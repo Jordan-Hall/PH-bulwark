@@ -1,0 +1,5 @@
+//! aegis-audio
+//! small dedicated explicit-audio classifier (ONNX)
+//! Stub crate; implementation per PLAN.md and docs/agent-workflow.md.
+#![forbid(unsafe_code)]
+

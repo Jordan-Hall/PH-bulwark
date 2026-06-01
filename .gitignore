@@ -1,0 +1,22 @@
+# Build
+/target
+**/target
+
+# Model artifacts (downloaded, checksum-pinned; not vendored)
+/models
+*.onnx
+*.gguf
+
+# Secrets & local state — NEVER commit
+*.pem
+*.key
+*-ca.crt
+*.db
+*.sqlite
+*.sqlcipher
+.env
+secrets/
+
+# OS / editor
+.DS_Store
+Thumbs.db

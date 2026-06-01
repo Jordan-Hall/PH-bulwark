@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+repository = "local"
+rust-version = "1.79"
+
+# Shared dependencies are pinned here once Wave A (crate research) confirms
+# exact versions + licenses. Builders depend on workspace versions, not their own.
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+# Client/server + clustering (versions confirmed by Wave A crate research):
+tonic = "0.12"
+prost = "0.13"
+# SWIM cluster membership crate (foca | chitchat) chosen by Wave A.
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
