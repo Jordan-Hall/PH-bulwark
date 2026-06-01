@@ -5,4 +5,27 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+aegis-proto = { path = "../aegis-proto" }
+aegis-core = { path = "../aegis-core" }
+tonic.workspace = true
+prost.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+futures-core.workspace = true
+futures-util.workspace = true
 
+# Multi-node SWIM gossip (single-node all-in-one works without it).
+foca = { workspace = true, optional = true }
+# Quorum source-of-truth for multi-node (avoids split-brain).
+sqlx = { workspace = true, optional = true }
+
+[features]
+default = []
+gossip = ["dep:foca"]
+quorum = ["dep:sqlx"]
+
+[dev-dependencies]
+tokio = { workspace = true }

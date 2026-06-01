@@ -5,4 +5,17 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-
+aegis-proto = { path = "../aegis-proto" }
+aegis-core = { path = "../aegis-core" }
+aegis-net = { path = "../aegis-net" }
+aegis-flow = { path = "../aegis-flow" }
+aegis-infer = { path = "../aegis-infer" }
+aegis-policy = { path = "../aegis-policy" }
+aegis-alert = { path = "../aegis-alert" }
+aegis-store = { path = "../aegis-store" }
+aegis-text = { path = "../aegis-text" }
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
