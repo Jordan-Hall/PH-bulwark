@@ -4,5 +4,59 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[dependencies]
+# aegis-store — the `Store` trait (interfaces.md) with two backends:
+#   * client/local: encrypted SQLite via SQLCipher (rusqlite `bundled-sqlcipher`)
+#   * server/cluster: Postgres via `sqlx`
+#
+# DATA-HANDLING MANDATE (docs/security/data-handling.md):
+#   This crate persists C1/C3 data ONLY — verdict + reason codes + hashes +
+#   safe-thumbnail *references* + metadata. It NEVER persists C0 (message text,
+#   explicit media bytes, raw decrypted bodies). The schema is shaped to make
+#   that invariant structural: there is no column able to hold message text or
+#   media bytes, and a unit test asserts it. Encryption-at-rest + retention
+#   auto-purge + a tamper-evident hash-chained audit log are required here.
+#
+# NO AI/ML in this crate. NO telemetry.
 
+[features]
+# By default both backends compile. A pure client build can drop the Postgres
+# adapter (and its sqlx dependency) with `--no-default-features --features sqlite`;
+# a pure server build can do the reverse with `--features postgres`.
+default = ["sqlite", "postgres"]
+# Client/local encrypted SQLite backend (SQLCipher at-rest).
+sqlite = ["dep:rusqlite"]
+# Server/cluster shared-state Postgres backend.
+postgres = ["dep:sqlx"]
+
+[dependencies]
+aegis-proto = { path = "../aegis-proto" }
+aegis-core = { path = "../aegis-core" }
+
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+
+# At-rest encryption. SQLCipher (below) encrypts the SQLite page store; `ring`
+# additionally provides the SHA-256 used by the tamper-evident audit hash-chain
+# and content hashing, and `age` is used for encrypted *exports/backups*
+# (data-handling.md §3 "Persist": exports are age-encrypted, keys owner-held).
+ring.workspace = true
+age.workspace = true
+
+# Client/local backend: SQLite with SQLCipher page-level encryption-at-rest.
+# `bundled-sqlcipher` statically links SQLCipher so no system crypto lib is
+# needed and the at-rest key is set via `PRAGMA key` (see crypto.rs).
+rusqlite = { version = "0.40", features = ["bundled-sqlcipher", "blob"], optional = true }
+
+# Server/cluster backend: Postgres shared state. at-rest encryption is provided
+# by the database/volume (data-handling.md §3); access is restricted by mTLS.
+sqlx = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }
+tempfile = "3"

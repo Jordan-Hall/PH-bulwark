@@ -4,5 +4,35 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[dependencies]
+# aegis-flow — protocol/flow classification, stream demux (HLS/DASH/progressive),
+# and the ring-buffer + bounded broadcast-delay for video/live. Implements the
+# `FlowClassifier` trait from docs/design/interfaces.md.
+#
+# MINIMAL-AI MANDATE (PLAN §0b): there is NO AI/ML in this crate. Classification
+# is pure deterministic logic over content-types, magic bytes, URL/extension, and
+# manifest text; buffering is a plain ring buffer with a latency budget. No
+# telemetry (PLAN §3): nothing here reports off-device.
 
+[dependencies]
+aegis-proto = { path = "../aegis-proto" }
+aegis-core = { path = "../aegis-core" }
+
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+
+# Zero-copy byte handling for buffered segments and body peeks. `bytes::Bytes`
+# lets the ring buffer clone segment handles cheaply (ref-counted) without
+# copying payloads. Added explicitly (NOT yet a workspace dep) — flag to C0/A1
+# to promote to the workspace allowlist + cargo-deny. MIT licensed.
+bytes = "1"
+
+# NOTE: `httparse` was considered for raw HTTP header parsing but is NOT used:
+# `aegis-net`'s `hudsucker` MITM already delivers parsed request/response heads,
+# so `aegis-flow` receives a structured `HttpHead` and only reads its fields.
+# Left documented here so the orchestrator knows it was evaluated and dropped.
+
+[dev-dependencies]
+tokio = { workspace = true }

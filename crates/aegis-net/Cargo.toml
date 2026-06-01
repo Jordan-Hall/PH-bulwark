@@ -4,5 +4,78 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[dependencies]
+# aegis-net — the interception layer (SECURITY-CRITICAL crate).
+#
+# Owns: the platform TUN abstraction (Windows `wintun` real; Linux/Android
+# stubbed), the `hudsucker` transparent MITM proxy (rustls + rcgen leaf certs),
+# the **per-install root CA** (the crown jewel — see docs/security/threat-model.md
+# Asset 1), QUIC downgrade, and cert-pinning detection.
+#
+# CROWN-JEWEL INVARIANTS (threat-model Asset 1):
+#   * The CA is generated PER INSTALL. There is NO shared/baked-in CA, ever.
+#   * The CA private key is wrapped by an OS keystore (DPAPI on Windows),
+#     marked non-exportable, and NEVER transmitted off the host.
+#   * Uninstall MUST remove our root from the OS trust store (release-blocker).
+#
+# `#![forbid(unsafe_code)]` is set at the crate root. The unavoidable FFI for
+# `wintun` and the `windows` crate (DPAPI + cert store) is isolated in three
+# clearly-marked modules — `ca::dpapi`, `truststore`, and `tun::windows` — which
+# are the ONLY places `unsafe` is permitted (each locally re-enables it with
+# `#![allow(unsafe_code)]` and documents the soundness of every block).
 
+[features]
+default = []
+# Build the real Windows TUN backend (wintun). Implied on windows targets via
+# cfg in the source; the feature exists so non-windows CI can opt in for docs.
+windows-tun = []
+
+[dependencies]
+# Path deps per the build brief. We DO use aegis-core's Config/Error here
+# (aegis-core is already built and re-exports aegis-proto), so the Interceptor
+# trait returns the shared `aegis_core::Result`.
+aegis-proto = { path = "../aegis-proto" }
+aegis-core = { path = "../aegis-core" }
+
+# MITM proxy + TLS + per-install CA.
+hudsucker.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+rcgen.workspace = true
+
+# Async runtime + plumbing.
+tokio.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+
+# Windows TUN driver (WireGuard's pre-signed wintun.dll). Target-gated: only
+# pulled in on Windows. Listed in the workspace allowlist already.
+[target.'cfg(windows)'.dependencies]
+wintun = { workspace = true }
+# The `windows` crate provides the FFI for BOTH:
+#   * DPAPI key wrapping  -> feature "Win32_Security_Cryptography"
+#   * Trusted Root store  -> feature "Win32_Security_Cryptography" (cert store
+#                            APIs: CertOpenStore / CertAddEncodedCertificateToStore
+#                            / CertDeleteCertificateFromStore live here)
+#   * Foundation handles  -> feature "Win32_Foundation"
+# These are the explicit feature set this crate needs (reported in the handoff).
+# Version tracks docs/research/crate-research.md (`windows` 0.60+).
+windows = { version = "0.60", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_System_Memory",
+] }
+
+# Linux/macOS TUN — stubbed (todo!()) behind cfg; dependency declared so the
+# stub module's doc references resolve and the real impl can slot in later.
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+tun-rs = { workspace = true }
+
+# Android VpnService shim — stubbed behind cfg; JNI dep declared for later.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

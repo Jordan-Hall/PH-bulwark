@@ -33,6 +33,7 @@ regex = "1"
 toml = "0.8"
 futures-core = "0.3"
 futures-util = "0.3"
+bytes = "1"
 
 # Interception / networking
 hudsucker = "0.24"
@@ -42,6 +43,7 @@ rcgen = "0.14"
 wintun = "0.5"        # Windows TUN (target-gated)
 tun-rs = "2.8"        # Linux/macOS TUN (target-gated)
 jni = "0.22"          # Android VpnService shim (target-gated)
+windows = { version = "0.60", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Memory"] } # DPAPI + cert store (target-gated)
 
 # gRPC + clustering (client/server)
 tonic = { version = "0.14", features = ["tls-ring"] }
@@ -60,7 +62,7 @@ leptess = "0.14"
 
 # Storage + crypto
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "tls-rustls"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled-sqlcipher"] }
 age = "0.11"
 ring = "0.17"
 
