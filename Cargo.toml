@@ -20,11 +20,19 @@ tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-figment = "0.10"
+figment = { version = "0.10", features = ["toml", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1"
 thiserror = "2"
+
+# Detection + text rule engine (added by Wave C batch 1)
+sysinfo = "0.33"
+aho-corasick = "1"
+regex = "1"
+toml = "0.8"
+futures-core = "0.3"
+futures-util = "0.3"
 
 # Interception / networking
 hudsucker = "0.24"
@@ -36,7 +44,7 @@ tun-rs = "2.8"        # Linux/macOS TUN (target-gated)
 jni = "0.22"          # Android VpnService shim (target-gated)
 
 # gRPC + clustering (client/server)
-tonic = { version = "0.14", features = ["tls"] }
+tonic = { version = "0.14", features = ["tls-ring"] }
 tonic-build = "0.14"
 tonic-health = "0.14"
 prost = "0.14"
