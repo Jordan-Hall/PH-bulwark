@@ -12,18 +12,53 @@ rust-version = "1.79"
 # Shared dependencies are pinned here once Wave A (crate research) confirms
 # exact versions + licenses. Builders depend on workspace versions, not their own.
 [workspace.dependencies]
+# Staged from Wave A crate research (docs/research/crate-research.md, 2026-06).
+# Exact versions get reconciled against the live registry at the first online build.
+
+# Async + plumbing
 tokio = { version = "1", features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = "0.3"
-anyhow = "1"
-thiserror = "2"
+async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-async-trait = "0.1"
-# Client/server + clustering (versions confirmed by Wave A crate research):
-tonic = "0.12"
-prost = "0.13"
-# SWIM cluster membership crate (foca | chitchat) chosen by Wave A.
+figment = "0.10"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+anyhow = "1"
+thiserror = "2"
+
+# Interception / networking
+hudsucker = "0.24"
+rustls = "0.23"
+tokio-rustls = "0.26"
+rcgen = "0.14"
+wintun = "0.5"        # Windows TUN (target-gated)
+tun-rs = "2.8"        # Linux/macOS TUN (target-gated)
+jni = "0.22"          # Android VpnService shim (target-gated)
+
+# gRPC + clustering (client/server)
+tonic = { version = "0.14", features = ["tls"] }
+tonic-build = "0.14"
+tonic-health = "0.14"
+prost = "0.14"
+foca = "0.13"         # SWIM membership (fallback: chitchat 0.10)
+ginepro = "0.8"       # client-side gRPC load balancing
+
+# Inference (small dedicated models)
+ort = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
+
+# Media + OCR (conventional)
+ffmpeg-sidecar = "0.5"
+leptess = "0.14"
+
+# Storage + crypto
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "tls-rustls"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+age = "0.11"
+ring = "0.17"
+
+# Email + web
+lettre = { version = "0.11", features = ["smtp-transport", "tokio1-rustls"] }
+axum = { version = "0.8", features = ["macros", "ws"] }
 
 [profile.release]
 lto = "thin"
