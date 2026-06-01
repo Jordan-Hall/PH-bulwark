@@ -1,0 +1,430 @@
+// Aegis gRPC/protobuf contracts — the single source of truth shared by
+// client, server, and cluster nodes so they can never drift.
+//
+// Transport: tonic gRPC over HTTP/2 with **mTLS** on every link
+// (client⇄cluster and worker⇄worker). See docs/design/architecture.md.
+//
+// PRIVACY / SAFETY INVARIANTS (enforced by message shape, not just policy):
+//   * Raw explicit media is NEVER carried back in a Verdict or AlertEvent.
+//     `Evidence` deliberately carries ONLY hashes, a SAFE (blurred/cropped)
+//     thumbnail, or a redacted text snippet — never the original frame/clip.
+//   * Suspected CSAM is flagged, never archived: see Category.CSAM_SUSPECTED
+//     and the report-never-store rule in PLAN.md §0c.
+//   * Inline media on AnalysisRequest is transient (analysed in memory,
+//     never persisted by a worker). Prefer MediaRef where a side channel
+//     already holds the bytes.
+
+syntax = "proto3";
+
+package aegis.v1;
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+// What kind of payload a request carries. Drives which analyzer pipeline runs.
+enum MediaKind {
+  MEDIA_KIND_UNSPECIFIED = 0;
+  MEDIA_KIND_TEXT        = 1; // chat / page text / OCR'd on-screen text
+  MEDIA_KIND_IMAGE       = 2; // a still image or sampled video frame
+  MEDIA_KIND_AUDIO       = 3; // an audio segment (PCM/encoded)
+  MEDIA_KIND_VIDEO       = 4; // a buffered video segment (decoded by worker)
+}
+
+// Where the captured content originated. Lets policy treat a buffered VOD
+// stream differently from a live stream or an on-device OCR capture.
+enum SourceChannel {
+  SOURCE_CHANNEL_UNSPECIFIED = 0;
+  WEB                        = 1; // MITM'd HTTP(S) page / web chat
+  VIDEO_STREAM               = 2; // progressive / HLS / DASH (buffered, delay OK)
+  LIVE_STREAM                = 3; // low-latency live (bounded delay budget)
+  OCR_ONSCREEN               = 4; // on-device conventional OCR (E2E / pinned apps)
+  NOTIFICATION               = 5; // on-device notification text (E2E apps)
+}
+
+// Classifier verdict category. SAFE is the explicit negative class so a
+// Verdict is always conclusive. GROOMING/CSAM_SUSPECTED come from aegis-text
+// rules+classifier; the ADULT_* come from vision/audio/text analyzers.
+enum Category {
+  CATEGORY_UNSPECIFIED = 0;
+  SAFE                 = 1;
+  ADULT_IMAGE          = 2;
+  ADULT_AUDIO          = 3;
+  ADULT_TEXT           = 4;
+  GROOMING             = 5;
+  CSAM_SUSPECTED       = 6; // report-never-archive path (PLAN §0c)
+  VIOLENCE             = 7;
+  SELF_HARM            = 8;
+  HATE                 = 9;
+}
+
+// Severity bands. Map onto policy thresholds (see model-research §grooming).
+enum Severity {
+  SEVERITY_UNSPECIFIED = 0;
+  INFO                 = 1; // log-only, <0.3 score band
+  LOW                  = 2; // log, 0.3–0.5
+  MEDIUM               = 3; // flag + log, 0.5–0.7
+  HIGH                 = 4; // immediate alert + human review, ≥0.7
+  CRITICAL             = 5; // CSAM-suspected / safety-critical, escalate now
+}
+
+// Action the client should take on the flow/segment. Set by aegis-policy from
+// a Verdict; carried back so the data plane needs no second round trip.
+enum Action {
+  ACTION_UNSPECIFIED = 0;
+  ALLOW              = 1; // forward unchanged
+  BLOCK              = 2; // drop / reset the flow or segment
+  BLUR               = 3; // re-encode flagged region/frame blurred (video/image)
+  MUTE               = 4; // silence flagged audio span
+  WARN               = 5; // forward but show an interstitial / overlay
+  LOG                = 6; // forward, record for review (borderline)
+}
+
+// ONNX execution provider a worker (or local client) used / can use. Mirrors
+// `ort` provider names; lets aegis-infer route by capability and reproduce.
+enum ExecutionProvider {
+  EXECUTION_PROVIDER_UNSPECIFIED = 0;
+  CPU                            = 1; // CPU / oneDNN baseline (always available)
+  CUDA                           = 2;
+  TENSORRT                       = 3;
+  DIRECTML                       = 4; // Windows GPU
+  COREML                         = 5; // Apple
+  NNAPI                          = 6; // Android
+  QNN                            = 7; // Qualcomm
+}
+
+// ---------------------------------------------------------------------------
+// Common payload messages
+// ---------------------------------------------------------------------------
+
+// Inline bytes for analysis. TRANSIENT: analysed in memory, never persisted.
+// Keep small; for anything large prefer MediaRef + a side channel.
+message InlineMedia {
+  bytes  data      = 1; // raw bytes (image/audio/video segment)
+  string mime_type = 2; // e.g. "image/jpeg", "audio/L16", "video/mp4"
+  uint32 width     = 3; // optional, images/frames
+  uint32 height    = 4; // optional, images/frames
+  uint64 duration_ms = 5; // optional, audio/video
+}
+
+// Reference to media already held by a content-addressed side channel (e.g. a
+// worker-local blob cache keyed by hash) so we don't re-ship large payloads.
+message MediaRef {
+  string uri    = 1; // opaque, cluster-internal (e.g. "blob://<sha256>")
+  bytes  sha256 = 2; // content hash; worker rejects on mismatch
+  uint64 size   = 3; // bytes
+  string mime_type = 4;
+}
+
+// A span of text to classify. Carries enough context for the conversation-level
+// grooming state machine without shipping whole histories.
+message TextSpan {
+  string text        = 1; // the message / OCR'd text (already plaintext)
+  string lang        = 2; // BCP-47 hint ("en", "es"); empty = detect
+  string app         = 3; // originating app/site ("messenger", "example.com")
+  string thread_id   = 4; // stable per-conversation id for state correlation
+  bool   from_minor  = 5; // true if the supervised child authored it (if known)
+  repeated string prior_excerpts = 6; // short redacted context for state machine
+}
+
+// ---------------------------------------------------------------------------
+// Analysis service
+// ---------------------------------------------------------------------------
+
+// One unit of work submitted by a client to the cluster.
+message AnalysisRequest {
+  string        request_id    = 1; // client-generated idempotency key
+  MediaKind     media_kind    = 2;
+  SourceChannel source_channel = 3;
+  string        device_id     = 4; // supervised device (client cert subject)
+  int64         ts            = 5; // capture time, unix epoch millis
+  TextSpan      text_span     = 6; // present when media_kind == TEXT
+
+  // Exactly one of the media carriers (for non-text kinds).
+  oneof media {
+    InlineMedia inline_media = 7;
+    MediaRef    media_ref    = 8;
+  }
+
+  // Soft deadline so a worker can fast-path / shed under a live-stream budget.
+  uint32 deadline_ms = 9;
+}
+
+// Hash-only / safe evidence attached to a Verdict for the review UI and alerts.
+// INVARIANT: NO raw explicit media here — hashes, a SAFE thumbnail (blurred or
+// heavily cropped), or a redacted text snippet ONLY. Never the original frame,
+// clip, or unredacted message. CSAM is reported via legal channels, not stored.
+message Evidence {
+  bytes  sha256          = 1; // content hash of the analysed media
+  bytes  perceptual_hash = 2; // pHash for near-dup / known-hash matching
+  bytes  safe_thumbnail  = 3; // OPTIONAL blurred/cropped preview — SAFE only
+  string text_snippet    = 4; // OPTIONAL redacted excerpt (text verdicts only)
+  string model_id        = 5; // which model produced the verdict (auditable)
+  string model_version   = 6;
+}
+
+// The decision returned for an AnalysisRequest.
+message Verdict {
+  string   request_id = 1; // echoes AnalysisRequest.request_id
+  Category category    = 2;
+  Action   action      = 3; // recommended action (policy may override)
+  Severity severity    = 4;
+  float    score       = 5; // normalized confidence 0.0–1.0
+  string   rationale    = 6; // human-readable, explainable (rules cite triggers)
+  Evidence evidence     = 7;
+  GroomingSignal grooming = 8; // present when category == GROOMING / CSAM_SUSPECTED
+  string   worker_id    = 9; // which node served it (observability)
+  uint32   latency_ms   = 10; // server-side processing time
+}
+
+// Output of the deterministic grooming rule engine (model-research §grooming).
+// The eight indicator categories are explainable and auditable.
+message GroomingSignal {
+  // Which of the eight rule categories fired, by stable name:
+  // "secrecy", "platform_switching", "personal_info_age_probing",
+  // "sexualization", "gifts_bribery", "emotional_manipulation",
+  // "boundary_testing", "image_request".
+  repeated string fired_categories = 1;
+  float  score   = 2; // normalized 0.0–1.0 (rule sum + context multipliers)
+  string excerpt = 3; // redacted excerpt that triggered the signal
+  bool   classifier_backed = 4; // true if small text classifier agreed
+}
+
+// Batched analysis (e.g. several sampled frames from one video segment).
+message AnalysisBatch {
+  repeated AnalysisRequest requests = 1;
+}
+
+message VerdictBatch {
+  repeated Verdict verdicts = 1;
+}
+
+// Client → cluster heavy analysis. Workers are stateless; any node can serve.
+service Analysis {
+  // Single request → single verdict (web text, one image).
+  rpc Analyze(AnalysisRequest) returns (Verdict);
+  // Bidirectional stream for live/continuous capture (frames, audio chunks).
+  rpc AnalyzeStream(stream AnalysisRequest) returns (stream Verdict);
+  // Batched fan-out (sampled frames of a buffered video segment).
+  rpc AnalyzeBatch(AnalysisBatch) returns (VerdictBatch);
+}
+
+// ---------------------------------------------------------------------------
+// Offload service — device-capability negotiation (aegis-infer ⇄ cluster)
+// ---------------------------------------------------------------------------
+
+// What the device can do locally. Drives the local-vs-remote routing decision.
+message DeviceProfile {
+  string device_id = 1;
+  string platform  = 2; // "windows", "linux", "android", "macos"
+  string cpu       = 3; // model string / arch
+  uint32 cpu_cores = 4;
+  uint64 ram_mb    = 5;
+  string gpu       = 6; // GPU model string, empty if none
+  repeated ExecutionProvider exec_providers = 7; // available, best-first
+  int32  battery_pct = 8;   // -1 if on mains / unknown
+  bool   on_battery  = 9;
+  uint32 rtt_ms      = 10;  // measured RTT to the cluster gateway
+  string app_version = 11;
+}
+
+// How work should be split between device and cluster. Returned by the cluster
+// from a DeviceProfile; the client honours it until RefreshOffload.
+message OffloadPolicy {
+  // Per-MediaKind routing hint. true = run locally, false = offload to cluster.
+  bool run_text_local   = 1; // grooming rules are cheap → usually local
+  bool run_image_local  = 2;
+  bool run_audio_local  = 3;
+  bool run_video_local  = 4; // almost always false on mobile
+
+  // Thresholds the client applies before offloading anyway.
+  uint32 max_local_rtt_ms     = 5; // offload preferred above this RTT
+  uint32 min_battery_pct      = 6; // below this, force-offload heavy work
+  uint32 cluster_queue_backpressure = 7; // est. queue depth → prefer local
+  uint32 ttl_secs             = 8; // re-negotiate after this
+  repeated ExecutionProvider preferred_local_providers = 9; // best-first to try
+  string policy_id            = 10; // for audit / RefreshOffload correlation
+}
+
+message RefreshOffloadRequest {
+  string device_id = 1;
+  string policy_id = 2; // current policy held by the client
+  uint32 rtt_ms    = 3; // fresh measurement
+  int32  battery_pct = 4;
+}
+
+service Offload {
+  rpc NegotiateOffload(DeviceProfile) returns (OffloadPolicy);
+  rpc RefreshOffload(RefreshOffloadRequest) returns (OffloadPolicy);
+}
+
+// ---------------------------------------------------------------------------
+// AlertRelay service — guardian notifications (client/server → aegis-alert)
+// ---------------------------------------------------------------------------
+
+// Why an alert fired. Two product triggers per PLAN §0/§2.
+enum AlertKind {
+  ALERT_KIND_UNSPECIFIED = 0;
+  INTERVENTION           = 1; // a blocker acted (block/blur/mute)
+  GROOMING_SUSPECTED     = 2; // grooming engine crossed alert threshold
+}
+
+// A guardian-facing alert. Carries redacted context ONLY — never explicit media.
+message AlertEvent {
+  string    alert_id = 1; // idempotency key (dedupe across retries)
+  AlertKind kind     = 2;
+  Category  category  = 3;
+  Severity  severity  = 4;
+  string    app       = 5; // app/site involved
+  string    device_id = 6;
+  int64     ts        = 7; // unix epoch millis
+  string    redacted_context = 8; // safe summary / redacted excerpt — NO media
+  Evidence  evidence  = 9; // hashes / safe thumbnail only (see Evidence invariant)
+}
+
+message AlertAck {
+  string alert_id  = 1;
+  bool   delivered = 2; // accepted by the relay (queued for email)
+  bool   deduped   = 3; // suppressed by rate-limit/digest
+  string detail    = 4;
+}
+
+message AlertBatch {
+  repeated AlertEvent events = 1;
+}
+
+message AlertAckBatch {
+  repeated AlertAck acks = 1;
+}
+
+service AlertRelay {
+  rpc RaiseAlert(AlertEvent) returns (AlertAck);
+  rpc RaiseAlerts(AlertBatch) returns (AlertAckBatch); // digest / backfill
+}
+
+// ---------------------------------------------------------------------------
+// ClusterControl service — membership / health / work queue (aegis-cluster)
+// ---------------------------------------------------------------------------
+
+// Role a node plays. Single binary, role chosen by flag (PLAN §1).
+enum NodeRole {
+  NODE_ROLE_UNSPECIFIED = 0;
+  LB                    = 1; // load balancer / gateway
+  WORKER                = 2; // analysis worker
+  ALL_IN_ONE            = 3; // home single-node deployment
+}
+
+enum NodeState {
+  NODE_STATE_UNSPECIFIED = 0;
+  ALIVE                  = 1;
+  SUSPECT                = 2; // SWIM suspect
+  DEAD                   = 3;
+  DRAINING               = 4; // graceful shutdown, finishing in-flight work
+}
+
+message NodeInfo {
+  string   node_id   = 1;
+  NodeRole role        = 2;
+  string   address     = 3; // host:port (mTLS endpoint)
+  NodeState state       = 4;
+  uint64    incarnation = 5; // SWIM incarnation number
+  repeated ExecutionProvider exec_providers = 6; // worker capability
+  string    version     = 7;
+}
+
+message JoinRequest {
+  NodeInfo node  = 1;
+  repeated string seed_nodes = 2; // known cluster members to gossip with
+}
+
+message JoinResponse {
+  bool     accepted   = 1;
+  repeated NodeInfo members = 2; // current view at join time
+  string   cluster_id  = 3;
+  string   reason       = 4; // populated when accepted == false
+}
+
+message LeaveRequest {
+  string node_id = 1;
+  bool   graceful = 2; // true → drain first
+}
+
+message LeaveResponse {
+  bool accepted = 1;
+}
+
+message HealthRequest {
+  string node_id = 1; // empty = whole-cluster health
+}
+
+// Health snapshot for a node (or aggregate). Feeds LB + offload backpressure.
+message HealthStatus {
+  string    node_id        = 1;
+  NodeState state           = 2;
+  uint32    queue_depth      = 3; // pending work items
+  uint32    inflight         = 4; // currently processing
+  float     cpu_load         = 5; // 0.0–1.0
+  float     gpu_load         = 6; // 0.0–1.0, 0 if no GPU
+  uint64    mem_used_mb       = 7;
+  uint32    p50_latency_ms     = 8;
+  uint32    p99_latency_ms     = 9;
+  bool      accepting_work     = 10; // false when quorum/heartbeat lost
+  int64     ts                  = 11;
+}
+
+// One queued work item (an AnalysisRequest plus routing metadata).
+message WorkItem {
+  string          work_id   = 1;
+  AnalysisRequest request    = 2;
+  uint32          priority    = 3; // higher = sooner (live stream > VOD)
+  int64           enqueued_ts = 4;
+  uint32          attempts    = 5; // redelivery count
+}
+
+message EnqueueRequest {
+  WorkItem item = 1;
+}
+
+message EnqueueResponse {
+  string work_id          = 1;
+  uint32 queue_position   = 2;
+  bool   accepted          = 3; // false under backpressure → caller runs local
+}
+
+message DequeueRequest {
+  string node_id        = 1; // claiming worker
+  uint32 max_items       = 2;
+  repeated ExecutionProvider provides = 3; // capability filter
+  uint32 wait_ms          = 4; // long-poll timeout
+}
+
+message DequeueResponse {
+  repeated WorkItem items = 1;
+}
+
+message DrainRequest {
+  string node_id        = 1;
+  uint32 deadline_secs   = 2; // finish in-flight within this, then DEAD
+}
+
+message DrainResponse {
+  bool   accepted      = 1;
+  uint32 inflight      = 2; // remaining when accepted
+}
+
+message WatchHealthRequest {
+  string node_id           = 1; // empty = all nodes
+  uint32 interval_ms        = 2; // desired push cadence
+}
+
+// Cluster membership, health, and work distribution. Postgres is the quorum
+// source-of-truth (avoids split-brain); SWIM gossip rides this transport.
+service ClusterControl {
+  rpc Join(JoinRequest) returns (JoinResponse);
+  rpc Leave(LeaveRequest) returns (LeaveResponse);
+  rpc Health(HealthRequest) returns (HealthStatus);
+  rpc WatchHealth(WatchHealthRequest) returns (stream HealthStatus);
+  rpc Enqueue(EnqueueRequest) returns (EnqueueResponse);
+  rpc Dequeue(DequeueRequest) returns (DequeueResponse);
+  rpc Drain(DrainRequest) returns (DrainResponse);
+}

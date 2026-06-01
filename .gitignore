@@ -17,6 +17,9 @@
 .env
 secrets/
 
+# Local Claude Code settings (personal overrides)
+.claude/settings.local.json
+
 # OS / editor
 .DS_Store
 Thumbs.db
