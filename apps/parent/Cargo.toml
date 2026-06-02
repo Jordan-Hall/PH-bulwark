@@ -1,0 +1,29 @@
+[package]
+name = "aegis-parent"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "Aegis parent console — all-Rust Dioxus UI over the shared core."
+
+[dependencies]
+# All-Rust UI. Pinned to the latest published Dioxus; RSX is forward-compatible,
+# so bumping to 0.7/0.8 + the native Blitz renderer (no webview) is a version
+# change here. `desktop` covers Windows + macOS; swap to `mobile` for iOS/Android
+# (experimental) or `web` for a hosted console.
+dioxus = { version = "0.6", features = ["desktop"] }
+
+# The parent console is just another Rust client of the shared core: it speaks
+# the SAME gRPC contract the cluster serves (no FFI bridge). It only uses the
+# LEGITIMATE services — AlertRelay (guardian alerts) + Review (approve/deny) +
+# read-only coverage. It does NOT import any device-control surface.
+aegis-proto = { path = "../../crates/aegis-proto" }
+tonic = { version = "0.14", features = ["tls-ring"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Detached from the core cargo workspace so the verified `cargo build --workspace`
+# (the engine crates) doesn't pull the heavy Dioxus UI tree. This app builds on
+# its own: `cd apps/parent && cargo run`.
+[workspace]
