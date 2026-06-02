@@ -23,9 +23,11 @@ Several types were defined independently by multiple crates and must become one:
     `aegis-flow::AnalysisUnit::VideoSegment` also carries a `segment_id` field used to apply the
     verdict back to the buffered bytes — preserve it through the router.
 - ✅ **DONE** — `AnalysisUnit` is canonical in `aegis-core::flow` (re-exported by `aegis-flow`).
-- **`Analyzer` trait** — mirrored in `aegis-server`, `aegis-vision`, `aegis-audio`,
-  `aegis-video`, `aegis-text`, `aegis-infer`. Define ONCE in `aegis-core`; all implement that one.
-- **`Route`** (infer) and **`AgeProfile`** (policy) — confirm single home.
+- ✅ **DONE** — `Analyzer` trait is canonical in `aegis-core::analyze` (handles + analyze +
+  default analyze_batch); all six crates (server/vision/audio/video/text/infer) implement that one.
+  Text's streaming moved to an inherent `analyze_stream` (the canonical trait is non-streaming).
+- ✅ `AgeProfile` (policy) now impls `Default` (= Teen) + `Clone` for the client. `Route` stays
+  local to `aegis-infer` (only it uses it) — fine as-is.
 
 ## 2. Confirm cross-crate public APIs the wiring assumes
 - `aegis_text::TextAnalyzer::analyze_span(&str, &TextSpan, i64) -> Verdict` (used by
@@ -37,7 +39,14 @@ Several types were defined independently by multiple crates and must become one:
 - `aegis_core::DeviceId` path (prelude) vs `aegis_core::ids::DeviceId` (used by `aegis-agent`).
 - `aegis_alert::AlertSink` object-safety + `EmailAlertSink` construction from config.
 
-## 3. tonic codegen specifics (verify once proto compiles — C0)
+## 3. tonic codegen specifics — ✅ MOSTLY DONE
+- ✅ tonic 0.14 codegen split handled: added `tonic-prost` (runtime) + `tonic-prost-build`/`protox`
+  (build); `aegis-proto/build.rs` now compiles hermetically (no system `protoc`) via protox +
+  `skip_protoc_run`. ✅ assoc-type names verified correct (`AnalyzeStreamStream`, `WatchHealthStream`).
+- REMAINING: confirm `tonic::include_proto!` still resolves in 0.14 vs `tonic_prost::include_proto!`
+  at the first online build.
+
+### (original notes, now resolved)
 - Generated server trait method/assoc-type names: `Analysis::AnalyzeStreamStream`,
   `ClusterControl::WatchHealthStream` — match the names in `aegis-cluster/src/service.rs`
   and `aegis-server/src/service.rs`.
