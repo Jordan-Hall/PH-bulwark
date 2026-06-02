@@ -64,7 +64,9 @@ ffmpeg-sidecar = "0.5"
 leptess = "0.14"
 
 # Storage + crypto
-sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "tls-rustls"] }
+# Postgres ONLY — default-features off so sqlx can't pull the sqlite backend,
+# which would link a second libsqlite3-sys and conflict with rusqlite/SQLCipher.
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "macros"] }
 rusqlite = { version = "0.40", features = ["bundled-sqlcipher"] }
 age = "0.11"
 ring = "0.17"

@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">Aegis</string>
+    <string name="a11y_description">Aegis reads on-screen text in messaging apps on this device to
+        check for grooming and adult content and alert the guardian. Message content is analysed
+        on-device and is never sent off the device except as redacted alerts to the guardian.</string>
+</resources>

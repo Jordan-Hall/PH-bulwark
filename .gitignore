@@ -1,6 +1,14 @@
 # Build
 /target
 **/target
+*.log
+
+# Android
+platform/android/.gradle
+platform/android/build
+platform/android/app/build
+platform/android/app/src/main/jniLibs
+platform/android/local.properties
 
 # Model artifacts (downloaded, checksum-pinned; not vendored)
 /models
