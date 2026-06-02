@@ -41,6 +41,15 @@ pub enum AgeProfile {
     Teen,
 }
 
+/// Default profile is `Teen` — the engine's canonical baseline. It still alerts
+/// the guardian on all material content but does not hard-block a whole
+/// conversation on a borderline signal (PLAN §5); dial it down for a younger child.
+impl Default for AgeProfile {
+    fn default() -> Self {
+        AgeProfile::Teen
+    }
+}
+
 impl AgeProfile {
     /// All bands, youngest first.
     pub const ALL: [AgeProfile; 3] =

@@ -13,10 +13,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use aegis_core::Result as CoreResult;
+use aegis_core::{Analyzer, Result as CoreResult};
 use aegis_proto::v1::{
-    AnalysisBatch, AnalysisRequest, DeviceProfile, ExecutionProvider, MediaKind, OffloadPolicy,
-    Verdict, VerdictBatch,
+    AnalysisRequest, DeviceProfile, ExecutionProvider, MediaKind, OffloadPolicy, Verdict,
 };
 use async_trait::async_trait;
 
@@ -67,21 +66,6 @@ impl Default for ServerConfig {
     }
 }
 
-/// The analysis contract (mirrors `docs/design/interfaces.md`). Implemented by
-/// the model crates; the server dispatches to them by `media_kind`.
-#[async_trait]
-pub trait Analyzer: Send + Sync {
-    fn handles(&self) -> &[MediaKind];
-    async fn analyze(&self, req: AnalysisRequest) -> CoreResult<Verdict>;
-    async fn analyze_batch(&self, batch: AnalysisBatch) -> CoreResult<VerdictBatch> {
-        let mut verdicts = Vec::with_capacity(batch.requests.len());
-        for req in batch.requests {
-            verdicts.push(self.analyze(req).await?);
-        }
-        Ok(VerdictBatch { verdicts })
-    }
-}
-
 /// Dispatches by `MediaKind` to the registered analyzer.
 #[derive(Default, Clone)]
 pub struct AnalyzerRegistry {
@@ -120,7 +104,7 @@ pub struct TextAnalyzerAdapter {
 impl TextAnalyzerAdapter {
     pub fn new() -> Self {
         Self {
-            inner: aegis_text::TextAnalyzer::new(),
+            inner: aegis_text::TextAnalyzer::new().expect("aegis-text built-in lexicon must load"),
         }
     }
 }

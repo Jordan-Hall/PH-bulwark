@@ -9,20 +9,12 @@
 //! Evidence carries the content SHA-256 only — NEVER the raw image. No LLM.
 #![forbid(unsafe_code)]
 
-use aegis_core::Result;
+use aegis_core::{Analyzer, Result};
 use aegis_proto::v1::{
     analysis_request::Media, Action, AnalysisRequest, Category, Evidence, MediaKind, Severity,
     Verdict,
 };
 use async_trait::async_trait;
-
-/// Minimal analysis contract (mirrors interfaces.md; unify into aegis-core at
-/// integration). Server dispatches by `handles()`.
-#[async_trait]
-pub trait Analyzer: Send + Sync {
-    fn handles(&self) -> &[MediaKind];
-    async fn analyze(&self, req: AnalysisRequest) -> Result<Verdict>;
-}
 
 /// Scores image bytes → NSFW probability in [0,1].
 pub trait Scorer: Send + Sync {

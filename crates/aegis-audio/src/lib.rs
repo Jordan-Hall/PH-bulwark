@@ -9,18 +9,12 @@
 //! Evidence is the content SHA-256 only. No LLM.
 #![forbid(unsafe_code)]
 
-use aegis_core::Result;
+use aegis_core::{Analyzer, Result};
 use aegis_proto::v1::{
     analysis_request::Media, Action, AnalysisRequest, Category, Evidence, MediaKind, Severity,
     Verdict,
 };
 use async_trait::async_trait;
-
-#[async_trait]
-pub trait Analyzer: Send + Sync {
-    fn handles(&self) -> &[MediaKind];
-    async fn analyze(&self, req: AnalysisRequest) -> Result<Verdict>;
-}
 
 /// Scores an audio window → explicit-content probability in [0,1].
 pub trait AudioScorer: Send + Sync {

@@ -20,14 +20,10 @@ use aegis_proto::v1::{
 };
 use async_trait::async_trait;
 
-use aegis_audio::{Analyzer as AudioAnalyzerT, AudioAnalyzer};
-use aegis_vision::{Analyzer as VisionAnalyzerT, VisionAnalyzer};
+use aegis_core::Analyzer;
 
-#[async_trait]
-pub trait Analyzer: Send + Sync {
-    fn handles(&self) -> &[MediaKind];
-    async fn analyze(&self, req: AnalysisRequest) -> Result<Verdict>;
-}
+use aegis_audio::AudioAnalyzer;
+use aegis_vision::VisionAnalyzer;
 
 #[derive(Debug, Clone)]
 pub struct VideoConfig {

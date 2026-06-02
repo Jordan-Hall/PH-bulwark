@@ -147,7 +147,7 @@ impl AlertRelay for AlertRelayService {
             .raise(req.into_inner())
             .await
             .map(Response::new)
-            .map_err(to_status)
+            .map_err(|e| Status::internal(e.to_string()))
     }
 
     async fn raise_alerts(
@@ -158,7 +158,7 @@ impl AlertRelay for AlertRelayService {
             .raise_batch(req.into_inner())
             .await
             .map(Response::new)
-            .map_err(to_status)
+            .map_err(|e| Status::internal(e.to_string()))
     }
 }
 

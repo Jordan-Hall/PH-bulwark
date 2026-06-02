@@ -48,6 +48,9 @@ windows = { version = "0.60", features = ["Win32_Foundation", "Win32_Security_Cr
 # gRPC + clustering (client/server)
 tonic = { version = "0.14", features = ["tls-ring"] }
 tonic-build = "0.14"
+tonic-prost = "0.14"        # runtime ProstCodec the generated stubs use (tonic 0.14 split)
+tonic-prost-build = "0.14"  # build-time codegen (replaces tonic-build's prost path)
+protox = "0.8"              # pure-Rust protobuf compiler → no system protoc needed
 tonic-health = "0.14"
 prost = "0.14"
 foca = "0.13"         # SWIM membership (fallback: chitchat 0.10)
