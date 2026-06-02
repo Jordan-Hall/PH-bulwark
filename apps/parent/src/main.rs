@@ -17,7 +17,7 @@
 //! THE ONE EXCEPTION — suspected CSAM is NEVER previewed: when
 //! `category == Category::CsamSuspected` the console renders no image and no
 //! snippet, even if evidence bytes/text are present. Instead it shows a notice
-//! that the content has been withheld and reported to the authorities. Previewing
+//! that the content is withheld and never shown or stored. Previewing
 //! suspected CSAM would be illegal, so it is the single thing this UI never
 //! displays; the server also refuses to approve it.
 //!
@@ -407,9 +407,9 @@ fn AlertCard(alert: Alert, on_decide: EventHandler<bool>) -> Element {
             p { class: "detail", "{alert.detail}" }
 
             if is_csam {
-                // No image, no snippet — withheld + reported notice only.
+                // No image, no snippet — withheld notice only (never displayed/stored).
                 div { class: "csam",
-                    "Preview withheld — suspected illegal content has been blocked and reported to the authorities."
+                    "Preview withheld — suspected illegal content is blocked and is never shown or stored."
                 }
             } else {
                 if let Some(uri) = preview_uri {

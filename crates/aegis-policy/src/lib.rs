@@ -198,8 +198,7 @@ impl Policy {
                 Action::Block,
                 Some(AlertKind::Intervention),
                 Severity::Critical,
-                "CSAM suspected: blocked and flagged for legal reporting \
-                 (report-never-archive)",
+                "CSAM suspected: blocked and never shown or stored",
             );
             d.report = self.config.csam_report_flag;
             return d;

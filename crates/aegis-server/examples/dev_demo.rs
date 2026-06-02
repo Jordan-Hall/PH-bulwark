@@ -72,7 +72,7 @@ fn demo_alert(n: u64) -> AlertEvent {
             Category::CsamSuspected,
             AlertKind::Intervention,
             "unknown-host",
-            "Suspected illegal content blocked + reported",
+            "Suspected illegal content blocked",
             "",
             false,
         ),

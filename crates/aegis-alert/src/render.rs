@@ -154,9 +154,7 @@ pub fn render_event(event: &AlertEvent, subject_prefix: &str) -> Result<Rendered
         body.push_str(
             "\nThis is a grooming-suspicion alert. The full conversation has \
              NOT been copied here. Review the flagged thread in the Aegis \
-             dashboard, and if you believe a child is at risk, follow the \
-             reporting guidance there (e.g. NCMEC CyberTipline in the US, or \
-             your local authority).\n",
+             dashboard and decide how you want to handle it.\n",
         );
     }
 
