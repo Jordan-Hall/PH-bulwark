@@ -76,6 +76,14 @@ ring = "0.17"
 lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "pool", "smtp-transport", "tokio1-rustls-tls", "ring"] }
 axum = { version = "0.8", features = ["macros", "ws"] }
 
+# Push (FCM HTTP v1) — used by aegis-alert behind the non-default `push` feature.
+# reqwest: default-features off so no native-tls is ever linked. In reqwest 0.13
+# the `rustls` feature selects the rustls TLS stack (incl. its crypto provider);
+# `json` + `form` cover the FCM send body and the OAuth2 token exchange.
+# jsonwebtoken 9.x: RS256 service-account JWT signing for the OAuth2 token mint.
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls", "http2"] }
+jsonwebtoken = "9"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

@@ -38,6 +38,13 @@ pub enum AlertError {
     #[error("mail transport error: {0}")]
     Transport(String),
 
+    /// A push-notification backend (FCM, behind the `push` feature) failed to
+    /// mint an OAuth2 token or deliver the message. Alerting is best-effort, so
+    /// callers may choose to log-and-continue on this rather than abort.
+    #[cfg(feature = "push")]
+    #[error("push delivery error: {0}")]
+    Push(String),
+
     /// Catch-all for plumbing that surfaces as `anyhow::Error` (e.g. address
     /// parsing). Kept distinct so callers can still match the typed variants.
     #[error(transparent)]
