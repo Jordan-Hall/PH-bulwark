@@ -8,6 +8,7 @@ use std::sync::Arc;
 use aegis_proto::v1::analysis_server::{Analysis, AnalysisServer};
 use aegis_proto::v1::offload_server::{Offload, OffloadServer};
 use aegis_proto::v1::alert_relay_server::{AlertRelay, AlertRelayServer};
+use aegis_proto::v1::review_server::ReviewServer;
 use aegis_proto::v1::{
     Action, AlertAck, AlertAckBatch, AlertBatch, AlertEvent, AnalysisBatch, AnalysisRequest,
     Category, DeviceProfile, OffloadPolicy, RefreshOffloadRequest, Severity, Verdict, VerdictBatch,
@@ -15,6 +16,7 @@ use aegis_proto::v1::{
 use futures_util::StreamExt;
 use tonic::{Request, Response, Status, Streaming};
 
+use crate::relay::{AlertHub, ReviewService};
 use crate::{default_offload_policy, AnalyzerRegistry, ServerConfig, ServerRole};
 
 fn to_status(e: aegis_core::Error) -> Status {
@@ -128,37 +130,82 @@ impl Offload for OffloadService {
     }
 }
 
-/// Hosts the `AlertRelay` service by delegating to an `aegis-alert` sink.
+/// Hosts the `AlertRelay` service. Every accepted [`AlertEvent`] is fanned out
+/// to subscribed guardian clients via the shared [`AlertHub`] broadcast (which
+/// `Review::StreamPendingReviews` consumes) and, when configured, also handed to
+/// the `aegis-alert` e-mail [`AlertSink`](aegis_alert::AlertSink). The sink is
+/// optional so the broadcast fan-out works even on a bare local node.
 #[derive(Clone)]
 pub struct AlertRelayService {
-    sink: Arc<dyn aegis_alert::AlertSink>,
+    hub: AlertHub,
+    sink: Option<Arc<dyn aegis_alert::AlertSink>>,
 }
 
 impl AlertRelayService {
-    pub fn new(sink: Arc<dyn aegis_alert::AlertSink>) -> Self {
-        Self { sink }
+    /// Build a relay that fans alerts into `hub` and, if `sink` is `Some`, also
+    /// e-mails them via `aegis-alert`.
+    pub fn new(hub: AlertHub, sink: Option<Arc<dyn aegis_alert::AlertSink>>) -> Self {
+        Self { hub, sink }
     }
 }
 
 #[tonic::async_trait]
 impl AlertRelay for AlertRelayService {
     async fn raise_alert(&self, req: Request<AlertEvent>) -> Result<Response<AlertAck>, Status> {
-        self.sink
-            .raise(req.into_inner())
-            .await
-            .map(Response::new)
-            .map_err(|e| Status::internal(e.to_string()))
+        let event = req.into_inner();
+
+        // Fan the redacted event out to any subscribed guardian Review streams.
+        let reached = self.hub.publish(event.clone());
+
+        match &self.sink {
+            // SMTP configured: dedupe/digest + e-mail, return its ack.
+            Some(sink) => sink
+                .raise(event)
+                .await
+                .map(Response::new)
+                .map_err(|e| Status::internal(e.to_string())),
+            // No SMTP sink: the broadcast fan-out is the delivery path. Ack as
+            // delivered iff at least one guardian stream received it.
+            None => Ok(Response::new(AlertAck {
+                alert_id: event.alert_id,
+                delivered: reached > 0,
+                deduped: false,
+                detail: format!("fanned out to {reached} guardian stream(s)"),
+            })),
+        }
     }
 
     async fn raise_alerts(
         &self,
         req: Request<AlertBatch>,
     ) -> Result<Response<AlertAckBatch>, Status> {
-        self.sink
-            .raise_batch(req.into_inner())
-            .await
-            .map(Response::new)
-            .map_err(|e| Status::internal(e.to_string()))
+        let batch = req.into_inner();
+
+        // Fan every event out to subscribed guardian Review streams.
+        for ev in &batch.events {
+            self.hub.publish(ev.clone());
+        }
+
+        match &self.sink {
+            Some(sink) => sink
+                .raise_batch(batch)
+                .await
+                .map(Response::new)
+                .map_err(|e| Status::internal(e.to_string())),
+            None => {
+                let acks = batch
+                    .events
+                    .into_iter()
+                    .map(|ev| AlertAck {
+                        alert_id: ev.alert_id,
+                        delivered: true,
+                        deduped: false,
+                        detail: "fanned out (no SMTP sink configured)".to_string(),
+                    })
+                    .collect();
+                Ok(Response::new(AlertAckBatch { acks }))
+            }
+        }
     }
 }
 
@@ -196,9 +243,24 @@ pub async fn run(
 
     if matches!(cfg.role, ServerRole::AllInOne | ServerRole::Lb) {
         router = router.add_service(OffloadServer::new(OffloadService));
-        if let Some(sink) = alert_sink {
-            router = router.add_service(AlertRelayServer::new(AlertRelayService::new(sink)));
-        }
+
+        // Shared guardian relay state: the broadcast hub fans redacted alerts
+        // from AlertRelay out to Review's StreamPendingReviews, and carries the
+        // per-device approve-allowlist Review::SubmitDecision writes through.
+        let hub = AlertHub::new();
+
+        // AlertRelay is always mounted on guardian-facing nodes (even without
+        // an SMTP sink) so the broadcast fan-out path is available; the sink is
+        // attached when SMTP is configured.
+        router = router.add_service(AlertRelayServer::new(AlertRelayService::new(
+            hub.clone(),
+            alert_sink,
+        )));
+
+        // Review: guardian approve/deny + remote-push registration + the
+        // pending-review stream (subscribes to the same hub).
+        router = router.add_service(ReviewServer::new(ReviewService::new(hub)));
+
         if let Some(c) = cluster {
             let svc = aegis_cluster::service::ClusterControlService::new(c);
             router = router.add_service(

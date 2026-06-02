@@ -10,6 +10,9 @@ aegis-core = { path = "../aegis-core" }
 aegis-cluster = { path = "../aegis-cluster" }
 aegis-text = { path = "../aegis-text" }
 aegis-alert = { path = "../aegis-alert" }
+# aegis-policy is pure-Rust (no rusqlite/SQLite) — it carries the per-device
+# approve-allowlist + tamper-evident audit chain the Review service applies.
+aegis-policy = { path = "../aegis-policy" }
 tonic.workspace = true
 prost.workspace = true
 tokio.workspace = true

@@ -19,7 +19,10 @@ use aegis_proto::v1::{
 };
 use async_trait::async_trait;
 
+pub mod relay;
 pub mod service;
+
+pub use relay::{AlertHub, ReviewService};
 
 /// Which role this process plays. Chosen by `--role` / `AEGIS_ROLE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
