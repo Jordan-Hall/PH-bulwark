@@ -84,10 +84,16 @@ impl SqliteStore {
     }
 
     fn init_conn(conn: &Connection, key: &AtRestKey) -> Result<()> {
-        // SQLCipher: key the database FIRST. `PRAGMA key = x'<hex>'` uses the raw
-        // keystore bytes as the key (no passphrase KDF).
+        // SQLCipher page-level at-rest encryption is OPT-IN (the `sqlcipher`
+        // feature + rusqlite `bundled-sqlcipher`). When off, the DB is plain
+        // SQLite — the store holds only metadata/hashes (never content), so
+        // at-rest protection is OS disk encryption + age-encrypted exports. The
+        // key still seeds the tamper-evident audit HMAC chain (see chain_link).
+        #[cfg(feature = "sqlcipher")]
         conn.pragma_update(None, "key", key.sqlcipher_pragma_value())
             .map_err(|e| StoreError::crypto(format!("PRAGMA key failed: {e}")))?;
+        #[cfg(not(feature = "sqlcipher"))]
+        let _ = key;
         // Enforce FK cascade (evidence_meta → audit_log) and durable journaling.
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(StoreError::open)?;
