@@ -14,8 +14,25 @@ aegis-policy = { path = "../aegis-policy" }
 aegis-alert = { path = "../aegis-alert" }
 aegis-store = { path = "../aegis-store" }
 aegis-text = { path = "../aegis-text" }
+# Local NSFW image scoring. Default build uses its fail-OPEN stub; the `onnx`
+# feature turns on aegis-vision/onnx for real scoring (see [features]).
+aegis-vision = { path = "../aegis-vision" }
 tokio.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
+# Downscale + re-encode the blocked image into a small SAFE preview for the
+# AlertEvent (non-CSAM only). Same decoder set as aegis-vision.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp"] }
+# AlertRelay gRPC client (RaiseAlert) used by the runnable aegis_proxy binary.
+tonic.workspace = true
+# SHA-256 for Evidence.sha256 (hash-only audit of analysed media).
+ring.workspace = true
+
+[features]
+default = []
+# Real local NSFW scoring via ONNX Runtime. Forwards to aegis-vision's `onnx`
+# feature (which gates the `ort` dependency). Absent → fail-OPEN stub, so the
+# DEFAULT build stays green with no model and no onnxruntime.dll.
+onnx = ["aegis-vision/onnx"]

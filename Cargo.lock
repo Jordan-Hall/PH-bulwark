@@ -78,10 +78,14 @@ dependencies = [
  "aegis-proto",
  "aegis-store",
  "aegis-text",
+ "aegis-vision",
  "anyhow",
  "async-trait",
+ "image",
+ "ring",
  "thiserror 2.0.18",
  "tokio",
+ "tonic",
  "tracing",
 ]
 

@@ -67,6 +67,13 @@ const LEAF_CACHE_SIZE: u64 = 1_000;
 /// (the streaming ring buffer handles media segments separately).
 const BODY_PEEK_CAP: usize = 64 * 1024;
 
+/// Upper bound on a captured **image** body surfaced for NSFW scoring. An image
+/// response (`image/jpeg|png|webp|gif`) is handed up WHOLE (not just the peek) so
+/// the classifier can actually decode + score it, but capped so a single huge
+/// image can't blow out the bounded flow channel's plaintext budget. 8 MiB
+/// comfortably covers real web imagery; larger bodies are skipped (fail-open).
+const IMAGE_BODY_CAP: usize = 8 * 1024 * 1024;
+
 /// Source channel of a captured flow (mirrors `aegis_proto::SourceChannel`; kept
 /// as a small enum here so the proxy layer doesn't construct proto messages —
 /// the orchestrator maps it onto the wire type).
@@ -99,10 +106,20 @@ pub struct CapturedFlow {
     pub method: String,
     /// Request path / URL.
     pub uri: String,
-    /// Decrypted body bytes (plaintext intermediate — in-memory only).
+    /// Decrypted body bytes (plaintext intermediate — in-memory only). This is a
+    /// bounded *peek* used for classification; the full body is forwarded and
+    /// dropped without being buffered here.
     pub body: Vec<u8>,
     /// `true` if this unit is a response (vs a request).
     pub is_response: bool,
+    /// The response `Content-Type` (lowercased, params stripped) when known, so
+    /// `aegis-flow`'s content-type fast-path engages instead of magic-sniffing.
+    pub content_type: Option<String>,
+    /// The WHOLE decrypted image body when this response carries a still image
+    /// (`image/jpeg|png|webp|gif`) under [`IMAGE_BODY_CAP`]. Surfaced separately
+    /// from `body` (a mere peek) because the NSFW scorer must decode the full
+    /// image. In-memory only, never logged or persisted (threat-model Asset 3).
+    pub image_body: Option<Vec<u8>>,
 }
 
 /// Receiver end of the flow channel given to `aegis-flow` via the interceptor.
@@ -375,6 +392,7 @@ pub struct FlowHandler {
 impl FlowHandler {
     /// Build a `CapturedFlow` and emit it (drops on backpressure — never blocks
     /// the data path, never unbounded-buffers plaintext). Returns the flow id.
+    #[allow(clippy::too_many_arguments)]
     pub fn emit(
         &self,
         source: FlowSource,
@@ -383,6 +401,8 @@ impl FlowHandler {
         uri: &str,
         body: Vec<u8>,
         is_response: bool,
+        content_type: Option<String>,
+        image_body: Option<Vec<u8>>,
     ) -> u64 {
         let flow_id = self
             .next_flow_id
@@ -396,6 +416,8 @@ impl FlowHandler {
             uri: uri.to_owned(),
             body,
             is_response,
+            content_type,
+            image_body,
         };
         if self.flow_tx.try_send(flow).is_err() {
             // Bounded channel full → shed (fail-safe on memory). Log metadata only.
@@ -447,6 +469,8 @@ impl HttpHandler for FlowHandler {
             &uri,
             peek(&full),
             false,
+            content_type_of(&parts.headers),
+            None, // request bodies are not image-scored (the response carries the image)
         );
 
         // Request leg is emit-only (forward the full body unchanged). Blocking a
@@ -461,10 +485,16 @@ impl HttpHandler for FlowHandler {
         res: Response<Body>,
     ) -> Response<Body> {
         let status = res.status().as_u16();
+        let content_type = content_type_of(res.headers());
         let (mut parts, body) = res.into_parts();
         // Collect the FULL decrypted response so we can forward it intact; the
         // classifier only receives a bounded peek (bounded plaintext on the channel).
         let full = collect_full(body).await;
+
+        // If this response is a still image of a type the NSFW scorer can decode,
+        // surface the WHOLE body (capped) so the pipeline can score the actual
+        // pixels — not just the magic-byte peek. Other bodies carry only a peek.
+        let image_body = image_body_for(content_type.as_deref(), &full);
 
         // Emit the response flow for classification.
         let flow_id = self.emit(
@@ -474,6 +504,8 @@ impl HttpHandler for FlowHandler {
             &format!("status:{status}"),
             peek(&full),
             true,
+            content_type,
+            image_body,
         );
 
         // If inline gating is disarmed (default, until the interceptor wires
@@ -559,6 +591,43 @@ fn peek(full: &[u8]) -> Vec<u8> {
     full[..full.len().min(BODY_PEEK_CAP)].to_vec()
 }
 
+/// The `Content-Type` header value, lowercased with any `; charset=…`/`; boundary=…`
+/// parameters stripped (e.g. `"image/JPEG; foo"` → `"image/jpeg"`). `None` if the
+/// header is absent or non-UTF-8.
+fn content_type_of(headers: &hudsucker::hyper::HeaderMap) -> Option<String> {
+    headers
+        .get(hudsucker::hyper::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| {
+            ct.split(';')
+                .next()
+                .unwrap_or(ct)
+                .trim()
+                .to_ascii_lowercase()
+        })
+}
+
+/// True for the still-image content-types the NSFW scorer can decode and score.
+/// Limited to the four the task targets (jpeg/png/webp/gif).
+fn is_scorable_image_ct(ct: &str) -> bool {
+    matches!(ct, "image/jpeg" | "image/png" | "image/webp" | "image/gif")
+}
+
+/// Decide whether to surface the WHOLE response body as an image for scoring.
+/// Returns `Some(bytes)` only for a scorable image content-type within
+/// [`IMAGE_BODY_CAP`]; otherwise `None` (the peek alone is carried). Oversized
+/// images fail OPEN (skipped) rather than blowing the channel's plaintext budget.
+fn image_body_for(content_type: Option<&str>, full: &[u8]) -> Option<Vec<u8>> {
+    let ct = content_type?;
+    if !is_scorable_image_ct(ct) {
+        return None;
+    }
+    if full.is_empty() || full.len() > IMAGE_BODY_CAP {
+        return None;
+    }
+    Some(full.to_vec())
+}
+
 /// The response served when policy says **Drop**: a minimal blocked-content
 /// 403 with no upstream body (never leak the original bytes downstream).
 fn blocked_response() -> Response<Body> {
@@ -614,7 +683,16 @@ mod tests {
     async fn handler_emits_flow_and_marks_mitmable() {
         let (tx, mut rx) = mpsc::channel(4);
         let h = test_handler(tx, DecisionGate::default());
-        let id = h.emit(FlowSource::Web, "example.com", "GET", "/", b"<html/>".to_vec(), true);
+        let id = h.emit(
+            FlowSource::Web,
+            "example.com",
+            "GET",
+            "/",
+            b"<html/>".to_vec(),
+            true,
+            Some("text/html".to_owned()),
+            None,
+        );
         assert_eq!(id, 1);
         let flow = rx.recv().await.unwrap();
         assert_eq!(flow.app_or_host, "example.com");
@@ -644,6 +722,54 @@ mod tests {
 
         // A second resolve for the same id finds no waiter.
         assert!(!gate.resolve(7, InterceptDecision::Forward).await);
+    }
+
+    #[test]
+    fn scorable_image_content_types() {
+        for ct in ["image/jpeg", "image/png", "image/webp", "image/gif"] {
+            assert!(is_scorable_image_ct(ct), "{ct} should be scorable");
+        }
+        for ct in ["image/avif", "image/svg+xml", "text/html", "video/mp4", "application/json"] {
+            assert!(!is_scorable_image_ct(ct), "{ct} should NOT be scorable");
+        }
+    }
+
+    #[test]
+    fn image_body_surfaced_only_for_scorable_image_types() {
+        let jpeg = vec![0xFFu8, 0xD8, 0xFF, 0xE0, 1, 2, 3];
+        // A scorable image type → whole body surfaced.
+        assert_eq!(
+            image_body_for(Some("image/jpeg"), &jpeg).as_deref(),
+            Some(jpeg.as_slice())
+        );
+        // HTML / non-image → no image body (peek path only).
+        assert!(image_body_for(Some("text/html"), &jpeg).is_none());
+        // Missing content-type → none.
+        assert!(image_body_for(None, &jpeg).is_none());
+        // Empty body → none (nothing to score).
+        assert!(image_body_for(Some("image/png"), &[]).is_none());
+    }
+
+    #[test]
+    fn oversized_image_body_is_skipped_fail_open() {
+        let huge = vec![0u8; IMAGE_BODY_CAP + 1];
+        assert!(
+            image_body_for(Some("image/jpeg"), &huge).is_none(),
+            "an image over the cap must be skipped (fail-open), not surfaced"
+        );
+        let at_cap = vec![0u8; IMAGE_BODY_CAP];
+        assert!(image_body_for(Some("image/jpeg"), &at_cap).is_some());
+    }
+
+    #[test]
+    fn content_type_of_strips_params_and_lowercases() {
+        let mut headers = hudsucker::hyper::HeaderMap::new();
+        headers.insert(
+            hudsucker::hyper::header::CONTENT_TYPE,
+            "Image/JPEG; charset=binary".parse().unwrap(),
+        );
+        assert_eq!(content_type_of(&headers).as_deref(), Some("image/jpeg"));
+        assert!(content_type_of(&hudsucker::hyper::HeaderMap::new()).is_none());
     }
 
     #[tokio::test]

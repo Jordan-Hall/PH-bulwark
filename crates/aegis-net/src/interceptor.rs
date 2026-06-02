@@ -141,6 +141,13 @@ impl NetInterceptor {
         self.ca.fingerprint_hex()
     }
 
+    /// The per-install root CA certificate in PEM, so a host tool can write it to
+    /// disk and the user can trust it (e.g. the runnable proxy prints its path).
+    /// Public cert only — never the private key.
+    pub fn ca_cert_pem(&self) -> &str {
+        self.ca.cert_pem()
+    }
+
     /// Keystore protection tier in effect (audit / UI honesty).
     pub fn keystore_tier(&self) -> KeyStoreTier {
         self.ca.tier()
@@ -169,9 +176,25 @@ impl NetInterceptor {
 
     fn convert(flow: ProxyFlow) -> CapturedFlow {
         // Map net's flat request/response onto the canonical `FlowPayload::Http`
-        // head. INTEGRATION: surface Content-Type/headers from the proxy so
-        // aegis-flow's content-type fast-path engages — today `headers` is empty
-        // and the classifier sniffs `body_peek` + the path/extension.
+        // head. The proxy now surfaces the response Content-Type, so we populate
+        // the `content-type` header and aegis-flow's content-type fast-path
+        // engages (instead of relying solely on magic-byte sniffing).
+        let mut headers = Vec::new();
+        if let Some(ct) = &flow.content_type {
+            headers.push(aegis_core::flow::Header {
+                name: "content-type".to_owned(),
+                value: ct.clone(),
+            });
+        }
+
+        // When the proxy captured a WHOLE still-image body for NSFW scoring, that
+        // becomes the classifier's body so the (image) magic bytes AND the full
+        // pixels reach the analyzer. Otherwise we carry the bounded peek as before.
+        let body = match flow.image_body {
+            Some(img) => bytes::Bytes::from(img),
+            None => bytes::Bytes::from(flow.body),
+        };
+
         CapturedFlow {
             flow_id: flow.flow_id,
             source_channel: Self::map_source(flow.source),
@@ -181,10 +204,52 @@ impl NetInterceptor {
                 method: (!flow.method.is_empty()).then_some(flow.method),
                 path: (!flow.uri.is_empty()).then_some(flow.uri),
                 status: None,
-                headers: Vec::new(),
-                body_peek: bytes::Bytes::from(flow.body),
+                headers,
+                body_peek: body,
             }),
         }
+    }
+}
+
+impl NetInterceptor {
+    /// Start ONLY the MITM proxy (install CA + spawn hudsucker), skipping the TUN
+    /// device and the QUIC firewall rule. This is the **explicit-proxy** path: the
+    /// user points their browser's HTTP/HTTPS proxy at `proxy_listen` directly, so
+    /// no transparent TUN redirect (which needs admin / the wintun driver) is
+    /// required. Decision-gating is armed exactly as in [`Interceptor::start`].
+    pub async fn start_proxy_only(&self) -> crate::Result<()> {
+        // Install / confirm the per-install root CA in the trust store (idempotent),
+        // then spawn the MITM proxy. CA already loaded/generated in `new`.
+        self.install_ca()?;
+        self.spawn_proxy().await
+    }
+
+    /// Spawn the MITM proxy listener + arm decision-gating. Shared by
+    /// [`Interceptor::start`] and [`NetInterceptor::start_proxy_only`].
+    async fn spawn_proxy(&self) -> crate::Result<()> {
+        let listen: std::net::SocketAddr = self
+            .config
+            .proxy_listen
+            .parse()
+            .map_err(|e| NetError::proxy(format!("bad proxy_listen: {e}")))?;
+
+        let tx = self
+            .flow_tx
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| NetError::proxy("proxy already started"))?;
+
+        let proxy = proxy::spawn(listen, self.ca.clone(), self.pinning.clone(), tx).await?;
+        proxy.set_gating(true);
+        tracing::info!(
+            ca_fp = %self.ca.fingerprint_hex(),
+            tier = ?self.ca.tier(),
+            listen = %proxy.listen_addr(),
+            "MITM proxy started (decision-gating armed)"
+        );
+        *self.proxy.lock().await = Some(proxy);
+        Ok(())
     }
 }
 
@@ -225,11 +290,16 @@ impl Interceptor for NetInterceptor {
         let proxy = proxy::spawn(listen, self.ca.clone(), self.pinning.clone(), tx)
             .await
             .map_err(aegis_core::Error::from)?;
+        // Arm inline decision-gating: the orchestrator now wires `apply` (below)
+        // to the proxy's per-flow decision sink, so the response handler awaits a
+        // Forward/Drop/Rewrite for each emitted flow (bounded, fail-OPEN on
+        // timeout). This is what makes a BLOCK actually drop the live response.
+        proxy.set_gating(true);
         tracing::info!(
             ca_fp = %self.ca.fingerprint_hex(),
             tier = ?self.ca.tier(),
             listen = %proxy.listen_addr(),
-            "interceptor started"
+            "interceptor started (decision-gating armed)"
         );
         *self.proxy.lock().await = Some(proxy);
         Ok(())
@@ -247,10 +317,9 @@ impl Interceptor for NetInterceptor {
     }
 
     async fn apply(&self, flow_id: u64, decision: InterceptDecision) -> CoreResult<()> {
-        // The proxy holds live flows; in the wired build `apply` signals the
-        // hudsucker handler (keyed by flow_id) to forward/rewrite/drop the
-        // in-flight response. Here we log the decision and accept it; the actual
-        // response mutation is wired with the hudsucker handler (online build).
+        // The proxy holds live flows; with gating armed (see `start`), `apply`
+        // signals the hudsucker response handler (keyed by flow_id) to
+        // forward/rewrite/drop the in-flight response.
         match &decision {
             InterceptDecision::Forward => {
                 tracing::trace!(flow_id, "decision: forward");
@@ -262,8 +331,12 @@ impl Interceptor for NetInterceptor {
                 tracing::debug!(flow_id, "decision: drop/block");
             }
         }
-        // TODO(online-build): route `decision` to the per-flow_id response sink
-        // in the hudsucker handler. Documented; no-op-with-log until then.
+        // Route the decision to the per-flow_id response sink in the running
+        // proxy. If the proxy isn't up yet (or the flow already forwarded/timed
+        // out), this resolves to `false` — a no-op, never an error.
+        if let Some(proxy) = self.proxy.lock().await.as_ref() {
+            let _ = proxy.apply(flow_id, decision).await.map_err(aegis_core::Error::from)?;
+        }
         Ok(())
     }
 
@@ -338,6 +411,8 @@ mod tests {
             uri: "/seg1.ts".to_owned(),
             body: b"abc".to_vec(),
             is_response: true,
+            content_type: Some("video/mp2t".to_owned()),
+            image_body: None,
         };
         let cf = NetInterceptor::convert(pf);
         assert_eq!(cf.flow_id, 7);
@@ -347,6 +422,35 @@ mod tests {
             FlowPayload::Http(h) => {
                 assert_eq!(h.path.as_deref(), Some("/seg1.ts"));
                 assert_eq!(h.body_peek.as_ref(), b"abc");
+                assert_eq!(h.content_type().as_deref(), Some("video/mp2t"));
+            }
+            _ => panic!("expected Http payload"),
+        }
+    }
+
+    #[test]
+    fn convert_surfaces_full_image_body_and_content_type() {
+        // An image response: the WHOLE image body (not just a peek) becomes the
+        // classifier's body, and the content-type header is populated so the
+        // content-type fast-path classifies it as IMAGE.
+        let jpeg = vec![0xFFu8, 0xD8, 0xFF, 0xE0, 9, 9, 9, 9];
+        let pf = ProxyFlow {
+            flow_id: 12,
+            source: proxy::FlowSource::Web,
+            app_or_host: String::new(),
+            readable: true,
+            method: String::new(),
+            uri: "status:200".to_owned(),
+            body: vec![0xFF, 0xD8, 0xFF], // peek only
+            is_response: true,
+            content_type: Some("image/jpeg".to_owned()),
+            image_body: Some(jpeg.clone()),
+        };
+        let cf = NetInterceptor::convert(pf);
+        match cf.payload {
+            FlowPayload::Http(h) => {
+                assert_eq!(h.content_type().as_deref(), Some("image/jpeg"));
+                assert_eq!(h.body_peek.as_ref(), jpeg.as_slice(), "full image surfaced");
             }
             _ => panic!("expected Http payload"),
         }
@@ -366,6 +470,8 @@ mod tests {
             uri: "/".to_owned(),
             body: Vec::new(),
             is_response: false,
+            content_type: None,
+            image_body: None,
         })
         .await
         .unwrap();

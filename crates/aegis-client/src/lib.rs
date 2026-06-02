@@ -26,7 +26,21 @@ use aegis_core::Result;
 use aegis_flow::{AnalysisUnit, DefaultFlowClassifier, FlowClassifier};
 use aegis_policy::PolicyEngine; // trait providing Policy::decide / Policy::alert_for
 use aegis_net::{Interceptor, InterceptDecision};
-use aegis_proto::v1::{Action, AlertKind, Verdict};
+use aegis_proto::v1::{Action, AlertKind, Category, Evidence, InlineMedia, Severity, Verdict};
+use aegis_vision::Scorer;
+
+/// NSFW probability at/above which a still image is blocked. Matches the
+/// `aegis-vision` default threshold so the device-side fast path and any cluster
+/// path band identically.
+const NSFW_BLOCK_THRESHOLD: f32 = 0.7;
+
+/// Square edge (px) the local NSFW model expects (ViT/MobileNet NSFW cards).
+/// Only referenced when the real ONNX scorer is compiled in (`onnx` feature).
+#[cfg(feature = "onnx")]
+const NSFW_INPUT_SIZE: u32 = 224;
+
+/// Longest edge (px) of the SAFE preview re-encoded into a non-CSAM block alert.
+const PREVIEW_MAX_EDGE: u32 = 256;
 
 /// Client tunables (device identity, cluster endpoint, age profile, paths).
 #[derive(Debug, Clone)]
@@ -68,6 +82,10 @@ pub struct Pipeline {
     age_profile: aegis_policy::AgeProfile,
     alert: Option<Arc<dyn aegis_alert::AlertSink>>,
     store: Option<Arc<dyn aegis_store::Store>>,
+    /// Local NSFW image scorer. Real (`OnnxScorer`) only with the `onnx` feature
+    /// AND a model at `AEGIS_NSFW_MODEL`; otherwise the fail-OPEN stub (score 0.0
+    /// → Allow), so the default build classifies images but never false-blocks.
+    nsfw: Box<dyn Scorer>,
 }
 
 impl Pipeline {
@@ -80,6 +98,7 @@ impl Pipeline {
             age_profile: aegis_policy::AgeProfile::default(),
             alert: None,
             store: None,
+            nsfw: build_nsfw_scorer(),
         }
     }
 
@@ -93,6 +112,13 @@ impl Pipeline {
         self
     }
 
+    /// Override the local NSFW scorer. Primarily for tests (inject a deterministic
+    /// scorer); production uses the env-selected scorer from [`Pipeline::new`].
+    pub fn with_nsfw_scorer(mut self, scorer: Box<dyn Scorer>) -> Self {
+        self.nsfw = scorer;
+        self
+    }
+
     /// Analyse one unit → Verdict. Text runs locally (deterministic rules);
     /// heavy media would route to the cluster via aegis-infer's OffloadRouter
     /// (SEAM: cluster client wired here when the endpoint is configured).
@@ -102,14 +128,58 @@ impl Pipeline {
                 let request_id = format!("{}-{}", self.cfg.device_id, span.thread_id);
                 self.text.analyze_span(&request_id, span, span_ts(span))
             }
-            // SEAM: route IMAGE/AUDIO/VIDEO to the cluster (aegis-infer OffloadRouter
-            // → Analysis.Analyze). Until the cluster client is wired, fail open.
+            // Still images are scored LOCALLY by the small NSFW model (no cluster
+            // round-trip, no raw media leaves the device). A high score blocks the
+            // image and attaches a SAFE downscaled preview (non-CSAM only).
+            AnalysisUnit::Image(media) => self.analyze_image(media),
+            // SEAM: route AUDIO/VIDEO to the cluster (aegis-infer OffloadRouter →
+            // Analysis.Analyze). Until the cluster client is wired, fail open.
             _ => Verdict {
-                category: aegis_proto::v1::Category::Safe as i32,
+                category: Category::Safe as i32,
                 action: Action::Allow as i32,
                 rationale: "heavy-media cluster path not yet wired".to_string(),
                 ..Default::default()
             },
+        }
+    }
+
+    /// Score a still image locally and build its verdict.
+    ///
+    /// A score `>= NSFW_BLOCK_THRESHOLD` → [`Category::AdultImage`] +
+    /// [`Action::Block`]; otherwise SAFE/Allow. On a NON-CSAM block we attach a
+    /// small re-encoded preview of the blocked image in `Evidence.safe_thumbnail`
+    /// so the parent alert can show WHAT was blocked.
+    ///
+    /// HARD LEGAL RULE: suspected CSAM ([`Category::CsamSuspected`]) NEVER has its
+    /// bytes previewed — `safe_thumbnail` stays EMPTY. The local NSFW model only
+    /// emits `AdultImage`, but [`build_image_evidence`] gates the thumbnail on the
+    /// category unconditionally so the guarantee holds for any future scorer too.
+    fn analyze_image(&self, media: &InlineMedia) -> Verdict {
+        let bytes = &media.data;
+        let score = self.nsfw.score(bytes);
+        let nsfw = score >= NSFW_BLOCK_THRESHOLD;
+
+        let category = if nsfw { Category::AdultImage } else { Category::Safe };
+        let action = if nsfw { Action::Block } else { Action::Allow };
+        let severity = if nsfw {
+            aegis_proto::severity_for_score(score)
+        } else {
+            Severity::Info
+        };
+
+        let evidence = build_image_evidence(category, bytes, self.nsfw.model_id());
+
+        Verdict {
+            request_id: format!("{}-img", self.cfg.device_id),
+            category: category as i32,
+            action: action as i32,
+            severity: severity as i32,
+            score,
+            rationale: format!(
+                "local nsfw score {score:.3} vs threshold {NSFW_BLOCK_THRESHOLD:.2}"
+            ),
+            evidence: Some(evidence),
+            ..Default::default()
         }
     }
 
@@ -119,10 +189,24 @@ impl Pipeline {
         flow: aegis_flow::CapturedFlow,
         interceptor: &dyn Interceptor,
     ) -> Result<()> {
+        let _ = self.handle_flow_reporting(flow, interceptor).await?;
+        Ok(())
+    }
+
+    /// Like [`handle_flow`](Self::handle_flow) but returns a [`BlockReport`] for
+    /// every unit that was BLOCKED, so a caller (the runnable proxy) can print /
+    /// relay per-block detail (host + category + score) without re-deriving it.
+    pub async fn handle_flow_reporting(
+        &self,
+        flow: aegis_flow::CapturedFlow,
+        interceptor: &dyn Interceptor,
+    ) -> Result<Vec<BlockReport>> {
         let flow_id = flow.flow_id;
         let source_channel = flow.source_channel;
+        let host = flow.app_or_host.clone();
         let units = self.classifier.classify(flow).await?;
 
+        let mut reports = Vec::new();
         for unit in &units {
             let verdict = self.analyze(unit).await;
 
@@ -138,8 +222,16 @@ impl Pipeline {
                 .apply(flow_id, action_to_decision(action, None))
                 .await?;
 
+            if action == Action::Block {
+                reports.push(BlockReport {
+                    host: host.clone(),
+                    category: Category::try_from(verdict.category).unwrap_or(Category::Unspecified),
+                    score: verdict.score,
+                });
+            }
+
             if let (Some(sink), Some(kind)) = (&self.alert, alert_kind) {
-                let event = build_alert(&self.cfg.device_id, &verdict, kind);
+                let event = build_alert(&self.cfg.device_id, &host, &verdict, kind);
                 let _ = sink.raise(event).await; // alerting failure must not break filtering
             }
 
@@ -155,7 +247,7 @@ impl Pipeline {
                     .await;
             }
         }
-        Ok(())
+        Ok(reports)
     }
 
     /// The main loop: pull flows from the interceptor and process them until
@@ -177,13 +269,29 @@ impl Pipeline {
     }
 }
 
-fn build_alert(device_id: &str, verdict: &Verdict, kind: AlertKind) -> aegis_proto::v1::AlertEvent {
+/// A single BLOCK outcome surfaced to the runnable proxy for printing / relaying.
+#[derive(Clone, Debug)]
+pub struct BlockReport {
+    /// Host the blocked flow belonged to (may be empty on a response-leg flow).
+    pub host: String,
+    /// The category that triggered the block.
+    pub category: Category,
+    /// The analyzer's normalized score (0.0–1.0).
+    pub score: f32,
+}
+
+fn build_alert(
+    device_id: &str,
+    host: &str,
+    verdict: &Verdict,
+    kind: AlertKind,
+) -> aegis_proto::v1::AlertEvent {
     aegis_proto::v1::AlertEvent {
         alert_id: format!("{}-{}", device_id, verdict.request_id),
         kind: kind as i32,
         category: verdict.category,
         severity: verdict.severity,
-        app: String::new(),
+        app: host.to_string(),
         device_id: device_id.to_string(),
         ts: span_now(),
         // redacted summary only — never raw content (Evidence carries hashes/safe thumb).
@@ -203,6 +311,98 @@ fn span_now() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Build the local NSFW scorer for this build:
+/// * `--features onnx` + a model at `AEGIS_NSFW_MODEL` that loads → real
+///   [`OnnxScorer`](aegis_vision::onnx::OnnxScorer).
+/// * otherwise → the fail-OPEN [`StubScorer`](aegis_vision::StubScorer) (0.0 →
+///   Allow), so the default build (and any host that can't load `onnxruntime.dll`)
+///   stays green and never false-blocks.
+fn build_nsfw_scorer() -> Box<dyn Scorer> {
+    #[cfg(feature = "onnx")]
+    {
+        match aegis_vision::onnx::OnnxScorer::from_env(NSFW_INPUT_SIZE) {
+            Ok(scorer) => {
+                tracing::info!(
+                    model = %scorer.model_id(),
+                    "aegis-client: local ONNX NSFW scorer active"
+                );
+                return Box::new(scorer);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "aegis-client: no usable NSFW model ({e}); image scoring fails OPEN (stub)"
+                );
+            }
+        }
+    }
+    #[cfg(not(feature = "onnx"))]
+    {
+        tracing::warn!(
+            "aegis-client: built without `onnx`; image scoring fails OPEN (stub). \
+             Rebuild with --features onnx and set {} for real blocking.",
+            aegis_vision::MODEL_PATH_ENV
+        );
+    }
+    Box::new(aegis_vision::StubScorer)
+}
+
+/// Build the [`Evidence`] for an image verdict.
+///
+/// Always carries the content SHA-256 + model id. On a NON-CSAM block we ALSO
+/// attach a small re-encoded preview in `safe_thumbnail` so the parent alert can
+/// show what was blocked.
+///
+/// HARD LEGAL RULE: for [`Category::CsamSuspected`] the thumbnail stays EMPTY —
+/// the raw image bytes are NEVER previewed, transmitted, or re-encoded. This is
+/// enforced here so it holds regardless of how the category was derived.
+fn build_image_evidence(category: Category, image_bytes: &[u8], model_id: &str) -> Evidence {
+    let safe_thumbnail = match category {
+        // NEVER preview suspected CSAM — block + hash + report path only.
+        Category::CsamSuspected => Vec::new(),
+        // For every OTHER blocking category, attach a downscaled preview so the
+        // parent can see what was blocked. SAFE categories get no preview (nothing
+        // was blocked) to avoid pointlessly re-encoding allowed traffic.
+        Category::AdultImage => safe_preview(image_bytes).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    Evidence {
+        sha256: sha256(image_bytes),
+        safe_thumbnail,
+        model_id: model_id.to_string(),
+        ..Default::default()
+    }
+}
+
+/// Downscale `image_bytes` so its longest edge is at most [`PREVIEW_MAX_EDGE`]
+/// and re-encode it as JPEG — a small SAFE preview for the live alert. Returns
+/// `None` if the image can't be decoded (fail-safe: no preview rather than the
+/// raw bytes). The preview is a fresh re-encode; the original bytes are never
+/// passed through verbatim.
+fn safe_preview(image_bytes: &[u8]) -> Option<Vec<u8>> {
+    let img = image::load_from_memory(image_bytes).ok()?;
+    let preview = img.thumbnail(PREVIEW_MAX_EDGE, PREVIEW_MAX_EDGE);
+    let rgb = preview.to_rgb8();
+    let mut out: Vec<u8> = Vec::new();
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 70);
+    use image::ImageEncoder;
+    encoder
+        .write_image(
+            rgb.as_raw(),
+            rgb.width(),
+            rgb.height(),
+            image::ExtendedColorType::Rgb8,
+        )
+        .ok()?;
+    Some(out)
+}
+
+/// SHA-256 of content, for `Evidence.sha256` (hash-only audit).
+fn sha256(bytes: &[u8]) -> Vec<u8> {
+    ring::digest::digest(&ring::digest::SHA256, bytes)
+        .as_ref()
+        .to_vec()
 }
 
 
@@ -229,5 +429,99 @@ mod tests {
             action_to_decision(Action::Blur, None),
             InterceptDecision::Drop
         ));
+    }
+
+    /// A deterministic scorer for tests.
+    struct FixedScorer(f32);
+    impl Scorer for FixedScorer {
+        fn score(&self, _: &[u8]) -> f32 {
+            self.0
+        }
+        fn model_id(&self) -> &str {
+            "test-fixed"
+        }
+    }
+
+    /// A small valid PNG so the preview re-encoder has something to decode.
+    fn tiny_png() -> Vec<u8> {
+        let mut img = image::RgbImage::new(64, 48);
+        for px in img.pixels_mut() {
+            *px = image::Rgb([200, 120, 40]);
+        }
+        let mut out = Vec::new();
+        use image::ImageEncoder;
+        image::codecs::png::PngEncoder::new(&mut out)
+            .write_image(img.as_raw(), 64, 48, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        out
+    }
+
+    fn pipeline_with(score: f32) -> Pipeline {
+        Pipeline::new(ClientConfig::default()).with_nsfw_scorer(Box::new(FixedScorer(score)))
+    }
+
+    #[tokio::test]
+    async fn high_nsfw_score_blocks_with_adult_image_category() {
+        let p = pipeline_with(0.95);
+        let unit = AnalysisUnit::Image(InlineMedia {
+            data: tiny_png(),
+            mime_type: "image/png".into(),
+            ..Default::default()
+        });
+        let v = p.analyze(&unit).await;
+        assert_eq!(v.category, Category::AdultImage as i32);
+        assert_eq!(v.action, Action::Block as i32);
+        // A non-CSAM block carries a SAFE re-encoded preview.
+        let ev = v.evidence.unwrap();
+        assert_eq!(ev.sha256.len(), 32);
+        assert!(!ev.safe_thumbnail.is_empty(), "non-CSAM block must attach a preview");
+        // The preview is a fresh JPEG re-encode (SOI marker), not the PNG input.
+        assert_eq!(&ev.safe_thumbnail[..3], &[0xFF, 0xD8, 0xFF]);
+    }
+
+    #[tokio::test]
+    async fn low_nsfw_score_allows_with_no_preview() {
+        let p = pipeline_with(0.10);
+        let unit = AnalysisUnit::Image(InlineMedia {
+            data: tiny_png(),
+            mime_type: "image/png".into(),
+            ..Default::default()
+        });
+        let v = p.analyze(&unit).await;
+        assert_eq!(v.category, Category::Safe as i32);
+        assert_eq!(v.action, Action::Allow as i32);
+        // Nothing blocked → no preview re-encoded.
+        assert!(v.evidence.unwrap().safe_thumbnail.is_empty());
+    }
+
+    #[test]
+    fn csam_evidence_never_carries_a_thumbnail() {
+        // HARD LEGAL RULE: even handed the (image) bytes, a CSAM-suspected verdict
+        // leaves safe_thumbnail EMPTY — block + hash only, never a preview.
+        let ev = build_image_evidence(Category::CsamSuspected, &tiny_png(), "test");
+        assert_eq!(ev.sha256.len(), 32, "hash still recorded");
+        assert!(ev.safe_thumbnail.is_empty(), "CSAM must NEVER be previewed");
+    }
+
+    #[test]
+    fn adult_image_evidence_carries_a_reencoded_preview() {
+        let ev = build_image_evidence(Category::AdultImage, &tiny_png(), "test");
+        assert!(!ev.safe_thumbnail.is_empty());
+        // JPEG SOI marker — a fresh re-encode.
+        assert_eq!(&ev.safe_thumbnail[..3], &[0xFF, 0xD8, 0xFF]);
+    }
+
+    #[test]
+    fn preview_is_downscaled_within_max_edge() {
+        // A 64x48 source downscales so its longest edge is <= PREVIEW_MAX_EDGE.
+        let prev = safe_preview(&tiny_png()).unwrap();
+        let decoded = image::load_from_memory(&prev).unwrap();
+        assert!(decoded.width() <= PREVIEW_MAX_EDGE && decoded.height() <= PREVIEW_MAX_EDGE);
+    }
+
+    #[test]
+    fn preview_fails_safe_on_undecodable_bytes() {
+        // Not an image → no preview (never the raw bytes).
+        assert!(safe_preview(b"not an image at all").is_none());
     }
 }
