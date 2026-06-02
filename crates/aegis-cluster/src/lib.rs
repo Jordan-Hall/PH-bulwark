@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use aegis_core::Result;
 use aegis_proto::v1::{
-    node_state, DequeueRequest, DequeueResponse, DrainRequest, DrainResponse, EnqueueRequest,
+    DequeueRequest, DequeueResponse, DrainRequest, DrainResponse, EnqueueRequest,
     EnqueueResponse, HealthRequest, HealthStatus, JoinRequest, JoinResponse, LeaveRequest,
     LeaveResponse, NodeInfo, NodeState, WatchHealthRequest, WorkItem,
 };
@@ -264,10 +264,6 @@ pub trait ClusterMember: Send + Sync {
     async fn dequeue(&self, req: DequeueRequest) -> Result<DequeueResponse>;
     async fn drain(&self, req: DrainRequest) -> Result<DrainResponse>;
 }
-
-// Keep the `node_state` import meaningful for downstream matching helpers.
-#[allow(unused_imports)]
-use node_state as _node_state;
 
 #[cfg(test)]
 mod tests {

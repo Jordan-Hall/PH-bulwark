@@ -22,6 +22,7 @@ tracing.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
+async-trait.workspace = true # FlowClassifier is an async trait
 
 # Zero-copy byte handling for buffered segments and body peeks. `bytes::Bytes`
 # lets the ring buffer clone segment handles cheaply (ref-counted) without

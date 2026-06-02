@@ -153,7 +153,7 @@ fn detect_cpu_model(sys: &System) -> String {
 /// Falls back to the logical CPU count from `sysinfo`, then to `1`.
 fn detect_cpu_cores(sys: &System) -> u32 {
     let logical = sys.cpus().len();
-    let physical = System::physical_core_count().unwrap_or(0);
+    let physical = sys.physical_core_count().unwrap_or(0);
     let cores = if physical > 0 { physical } else { logical };
     u32::try_from(cores.max(1)).unwrap_or(u32::MAX)
 }

@@ -72,7 +72,8 @@ age = "0.11"
 ring = "0.17"
 
 # Email + web
-lettre = { version = "0.11", features = ["smtp-transport", "tokio1-rustls"] }
+# default off (drops native-tls); rustls async SMTP with the ring provider + cert verifier.
+lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "pool", "smtp-transport", "tokio1-rustls-tls", "ring"] }
 axum = { version = "0.8", features = ["macros", "ws"] }
 
 [profile.release]
