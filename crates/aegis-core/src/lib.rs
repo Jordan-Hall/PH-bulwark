@@ -35,6 +35,7 @@
 pub mod config;
 pub mod device;
 pub mod error;
+pub mod flow;
 pub mod ids;
 pub mod telemetry;
 
@@ -48,6 +49,7 @@ pub use device::{
     DetectionHints,
 };
 pub use error::{Error, Result};
+pub use flow::{AnalysisUnit, CapturedFlow, FlowPayload, Header, HttpHead, InterceptDecision};
 pub use ids::{DeviceId, RequestId, ThreadId};
 pub use telemetry::{init_tracing, init_tracing_default, LogFormat, LoggingConfig};
 

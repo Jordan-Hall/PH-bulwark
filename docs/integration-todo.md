@@ -7,9 +7,12 @@ drift** to reconcile before `cargo build --workspace` is green. This is the punc
 
 ## 1. Hoist shared types into `aegis-core` (biggest item)
 Several types were defined independently by multiple crates and must become one:
-- **`CapturedFlow`, `FlowPayload`, `InterceptDecision`** — defined in BOTH `aegis-net`
-  and `aegis-flow`. Move to `aegis-core` (or a new `aegis-types`); both crates re-import.
-  Removes the `adapt_flow` / `convert_payload` SEAMs in `aegis-client/src/lib.rs`.
+- ✅ **DONE** — `CapturedFlow`, `FlowPayload`, `HttpHead`, `Header`, `InterceptDecision`, and
+  `AnalysisUnit` now live canonically in **`aegis-core::flow`**; `aegis-net` and `aegis-flow`
+  re-export them (the SAME type), and the `aegis-client` adapter was deleted. `aegis-net::convert`
+  builds `FlowPayload::Http` from its flat proxy flow.
+  - REMAINING: `aegis-net`'s proxy should surface response **Content-Type/headers** so
+    `aegis-flow`'s content-type fast-path engages (today `headers` is empty → magic-byte/extension sniff).
   - **Divergence found (reconcile, don't just rename):** `aegis-net::FlowPayload` is a flat
     struct `{method, uri, bytes, is_response}`; `aegis-flow::FlowPayload` is an enum
     `Http(HttpHead{method,path,status,headers,body_peek}) | StreamChunk{data,mime_type,url}`.
@@ -19,7 +22,7 @@ Several types were defined independently by multiple crates and must become one:
     works (today it falls back to magic-byte + URL-extension sniffing on `body_peek`). Note
     `aegis-flow::AnalysisUnit::VideoSegment` also carries a `segment_id` field used to apply the
     verdict back to the buffered bytes — preserve it through the router.
-- **`AnalysisUnit`** — defined in `aegis-flow`; consumed by `aegis-client`. Keep canonical in flow or core.
+- ✅ **DONE** — `AnalysisUnit` is canonical in `aegis-core::flow` (re-exported by `aegis-flow`).
 - **`Analyzer` trait** — mirrored in `aegis-server`, `aegis-vision`, `aegis-audio`,
   `aegis-video`, `aegis-text`, `aegis-infer`. Define ONCE in `aegis-core`; all implement that one.
 - **`Route`** (infer) and **`AgeProfile`** (policy) — confirm single home.

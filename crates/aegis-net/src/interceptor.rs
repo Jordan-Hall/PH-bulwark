@@ -27,46 +27,10 @@ use crate::quic::QuicDowngrade;
 use crate::tun::{open_tun, TunConfig, TunDevice};
 use crate::{truststore, NetError};
 
-/// Protocol metadata + bytes for a captured flow (interfaces.md `FlowPayload`).
-#[derive(Clone, Debug)]
-pub struct FlowPayload {
-    /// HTTP method for a request, empty for a response.
-    pub method: String,
-    /// Request URI / path.
-    pub uri: String,
-    /// Decrypted body bytes (plaintext intermediate — in-memory only).
-    pub bytes: Vec<u8>,
-    /// True if this unit is a response.
-    pub is_response: bool,
-}
-
-/// A captured, MITM-decrypted (or marked-unreadable) network unit handed up to
-/// the flow layer. Carries no verdict yet. (interfaces.md `CapturedFlow`.)
-#[derive(Clone, Debug)]
-pub struct CapturedFlow {
-    /// Per-session flow id.
-    pub flow_id: u64,
-    /// WEB / VIDEO_STREAM / LIVE_STREAM (reuses the proto enum).
-    pub source_channel: SourceChannel,
-    /// Host / app the flow is for.
-    pub app_or_host: String,
-    /// `false` = pinned/E2E → route to OcrSource.
-    pub readable: bool,
-    /// Bytes + protocol metadata.
-    pub payload: FlowPayload,
-}
-
-/// A policy decision applied back onto a live flow (interfaces.md
-/// `InterceptDecision`).
-#[derive(Clone, Debug)]
-pub enum InterceptDecision {
-    /// Pass through unchanged.
-    Forward,
-    /// Replace payload (blur image / interstitial).
-    Rewrite(Vec<u8>),
-    /// Block / drop the flow.
-    Drop,
-}
+// The captured-flow vocabulary is now CANONICAL in `aegis-core::flow` so this
+// crate and `aegis-flow` share ONE definition (no drift). Re-exported here so the
+// crate's public API (`aegis_net::CapturedFlow`, …) is unchanged for callers.
+pub use aegis_core::flow::{CapturedFlow, FlowPayload, HttpHead, InterceptDecision};
 
 /// Captures and (where possible) decrypts device traffic, surfacing inspectable
 /// units. Owns the per-install CA, QUIC-downgrade, and pinning detection.
@@ -204,17 +168,22 @@ impl NetInterceptor {
     }
 
     fn convert(flow: ProxyFlow) -> CapturedFlow {
+        // Map net's flat request/response onto the canonical `FlowPayload::Http`
+        // head. INTEGRATION: surface Content-Type/headers from the proxy so
+        // aegis-flow's content-type fast-path engages — today `headers` is empty
+        // and the classifier sniffs `body_peek` + the path/extension.
         CapturedFlow {
             flow_id: flow.flow_id,
             source_channel: Self::map_source(flow.source),
             app_or_host: flow.app_or_host,
             readable: flow.readable,
-            payload: FlowPayload {
-                method: flow.method,
-                uri: flow.uri,
-                bytes: flow.body,
-                is_response: flow.is_response,
-            },
+            payload: FlowPayload::Http(HttpHead {
+                method: (!flow.method.is_empty()).then_some(flow.method),
+                path: (!flow.uri.is_empty()).then_some(flow.uri),
+                status: None,
+                headers: Vec::new(),
+                body_peek: bytes::Bytes::from(flow.body),
+            }),
         }
     }
 }
@@ -374,9 +343,13 @@ mod tests {
         assert_eq!(cf.flow_id, 7);
         assert_eq!(cf.source_channel, SourceChannel::VideoStream);
         assert!(cf.readable);
-        assert_eq!(cf.payload.uri, "/seg1.ts");
-        assert!(cf.payload.is_response);
-        assert_eq!(cf.payload.bytes, b"abc");
+        match cf.payload {
+            FlowPayload::Http(h) => {
+                assert_eq!(h.path.as_deref(), Some("/seg1.ts"));
+                assert_eq!(h.body_peek.as_ref(), b"abc");
+            }
+            _ => panic!("expected Http payload"),
+        }
     }
 
     #[tokio::test]

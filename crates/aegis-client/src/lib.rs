@@ -11,11 +11,10 @@
 //!        └─ Action               └─ AlertSink (guardian email) + Store (redacted audit)
 //! ```
 //!
-//! INTEGRATION NOTE (for the integrator / Wave D): two shared types were defined
-//! independently by `aegis-net` and `aegis-flow` (`CapturedFlow`, `FlowPayload`)
-//! and the `Analyzer`/trait contracts were mirrored per-crate. They should be
-//! **hoisted into `aegis-core`** so this crate links one vocabulary. Until then
-//! the `adapt_flow` seam below converts between them. Marked `// SEAM:`.
+//! NOTE: `CapturedFlow`/`FlowPayload` are now canonical in `aegis-core::flow`
+//! (re-exported by `aegis-net` and `aegis-flow`), so the interceptor's output
+//! feeds the classifier directly — no adapter needed. The per-crate `Analyzer`
+//! trait copies still want hoisting into `aegis-core` (docs/integration-todo.md §1).
 //!
 //! `#![forbid(unsafe_code)]`. No AI beyond the small dedicated analyzers; text
 //! analysis is the deterministic rule engine and always runs locally.
@@ -163,8 +162,9 @@ impl Pipeline {
     pub async fn run(&self, interceptor: Arc<dyn Interceptor>) -> Result<()> {
         loop {
             match interceptor.next_flow().await? {
-                Some(net_flow) => {
-                    let flow = adapt_flow(net_flow);
+                Some(flow) => {
+                    // net + flow now share aegis_core::flow::CapturedFlow, so the
+                    // interceptor's output feeds the classifier directly (no adapter).
                     if let Err(e) = self.handle_flow(flow, interceptor.as_ref()).await {
                         tracing::warn!(error = %e, "flow handling failed; failing open");
                     }
@@ -174,37 +174,6 @@ impl Pipeline {
         }
         Ok(())
     }
-}
-
-/// SEAM: convert `aegis_net::CapturedFlow` → `aegis_flow::CapturedFlow`.
-/// These are currently two distinct structs (see INTEGRATION NOTE). The
-/// integrator should unify them in `aegis-core`; this adapter exists so the
-/// loop type-checks once field names are aligned.
-fn adapt_flow(net_flow: aegis_net::CapturedFlow) -> aegis_flow::CapturedFlow {
-    // flow_id / source_channel / app_or_host / readable are identical types in
-    // both crates; only the payload model differs (see convert_payload).
-    aegis_flow::CapturedFlow {
-        flow_id: net_flow.flow_id,
-        source_channel: net_flow.source_channel,
-        app_or_host: net_flow.app_or_host,
-        readable: net_flow.readable,
-        payload: convert_payload(net_flow.payload),
-    }
-}
-
-/// Convert aegis-net's flat HTTP payload into aegis-flow's richer `Http` head.
-/// net does not yet surface response headers, so `headers` is empty and the
-/// classifier falls back to magic-byte + URL-extension detection on `body_peek`.
-/// INTEGRATION: when net surfaces Content-Type, populate `headers` so the
-/// classifier's content-type fast-path engages (docs/integration-todo.md §1).
-fn convert_payload(p: aegis_net::FlowPayload) -> aegis_flow::FlowPayload {
-    aegis_flow::FlowPayload::Http(aegis_flow::HttpHead {
-        method: (!p.method.is_empty()).then_some(p.method),
-        path: (!p.uri.is_empty()).then_some(p.uri),
-        status: None,
-        headers: Vec::new(),
-        body_peek: bytes::Bytes::from(p.bytes),
-    })
 }
 
 fn build_alert(device_id: &str, verdict: &Verdict, kind: AlertKind) -> aegis_proto::v1::AlertEvent {

@@ -49,6 +49,7 @@ tracing.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
+bytes.workspace = true # build the canonical FlowPayload::Http body_peek in convert()
 
 # Windows TUN driver (WireGuard's pre-signed wintun.dll). Target-gated: only
 # pulled in on Windows. Listed in the workspace allowlist already.
