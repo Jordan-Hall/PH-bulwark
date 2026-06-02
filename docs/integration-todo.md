@@ -1,9 +1,15 @@
 # Aegis — Integration TODO (Wave D)
 
-All 14 crates are implemented (~16.5k LoC) but **nothing has been compile-verified**
-(this build environment had no network for cargo). The crates were built in parallel
-against the `aegis-proto` contract + `interfaces.md`, so there is known **integration
-drift** to reconcile before `cargo build --workspace` is green. This is the punch list.
+All crates are implemented. **Build status — verified on the Windows dev host
+(`cargo build`, network on):** the **15 non-SQLite crates compile cleanly** —
+`aegis-proto` (tonic/protox codegen), `aegis-core`, `aegis-net` (Wintun + MITM +
+DPAPI FFI), `flow`, `vision`, `audio`, `video`, `text`, `policy`, `alert`, `infer`,
+`cluster`, `server`, `supervision`. The 3 SQLite-backed crates (`aegis-store`,
+`aegis-client`, `aegis-ui`) could NOT be built **on this host**: Windows Application
+Control blocks executing the `libsqlite3-sys` build-script binary (os error 4551) —
+an environmental policy, not our code (the `cfg_select`/version issues were resolved).
+They build on CI / Linux (`.github/workflows/ci.yml`). The drift items below are now
+**DONE** except where noted; this is the record of what was fixed.
 
 ## 1. Hoist shared types into `aegis-core` (biggest item)
 Several types were defined independently by multiple crates and must become one:
