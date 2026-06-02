@@ -50,7 +50,8 @@ pub use engine::{weight, GroomingRuleEngine, RuleOutcome};
 pub use error::{Result, TextError};
 pub use lexicon::{LanguageLexicon, Lexicon};
 pub use state::{ThreadState, ESCALATION_WINDOW_MS};
-pub use traits::{Analyzer, GroomingRules};
+pub use aegis_core::Analyzer;
+pub use traits::GroomingRules;
 
 #[cfg(feature = "classifier")]
 pub use classifier::{OrtGroomingClassifier, Tokenizer};

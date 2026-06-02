@@ -19,7 +19,7 @@ use aegis_proto::v1::{
     AnalysisRequest, DeviceProfile, MediaKind, OffloadPolicy, RefreshOffloadRequest, Verdict,
 };
 
-use crate::analyzer::Analyzer;
+use aegis_core::Analyzer;
 use crate::client::OffloadClient;
 use crate::error::{InferError, Result};
 use crate::policy::{decide, LiveConditions, PolicySnapshot, Route};

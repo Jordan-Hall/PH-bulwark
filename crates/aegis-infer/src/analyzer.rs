@@ -20,49 +20,11 @@
 //! `aegis-vision`/`-audio`/`-text` can be injected without changing the router.
 
 use async_trait::async_trait;
-use futures_core::stream::BoxStream;
 
-use aegis_proto::v1::{
-    AnalysisBatch, AnalysisRequest, Category, MediaKind, Severity, Verdict, VerdictBatch,
-};
+use aegis_core::Analyzer;
+use aegis_proto::v1::{AnalysisRequest, Category, MediaKind, Severity, Verdict};
 
 use crate::error::Result;
-
-/// The core analysis contract (mirrors `Analyzer` in
-/// `docs/design/interfaces.md`). Implemented locally for the on-device
-/// first-pass; the cluster implements the same shape behind the gRPC boundary.
-#[async_trait]
-pub trait Analyzer: Send + Sync {
-    /// Which media kinds this analyzer can handle locally (the router uses this
-    /// to decide whether a local run is even possible before consulting policy).
-    fn handles(&self) -> &[MediaKind];
-
-    /// Analyse one request → one verdict. MUST NOT return raw explicit media in
-    /// `Verdict.evidence` (hashes / safe thumbnail / redacted snippet only).
-    async fn analyze(&self, req: AnalysisRequest) -> Result<Verdict>;
-
-    /// Batched analyse. Default = sequential [`Analyzer::analyze`].
-    async fn analyze_batch(&self, batch: AnalysisBatch) -> Result<VerdictBatch> {
-        let mut verdicts = Vec::with_capacity(batch.requests.len());
-        for req in batch.requests {
-            verdicts.push(self.analyze(req).await?);
-        }
-        Ok(VerdictBatch { verdicts })
-    }
-
-    /// Streaming analyse for live capture. Default maps each request through
-    /// [`Analyzer::analyze`] sequentially.
-    async fn analyze_stream(
-        &self,
-        _requests: BoxStream<'static, AnalysisRequest>,
-    ) -> Result<BoxStream<'static, Result<Verdict>>> {
-        // A local first-pass rarely streams; the cluster handles live streams.
-        // Implementors that need it override this.
-        Err(aegis_core::Error::Ipc(
-            "local analyzer does not support streaming; route to cluster".into(),
-        ))
-    }
-}
 
 /// Build the conservative "inconclusive — prefer offload" verdict. Used when no
 /// real local model is available for a kind: a low-confidence SAFE verdict whose
@@ -209,6 +171,7 @@ pub mod onnx {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aegis_proto::v1::AnalysisBatch;
 
     fn text_request() -> AnalysisRequest {
         AnalysisRequest {

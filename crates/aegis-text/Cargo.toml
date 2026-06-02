@@ -18,6 +18,7 @@ classifier = ["dep:ort"]
 
 [dependencies]
 aegis-proto = { path = "../aegis-proto" }
+aegis-core = { path = "../aegis-core" }
 
 serde.workspace = true
 anyhow.workspace = true

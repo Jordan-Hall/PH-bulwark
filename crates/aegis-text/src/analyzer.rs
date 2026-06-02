@@ -35,7 +35,8 @@ use crate::error::TextError;
 use crate::lexicon::Lexicon;
 use crate::redact::{redacted_adult_excerpt, redacted_excerpt};
 use crate::state::ThreadState;
-use crate::traits::{Analyzer, GroomingRules};
+use crate::traits::GroomingRules;
+use aegis_core::Analyzer;
 
 /// Stable model id reported in `Evidence.model_id` for the deterministic engine.
 const RULE_ENGINE_ID: &str = "aegis-grooming-rules";
@@ -290,13 +291,19 @@ impl<C: TextClassifier + 'static> Analyzer for TextAnalyzer<C> {
         &[MediaKind::Text]
     }
 
-    async fn analyze(&self, req: AnalysisRequest) -> anyhow::Result<Verdict> {
-        let span = require_text_span(&req)?;
+    async fn analyze(&self, req: AnalysisRequest) -> aegis_core::Result<Verdict> {
+        // Boundary: surface aegis_core::Result. TextError -> anyhow -> Error::Other.
+        let span = require_text_span(&req).map_err(|e| aegis_core::Error::Other(e.into()))?;
         // ts is unix epoch millis on the request; default to 0 if unset.
         Ok(self.analyze_span(&req.request_id, span, req.ts))
     }
+}
 
-    async fn analyze_stream(
+impl<C: TextClassifier> TextAnalyzer<C> {
+    /// Streaming helper for the local first-pass live path. Kept as an INHERENT
+    /// method — the canonical `aegis_core::Analyzer` is non-streaming; the server
+    /// drives streaming by looping `analyze` over its gRPC request stream.
+    pub async fn analyze_stream(
         &self,
         requests: BoxStream<'static, AnalysisRequest>,
     ) -> anyhow::Result<BoxStream<'static, anyhow::Result<Verdict>>> {
@@ -304,13 +311,7 @@ impl<C: TextClassifier + 'static> Analyzer for TextAnalyzer<C> {
         // request stream straight to a verdict stream. Thread state is shared
         // via the analyzer's internal map, so ordering within a thread is
         // preserved as long as the producer feeds messages in order.
-        //
-        // We must produce a 'static stream, so collect verdicts eagerly per
-        // item using the analyzer behind an Arc would be ideal; for the
-        // first-pass local path we buffer the (already in-memory) requests.
         let mut verdicts: Vec<anyhow::Result<Verdict>> = Vec::new();
-        // `BoxStream` (Pin<Box<dyn Stream + Send>>) is `Unpin`, so we can poll it
-        // directly via `StreamExt::next`.
         let mut requests = requests;
         while let Some(req) = requests.next().await {
             match require_text_span(&req) {

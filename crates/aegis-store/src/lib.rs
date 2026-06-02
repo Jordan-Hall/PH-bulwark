@@ -199,7 +199,7 @@ mod store_trait_tests {
 
     fn store() -> SqliteStore {
         let key = AtRestKey::new(vec![3u8; 32]).unwrap();
-        SqliteStore::open_in_memory(&key, RetentionPolicy::default()).unwrap()
+        SqliteStore::open_in_memory_with(&key, RetentionPolicy::default()).unwrap()
     }
 
     fn event(ts: i64) -> StoredEvent {

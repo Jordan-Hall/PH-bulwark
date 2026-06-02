@@ -55,8 +55,9 @@ impl SqliteStore {
         })
     }
 
-    /// Open an in-memory encrypted database (tests / ephemeral use).
-    pub fn open_in_memory(key: &AtRestKey, retention: RetentionPolicy) -> Result<Self> {
+    /// Open an in-memory encrypted database with an explicit at-rest key and
+    /// retention policy (tests / ephemeral use, full control).
+    pub fn open_in_memory_with(key: &AtRestKey, retention: RetentionPolicy) -> Result<Self> {
         retention.validate()?;
         let conn = Connection::open_in_memory().map_err(StoreError::open)?;
         Self::init_conn(&conn, key)?;
@@ -65,6 +66,21 @@ impl SqliteStore {
             retention,
             audit_key: Some(key.audit_hmac_key()),
         })
+    }
+
+    /// Open an ephemeral in-memory store as a boxed [`Store`] trait object, for
+    /// dev / dashboard use (e.g. `aegis-ui`). Mints a random throwaway at-rest key
+    /// (the `:memory:` DB never touches disk), applies the default
+    /// [`RetentionPolicy`], and returns `Arc<dyn Store>`.
+    pub fn open_in_memory() -> aegis_core::Result<std::sync::Arc<dyn crate::Store>> {
+        use ring::rand::SecureRandom;
+        let mut key_bytes = [0u8; 32];
+        ring::rand::SystemRandom::new()
+            .fill(&mut key_bytes)
+            .map_err(|_| StoreError::crypto("failed to generate ephemeral at-rest key"))?;
+        let key = AtRestKey::new(key_bytes.to_vec())?;
+        let store = Self::open_in_memory_with(&key, RetentionPolicy::default())?;
+        Ok(std::sync::Arc::new(store))
     }
 
     fn init_conn(conn: &Connection, key: &AtRestKey) -> Result<()> {
@@ -419,7 +435,7 @@ mod tests {
     }
 
     fn store() -> SqliteStore {
-        SqliteStore::open_in_memory(&key(), RetentionPolicy::default()).unwrap()
+        SqliteStore::open_in_memory_with(&key(), RetentionPolicy::default()).unwrap()
     }
 
     fn event(ts: i64, score: f32, sha: Vec<u8>) -> StoredEvent {
@@ -599,7 +615,7 @@ mod tests {
             audit_max_rows: 3,
             honor_pins: true,
         };
-        let s = SqliteStore::open_in_memory(&key(), policy).unwrap();
+        let s = SqliteStore::open_in_memory_with(&key(), policy).unwrap();
         for i in 0..10 {
             s.record_sync(&event(1000 + i, 0.5, vec![i as u8])).unwrap();
         }

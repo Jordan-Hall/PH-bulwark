@@ -67,7 +67,8 @@ pub mod router;
 
 // --- Curated public prelude ---
 
-pub use analyzer::{Analyzer, NullAnalyzer};
+pub use aegis_core::Analyzer;
+pub use analyzer::NullAnalyzer;
 pub use client::{ClientTlsIdentity, OffloadClient};
 pub use error::{InferError, Result};
 pub use policy::{decide, is_heavy, LiveConditions, PolicySnapshot, Route};
