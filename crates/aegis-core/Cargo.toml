@@ -14,6 +14,7 @@ tracing-subscriber.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 bytes.workspace = true # shared flow vocabulary (CapturedFlow/FlowPayload body handles)
+async-trait.workspace = true # canonical Analyzer trait
 
 # Best-effort device-capability detection (CPU/RAM/host). Pinned explicitly here
 # (not a workspace dep yet) — orchestrator should stage `sysinfo = "0.33"` in the
