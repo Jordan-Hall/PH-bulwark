@@ -1,0 +1,56 @@
+# aegis-android — the JNI bridge that backs `co.libertyware.aegis.core.RustBridge`.
+#
+# This crate is the C-ABI shared library the Android app loads with
+# `System.loadLibrary("aegis_client")` (see RustBridge.kt). It exposes the
+# `Java_co_libertyware_aegis_core_RustBridge_*` symbols and forwards the
+# on-device-captured text into the LEGITIMATE, deterministic content analyzers:
+#
+#   * aegis-text   — the rules-first grooming / adult-text detector (TextAnalyzer)
+#   * aegis-policy — the Verdict -> Action policy engine (Policy)
+#
+# It is a TRANSPARENT content-safety bridge. It does NOT implement any
+# device-control / surveillance surface (no anti-uninstall, no screen mirroring,
+# no remote wipe, no hidden location, no reading other apps beyond the on-device
+# safety check the child app transparently performs).
+#
+# DETACHED from the root cargo workspace (own empty `[workspace]` table, like
+# apps/parent/Cargo.toml) so it never perturbs `cargo build --workspace` for the
+# engine crates and is free to pull the `jni` cdylib toolchain on its own.
+
+[package]
+name = "aegis-android"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "JNI bridge: Android app -> Aegis deterministic content analyzers."
+
+[lib]
+# The Android app links `libaegis_client.so`; cdylib emits exactly that shape.
+# (The output stem is set per-target by cargo-ndk via the [lib] name below.)
+name = "aegis_client"
+crate-type = ["cdylib"]
+
+[dependencies]
+# JNI surface (latest 0.21.x). `extern "system" fn Java_...` exports + JNIEnv.
+jni = "0.21"
+
+# The legitimate on-device analyzers, by relative path. Depth check from
+# platform/android/rust/aegis-android/ : aegis-android -> rust -> android ->
+# platform -> <root>, i.e. four `..`, then crates/<crate>.
+#
+# NOTE: deliberately NO aegis-store / rusqlite dependency — rusqlite fails to
+# build on this Windows host (os error 4551, environmental). The bridge needs
+# only the pure analyzers, which have no DB dependency.
+aegis-text = { path = "../../../../crates/aegis-text" }
+aegis-policy = { path = "../../../../crates/aegis-policy" }
+aegis-core = { path = "../../../../crates/aegis-core" }
+aegis-proto = { path = "../../../../crates/aegis-proto" }
+
+# Minimal JSON assembly for the Verdict the Kotlin side parses. (serde_json is
+# already in the workspace tree via the analyzer crates' dev-deps; pull it here
+# explicitly as a normal dep.)
+serde_json = "1"
+
+# Detached workspace — this crate builds on its own:
+#   cd platform/android/rust/aegis-android && cargo build
+[workspace]

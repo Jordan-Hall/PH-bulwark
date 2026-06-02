@@ -64,7 +64,13 @@ pub struct Table {
     pub columns: &'static [Column],
 }
 
-const C: fn(&'static str, ColType) -> Column = |name, ty| Column { name, ty };
+// A `const fn` (NOT a fn-pointer `const`): calling a function pointer in a
+// `const` context — as the column arrays below do — is not permitted, whereas a
+// `const fn` call is. `#[allow(non_snake_case)]` keeps the terse `C(...)` name.
+#[allow(non_snake_case)]
+const fn C(name: &'static str, ty: ColType) -> Column {
+    Column { name, ty }
+}
 
 /// `audit_log` columns (class C3, tamper-evident).
 pub const AUDIT_LOG_COLUMNS: &[Column] = &[

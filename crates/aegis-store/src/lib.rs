@@ -54,6 +54,9 @@ pub mod sqlite;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 
+#[cfg(feature = "portable")]
+pub mod portable;
+
 // --- Public API re-exports -------------------------------------------------
 
 pub use crypto::{AgeExporter, AtRestKey};
@@ -69,7 +72,32 @@ pub use sqlite::SqliteStore;
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresStore;
 
+#[cfg(feature = "portable")]
+pub use portable::PortableStore;
+
 use aegis_core::DeviceId;
+
+/// Open an ephemeral in-memory [`Store`] using the best available backend:
+/// encrypted SQLite when the `sqlite` feature is enabled, otherwise the
+/// dependency-free [`PortableStore`] (which builds on any host — including
+/// locked-down Windows where the bundled-SQLite C compile is blocked). Binaries
+/// should call this backend-agnostic entry point rather than a concrete type.
+pub fn open_in_memory() -> aegis_core::Result<std::sync::Arc<dyn Store>> {
+    #[cfg(feature = "sqlite")]
+    {
+        return SqliteStore::open_in_memory();
+    }
+    #[cfg(all(not(feature = "sqlite"), feature = "portable"))]
+    {
+        return portable::PortableStore::open_in_memory();
+    }
+    #[cfg(all(not(feature = "sqlite"), not(feature = "portable")))]
+    {
+        return Err(aegis_core::Error::Other(anyhow::anyhow!(
+            "aegis-store: no in-memory store backend enabled (enable `portable` or `sqlite`)"
+        )));
+    }
+}
 
 /// Persists redacted events/verdicts (interfaces.md `Store`). One trait, two
 /// adapters ([`SqliteStore`] client, [`PostgresStore`] server).
@@ -113,7 +141,7 @@ pub trait Store: Send + Sync {
 }
 
 /// Current unix epoch millis (used as the default `now` for timestamps/purge).
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "portable"))]
 fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()

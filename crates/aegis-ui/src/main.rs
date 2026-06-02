@@ -13,7 +13,7 @@ async fn main() -> anyhow::Result<()> {
     // SEAM (integration): open the encrypted client store with a key from the OS
     // keystore. aegis-store finalizes the exact constructor; this is the one
     // wiring point the dashboard binary needs.
-    let store: Arc<dyn aegis_store::Store> = aegis_store::SqliteStore::open_in_memory()?;
+    let store: Arc<dyn aegis_store::Store> = aegis_store::open_in_memory()?;
 
     let bind = std::env::var("AEGIS_UI_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
     let app = router(AppState { store });

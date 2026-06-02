@@ -483,6 +483,10 @@ mod tests {
         assert_eq!(recent[0].ts, 2000);
     }
 
+    // At-rest encryption only exists under the `sqlcipher` feature; on the plain
+    // backend the key seeds only the audit HMAC chain, so a wrong key still opens
+    // the (unencrypted) file. This assertion is meaningful only with SQLCipher.
+    #[cfg(feature = "sqlcipher")]
     #[test]
     fn encrypted_file_round_trips_with_key() {
         let dir = tempfile::tempdir().unwrap();

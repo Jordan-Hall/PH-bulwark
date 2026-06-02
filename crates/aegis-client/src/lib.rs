@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use aegis_core::Result;
 use aegis_flow::{AnalysisUnit, DefaultFlowClassifier, FlowClassifier};
+use aegis_policy::PolicyEngine; // trait providing Policy::decide / Policy::alert_for
 use aegis_net::{Interceptor, InterceptDecision};
 use aegis_proto::v1::{Action, AlertKind, Verdict};
 
