@@ -185,18 +185,174 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
 
 #[cfg(feature = "ffmpeg")]
 pub mod ffmpeg {
-    //! `ffmpeg-sidecar` demuxer: spawn ffmpeg to extract sampled frames (JPEG)
-    //! and audio windows from a buffered segment, and (for flagged segments)
-    //! re-encode with blur/mute filters. ffmpeg is a child process — never linked.
+    //! `ffmpeg-sidecar` demuxer: spawn ffmpeg to extract sampled frames and audio
+    //! windows from a buffered segment, and (for flagged segments) re-encode with
+    //! blur/mute filters. ffmpeg is a child process — **never linked** (keeps its
+    //! GPL/LGPL and its C attack surface out of our address space).
     use super::{DecodedSegment, Demuxer};
-    pub struct FfmpegDemuxer;
-    impl Demuxer for FfmpegDemuxer {
-        fn sample(&self, _segment: &[u8], _fps: f32) -> DecodedSegment {
-            // ffmpeg -i pipe: -vf fps=,scene -f image2pipe ...  (TODO online)
-            DecodedSegment {
-                decoded: true,
-                ..Default::default()
+    use ffmpeg_sidecar::command::FfmpegCommand;
+    use ffmpeg_sidecar::event::FfmpegEvent;
+    use std::ffi::OsString;
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+
+    /// One decoded + sampled frame, with the dimensions ffmpeg actually produced.
+    /// `data` is raw RGB24 (`width * height * 3` bytes) so downstream code can
+    /// re-encode or hand it to a classifier without guessing the pixel layout.
+    #[derive(Clone)]
+    pub struct SampledFrame {
+        pub width: u32,
+        pub height: u32,
+        pub timestamp: f32,
+        pub data: Vec<u8>,
+    }
+
+    /// Resolve the ffmpeg binary. ffmpeg-sidecar's own `ffmpeg_path()` only looks
+    /// for a binary adjacent to our exe or on `PATH`; it does **not** read
+    /// `FFMPEG_BINARY`. We honour `FFMPEG_BINARY` ourselves (matching the wider
+    /// sidecar ecosystem convention) and otherwise fall back to bare `ffmpeg`.
+    fn resolve_binary(explicit: Option<&Path>) -> OsString {
+        if let Some(p) = explicit {
+            return p.as_os_str().to_owned();
+        }
+        if let Some(env) = std::env::var_os("FFMPEG_BINARY") {
+            if !env.is_empty() {
+                return env;
             }
+        }
+        OsString::from("ffmpeg")
+    }
+
+    /// Real ffmpeg-backed demuxer.
+    ///
+    /// `binary` lets callers pin an exact ffmpeg path (e.g. from app config);
+    /// when `None`, `FFMPEG_BINARY` then `PATH` are consulted at run time.
+    #[derive(Default)]
+    pub struct FfmpegDemuxer {
+        binary: Option<PathBuf>,
+    }
+
+    impl FfmpegDemuxer {
+        pub fn new() -> Self {
+            Self { binary: None }
+        }
+
+        /// Pin a specific ffmpeg binary path.
+        pub fn with_binary(path: impl Into<PathBuf>) -> Self {
+            Self {
+                binary: Some(path.into()),
+            }
+        }
+
+        fn command(&self) -> FfmpegCommand {
+            let mut cmd = FfmpegCommand::new_with_path(resolve_binary(self.binary.as_deref()));
+            cmd.create_no_window();
+            cmd
+        }
+
+        /// Decode `input` (a file path or an ffmpeg input URL such as a `lavfi`
+        /// spec when paired with `-f lavfi`) and sample frames at `sample_fps`,
+        /// returning the decoded RGB24 frames with their true dimensions.
+        ///
+        /// Returns `None` if ffmpeg could not be spawned (binary missing) so
+        /// callers can fail open / self-skip.
+        pub fn decode_path_frames(
+            &self,
+            input: &str,
+            sample_fps: f32,
+            lavfi: bool,
+        ) -> Option<Vec<SampledFrame>> {
+            let mut cmd = self.command();
+            cmd.hide_banner();
+            if lavfi {
+                cmd.format("lavfi");
+            }
+            cmd.input(input);
+            // Sample at `sample_fps`, emit raw RGB24 frames on stdout so the
+            // sidecar parser hands us exact per-frame dimensions + timestamps.
+            cmd.arg("-vf").arg(format!("fps={sample_fps}"));
+            cmd.rawvideo(); // -f rawvideo -pix_fmt rgb24 -
+            cmd.inner_pipe_stdout();
+
+            let mut child = cmd.spawn().ok()?;
+            let mut frames = Vec::new();
+            let iter = child.iter().ok()?;
+            for event in iter {
+                if let FfmpegEvent::OutputFrame(f) = event {
+                    frames.push(SampledFrame {
+                        width: f.width,
+                        height: f.height,
+                        timestamp: f.timestamp,
+                        data: f.data,
+                    });
+                }
+            }
+            let _ = child.wait();
+            Some(frames)
+        }
+
+        /// Decode an in-memory segment by staging it to a temp file (the segment
+        /// API is byte-oriented; piping arbitrary container bytes through stdin
+        /// is format-fragile, so a temp file is the robust path).
+        fn decode_segment_frames(&self, segment: &[u8], sample_fps: f32) -> Option<Vec<SampledFrame>> {
+            if segment.is_empty() {
+                return Some(Vec::new());
+            }
+            let tmp = TempInput::write(segment).ok()?;
+            self.decode_path_frames(&tmp.path().to_string_lossy(), sample_fps, false)
+        }
+    }
+
+    impl Demuxer for FfmpegDemuxer {
+        fn sample(&self, segment: &[u8], fps: f32) -> DecodedSegment {
+            match self.decode_segment_frames(segment, fps) {
+                Some(frames) => DecodedSegment {
+                    frames: frames.into_iter().map(|f| f.data).collect(),
+                    audio_windows: Vec::new(),
+                    decoded: true,
+                },
+                // ffmpeg unavailable → not decoded → conservative handling upstream.
+                None => DecodedSegment::default(),
+            }
+        }
+    }
+
+    /// `FfmpegCommand` exposes `pipe_stdout()` but it pushes a second `-`. We
+    /// already added `-` via `rawvideo()`, so wire stdout piping directly on the
+    /// inner `Command` instead of appending another output arg.
+    trait InnerPipeStdout {
+        fn inner_pipe_stdout(&mut self) -> &mut Self;
+    }
+    impl InnerPipeStdout for FfmpegCommand {
+        fn inner_pipe_stdout(&mut self) -> &mut Self {
+            self.as_inner_mut().stdout(std::process::Stdio::piped());
+            self
+        }
+    }
+
+    /// A self-deleting temp file holding a staged input segment.
+    struct TempInput {
+        path: PathBuf,
+    }
+    impl TempInput {
+        fn write(bytes: &[u8]) -> std::io::Result<Self> {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let mut path = std::env::temp_dir();
+            path.push(format!("aegis-video-seg-{}-{}.bin", std::process::id(), n));
+            let mut f = std::fs::File::create(&path)?;
+            f.write_all(bytes)?;
+            f.flush()?;
+            Ok(Self { path })
+        }
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+    impl Drop for TempInput {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
         }
     }
 }
