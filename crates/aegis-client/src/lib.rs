@@ -74,7 +74,7 @@ impl Pipeline {
         Self {
             cfg,
             classifier: DefaultFlowClassifier::with_defaults(),
-            text: aegis_text::TextAnalyzer::new(),
+            text: aegis_text::TextAnalyzer::new().expect("aegis-text built-in lexicon must load"),
             policy: aegis_policy::Policy::default(),
             age_profile: aegis_policy::AgeProfile::default(),
             alert: None,
