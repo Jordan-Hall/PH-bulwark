@@ -3,15 +3,23 @@
 //! LEGITIMATE features only: review guardian alerts, **approve / keep-blocked**
 //! flagged items, and see the honest coverage matrix. It talks to the home
 //! cluster over the SAME gRPC contract the engine serves (`Review` carries the
-//! redacted pending-review stream and the approve/deny decision). There is
-//! deliberately **no** device-control / screen / location / remote-command
-//! surface here — Aegis is a transparent content-safety tool, not a
-//! remote-administration console.
+//! pending-review stream and the approve/deny decision). There is deliberately
+//! **no** device-control / screen / location / remote-command surface here —
+//! Aegis is a transparent content-safety tool, not a remote-administration
+//! console.
 //!
-//! PRIVACY INVARIANT: this UI NEVER requests or renders raw media. It only ever
-//! reads the redacted fields of an `AlertEvent` (kind/category/app/device and
-//! the `redacted_context` summary). The safe-thumbnail / hash `Evidence` is not
-//! fetched or shown here.
+//! GUARDIAN-TRANSPARENCY MODEL: the console now shows guardians the FULL flagged
+//! content for review — the actual blocked text snippet (`Evidence.text_snippet`)
+//! and an inline preview of the blocked media (`Evidence.safe_thumbnail`,
+//! rendered as a base64 data URI) — alongside the app/device/time context. The
+//! parent sees what was blocked so they can make an informed approve/deny call.
+//!
+//! THE ONE EXCEPTION — suspected CSAM is NEVER previewed: when
+//! `category == Category::CsamSuspected` the console renders no image and no
+//! snippet, even if evidence bytes/text are present. Instead it shows a notice
+//! that the content has been withheld and reported to the authorities. Previewing
+//! suspected CSAM would be illegal, so it is the single thing this UI never
+//! displays; the server also refuses to approve it.
 //!
 //! Dioxus `desktop` feature covers Windows + macOS. The same RSX drives the
 //! `mobile` (Android/iOS, experimental) and `web` targets, and bumps cleanly to
@@ -62,7 +70,12 @@ async fn connect_channel() -> anyhow::Result<Channel> {
     Ok(builder.connect().await?)
 }
 
-/// A guardian-facing alert row (the redacted view; never carries media).
+/// A guardian-facing alert row.
+///
+/// Carries the full review payload: the context summary plus, for non-CSAM
+/// items, the actual flagged text snippet and a safe inline media preview so the
+/// guardian sees exactly what was blocked. CSAM-suspected items deliberately
+/// carry no preview surfaced to the UI (see [`AlertCard`]).
 #[derive(Clone, PartialEq)]
 struct Alert {
     id: String,
@@ -72,14 +85,34 @@ struct Alert {
     when: String,
     /// Whether approve / keep-blocked is offered (intervention & grooming items).
     actionable: bool,
+    /// The classifier category; gates the CSAM "never preview" exception.
+    category: Category,
+    /// Safe (blurred/cropped) preview bytes from `Evidence.safe_thumbnail`.
+    /// Empty when none was provided. Never rendered for CsamSuspected.
+    thumbnail: Vec<u8>,
+    /// The actual flagged text from `Evidence.text_snippet` (full, not redacted
+    /// to the guardian). Empty when none. Never rendered for CsamSuspected.
+    snippet: String,
 }
 
 impl Alert {
-    /// Map a redacted proto [`AlertEvent`] into a UI row. Reads ONLY the safe,
-    /// redacted fields — no `Evidence` bytes / thumbnail are touched here.
+    /// Map a proto [`AlertEvent`] into a UI row.
+    ///
+    /// Carries through the `Evidence` preview fields (`safe_thumbnail`,
+    /// `text_snippet`) and the `category` so the card can show the guardian the
+    /// real flagged content — except for CSAM, which [`AlertCard`] never renders.
     fn from_event(ev: AlertEvent) -> Self {
         let kind = ev.kind();
         let category = ev.category();
+
+        // Pull the preview/evidence the cluster attached, if any. These are the
+        // SAFE thumbnail and the flagged text excerpt; the CSAM exception is
+        // enforced at render time in AlertCard, not here, so the row always
+        // honestly reflects what the event carried.
+        let (thumbnail, snippet) = match ev.evidence {
+            Some(ref e) => (e.safe_thumbnail.clone(), e.text_snippet.clone()),
+            None => (Vec::new(), String::new()),
+        };
 
         // Title is a plain-language summary derived from kind + category — never
         // from any raw content.
@@ -122,6 +155,9 @@ impl Alert {
             when: format_when(ev.ts),
             // Both product triggers are actionable (guardian can approve/deny).
             actionable: true,
+            category,
+            thumbnail,
+            snippet,
         }
     }
 }
@@ -156,10 +192,14 @@ fn seed() -> Vec<Alert> {
         Alert {
             id: "a-1001".into(),
             title: "Blocked an adult image".into(),
-            detail: "On a web page (blurred preview available in-app).".into(),
+            detail: "On a web page.".into(),
             device: "Kids tablet".into(),
             when: "2m ago".into(),
             actionable: true,
+            category: Category::AdultImage,
+            // Offline sample: no real bytes to preview.
+            thumbnail: Vec::new(),
+            snippet: String::new(),
         },
         Alert {
             id: "a-1002".into(),
@@ -168,6 +208,9 @@ fn seed() -> Vec<Alert> {
             device: "Kids phone".into(),
             when: "18m ago".into(),
             actionable: true,
+            category: Category::Grooming,
+            thumbnail: Vec::new(),
+            snippet: "hey don\u{2019}t tell your mum about this, let\u{2019}s talk on the other app".into(),
         },
     ]
 }
@@ -340,11 +383,49 @@ async fn submit_decision(alert_id: &str, device_id: &str, approve: bool) -> anyh
 
 #[component]
 fn AlertCard(alert: Alert, on_decide: EventHandler<bool>) -> Element {
+    // THE CSAM EXCEPTION. Suspected CSAM is illegal to view, so this UI shows
+    // NEITHER the image NOR the text snippet, regardless of what the event
+    // carried. Everything else (intervention blocks, grooming) shows the
+    // guardian the real flagged content for an informed decision.
+    let is_csam = alert.category == Category::CsamSuspected;
+
+    // Build the inline image data URI only for non-CSAM items that actually
+    // carried preview bytes. `image_data_uri` sniffs the format and base64s it.
+    let preview_uri: Option<String> = if !is_csam && !alert.thumbnail.is_empty() {
+        Some(image_data_uri(&alert.thumbnail))
+    } else {
+        None
+    };
+
+    // The actual flagged text — shown in full to the guardian, except for CSAM.
+    let show_snippet = !is_csam && !alert.snippet.is_empty();
+
     rsx! {
         div { class: "card",
             div { class: "ttl", "{alert.title}" }
             div { class: "meta", "{alert.device} \u{00b7} {alert.when}" }
             p { class: "detail", "{alert.detail}" }
+
+            if is_csam {
+                // No image, no snippet — withheld + reported notice only.
+                div { class: "csam",
+                    "Preview withheld — suspected illegal content has been blocked and reported to the authorities."
+                }
+            } else {
+                if let Some(uri) = preview_uri {
+                    div { class: "preview",
+                        div { class: "preview-label", "Preview of what was blocked:" }
+                        img { class: "thumb", src: "{uri}", alt: "Safe preview of the blocked content" }
+                    }
+                }
+                if show_snippet {
+                    div { class: "snippet",
+                        div { class: "snippet-label", "What was blocked:" }
+                        p { class: "snippet-text", "{alert.snippet}" }
+                    }
+                }
+            }
+
             if alert.actionable {
                 div { class: "row",
                     button { class: "approve", onclick: move |_| on_decide.call(true), "Approve" }
@@ -353,6 +434,59 @@ fn AlertCard(alert: Alert, on_decide: EventHandler<bool>) -> Element {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Inline image preview helpers (no heavy deps — hand-rolled base64 + sniff)
+// ---------------------------------------------------------------------------
+
+/// Build a `data:` URI for inline `<img src=...>` rendering from raw image
+/// bytes, sniffing the format from magic bytes (JPEG default).
+fn image_data_uri(bytes: &[u8]) -> String {
+    let mime = sniff_image_mime(bytes);
+    format!("data:{};base64,{}", mime, base64_encode(bytes))
+}
+
+/// Best-effort image MIME sniff from leading magic bytes. Defaults to
+/// `image/jpeg` (the common safe-thumbnail format) when nothing matches.
+fn sniff_image_mime(bytes: &[u8]) -> &'static str {
+    if bytes.len() >= 8 && bytes[..8] == [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A] {
+        "image/png"
+    } else if bytes.len() >= 6 && (&bytes[..6] == b"GIF87a" || &bytes[..6] == b"GIF89a") {
+        "image/gif"
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        // JPEG (FF D8 FF) and everything else default to jpeg.
+        "image/jpeg"
+    }
+}
+
+/// Minimal standard-alphabet base64 encoder (RFC 4648, with `=` padding).
+/// Hand-rolled so the console needs no extra dependency for the data URI.
+fn base64_encode(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[((n >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[((n >> 6) & 0x3F) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[(n & 0x3F) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 #[component]
@@ -387,6 +521,13 @@ const CSS: &str = r#"
     .ttl { font-weight: 600; }
     .meta { color: #8b91a0; font-size: 12px; margin: 2px 0 8px; }
     .detail { margin: 0 0 10px; font-size: 14px; }
+    .preview { margin: 0 0 10px; }
+    .preview-label { color: #8b91a0; font-size: 11px; text-transform: uppercase; letter-spacing: .03em; margin-bottom: 5px; }
+    .thumb { display: block; max-width: 320px; width: 100%; height: auto; border-radius: 8px; border: 1px solid #232733; }
+    .snippet { background: #12151c; border: 1px solid #232733; border-left: 3px solid #6f5a2f; border-radius: 8px; padding: 8px 12px; margin: 0 0 10px; }
+    .snippet-label { color: #8b91a0; font-size: 11px; text-transform: uppercase; letter-spacing: .03em; margin-bottom: 4px; }
+    .snippet-text { margin: 0; font-size: 14px; white-space: pre-wrap; word-break: break-word; color: #e6e8ee; }
+    .csam { background: #2a1414; border: 1px solid #5a2a2a; color: #ffd7d7; border-radius: 8px; padding: 10px 12px; font-size: 13px; margin: 0 0 10px; }
     .row { display: flex; gap: 8px; }
     button { border: 0; border-radius: 8px; padding: 7px 14px; font-size: 13px; cursor: pointer; }
     .approve { background: #2f6f3e; color: #eaffea; }
