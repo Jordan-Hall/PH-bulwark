@@ -1,0 +1,80 @@
+name: ci
+
+# The build/test/clippy/deny sequence from docs/running.md §2, run on a networked
+# compiler (GitHub Actions). This is the verification that cannot run in the
+# offline dev sandbox — pushing this repo makes it run automatically.
+#
+# Note: aegis-proto's build.rs compiles the .proto hermetically via `protox`
+# (pure Rust), so NO system `protoc` install is needed in CI.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy-test:
+    name: clippy + build + test (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy
+        run: cargo clippy --workspace --all-targets
+      - name: build
+        run: cargo build --workspace
+      - name: test
+        run: cargo test --workspace
+
+  features:
+    name: feature builds (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Each optional feature compiles on its own. ort (onnx) and ffmpeg-sidecar
+      # build without the model/ffmpeg binary present (those are runtime only).
+      - run: cargo build -p aegis-text --features classifier
+      - run: cargo build -p aegis-vision --features onnx
+      - run: cargo build -p aegis-audio --features onnx
+      - run: cargo build -p aegis-video --features ffmpeg
+      - run: cargo build -p aegis-ui --features llm-explain
+      - run: cargo build -p aegis-cluster --features gossip,quorum
+
+  windows-build:
+    name: windows-gated crates (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # aegis-net's Wintun + DPAPI + cert-store FFI only compiles on Windows.
+      - run: cargo build -p aegis-net -p aegis-client
+
+  deny:
+    name: cargo-deny (licenses + advisories + bans)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

@@ -1,0 +1,16 @@
+# Normalize line endings (stops the LF↔CRLF churn warnings on Windows).
+* text=auto eol=lf
+
+*.rs    text eol=lf
+*.toml  text eol=lf
+*.md    text eol=lf
+*.proto text eol=lf
+*.yml   text eol=lf
+*.json  text eol=lf
+
+# Binary artifacts (never normalize / diff).
+*.onnx binary
+*.gguf binary
+*.png  binary
+*.jpg  binary
+*.bin  binary
