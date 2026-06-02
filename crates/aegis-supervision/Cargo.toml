@@ -5,4 +5,15 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+aegis-proto = { path = "../aegis-proto" }
+aegis-core = { path = "../aegis-core" }
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
 
+# NOTE: real connectors need an HTTP client (reqwest) + each platform's OAuth.
+# Added when a connector is implemented for real (flag for cargo-deny). The
+# default build ships only the trait + disabled stubs (coarse signals, opt-in).

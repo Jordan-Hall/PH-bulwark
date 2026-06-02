@@ -5,4 +5,21 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+aegis-proto = { path = "../aegis-proto" }
+aegis-core = { path = "../aegis-core" }
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
 
+# CONVENTIONAL OCR only (never a vision-LLM): Tesseract (`leptess`) cross-platform
+# behind `tesseract`, OS-native (Windows.Media.Ocr) behind `winocr`. Default build
+# uses a stub source so the crate links without native OCR libs.
+leptess = { workspace = true, optional = true }
+windows = { workspace = true, optional = true }
+
+[features]
+default = []
+tesseract = ["dep:leptess"]
+winocr = ["dep:windows"]

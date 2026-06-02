@@ -5,4 +5,20 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+aegis-proto = { path = "../aegis-proto" }
+aegis-core = { path = "../aegis-core" }
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+ring.workspace = true # sha256 for evidence hashing
 
+# Small dedicated NSFW classifier (NudeNet/Falconsai ONNX) — runs only with the
+# `onnx` feature; the default build is deterministic-stub (fails open) so the
+# crate links without a model artifact present.
+ort = { workspace = true, optional = true }
+
+[features]
+default = []
+onnx = ["dep:ort"]

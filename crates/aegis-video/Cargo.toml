@@ -5,4 +5,21 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+aegis-proto = { path = "../aegis-proto" }
+aegis-core = { path = "../aegis-core" }
+aegis-vision = { path = "../aegis-vision" }
+aegis-audio = { path = "../aegis-audio" }
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
 
+# ffmpeg is SHELLED OUT (sidecar) — never linked — to keep our binary's license
+# clean (ffmpeg is GPL/LGPL). Behind the `ffmpeg` feature; default build stubs
+# decoding so the crate links without the ffmpeg binary present.
+ffmpeg-sidecar = { workspace = true, optional = true }
+
+[features]
+default = []
+ffmpeg = ["dep:ffmpeg-sidecar"]
