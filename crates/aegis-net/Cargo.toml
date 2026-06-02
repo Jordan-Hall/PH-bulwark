@@ -50,6 +50,7 @@ anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 bytes.workspace = true # build the canonical FlowPayload::Http body_peek in convert()
+http-body-util = "0.1" # BodyExt::collect() for the hudsucker MITM handler (already transitive via hudsucker)
 
 # Windows TUN driver (WireGuard's pre-signed wintun.dll). Target-gated: only
 # pulled in on Windows. Listed in the workspace allowlist already.
