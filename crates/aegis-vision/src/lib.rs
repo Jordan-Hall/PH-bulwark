@@ -1,10 +1,23 @@
 //! aegis-vision — small dedicated NSFW image/frame classifier.
 //!
 //! Implements the `Analyzer` contract (interfaces.md) for `MediaKind::IMAGE`.
-//! The model is a small single-purpose NSFW classifier (NudeNet/Falconsai ONNX,
-//! see docs/research/model-research.md), run via `ort` behind the `onnx`
-//! feature. The default build uses a deterministic stub scorer that fails OPEN
-//! (score 0.0) so the workspace links without a model artifact.
+//! The model is a small single-purpose NSFW classifier (e.g. Falconsai's
+//! `nsfw_image_detection` exported to ONNX, or NudeNet — see
+//! docs/research/model-research.md), run via the `ort` crate (ONNX Runtime)
+//! behind the optional `onnx` feature.
+//!
+//! ## Default build (no `ort`)
+//! The default build does NOT depend on ONNX Runtime. It uses [`StubScorer`],
+//! which fails **OPEN** (score 0.0 → SAFE/Allow) so the workspace links and the
+//! tests run with no model artifact and no `onnxruntime.dll`. This is deliberate:
+//! the build host enforces Smart App Control, which can block loading the ONNX
+//! Runtime native library (the same environmental block that affected SQLite).
+//!
+//! ## Real classification (`--features onnx`)
+//! Enabling the `onnx` feature compiles [`onnx::OnnxScorer`], which loads an
+//! ONNX model from a path and runs it on the CPU execution provider,
+//! deterministically. See the crate `README.md` for where to drop a model and
+//! the environment variable to point at it.
 //!
 //! Evidence carries the content SHA-256 only — NEVER the raw image. No LLM.
 #![forbid(unsafe_code)]
@@ -16,10 +29,27 @@ use aegis_proto::v1::{
 };
 use async_trait::async_trait;
 
-/// Scores image bytes → NSFW probability in [0,1].
+pub mod preprocess;
+
+/// Environment variable holding the filesystem path to the ONNX NSFW model.
+/// Consulted by [`VisionAnalyzer::from_env`] (and [`onnx::OnnxScorer::from_env`]).
+pub const MODEL_PATH_ENV: &str = "AEGIS_NSFW_MODEL";
+
+/// Scores image bytes → NSFW probability in `[0, 1]`.
 pub trait Scorer: Send + Sync {
     fn score(&self, image_bytes: &[u8]) -> f32;
     fn model_id(&self) -> &str;
+}
+
+/// So a `Box<dyn Scorer>` (used by [`VisionAnalyzer::from_env`]) is itself a
+/// `Scorer` and can fill the analyzer's generic slot.
+impl Scorer for Box<dyn Scorer> {
+    fn score(&self, image_bytes: &[u8]) -> f32 {
+        (**self).score(image_bytes)
+    }
+    fn model_id(&self) -> &str {
+        (**self).model_id()
+    }
 }
 
 /// Default scorer: fails open (0.0). Real scoring needs `--features onnx`.
@@ -37,10 +67,21 @@ impl Scorer for StubScorer {
 pub struct VisionConfig {
     /// NSFW score at/above which we act. Tuned per deployment.
     pub nsfw_threshold: f32,
+    /// Optional path to the ONNX model. When `None`, [`MODEL_PATH_ENV`] is
+    /// consulted by the env constructors. Ignored unless the `onnx` feature is
+    /// enabled (the stub scorer never loads a model).
+    pub model_path: Option<String>,
+    /// Square edge (pixels) the input image is resized to before inference.
+    /// 224 matches the common ViT/MobileNet NSFW model cards.
+    pub input_size: u32,
 }
 impl Default for VisionConfig {
     fn default() -> Self {
-        Self { nsfw_threshold: 0.7 }
+        Self {
+            nsfw_threshold: 0.7,
+            model_path: None,
+            input_size: 224,
+        }
     }
 }
 
@@ -66,6 +107,66 @@ impl<S: Scorer> VisionAnalyzer<S> {
     pub fn with_scorer(cfg: VisionConfig, scorer: S) -> Self {
         Self { cfg, scorer }
     }
+}
+
+impl VisionAnalyzer<Box<dyn Scorer>> {
+    /// Build an analyzer using the best scorer available for this build:
+    ///
+    /// * With the `onnx` feature **and** a model configured (via
+    ///   `cfg.model_path` or the [`MODEL_PATH_ENV`] env var) that loads
+    ///   successfully → a real [`onnx::OnnxScorer`].
+    /// * Otherwise → the deterministic [`StubScorer`] that fails OPEN. A single
+    ///   warning is logged the first time we fall back, so default builds and
+    ///   tests need no model and stay quiet.
+    ///
+    /// This never returns an error: an unloadable/missing model degrades to the
+    /// safe stub rather than failing the analyzer construction.
+    pub fn from_env(mut cfg: VisionConfig) -> Self {
+        if cfg.model_path.is_none() {
+            cfg.model_path = std::env::var(MODEL_PATH_ENV).ok().filter(|s| !s.is_empty());
+        }
+        let scorer = build_scorer(&cfg);
+        Self { cfg, scorer }
+    }
+}
+
+/// Selects the scorer for the current build/config, logging the fallback once.
+fn build_scorer(cfg: &VisionConfig) -> Box<dyn Scorer> {
+    #[cfg(feature = "onnx")]
+    {
+        if let Some(path) = cfg.model_path.as_deref() {
+            match onnx::OnnxScorer::load(path, cfg.input_size) {
+                Ok(s) => {
+                    tracing::info!(model = %path, "aegis-vision: loaded ONNX NSFW model");
+                    return Box::new(s);
+                }
+                Err(e) => {
+                    log_fallback_once(&format!(
+                        "failed to load ONNX model from {path}: {e}; failing OPEN (stub)"
+                    ));
+                    return Box::new(StubScorer);
+                }
+            }
+        }
+        log_fallback_once(&format!(
+            "no NSFW model configured ({MODEL_PATH_ENV} unset / model_path None); failing OPEN (stub)"
+        ));
+    }
+    #[cfg(not(feature = "onnx"))]
+    {
+        let _ = cfg;
+        log_fallback_once(
+            "built without the `onnx` feature; NSFW scoring fails OPEN (stub). \
+             Rebuild with --features onnx and set AEGIS_NSFW_MODEL for real scoring.",
+        );
+    }
+    Box::new(StubScorer)
+}
+
+fn log_fallback_once(msg: &str) {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| tracing::warn!("aegis-vision: {msg}"));
 }
 
 fn sha256(bytes: &[u8]) -> Vec<u8> {
@@ -134,35 +235,7 @@ impl<S: Scorer> Analyzer for VisionAnalyzer<S> {
 }
 
 #[cfg(feature = "onnx")]
-pub mod onnx {
-    //! `ort`-backed NSFW scorer. Loads a checksum-pinned ONNX model and runs it
-    //! with the best available execution provider (falls back to CPU). The exact
-    //! pre/post-processing (resize 224, normalize, sigmoid head) matches the
-    //! chosen model card; verified when built online.
-    use super::Scorer;
-
-    pub struct OnnxScorer {
-        model_id: String,
-        // session: ort::Session,  // constructed from a checksum-pinned file
-    }
-    impl OnnxScorer {
-        pub fn load(_model_path: &str, expected_sha256: &[u8]) -> anyhow::Result<Self> {
-            let _ = expected_sha256; // verify before load (reject mismatch)
-            Ok(Self {
-                model_id: "nsfw-onnx".into(),
-            })
-        }
-    }
-    impl Scorer for OnnxScorer {
-        fn score(&self, _image_bytes: &[u8]) -> f32 {
-            // decode → resize → normalize → session.run → sigmoid. TODO online.
-            0.0
-        }
-        fn model_id(&self) -> &str {
-            &self.model_id
-        }
-    }
-}
+pub mod onnx;
 
 #[cfg(test)]
 mod tests {
@@ -207,6 +280,15 @@ mod tests {
     async fn stub_fails_open_safe() {
         let a = VisionAnalyzer::new();
         let v = a.analyze(img_req(vec![9, 9])).await.unwrap();
+        assert_eq!(v.category, Category::Safe as i32);
+        assert_eq!(v.action, Action::Allow as i32);
+    }
+
+    #[tokio::test]
+    async fn from_env_without_model_fails_open() {
+        // No `onnx` feature and/or no model → stub → SAFE/Allow.
+        let a = VisionAnalyzer::from_env(VisionConfig::default());
+        let v = a.analyze(img_req(vec![4, 5, 6])).await.unwrap();
         assert_eq!(v.category, Category::Safe as i32);
         assert_eq!(v.action, Action::Allow as i32);
     }
