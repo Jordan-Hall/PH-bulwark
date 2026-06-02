@@ -26,7 +26,7 @@ use std::sync::Arc;
 use aegis_core::Result;
 use aegis_flow::{AnalysisUnit, DefaultFlowClassifier, FlowClassifier};
 use aegis_net::{Interceptor, InterceptDecision};
-use aegis_proto::v1::{Action, AlertKind, AnalysisRequest, MediaKind, SourceChannel, Verdict};
+use aegis_proto::v1::{Action, AlertKind, Verdict};
 
 /// Client tunables (device identity, cluster endpoint, age profile, paths).
 #[derive(Debug, Clone)]
@@ -120,7 +120,7 @@ impl Pipeline {
         interceptor: &dyn Interceptor,
     ) -> Result<()> {
         let flow_id = flow.flow_id;
-        let source_channel = flow.source_channel();
+        let source_channel = flow.source_channel;
         let units = self.classifier.classify(flow).await?;
 
         for unit in &units {
@@ -181,7 +181,8 @@ impl Pipeline {
 /// integrator should unify them in `aegis-core`; this adapter exists so the
 /// loop type-checks once field names are aligned.
 fn adapt_flow(net_flow: aegis_net::CapturedFlow) -> aegis_flow::CapturedFlow {
-    // Both carry flow_id / source_channel / app-or-host / readable / payload.
+    // flow_id / source_channel / app_or_host / readable are identical types in
+    // both crates; only the payload model differs (see convert_payload).
     aegis_flow::CapturedFlow {
         flow_id: net_flow.flow_id,
         source_channel: net_flow.source_channel,
@@ -191,10 +192,19 @@ fn adapt_flow(net_flow: aegis_net::CapturedFlow) -> aegis_flow::CapturedFlow {
     }
 }
 
-/// SEAM: payload conversion mirrors `adapt_flow`. Unify in aegis-core.
+/// Convert aegis-net's flat HTTP payload into aegis-flow's richer `Http` head.
+/// net does not yet surface response headers, so `headers` is empty and the
+/// classifier falls back to magic-byte + URL-extension detection on `body_peek`.
+/// INTEGRATION: when net surfaces Content-Type, populate `headers` so the
+/// classifier's content-type fast-path engages (docs/integration-todo.md §1).
 fn convert_payload(p: aegis_net::FlowPayload) -> aegis_flow::FlowPayload {
-    // Field-for-field once the two definitions are reconciled.
-    aegis_flow::FlowPayload::from_net(p)
+    aegis_flow::FlowPayload::Http(aegis_flow::HttpHead {
+        method: (!p.method.is_empty()).then_some(p.method),
+        path: (!p.uri.is_empty()).then_some(p.uri),
+        status: None,
+        headers: Vec::new(),
+        body_peek: bytes::Bytes::from(p.bytes),
+    })
 }
 
 fn build_alert(device_id: &str, verdict: &Verdict, kind: AlertKind) -> aegis_proto::v1::AlertEvent {
@@ -225,9 +235,6 @@ fn span_now() -> i64 {
         .unwrap_or(0)
 }
 
-// Keep the imports meaningful for downstream wiring helpers.
-#[allow(unused_imports)]
-use aegis_proto::v1::{AnalysisRequest as _AnalysisRequest, MediaKind as _MediaKind};
 
 #[cfg(test)]
 mod tests {

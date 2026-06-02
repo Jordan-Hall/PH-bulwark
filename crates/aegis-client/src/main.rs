@@ -13,8 +13,11 @@ async fn main() -> anyhow::Result<()> {
 
     // SEAM: construct the platform interceptor (Windows Wintun + MITM + per-install CA).
     // Exact constructor confirmed at integration; aegis-net exposes NetInterceptor + NetConfig.
-    let interceptor: Arc<dyn aegis_net::Interceptor> =
-        Arc::new(aegis_net::NetInterceptor::new(aegis_net::NetConfig::default()));
+    // NetInterceptor::new returns Result (fail-closed if the keystore can't
+    // provide a CA key) — propagate it.
+    let net = aegis_net::NetInterceptor::new(aegis_net::NetConfig::default())
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let interceptor: Arc<dyn aegis_net::Interceptor> = Arc::new(net);
     interceptor.start().await.map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
     let pipeline = Pipeline::new(cfg);

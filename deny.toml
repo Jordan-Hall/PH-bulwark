@@ -1,0 +1,44 @@
+# cargo-deny configuration — supply-chain + license gate (run `cargo deny check`).
+# License policy: permissive only. ffmpeg is SHELLED OUT (sidecar), never linked,
+# so GPL/LGPL must NOT appear in the dependency graph.
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+# Allowed permissive licenses. No GPL / AGPL / LGPL (would taint the binary).
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "MPL-2.0",
+]
+confidence-threshold = 0.9
+# `ring` is Apache-2.0/ISC/MIT-ish with a custom OpenSSL-derived notice; clarify if flagged.
+exceptions = [{ name = "ring", allow = ["ISC", "MIT", "OpenSSL"] }]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+# Forbid FFI ffmpeg bindings — ffmpeg MUST remain a shelled-out sidecar (license
+# isolation, per docs/research/crate-research.md). Use ffmpeg-sidecar only.
+deny = [
+    { name = "ffmpeg-next" },
+    { name = "ffmpeg-sys-next" },
+    { name = "ffmpeg-sys" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
