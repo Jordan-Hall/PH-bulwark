@@ -35,9 +35,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod allowlist;
 mod config;
 mod error;
 
+pub use allowlist::{Allowlist, ApplyOutcome, AuditEntry, AuditLog, DeviceAllowlist, ReviewItem};
 pub use config::{AgeBandThresholds, AgeProfile, PolicyConfig, Thresholds};
 pub use error::{PolicyError, Result};
 
@@ -266,6 +268,45 @@ impl Policy {
             Severity::Low,
             format!("{} in log band ({:.2}); recorded", category_label(category), score),
         )
+    }
+
+    /// Like [`Policy::evaluate`], but first consults a guardian [`Allowlist`].
+    /// If the verdict's `host` or content hash was APPROVEd for this device, the
+    /// item short-circuits to [`Action::Allow`] with no alert (it must not be
+    /// re-blocked). **CSAM is never bypassed** (belt-and-braces; the allowlist
+    /// also refuses to store CSAM). `host` is the app/site (`AlertEvent.app`);
+    /// pass `""` if unknown. See docs/design/parent-notifications.md.
+    pub fn decide_with_allowlist(
+        &self,
+        verdict: &Verdict,
+        ctx: &PolicyContext,
+        allowlist: &Allowlist,
+        host: &str,
+    ) -> PolicyDecision {
+        if verdict.category() != Category::CsamSuspected {
+            let host_allowed = !host.is_empty() && allowlist.is_host_allowed(&ctx.device, host);
+            let hash_allowed = verdict
+                .evidence
+                .as_ref()
+                .map(|e| allowlist.is_hash_allowed(&ctx.device, &e.sha256))
+                .unwrap_or(false);
+            if host_allowed || hash_allowed {
+                let why = if host_allowed && hash_allowed {
+                    "host and content hash"
+                } else if host_allowed {
+                    "host"
+                } else {
+                    "content hash"
+                };
+                return PolicyDecision::new(
+                    Action::Allow,
+                    None,
+                    Severity::Info,
+                    format!("guardian-approved ({why}); allowlisted for this device"),
+                );
+            }
+        }
+        self.evaluate(verdict, ctx)
     }
 
     /// Grooming policy (PLAN §5): prefer alert + log over hard-blocking a child's

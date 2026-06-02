@@ -303,6 +303,67 @@ service AlertRelay {
 }
 
 // ---------------------------------------------------------------------------
+// Review service — guardian approve/deny (notification + Review screen →
+// aegis-policy / aegis-alert). See docs/design/parent-notifications.md.
+// APPROVE allowlists the host / content hash for this child; DENY confirms the
+// block. Every decision is audited by aegis-policy. RegisterPushTarget lets the
+// cluster relay an alert via FCM to a guardian's separate device;
+// StreamPendingReviews carries the SAME redacted AlertEvent (no media, ever).
+// ---------------------------------------------------------------------------
+
+// The guardian's verdict on a flagged item.
+enum ReviewDecision {
+  REVIEW_DECISION_UNSPECIFIED = 0;
+  APPROVE                     = 1; // allow this item (allowlist host/hash)
+  DENY                        = 2; // confirm the block
+}
+
+// Breadth of an APPROVE (mirrors aegis-policy's host/content-hash allowlist).
+enum ReviewScope {
+  REVIEW_SCOPE_UNSPECIFIED = 0;
+  THIS_ITEM                = 1; // only the exact content (by evidence hash)
+  THIS_HOST                = 2; // the whole app/host involved
+}
+
+// One guardian decision on a previously-raised AlertEvent.
+message ReviewRequest {
+  string         alert_id  = 1; // the AlertEvent.alert_id being decided
+  ReviewDecision decision  = 2;
+  string         device_id = 3; // supervised device the alert came from
+  ReviewScope    scope     = 4; // breadth of an APPROVE (ignored for DENY)
+  int64          ts        = 5;
+}
+
+message ReviewAck {
+  string alert_id = 1;
+  bool   applied  = 2;
+}
+
+// A guardian device registered for remote push (FCM). Routing token only — no
+// alert content.
+message PushTarget {
+  string device_id = 1; // the GUARDIAN device id
+  string fcm_token  = 2; // FCM registration token (rotates)
+  string platform   = 3; // "android" | "ios" | "web"
+}
+
+message PushAck {
+  bool ok = 1;
+}
+
+message DeviceFilter {
+  string device_id = 1; // empty = all supervised devices
+}
+
+// Guardian approve/deny review + remote-push registration. The pending-review
+// stream re-emits the redacted AlertEvent (same no-media invariant as AlertRelay).
+service Review {
+  rpc SubmitDecision(ReviewRequest) returns (ReviewAck);
+  rpc RegisterPushTarget(PushTarget) returns (PushAck);
+  rpc StreamPendingReviews(DeviceFilter) returns (stream AlertEvent);
+}
+
+// ---------------------------------------------------------------------------
 // ClusterControl service — membership / health / work queue (aegis-cluster)
 // ---------------------------------------------------------------------------
 
