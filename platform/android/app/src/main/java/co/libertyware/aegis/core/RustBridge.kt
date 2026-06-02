@@ -48,4 +48,16 @@ object RustBridge {
 
     /** Poll the next guardian alert as JSON, or null if none is pending. */
     external fun nextAlert(): String?
+
+    /**
+     * Submit the guardian's review decision for a flagged item: `approve` = allow
+     * it through / override the block; otherwise keep it blocked. Routed to the
+     * policy engine, which records the decision and may allowlist the host/hash
+     * for this child. (Approve/deny is roadmap — see docs/design/parent-notifications.md.)
+     */
+    external fun submitReviewDecision(alertId: String, approve: Boolean)
+
+    /** Register this parent device's push token so the cluster can deliver alerts
+     *  remotely via FCM. No-op when the parent reviews on the same device. */
+    external fun registerParentPushToken(token: String)
 }

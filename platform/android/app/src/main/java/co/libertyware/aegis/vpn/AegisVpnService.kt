@@ -8,6 +8,7 @@ import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import co.libertyware.aegis.core.RustBridge
+import co.libertyware.aegis.notify.AlertNotifier
 
 /**
  * The Aegis filtering VPN client.
@@ -28,6 +29,7 @@ class AegisVpnService : VpnService() {
 
     private var tun: ParcelFileDescriptor? = null
     private var rustHandle: Long = 0L
+    @Volatile private var polling = false
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIF_ID, buildNotification())
@@ -57,9 +59,29 @@ class AegisVpnService : VpnService() {
         // Rust owns the read/write loop on the raw fd from here.
         rustHandle = RustBridge.startVpn(pfd.fd, CONFIG_JSON)
         Log.i(TAG, "Aegis VPN established (rustHandle=$rustHandle)")
+        startAlertPoller()
+    }
+
+    /**
+     * Surface flagged alerts to the guardian. Polls the Rust core for the next
+     * alert and posts each as a notification (safe evidence + approve/deny) via
+     * [AlertNotifier]. This is the same-device path; remote delivery to a separate
+     * parent device is via FCM (see docs/design/parent-notifications.md).
+     */
+    private fun startAlertPoller() {
+        if (polling) return
+        polling = true
+        Thread({
+            while (polling) {
+                val alert = runCatching { RustBridge.nextAlert() }.getOrNull()
+                if (alert != null) AlertNotifier.notify(this, alert)
+                else runCatching { Thread.sleep(2_000) }
+            }
+        }, "aegis-alert-poller").apply { isDaemon = true }.start()
     }
 
     override fun onDestroy() {
+        polling = false
         if (rustHandle != 0L) {
             RustBridge.stopVpn(rustHandle)
             rustHandle = 0L

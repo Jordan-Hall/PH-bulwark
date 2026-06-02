@@ -11,6 +11,12 @@
 
 use std::path::PathBuf;
 
+// protox re-exports the exact prost it built the FileDescriptorSet with
+// (`pub use {prost, prost_reflect}`). Encode through THAT prost so the
+// `Message` trait matches the descriptor type; the bytes are standard protobuf
+// that tonic-prost-build reads back with its own prost.
+use protox::prost::Message as _;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto = "proto/aegis.proto";
     let include = "proto";
@@ -19,7 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let descriptors = protox::compile([proto], [include])?;
     let out_dir = PathBuf::from(std::env::var("OUT_DIR")?);
     let fds_path = out_dir.join("aegis_fds.bin");
-    std::fs::write(&fds_path, prost::Message::encode_to_vec(&descriptors))?;
+    std::fs::write(&fds_path, descriptors.encode_to_vec())?;
 
     tonic_prost_build::configure()
         .build_server(true)

@@ -53,5 +53,9 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
+        <!-- Approve / "Keep blocked" actions on a guardian alert notification. -->
+        <receiver
+            android:name=".notify.ReviewActionReceiver"
+            android:exported="false" />
     </application>
 </manifest>
