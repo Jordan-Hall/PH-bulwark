@@ -61,6 +61,31 @@ pub struct AlertHub {
     // SEAM: durable storage — persist FCM routing tokens (no alert content) so
     // a guardian stays reachable across restarts.
     push_targets: Arc<Mutex<HashMap<String, PushTarget>>>,
+    /// Pending-review records keyed by `alert_id`: the redacted facts a
+    /// `SubmitDecision` needs to resolve a `ReviewItem` (host/hash/category)
+    /// without re-shipping the original event. A `ReviewRequest` carries only
+    /// `alert_id` + the guardian's decision, so the server must remember which
+    /// host/category that alert referred to in order to (a) key an APPROVE on a
+    /// real host and (b) re-check the CSAM-never-allowlistable rule. Content-free
+    /// (host + hash + category only — never raw media or message text).
+    // SEAM: durable storage — this is the in-memory pending-review queue the
+    // `submit_decision` SEAM comment refers to; persist it so a decision can be
+    // resolved across a restart.
+    pending: Arc<Mutex<HashMap<String, PendingReview>>>,
+}
+
+/// The content-free facts the relay retains about a raised alert so a later
+/// guardian decision can be resolved into a `ReviewItem`. Mirrors the
+/// `Evidence`/`AlertEvent` no-media invariant: host (the app/site), the content
+/// hash, and the category only.
+#[derive(Clone)]
+struct PendingReview {
+    /// `AlertEvent.app` — the host/site an APPROVE(THIS_HOST) allowlists.
+    host: String,
+    /// `Evidence.sha256` (may be empty) — the hash an APPROVE(THIS_ITEM) keys on.
+    sha256: Vec<u8>,
+    /// The flagged category, so CSAM stays un-allowlistable even at decision time.
+    category: Category,
 }
 
 impl Default for AlertHub {
@@ -77,6 +102,7 @@ impl AlertHub {
             tx,
             allowlist: Arc::new(Mutex::new(Allowlist::new())),
             push_targets: Arc::new(Mutex::new(HashMap::new())),
+            pending: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -87,9 +113,51 @@ impl AlertHub {
     /// `Clone`) and call `publish`. Returns the number of subscribers the event
     /// reached (`0` when nobody is currently streaming — not an error).
     pub fn publish(&self, event: AlertEvent) -> usize {
+        // Remember the content-free facts of this alert so a later guardian
+        // SubmitDecision (which carries only the alert_id) can resolve the real
+        // host/hash/category — keyed by alert_id. No raw media is retained.
+        if !event.alert_id.trim().is_empty() {
+            let record = PendingReview {
+                host: event.app.clone(),
+                sha256: event
+                    .evidence
+                    .as_ref()
+                    .map(|e| e.sha256.clone())
+                    .unwrap_or_default(),
+                category: event.category(),
+            };
+            self.pending
+                .lock()
+                .expect("pending-review mutex poisoned")
+                .insert(event.alert_id.clone(), record);
+        }
         // `send` errors only when there are zero receivers; that is normal
         // (no guardian streaming right now), so treat it as "reached 0".
         self.tx.send(event).unwrap_or(0)
+    }
+
+    /// Resolve the retained facts for a raised alert into the `ReviewItem` the
+    /// allowlist applies. Returns `None` when no alert with this id was seen
+    /// (the decision then keys on an empty item — an APPROVE it cannot resolve
+    /// is refused, conservatively, which is the documented behaviour).
+    fn resolve_item(&self, device: DeviceId, alert_id: &str) -> ReviewItem {
+        let pending = self.pending.lock().expect("pending-review mutex poisoned");
+        match pending.get(alert_id) {
+            Some(p) => ReviewItem::new(
+                device,
+                alert_id.to_string(),
+                p.host.clone(),
+                p.sha256.clone(),
+                p.category,
+            ),
+            None => ReviewItem::new(
+                device,
+                alert_id.to_string(),
+                String::new(),
+                Vec::new(),
+                Category::Unspecified,
+            ),
+        }
     }
 
     /// Subscribe to the alert fan-out (used by `StreamPendingReviews`).
@@ -195,26 +263,16 @@ impl aegis_proto::v1::review_server::Review for ReviewService {
         }
         let scope = r.scope(); // ignored for DENY by the allowlist
 
-        // SEAM: durable storage — the resolved host/sha256/category for an
-        // alert_id would come from a persisted pending-review record keyed by
-        // alert_id. In-memory we don't retain the original AlertEvent, so we
-        // key the APPROVE on the host carried alongside the decision's
-        // device/alert. For THIS_HOST the `aegis-policy` allowlist needs a
-        // host; an APPROVE with no resolvable host is refused below (audited),
-        // which is the correct, conservative behaviour.
-        let item = ReviewItem::new(
-            DeviceId(r.device_id.clone()),
-            r.alert_id.clone(),
-            // Host/hash are resolved from the pending-review store once durable
-            // storage lands; empty here means the allowlist will refuse an
-            // APPROVE it cannot key on (still audited). DENY is unaffected.
-            String::new(),
-            Vec::new(),
-            // Category is unknown without the original event; default to a
-            // non-CSAM category. The allowlist re-checks CSAM from the resolved
-            // item once the pending-review store provides the real category.
-            Category::Unspecified,
-        );
+        // Resolve the host/sha256/category for this alert_id from the in-memory
+        // pending-review store populated by `AlertHub::publish` when the alert
+        // was raised. A `ReviewRequest` carries only the alert_id + decision, so
+        // this is how an APPROVE(THIS_HOST) gets a real host to allowlist and how
+        // the CSAM-never-allowlistable rule is re-checked at decision time. An
+        // alert_id we never saw resolves to an empty item — an APPROVE the
+        // allowlist cannot key on is refused (audited); DENY is unaffected.
+        let item = self
+            .hub
+            .resolve_item(DeviceId(r.device_id.clone()), &r.alert_id);
 
         let outcome = self.hub.apply_decision(&item, decision, scope, r.ts);
 

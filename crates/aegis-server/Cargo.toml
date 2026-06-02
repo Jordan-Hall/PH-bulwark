@@ -28,3 +28,14 @@ futures-util.workspace = true
 default = []
 # Enable the small text classifier backstop in aegis-text on worker nodes.
 classifier = ["aegis-text/classifier"]
+
+[dev-dependencies]
+# In-process end-to-end guardian approve/deny test (tests/e2e_review.rs):
+# spin the AlertRelay + Review tonic services on a loopback OS-assigned port
+# (plaintext — no TLS), drive them with the generated gRPC clients, and assert
+# the fan-out + decision loop. NOTE: deliberately no aegis-store/rusqlite — it
+# does not build on this host and is not needed for the relay path.
+aegis-proto = { path = "../aegis-proto" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
+tonic = { version = "0.14", features = ["transport"] }
+tokio-stream = { version = "0.1", features = ["net"] }
