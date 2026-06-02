@@ -31,17 +31,17 @@ use crate::Result;
 
 #[cfg(windows)]
 use windows::Win32::Security::Cryptography::{
-    CryptProtectData, CryptUnprotectData, CRYPTPROTECT_FLAGS, CRYPT_INTEGER_BLOB,
+    CryptProtectData, CryptUnprotectData, CRYPT_INTEGER_BLOB,
 };
 #[cfg(windows)]
-use windows::Win32::System::Memory::LocalFree;
+use windows::Win32::Foundation::LocalFree;
 
 /// DPAPI flags. `0` = user scope (the default we want): only the same user on
 /// the same machine can unprotect. We deliberately do NOT pass
 /// `CRYPTPROTECT_LOCAL_MACHINE` (that would widen decryptability to any process
 /// on the box). No UI flag — this is non-interactive.
 #[cfg(windows)]
-const DPAPI_FLAGS: CRYPTPROTECT_FLAGS = CRYPTPROTECT_FLAGS(0);
+const DPAPI_FLAGS: u32 = 0;
 
 /// Extra entropy mixed into DPAPI so that another process running as the same
 /// user cannot unwrap our blob without also knowing this value. Compiled in; it

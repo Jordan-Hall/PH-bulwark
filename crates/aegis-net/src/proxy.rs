@@ -142,11 +142,13 @@ pub async fn spawn(
     // `handler` to `hudsucker::Proxy` and awaits `shutdown_rx`. Until the
     // hudsucker builder is pinned at the first online build, the loop accepts and
     // closes connections so the listener is live and the task is shutdown-driven.
+    // Snapshot the fingerprint before `ca` is moved into the run-loop task.
+    let ca_fp = ca_fingerprint(&ca);
     let join = tokio::spawn(async move {
         run_hudsucker(listener, ca, handler, shutdown_rx).await;
     });
 
-    tracing::info!(%listen_addr, ca_fp = %ca_fingerprint(&ca), "MITM proxy started");
+    tracing::info!(%listen_addr, %ca_fp, "MITM proxy started");
     Ok(MitmProxy {
         shutdown: Some(shutdown_tx),
         join: Some(join),

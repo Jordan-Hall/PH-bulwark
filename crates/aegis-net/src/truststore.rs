@@ -151,7 +151,7 @@ mod win {
                 CERT_STORE_PROV_SYSTEM_W,
                 CERT_QUERY_ENCODING_TYPE(0),
                 None,
-                windows::Win32::Security::Cryptography::CERT_OPEN_STORE_FLAGS(flags.0),
+                windows::Win32::Security::Cryptography::CERT_OPEN_STORE_FLAGS(flags),
                 Some(w!("ROOT").as_ptr() as *const core::ffi::c_void),
             )
         }
@@ -202,7 +202,7 @@ mod win {
             // previous context and frees it internally as it advances, so we must
             // NOT free `ctx` ourselves between iterations. The handle `store` is
             // valid for the whole loop.
-            ctx = unsafe { CertEnumCertificatesInStore(Some(store), Some(ctx)) };
+            ctx = unsafe { CertEnumCertificatesInStore(store, Some(ctx as *const _)) };
             if ctx.is_null() {
                 break;
             }
@@ -223,7 +223,7 @@ mod win {
                 // to `CertDeleteCertificateFromStore`, which frees exactly that
                 // duplicate. We do not reuse the duplicate afterwards.
                 let dup = unsafe { CertDuplicateCertificateContext(Some(ctx)) };
-                let del = unsafe { CertDeleteCertificateFromStore(Some(dup)) };
+                let del = unsafe { CertDeleteCertificateFromStore(dup as *const _) };
                 removed = del.is_ok();
                 if let Err(e) = del {
                     close_store(store);

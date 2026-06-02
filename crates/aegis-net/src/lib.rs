@@ -43,7 +43,10 @@
 //! This crate does pure protocol interception. There are no models and nothing
 //! reports off-device (PLAN §0b, §3).
 
-#![forbid(unsafe_code)]
+// `deny` (not `forbid`) at the root so the three isolated FFI modules
+// (ca::dpapi, truststore, tun::windows) can locally `#![allow(unsafe_code)]`
+// for audited, SAFETY-documented blocks. Unsafe stays denied everywhere else.
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod ca;

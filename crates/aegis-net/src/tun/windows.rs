@@ -65,7 +65,7 @@ impl TunDevice for WintunDevice {
             .start_session(wintun::MAX_RING_CAPACITY)
             .map_err(|e| NetError::tun(format!("starting wintun session: {e}")))?;
 
-        self.adapter = Some(Arc::new(adapter));
+        self.adapter = Some(adapter); // wintun::Adapter::create already returns Arc<Adapter>
         self.session = Some(Arc::new(session));
         tracing::info!(name = %config.name, "wintun adapter up");
         Ok(())

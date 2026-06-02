@@ -216,7 +216,7 @@ impl CaManager {
         // the leaf's issuer DN matches the installed root exactly. Built fresh
         // per mint and consumed here; the proxy's RcgenAuthority caches leaves.
         let ca_key = reparse_keypair(&self.ca_key_der)?;
-        let ca_cert_der = rcgen::CertificateDer::from(self.cert_der.clone());
+        let ca_cert_der = rustls::pki_types::CertificateDer::from(self.cert_der.clone());
         let issuer = rcgen::Issuer::from_ca_cert_der(&ca_cert_der, ca_key)
             .map_err(|e| NetError::ca(format!("build issuer from CA cert: {e}")))?;
         let leaf = params
