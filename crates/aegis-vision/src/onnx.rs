@@ -395,7 +395,10 @@ mod tests {
             return;
         };
         if !std::path::Path::new(&path).is_file() {
-            eprintln!("skipping: {} -> {path} is not a file", crate::MODEL_PATH_ENV);
+            eprintln!(
+                "skipping: {} -> {path} is not a file",
+                crate::MODEL_PATH_ENV
+            );
             return;
         }
 

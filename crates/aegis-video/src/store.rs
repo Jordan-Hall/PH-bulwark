@@ -238,7 +238,10 @@ mod tests {
         let meta = s.base.join(format!("{}.meta", stored.sha256_hex));
         std::fs::write(&meta, "0\n1\n").unwrap();
         assert_eq!(s.purge_expired().unwrap(), 1);
-        assert!(s.load(&stored.uri).unwrap().is_none(), "purged blob is gone");
+        assert!(
+            s.load(&stored.uri).unwrap().is_none(),
+            "purged blob is gone"
+        );
     }
 
     #[test]

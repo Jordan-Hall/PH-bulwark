@@ -18,7 +18,10 @@ async fn main() -> anyhow::Result<()> {
     let net = aegis_net::NetInterceptor::new(aegis_net::NetConfig::default())
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let interceptor: Arc<dyn aegis_net::Interceptor> = Arc::new(net);
-    interceptor.start().await.map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    interceptor
+        .start()
+        .await
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
     let pipeline = Pipeline::new(cfg);
     tracing::info!("aegis-client running — intercept → classify → grooming/policy → block/alert");

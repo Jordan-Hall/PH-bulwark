@@ -30,11 +30,11 @@ use crate::ca::keystore::{CaKeyStore, KeyStoreTier};
 use crate::Result;
 
 #[cfg(windows)]
+use windows::Win32::Foundation::LocalFree;
+#[cfg(windows)]
 use windows::Win32::Security::Cryptography::{
     CryptProtectData, CryptUnprotectData, CRYPT_INTEGER_BLOB,
 };
-#[cfg(windows)]
-use windows::Win32::Foundation::LocalFree;
 
 /// DPAPI flags. `0` = user scope (the default we want): only the same user on
 /// the same machine can unprotect. We deliberately do NOT pass
@@ -166,11 +166,11 @@ fn protect(plaintext: &[u8]) -> Result<Vec<u8>> {
     let ok = unsafe {
         CryptProtectData(
             &in_blob,
-            None,                       // no description
-            Some(&entropy_blob),        // additional entropy
-            None,                       // reserved
-            None,                       // no prompt struct (non-interactive)
-            DPAPI_FLAGS,                // user scope, no UI
+            None,                // no description
+            Some(&entropy_blob), // additional entropy
+            None,                // reserved
+            None,                // no prompt struct (non-interactive)
+            DPAPI_FLAGS,         // user scope, no UI
             &mut out_blob,
         )
     };
@@ -178,9 +178,8 @@ fn protect(plaintext: &[u8]) -> Result<Vec<u8>> {
 
     // SAFETY: on success `out_blob.pbData` is a valid pointer to `cbData` bytes
     // allocated by DPAPI. We copy them into an owned Vec before freeing.
-    let ciphertext = unsafe {
-        std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec()
-    };
+    let ciphertext =
+        unsafe { std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec() };
     free_dpapi_blob(&out_blob);
     Ok(ciphertext)
 }
@@ -206,7 +205,7 @@ fn unprotect(wrapped: &[u8]) -> Result<Vec<u8>> {
     let ok = unsafe {
         CryptUnprotectData(
             &in_blob,
-            None,                  // ppszDataDescr out (unused)
+            None, // ppszDataDescr out (unused)
             Some(&entropy_blob),
             None,
             None,
@@ -217,9 +216,8 @@ fn unprotect(wrapped: &[u8]) -> Result<Vec<u8>> {
     ok.map_err(|e| crate::NetError::keystore(format!("CryptUnprotectData failed: {e}")))?;
 
     // SAFETY: see `protect` — valid pointer/len on success; copied then freed.
-    let plaintext = unsafe {
-        std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec()
-    };
+    let plaintext =
+        unsafe { std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec() };
     free_dpapi_blob(&out_blob);
     Ok(plaintext)
 }

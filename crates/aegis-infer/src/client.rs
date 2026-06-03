@@ -62,7 +62,10 @@ impl ClientTlsIdentity {
         ClientTlsConfig::new()
             .domain_name(self.server_domain.clone())
             .ca_certificate(Certificate::from_pem(&self.ca_cert_pem))
-            .identity(Identity::from_pem(&self.client_cert_pem, &self.client_key_pem))
+            .identity(Identity::from_pem(
+                &self.client_cert_pem,
+                &self.client_key_pem,
+            ))
     }
 }
 

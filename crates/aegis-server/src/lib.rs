@@ -138,10 +138,9 @@ impl Analyzer for TextAnalyzerAdapter {
 /// GPU-less devices offload heavy media; text always stays local.
 pub fn default_offload_policy(profile: &DeviceProfile) -> OffloadPolicy {
     let is_mobile = matches!(profile.platform.as_str(), "android" | "ios");
-    let has_gpu = profile
-        .exec_providers
-        .iter()
-        .any(|p| *p != ExecutionProvider::Cpu as i32 && *p != ExecutionProvider::Unspecified as i32);
+    let has_gpu = profile.exec_providers.iter().any(|p| {
+        *p != ExecutionProvider::Cpu as i32 && *p != ExecutionProvider::Unspecified as i32
+    });
     OffloadPolicy {
         run_text_local: true, // grooming rules are cheap + explainable
         run_image_local: has_gpu && !is_mobile,
@@ -171,7 +170,10 @@ mod tests {
     fn offload_policy_mobile_offloads_heavy_keeps_text_local() {
         let p = DeviceProfile {
             platform: "android".into(),
-            exec_providers: vec![ExecutionProvider::Nnapi as i32, ExecutionProvider::Cpu as i32],
+            exec_providers: vec![
+                ExecutionProvider::Nnapi as i32,
+                ExecutionProvider::Cpu as i32,
+            ],
             ..Default::default()
         };
         let pol = default_offload_policy(&p);

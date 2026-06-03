@@ -74,7 +74,12 @@ impl DefaultFlowClassifier {
 
     /// Apply a verdict `Action` to a buffered segment (forward / drop / hold).
     /// Convenience wrapper over [`DelayBuffer::apply`].
-    pub fn apply(&self, segment_id: u64, action: Action, rewritten: Option<Bytes>) -> Result<Released> {
+    pub fn apply(
+        &self,
+        segment_id: u64,
+        action: Action,
+        rewritten: Option<Bytes>,
+    ) -> Result<Released> {
         Ok(self.buffer.apply(segment_id, action, rewritten)?)
     }
 
@@ -97,21 +102,33 @@ impl DefaultFlowClassifier {
 
     /// Turn a classified flow into zero or more analysis units, admitting
     /// streaming segments to the delay buffer first.
-    fn build_units(&self, flow: &CapturedFlow, class: &Classification) -> Result<Vec<AnalysisUnit>> {
+    fn build_units(
+        &self,
+        flow: &CapturedFlow,
+        class: &Classification,
+    ) -> Result<Vec<AnalysisUnit>> {
         let body = body_bytes(&flow.payload);
 
         match class.disposition {
             // A manifest carries no media bytes — nothing to analyse yet; the
             // demuxer will see the segments it points to as their own flows.
             Disposition::Manifest { .. } => {
-                tracing::trace!(flow = flow.flow_id, reason = class.reason, "manifest forwarded");
+                tracing::trace!(
+                    flow = flow.flow_id,
+                    reason = class.reason,
+                    "manifest forwarded"
+                );
                 Ok(Vec::new())
             }
 
             // Not in scope (WebRTC handled by aegis-net, opaque binary, E2E) →
             // pass through with no unit.
             Disposition::Other => {
-                tracing::trace!(flow = flow.flow_id, reason = class.reason, "flow passed through");
+                tracing::trace!(
+                    flow = flow.flow_id,
+                    reason = class.reason,
+                    "flow passed through"
+                );
                 Ok(Vec::new())
             }
 
@@ -265,7 +282,9 @@ fn inline(data: Bytes, mime_type: String) -> InlineMedia {
 pub fn channel_for_unit(unit: &AnalysisUnit, fallback: SourceChannel) -> SourceChannel {
     match unit {
         AnalysisUnit::Text(_) => SourceChannel::Web,
-        AnalysisUnit::VideoSegment { deadline_ms, .. } if *deadline_ms > 0 => SourceChannel::LiveStream,
+        AnalysisUnit::VideoSegment { deadline_ms, .. } if *deadline_ms > 0 => {
+            SourceChannel::LiveStream
+        }
         AnalysisUnit::VideoSegment { .. } => SourceChannel::VideoStream,
         _ => fallback,
     }
@@ -305,7 +324,12 @@ mod tests {
     async fn html_flow_yields_one_text_unit() {
         let fc = DefaultFlowClassifier::with_defaults();
         let units = fc
-            .classify(http(Some("text/html"), Some("/p"), b"<html>hello</html>", false))
+            .classify(http(
+                Some("text/html"),
+                Some("/p"),
+                b"<html>hello</html>",
+                false,
+            ))
             .await
             .unwrap();
         assert_eq!(units.len(), 1);
@@ -316,7 +340,12 @@ mod tests {
     async fn image_flow_yields_one_image_unit() {
         let fc = DefaultFlowClassifier::with_defaults();
         let units = fc
-            .classify(http(Some("image/png"), Some("/i.png"), b"\x89PNG\r\n\x1a\n", false))
+            .classify(http(
+                Some("image/png"),
+                Some("/i.png"),
+                b"\x89PNG\r\n\x1a\n",
+                false,
+            ))
             .await
             .unwrap();
         assert_eq!(units.len(), 1);
@@ -327,7 +356,12 @@ mod tests {
     async fn vod_video_segment_is_buffered_with_zero_deadline() {
         let fc = DefaultFlowClassifier::with_defaults();
         let units = fc
-            .classify(http(Some("video/mp4"), Some("/v.mp4"), b"\x00\x00\x00\x18ftypisom....", false))
+            .classify(http(
+                Some("video/mp4"),
+                Some("/v.mp4"),
+                b"\x00\x00\x00\x18ftypisom....",
+                false,
+            ))
             .await
             .unwrap();
         assert_eq!(units.len(), 1);
@@ -349,7 +383,12 @@ mod tests {
     async fn live_video_segment_carries_live_deadline_then_releases_on_allow() {
         let fc = DefaultFlowClassifier::with_defaults();
         let units = fc
-            .classify(http(Some("video/mp2t"), Some("/live/seg.ts"), &[0x47u8; 16], true))
+            .classify(http(
+                Some("video/mp2t"),
+                Some("/live/seg.ts"),
+                &[0x47u8; 16],
+                true,
+            ))
             .await
             .unwrap();
         let (deadline, seg_id) = match &units[0] {
@@ -360,7 +399,10 @@ mod tests {
             } => (*deadline_ms, segment_id.unwrap()),
             other => panic!("expected VideoSegment, got {other:?}"),
         };
-        assert_eq!(deadline, LIVE_DELAY_MS, "live segment carries the live deadline");
+        assert_eq!(
+            deadline, LIVE_DELAY_MS,
+            "live segment carries the live deadline"
+        );
         assert_eq!(fc.buffer().pending(), 1);
 
         // Verdict comes back ALLOW → segment released (forwarded), buffer drains.
@@ -374,7 +416,12 @@ mod tests {
         let fc = DefaultFlowClassifier::with_defaults();
         let m = b"#EXTM3U\n#EXT-X-ENDLIST\n";
         let units = fc
-            .classify(http(Some("application/vnd.apple.mpegurl"), Some("/m.m3u8"), m, false))
+            .classify(http(
+                Some("application/vnd.apple.mpegurl"),
+                Some("/m.m3u8"),
+                m,
+                false,
+            ))
             .await
             .unwrap();
         assert!(units.is_empty(), "a manifest carries no media to analyse");
@@ -384,9 +431,14 @@ mod tests {
     async fn current_delay_ms_reflects_buffer() {
         let fc = DefaultFlowClassifier::with_defaults();
         assert_eq!(fc.current_delay_ms(), 0);
-        fc.classify(http(Some("video/mp4"), Some("/v.mp4"), b"\x00\x00\x00\x18ftypisomXXXX", false))
-            .await
-            .unwrap();
+        fc.classify(http(
+            Some("video/mp4"),
+            Some("/v.mp4"),
+            b"\x00\x00\x00\x18ftypisomXXXX",
+            false,
+        ))
+        .await
+        .unwrap();
         // Just admitted, so the delay is ~0 but the segment is held.
         assert_eq!(fc.buffer().pending(), 1);
     }

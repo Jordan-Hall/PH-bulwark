@@ -25,8 +25,8 @@ use std::sync::{Arc, Mutex};
 
 use aegis_core::Result;
 use aegis_flow::{AnalysisUnit, DefaultFlowClassifier, FlowClassifier};
+use aegis_net::{InterceptDecision, Interceptor};
 use aegis_policy::PolicyEngine; // trait providing Policy::decide / Policy::alert_for
-use aegis_net::{Interceptor, InterceptDecision};
 use aegis_proto::v1::{Action, AlertKind, Category, Evidence, InlineMedia, Severity, Verdict};
 use aegis_vision::Scorer;
 
@@ -191,7 +191,11 @@ impl Pipeline {
         // Miss → score once, store the decision keyed by hash, then build it.
         let score = self.nsfw.score(bytes);
         let nsfw = score >= NSFW_BLOCK_THRESHOLD;
-        let category = if nsfw { Category::AdultImage } else { Category::Safe };
+        let category = if nsfw {
+            Category::AdultImage
+        } else {
+            Category::Safe
+        };
         let action = if nsfw { Action::Block } else { Action::Allow };
         let decision: ImageDecision = (action, category, score);
         self.cache_store(hash, decision);
@@ -464,7 +468,6 @@ fn sha256_array(bytes: &[u8]) -> [u8; 32] {
     digest.as_ref().try_into().unwrap_or([0u8; 32])
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,7 +512,8 @@ mod tests {
     }
     impl Scorer for CountingScorer {
         fn score(&self, _: &[u8]) -> f32 {
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.score
         }
         fn model_id(&self) -> &str {
@@ -549,7 +553,10 @@ mod tests {
         // A non-CSAM block carries a SAFE re-encoded preview.
         let ev = v.evidence.unwrap();
         assert_eq!(ev.sha256.len(), 32);
-        assert!(!ev.safe_thumbnail.is_empty(), "non-CSAM block must attach a preview");
+        assert!(
+            !ev.safe_thumbnail.is_empty(),
+            "non-CSAM block must attach a preview"
+        );
         // The preview is a fresh JPEG re-encode (SOI marker), not the PNG input.
         assert_eq!(&ev.safe_thumbnail[..3], &[0xFF, 0xD8, 0xFF]);
     }

@@ -97,10 +97,7 @@ fn decodes_real_frames_from_synthetic_clip() {
 
     // (1) Sane number of frames: duration(2s) * sample_fps(5) = ~10, allow slack
     // for fps-filter edge frames (first/last) across ffmpeg versions.
-    assert!(
-        !frames.is_empty(),
-        "expected real decoded frames, got zero"
-    );
+    assert!(!frames.is_empty(), "expected real decoded frames, got zero");
     assert!(
         frames.len() >= 8 && frames.len() <= 13,
         "expected ~10 frames (2s * 5fps), got {}",

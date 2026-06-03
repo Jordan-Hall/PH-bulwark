@@ -105,10 +105,20 @@ mod tests {
     async fn pushed_text_is_drained_in_order() {
         let a = OcrAgent::new();
         a.start(&DeviceId::from("dev1")).await.unwrap();
-        a.push("messenger", "t1", "our little secret".into(), SourceChannel::OcrOnscreen)
-            .await;
-        a.push("messenger", "t1", "dont tell your parents".into(), SourceChannel::Notification)
-            .await;
+        a.push(
+            "messenger",
+            "t1",
+            "our little secret".into(),
+            SourceChannel::OcrOnscreen,
+        )
+        .await;
+        a.push(
+            "messenger",
+            "t1",
+            "dont tell your parents".into(),
+            SourceChannel::Notification,
+        )
+        .await;
         let first = a.next_text().await.unwrap().unwrap();
         assert_eq!(first.app, "messenger");
         assert_eq!(first.thread_id, "t1");

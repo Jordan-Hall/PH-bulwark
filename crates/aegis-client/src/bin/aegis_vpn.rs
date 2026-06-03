@@ -56,7 +56,10 @@ async fn main() -> anyhow::Result<()> {
     // --- 0. Pre-flight: VPN mode needs elevation + a TUN driver. --------------
     if !aegis_net::is_elevated() {
         eprintln!("aegis_vpn needs elevation (TUN adapter + default route).");
-        eprintln!("Re-run as administrator/root:\n  {}", aegis_net::elevation_command());
+        eprintln!(
+            "Re-run as administrator/root:\n  {}",
+            aegis_net::elevation_command()
+        );
         std::process::exit(1);
     }
     if !aegis_net::wintun_available() {
@@ -75,7 +78,8 @@ async fn main() -> anyhow::Result<()> {
         proxy_listen: PROXY_LISTEN.to_owned(),
         ..aegis_net::NetConfig::default()
     };
-    let net = aegis_net::NetInterceptor::new(net_cfg).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let net =
+        aegis_net::NetInterceptor::new(net_cfg).map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
     let ca_path = write_ca_cert(net.ca_cert_pem())?;
     println!("=================================================================");
@@ -146,8 +150,16 @@ async fn run_loop(
                 {
                     Ok(reports) => {
                         for r in reports {
-                            let host = if r.host.is_empty() { "<unknown>" } else { &r.host };
-                            println!("BLOCKED {host} {} score={:.3}", category_name(r.category), r.score);
+                            let host = if r.host.is_empty() {
+                                "<unknown>"
+                            } else {
+                                &r.host
+                            };
+                            println!(
+                                "BLOCKED {host} {} score={:.3}",
+                                category_name(r.category),
+                                r.score
+                            );
                         }
                     }
                     Err(e) => tracing::warn!(error = %e, "flow handling failed; failing open"),
@@ -244,12 +256,22 @@ impl AlertSink for RelaySink {
                 Ok(resp) => Ok(resp.into_inner()),
                 Err(status) => {
                     tracing::warn!(%alert_id, %status, "AlertRelay.RaiseAlert failed");
-                    Ok(AlertAck { alert_id, delivered: false, deduped: false, detail: format!("relay error: {status}") })
+                    Ok(AlertAck {
+                        alert_id,
+                        delivered: false,
+                        deduped: false,
+                        detail: format!("relay error: {status}"),
+                    })
                 }
             },
             Err(e) => {
                 tracing::warn!(%alert_id, error = %e, "AlertRelay connect failed");
-                Ok(AlertAck { alert_id, delivered: false, deduped: false, detail: format!("connect error: {e}") })
+                Ok(AlertAck {
+                    alert_id,
+                    delivered: false,
+                    deduped: false,
+                    detail: format!("connect error: {e}"),
+                })
             }
         }
     }

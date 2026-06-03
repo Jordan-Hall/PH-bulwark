@@ -49,8 +49,8 @@ async fn main() -> anyhow::Result<()> {
         proxy_listen: PROXY_LISTEN.to_owned(),
         ..aegis_net::NetConfig::default()
     };
-    let net = aegis_net::NetInterceptor::new(net_cfg)
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let net =
+        aegis_net::NetInterceptor::new(net_cfg).map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
     // --- 2. Persist + PRINT the CA cert path so the user can trust it. --------
     let ca_path = write_ca_cert(net.ca_cert_pem())?;
@@ -105,7 +105,11 @@ async fn run_loop(
                 {
                     Ok(reports) => {
                         for r in reports {
-                            let host = if r.host.is_empty() { "<unknown>" } else { &r.host };
+                            let host = if r.host.is_empty() {
+                                "<unknown>"
+                            } else {
+                                &r.host
+                            };
                             // The line the brief asks for, on stdout.
                             println!(
                                 "BLOCKED {host} {} score={:.3}",

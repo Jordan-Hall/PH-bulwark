@@ -6,9 +6,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use aegis_proto::v1::accounts_server::AccountsServer;
+use aegis_proto::v1::alert_relay_server::{AlertRelay, AlertRelayServer};
 use aegis_proto::v1::analysis_server::{Analysis, AnalysisServer};
 use aegis_proto::v1::offload_server::{Offload, OffloadServer};
-use aegis_proto::v1::alert_relay_server::{AlertRelay, AlertRelayServer};
 use aegis_proto::v1::review_server::ReviewServer;
 use aegis_proto::v1::{
     Action, AlertAck, AlertAckBatch, AlertBatch, AlertEvent, AnalysisBatch, AnalysisRequest,
@@ -273,8 +273,7 @@ pub async fn run(
         )));
 
         // Accounts: parent registration/login + child/guardian management.
-        router =
-            router.add_service(AccountsServer::new(AccountsService::new(accounts)));
+        router = router.add_service(AccountsServer::new(AccountsService::new(accounts)));
 
         if let Some(c) = cluster {
             let svc = aegis_cluster::service::ClusterControlService::new(c);

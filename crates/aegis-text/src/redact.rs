@@ -105,8 +105,14 @@ mod tests {
 
     #[test]
     fn digits_are_masked() {
-        let out = redacted_excerpt("im 13 call me on 0123456789", &[GroomingRule::Sexualization]);
-        assert!(!out.chars().any(|c| c.is_ascii_digit()), "no raw digits: {out}");
+        let out = redacted_excerpt(
+            "im 13 call me on 0123456789",
+            &[GroomingRule::Sexualization],
+        );
+        assert!(
+            !out.chars().any(|c| c.is_ascii_digit()),
+            "no raw digits: {out}"
+        );
         assert!(out.contains("sexualization"));
     }
 
@@ -117,7 +123,10 @@ mod tests {
         let long = "secretphrase ".repeat(50);
         let out = redacted_excerpt(&long, &[GroomingRule::Sexualization]);
         assert!(out.starts_with("[redacted"));
-        assert!(!out.contains("secretphrase"), "verbatim text withheld: {out}");
+        assert!(
+            !out.contains("secretphrase"),
+            "verbatim text withheld: {out}"
+        );
         assert!(out.contains("sexualization"));
         assert!(out.chars().count() < 80, "stays short: {out}");
     }
@@ -139,7 +148,11 @@ mod tests {
         let long = "word ".repeat(200);
         let out = full_excerpt(&long, &[]);
         // Bounded to ~MAX_FULL_EXCERPT chars (+ category tag), and cut-marked.
-        assert!(out.chars().count() <= MAX_FULL_EXCERPT + 2, "bounded: {}", out.chars().count());
+        assert!(
+            out.chars().count() <= MAX_FULL_EXCERPT + 2,
+            "bounded: {}",
+            out.chars().count()
+        );
         assert!(out.contains('…'));
     }
 }

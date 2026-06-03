@@ -131,9 +131,7 @@ pub fn preprocess(
         return Err(PreprocessError::InvalidSize(size));
     }
     let img = image::load_from_memory(bytes)?;
-    let rgb = img
-        .resize_exact(size, size, FilterType::Triangle)
-        .to_rgb8();
+    let rgb = img.resize_exact(size, size, FilterType::Triangle).to_rgb8();
     Ok(to_nchw(&rgb, size, norm))
 }
 

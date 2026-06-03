@@ -147,9 +147,8 @@ pub fn elevation_command() -> String {
 /// default route, and restores host routing on exit. **Requires admin +
 /// `wintun.dll`** (check [`is_elevated`] / [`wintun_available`] first).
 pub async fn run_vpn(cfg: VpnConfig, shutdown: CancellationToken) -> Result<()> {
-    let proxy = ArgProxy::try_from(cfg.proxy_url()).map_err(|e| {
-        NetError::proxy(format!("invalid MITM proxy URL {}: {e}", cfg.proxy_url()))
-    })?;
+    let proxy = ArgProxy::try_from(cfg.proxy_url())
+        .map_err(|e| NetError::proxy(format!("invalid MITM proxy URL {}: {e}", cfg.proxy_url())))?;
 
     // Block QUIC/UDP-443 so HTTP/3 can't slip past the TCP MITM. Best-effort —
     // removed on exit. Empty allowlist = downgrade all QUIC to TCP.

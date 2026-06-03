@@ -107,10 +107,7 @@ pub const THREAD_STATE_COLUMNS: &[Column] = &[
 ];
 
 /// `alert_dedupe` columns (class C3).
-pub const ALERT_DEDUPE_COLUMNS: &[Column] = &[
-    C("alert_id", ColType::Code),
-    C("ts", ColType::Int),
-];
+pub const ALERT_DEDUPE_COLUMNS: &[Column] = &[C("alert_id", ColType::Code), C("ts", ColType::Int)];
 
 /// `config_kv` columns (class C3/C4).
 pub const CONFIG_KV_COLUMNS: &[Column] = &[
@@ -338,7 +335,14 @@ mod tests {
     #[test]
     fn sqlite_ddl_has_no_content_keywords() {
         let ddl = SQLITE_DDL.to_ascii_lowercase();
-        for bad in ["message ", "body ", "transcript ", " media ", "payload ", "plaintext "] {
+        for bad in [
+            "message ",
+            "body ",
+            "transcript ",
+            " media ",
+            "payload ",
+            "plaintext ",
+        ] {
             assert!(
                 !ddl.contains(bad),
                 "SQLITE_DDL contains a content-like column token: {bad:?}"

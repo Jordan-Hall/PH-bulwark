@@ -63,9 +63,13 @@ pub enum AccountError {
 impl From<AccountError> for Status {
     fn from(e: AccountError) -> Self {
         match e {
-            AccountError::EmailExists => Status::already_exists("an account with that email exists"),
+            AccountError::EmailExists => {
+                Status::already_exists("an account with that email exists")
+            }
             AccountError::BadCredentials => Status::unauthenticated("invalid email or password"),
-            AccountError::Unauthorized => Status::unauthenticated("invalid or missing session token"),
+            AccountError::Unauthorized => {
+                Status::unauthenticated("invalid or missing session token")
+            }
             AccountError::NotFound => Status::not_found("no such child or account"),
             AccountError::NotGuardian => {
                 Status::permission_denied("caller is not a guardian of this child")
@@ -208,7 +212,9 @@ impl AccountStore {
         let (salt, hash) = self.hash_password(password);
         let account_id = self.rand_hex(ID_BYTES);
         let family_id = self.rand_hex(ID_BYTES);
-        inner.email_by_id.insert(account_id.clone(), email_key.clone());
+        inner
+            .email_by_id
+            .insert(account_id.clone(), email_key.clone());
         inner.by_email.insert(
             email_key,
             Account {
@@ -222,10 +228,17 @@ impl AccountStore {
     }
 
     /// Verify credentials and mint a session token on success.
-    pub fn login(&self, email: &str, password: &str) -> Result<(String, String, i64), AccountError> {
+    pub fn login(
+        &self,
+        email: &str,
+        password: &str,
+    ) -> Result<(String, String, i64), AccountError> {
         let email_key = normalize_email(email);
         let mut inner = self.inner.lock().expect("account mutex poisoned");
-        let account = inner.by_email.get(&email_key).ok_or(AccountError::BadCredentials)?;
+        let account = inner
+            .by_email
+            .get(&email_key)
+            .ok_or(AccountError::BadCredentials)?;
         // Constant-time verify; a wrong password and an unknown user both fail.
         pbkdf2::verify(
             PBKDF2_ALG,
@@ -279,7 +292,9 @@ impl AccountStore {
             guardians,
         };
         if !rec.device_id.is_empty() {
-            inner.device_to_child.insert(rec.device_id.clone(), child_id.clone());
+            inner
+                .device_to_child
+                .insert(rec.device_id.clone(), child_id.clone());
         }
         let proto = rec.to_proto();
         inner.children.insert(child_id, rec);
@@ -299,7 +314,10 @@ impl AccountStore {
         if !inner.email_by_id.contains_key(guardian_account_id) {
             return Err(AccountError::NotFound);
         }
-        let rec = inner.children.get_mut(child_id).ok_or(AccountError::NotFound)?;
+        let rec = inner
+            .children
+            .get_mut(child_id)
+            .ok_or(AccountError::NotFound)?;
         if !rec.guardians.contains(&caller) {
             return Err(AccountError::NotGuardian);
         }
@@ -398,7 +416,8 @@ impl Accounts for AccountsService {
     ) -> Result<Response<AccountAck>, Status> {
         let r = req.into_inner();
         let (account_id, created) =
-            self.store.create_account(&r.email, &r.password, &r.display_name)?;
+            self.store
+                .create_account(&r.email, &r.password, &r.display_name)?;
         Ok(Response::new(AccountAck {
             account_id,
             created,
@@ -485,7 +504,9 @@ mod tests {
         let store = AccountStore::new();
         assert_eq!(
             store.create_account("a@b.com", "short", "x"),
-            Err(AccountError::Validation("password must be at least 8 characters"))
+            Err(AccountError::Validation(
+                "password must be at least 8 characters"
+            ))
         );
     }
 
@@ -493,9 +514,13 @@ mod tests {
     fn child_and_guardian_routing_is_isolated() {
         let store = AccountStore::new();
         // Two separate parents.
-        let (_alice_id, _) = store.create_account("alice@x.com", "alicepass1", "A").unwrap();
+        let (_alice_id, _) = store
+            .create_account("alice@x.com", "alicepass1", "A")
+            .unwrap();
         let (alice_tok, _, _) = store.login("alice@x.com", "alicepass1").unwrap();
-        let (bob_id, _) = store.create_account("bob@x.com", "bobpassword", "B").unwrap();
+        let (bob_id, _) = store
+            .create_account("bob@x.com", "bobpassword", "B")
+            .unwrap();
         let (bob_tok, _, _) = store.login("bob@x.com", "bobpassword").unwrap();
 
         // Alice adds a child on "kids-tablet"; she is its guardian, Bob is not.
@@ -519,7 +544,9 @@ mod tests {
         );
 
         // Alice assigns Bob; now Bob's scope includes the child + device.
-        store.assign_guardian(&alice_tok, &child.child_id, &bob_id).unwrap();
+        store
+            .assign_guardian(&alice_tok, &child.child_id, &bob_id)
+            .unwrap();
         let bob_scope2 = store.guardian_scope(&bob_tok).unwrap();
         assert!(bob_scope2.device_ids.contains("kids-tablet"));
 

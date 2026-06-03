@@ -509,7 +509,11 @@ mod tests {
         let report = s.purge_expired_sync(now).unwrap();
         assert!(report.audit_rows_aged_out >= 1);
         assert!(report.evidence_rows_purged >= 1);
-        assert!(s.recent_sync("dev-1", 100).unwrap().iter().any(|e| e.ts == now));
+        assert!(s
+            .recent_sync("dev-1", 100)
+            .unwrap()
+            .iter()
+            .any(|e| e.ts == now));
     }
 
     #[test]
@@ -527,7 +531,8 @@ mod tests {
             let s = PortableStore::open(&path, &k, RetentionPolicy::default()).unwrap();
             assert_eq!(s.recent_sync("dev-1", 10).unwrap().len(), 1);
             assert_eq!(s.thread_state_sync("t1").unwrap().unwrap(), b"\x09");
-            s.verify_audit_chain_sync().expect("chain re-verifies after reload");
+            s.verify_audit_chain_sync()
+                .expect("chain re-verifies after reload");
         }
     }
 }

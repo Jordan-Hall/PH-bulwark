@@ -77,7 +77,13 @@ mod integration_tests {
     use aegis_proto::v1::{Action, MediaKind, SourceChannel};
     use bytes::Bytes;
 
-    fn flow(flow_id: u64, ct: Option<&str>, path: &str, body: &[u8], channel: SourceChannel) -> CapturedFlow {
+    fn flow(
+        flow_id: u64,
+        ct: Option<&str>,
+        path: &str,
+        body: &[u8],
+        channel: SourceChannel,
+    ) -> CapturedFlow {
         let mut headers = Vec::new();
         if let Some(ct) = ct {
             headers.push(Header {
@@ -106,13 +112,38 @@ mod integration_tests {
         let fc = DefaultFlowClassifier::with_defaults();
 
         let cases: &[(&str, &str, MediaKind, SourceChannel)] = &[
-            ("text/html", "/index.html", MediaKind::Text, SourceChannel::Web),
-            ("application/json", "/api/chat", MediaKind::Text, SourceChannel::Web),
+            (
+                "text/html",
+                "/index.html",
+                MediaKind::Text,
+                SourceChannel::Web,
+            ),
+            (
+                "application/json",
+                "/api/chat",
+                MediaKind::Text,
+                SourceChannel::Web,
+            ),
             ("image/jpeg", "/a.jpg", MediaKind::Image, SourceChannel::Web),
-            ("image/webp", "/a.webp", MediaKind::Image, SourceChannel::Web),
+            (
+                "image/webp",
+                "/a.webp",
+                MediaKind::Image,
+                SourceChannel::Web,
+            ),
             ("audio/mpeg", "/a.mp3", MediaKind::Audio, SourceChannel::Web),
-            ("video/mp4", "/a.mp4", MediaKind::Video, SourceChannel::VideoStream),
-            ("video/mp2t", "/seg.ts", MediaKind::Video, SourceChannel::VideoStream),
+            (
+                "video/mp4",
+                "/a.mp4",
+                MediaKind::Video,
+                SourceChannel::VideoStream,
+            ),
+            (
+                "video/mp2t",
+                "/seg.ts",
+                MediaKind::Video,
+                SourceChannel::VideoStream,
+            ),
         ];
 
         for (ct, path, kind, channel) in cases {
@@ -129,7 +160,13 @@ mod integration_tests {
         let fc = DefaultFlowClassifier::with_defaults();
         let manifest = b"#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-TARGETDURATION:2\n\
                          #EXT-X-MEDIA-SEQUENCE:330\n#EXTINF:2.0,\nseg330.ts\n#EXTINF:2.0,\nseg331.ts\n";
-        let f = flow(10, Some("text/plain"), "/live/master.m3u8", manifest, SourceChannel::Web);
+        let f = flow(
+            10,
+            Some("text/plain"),
+            "/live/master.m3u8",
+            manifest,
+            SourceChannel::Web,
+        );
 
         let c = fc.classification(&f);
         assert_eq!(c.source_channel, SourceChannel::LiveStream);
@@ -150,7 +187,13 @@ mod integration_tests {
                 <Representation id="1" bandwidth="800000"></Representation>
               </AdaptationSet></Period>
             </MPD>"#;
-        let f = flow(11, Some("application/dash+xml"), "/vod/manifest.mpd", mpd, SourceChannel::Web);
+        let f = flow(
+            11,
+            Some("application/dash+xml"),
+            "/vod/manifest.mpd",
+            mpd,
+            SourceChannel::Web,
+        );
 
         let c = fc.classification(&f);
         assert_eq!(c.source_channel, SourceChannel::VideoStream);
@@ -167,7 +210,13 @@ mod integration_tests {
         // A progressive mp4 chunk (ftyp box) on a VOD video channel.
         let seg = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2 video-payload-here";
         let units = fc
-            .classify(flow(20, Some("video/mp4"), "/vod/chunk0.mp4", seg, SourceChannel::VideoStream))
+            .classify(flow(
+                20,
+                Some("video/mp4"),
+                "/vod/chunk0.mp4",
+                seg,
+                SourceChannel::VideoStream,
+            ))
             .await
             .unwrap();
 
@@ -177,7 +226,11 @@ mod integration_tests {
             AnalysisUnit::VideoSegment { segment_id, .. } => segment_id.unwrap(),
             other => panic!("expected VideoSegment, got {other:?}"),
         };
-        assert_eq!(fc.buffer().pending(), 1, "segment is held pending a verdict");
+        assert_eq!(
+            fc.buffer().pending(),
+            1,
+            "segment is held pending a verdict"
+        );
 
         // Verdict returns ALLOW → the segment is RELEASED (forwarded) and the
         // buffer drains.
@@ -196,7 +249,13 @@ mod integration_tests {
         // A live .ts segment (MPEG-TS sync byte) on a live channel.
         let seg = [0x47u8; 376]; // two TS packets
         let units = fc
-            .classify(flow(21, Some("video/mp2t"), "/live/seg42.ts", &seg, SourceChannel::LiveStream))
+            .classify(flow(
+                21,
+                Some("video/mp2t"),
+                "/live/seg42.ts",
+                &seg,
+                SourceChannel::LiveStream,
+            ))
             .await
             .unwrap();
 
@@ -208,7 +267,10 @@ mod integration_tests {
             } => (segment_id.unwrap(), *deadline_ms),
             other => panic!("expected VideoSegment, got {other:?}"),
         };
-        assert_eq!(deadline, LIVE_DELAY_MS, "live segment carries the broadcast-delay deadline");
+        assert_eq!(
+            deadline, LIVE_DELAY_MS,
+            "live segment carries the broadcast-delay deadline"
+        );
         assert_eq!(fc.buffer().pending(), 1);
 
         // Verdict returns BLOCK → the segment is DROPPED, not forwarded.
@@ -232,14 +294,26 @@ mod integration_tests {
 
         // First segment admitted.
         let units = fc
-            .classify(flow(30, Some("video/mp4"), "/a.mp4", seg, SourceChannel::VideoStream))
+            .classify(flow(
+                30,
+                Some("video/mp4"),
+                "/a.mp4",
+                seg,
+                SourceChannel::VideoStream,
+            ))
             .await
             .unwrap();
         assert_eq!(units.len(), 1);
 
         // Second segment: buffer full → classify surfaces a BufferFull error.
         let err = fc
-            .classify(flow(31, Some("video/mp4"), "/b.mp4", seg, SourceChannel::VideoStream))
+            .classify(flow(
+                31,
+                Some("video/mp4"),
+                "/b.mp4",
+                seg,
+                SourceChannel::VideoStream,
+            ))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("ipc") || err.to_string().contains("back-pressure"));

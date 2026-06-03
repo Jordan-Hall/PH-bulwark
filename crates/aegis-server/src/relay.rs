@@ -221,9 +221,7 @@ pub type AlertEventStream =
 /// A lagged receiver (slow guardian client) skips the dropped events rather
 /// than failing the whole stream; a closed channel ends the stream cleanly.
 /// Built with `futures_util::stream::unfold` so we need no `tokio-stream` dep.
-fn broadcast_into_stream(
-    rx: tokio::sync::broadcast::Receiver<AlertEvent>,
-) -> AlertEventStream {
+fn broadcast_into_stream(rx: tokio::sync::broadcast::Receiver<AlertEvent>) -> AlertEventStream {
     use tokio::sync::broadcast::error::RecvError;
 
     let stream = futures_util::stream::unfold(rx, |mut rx| async move {
@@ -262,7 +260,10 @@ pub struct ReviewService {
 impl ReviewService {
     /// Legacy constructor: no per-guardian scoping (device_id filter only).
     pub fn new(hub: AlertHub) -> Self {
-        Self { hub, accounts: None }
+        Self {
+            hub,
+            accounts: None,
+        }
     }
 
     /// Scope guardian streams by session token against `store`'s child→guardian
@@ -292,9 +293,7 @@ impl aegis_proto::v1::review_server::Review for ReviewService {
         }
         let decision = r.decision();
         if decision == ReviewDecision::Unspecified {
-            return Err(Status::invalid_argument(
-                "decision must be APPROVE or DENY",
-            ));
+            return Err(Status::invalid_argument("decision must be APPROVE or DENY"));
         }
         let scope = r.scope(); // ignored for DENY by the allowlist
 

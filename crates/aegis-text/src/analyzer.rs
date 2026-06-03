@@ -154,8 +154,11 @@ impl<C: TextClassifier> TextAnalyzer<C> {
         // Backstop confirmation only — never alters category/score/action.
         let classifier_backed = self.classifier.agrees_grooming(span);
 
-        let fired_names: Vec<String> =
-            outcome.fired.iter().map(|r| r.as_str().to_string()).collect();
+        let fired_names: Vec<String> = outcome
+            .fired
+            .iter()
+            .map(|r| r.as_str().to_string())
+            .collect();
 
         // Image request → CSAM-suspected (report-never-archive path, PLAN §0c).
         let category = if outcome.image_request {
@@ -231,7 +234,11 @@ impl<C: TextClassifier> GroomingRules for TextAnalyzer<C> {
             full_excerpt(&span.text, &outcome.fired)
         };
         GroomingSignal {
-            fired_categories: outcome.fired.iter().map(|r| r.as_str().to_string()).collect(),
+            fired_categories: outcome
+                .fired
+                .iter()
+                .map(|r| r.as_str().to_string())
+                .collect(),
             score: outcome.score,
             excerpt,
             classifier_backed,
@@ -400,7 +407,10 @@ mod tests {
         let v = a.analyze_span("r1", &span, 0);
         assert_eq!(v.category, Category::CsamSuspected as i32);
         let ev = v.evidence.unwrap();
-        assert!(ev.text_snippet.starts_with("[redacted"), "CSAM stays redacted");
+        assert!(
+            ev.text_snippet.starts_with("[redacted"),
+            "CSAM stays redacted"
+        );
         assert_ne!(ev.text_snippet, raw);
         assert!(v.grooming.unwrap().excerpt.starts_with("[redacted"));
     }

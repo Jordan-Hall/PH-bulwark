@@ -40,7 +40,6 @@ pub enum TlsMode {
     None,
 }
 
-
 /// SMTP credentials. Held in memory only; sourced from the environment / OS
 /// keystore, never from a committed config file.
 #[derive(Clone, Serialize, Deserialize)]

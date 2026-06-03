@@ -126,13 +126,13 @@ fn run_certutil(mut cmd: std::process::Command) -> Result<()> {
 mod win {
     use super::{NetError, Result, StoreScope};
     use windows::core::w;
+    use windows::Win32::Security::Cryptography::HCERTSTORE;
     use windows::Win32::Security::Cryptography::{
         CertAddEncodedCertificateToStore, CertCloseStore, CertDeleteCertificateFromStore,
         CertDuplicateCertificateContext, CertEnumCertificatesInStore, CertOpenStore,
         CERT_QUERY_ENCODING_TYPE, CERT_STORE_ADD_REPLACE_EXISTING, CERT_STORE_PROV_SYSTEM_W,
         CERT_SYSTEM_STORE_CURRENT_USER, CERT_SYSTEM_STORE_LOCAL_MACHINE, X509_ASN_ENCODING,
     };
-    use windows::Win32::Security::Cryptography::HCERTSTORE;
 
     const PKCS_7_ASN_ENCODING: u32 = 0x0001_0000;
 
@@ -182,8 +182,8 @@ mod win {
                 None,
             )
         };
-        let result = res
-            .map_err(|e| NetError::trust_store(format!("add cert to ROOT failed: {e}")));
+        let result =
+            res.map_err(|e| NetError::trust_store(format!("add cert to ROOT failed: {e}")));
         close_store(store);
         result?;
         tracing::info!("installed per-install root CA into Windows Trusted Root store");
@@ -241,7 +241,9 @@ mod win {
         } else {
             // Not finding it is not fatal on uninstall (already gone), but we log
             // so a truly-orphaned root is investigated.
-            tracing::warn!("root CA not found in Trusted Root store during uninstall (already removed?)");
+            tracing::warn!(
+                "root CA not found in Trusted Root store during uninstall (already removed?)"
+            );
             Ok(())
         }
     }

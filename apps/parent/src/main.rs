@@ -182,8 +182,7 @@ impl Alert {
         // A locally-stored video segment to review, if the cluster attached one.
         // (The store never persists CSAM, so this is always empty for CSAM; the
         // card also gates playback on category as defence in depth.)
-        let segment_uri = Some(ev.local_segment_uri)
-            .filter(|s| !s.is_empty());
+        let segment_uri = Some(ev.local_segment_uri).filter(|s| !s.is_empty());
 
         Self {
             id: ev.alert_id,
@@ -250,7 +249,9 @@ fn seed() -> Vec<Alert> {
             actionable: true,
             category: Category::Grooming,
             thumbnail: Vec::new(),
-            snippet: "hey don\u{2019}t tell your mum about this, let\u{2019}s talk on the other app".into(),
+            snippet:
+                "hey don\u{2019}t tell your mum about this, let\u{2019}s talk on the other app"
+                    .into(),
             segment_uri: None,
         },
     ]
@@ -438,7 +439,9 @@ async fn submit_decision(alert_id: &str, device_id: &str, approve: bool) -> anyh
 /// whether it has been generated, and surface the trust command if needed.
 fn ca_pem_path() -> std::path::PathBuf {
     let base = std::env::var("LOCALAPPDATA").unwrap_or_default();
-    std::path::Path::new(&base).join("Aegis").join("aegis-root-ca.pem")
+    std::path::Path::new(&base)
+        .join("Aegis")
+        .join("aegis-root-ca.pem")
 }
 
 /// True when the CA pem exists on disk (i.e. the proxy has a root to trust).
@@ -653,8 +656,7 @@ fn ProtectionPanel() -> Element {
 
     // The spawned proxy process, shared across handlers. use_signal stores it so
     // the same Rc survives re-renders; we never read it on the render path.
-    let proxy: Signal<ProxyHandle> =
-        use_signal(|| Rc::new(RefCell::new(Option::<Child>::None)));
+    let proxy: Signal<ProxyHandle> = use_signal(|| Rc::new(RefCell::new(Option::<Child>::None)));
 
     // Live status poll: every ~2s probe the port (source of truth) and re-check
     // the CA file. Heavy/blocking work runs inside the async task, off render.
@@ -931,12 +933,13 @@ fn SegmentPlayer(uri: String) -> Element {
         let uri = uri.clone();
         spawn(async move {
             match load_segment_from_disk(&uri) {
-                Ok(Some(bytes)) => {
-                    data_uri.set(Some(format!("data:video/mp4;base64,{}", base64_encode(&bytes))))
-                }
-                Ok(None) => {
-                    load_err.set(Some("not found (expired, purged, or never stored)".to_string()))
-                }
+                Ok(Some(bytes)) => data_uri.set(Some(format!(
+                    "data:video/mp4;base64,{}",
+                    base64_encode(&bytes)
+                ))),
+                Ok(None) => load_err.set(Some(
+                    "not found (expired, purged, or never stored)".to_string(),
+                )),
                 Err(e) => load_err.set(Some(e)),
             }
         });
@@ -1006,8 +1009,7 @@ fn sniff_image_mime(bytes: &[u8]) -> &'static str {
 /// Minimal standard-alphabet base64 encoder (RFC 4648, with `=` padding).
 /// Hand-rolled so the console needs no extra dependency for the data URI.
 fn base64_encode(input: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
         let b0 = chunk[0] as u32;
@@ -1033,10 +1035,26 @@ fn base64_encode(input: &[u8]) -> String {
 #[component]
 fn CoverageMatrix() -> Element {
     let rows = [
-        ("Web (browsers)", "Filtered", "HTTPS decrypted via the per-install CA"),
-        ("Video / live streams", "Filtered", "Buffered, sampled, block/blur/mute"),
-        ("WhatsApp / Signal / Messenger (E2E)", "On-device only", "Network can't read; on-device text check"),
-        ("iPhone / iPad", "Content filter only", "Apple forbids message/screen access to apps"),
+        (
+            "Web (browsers)",
+            "Filtered",
+            "HTTPS decrypted via the per-install CA",
+        ),
+        (
+            "Video / live streams",
+            "Filtered",
+            "Buffered, sampled, block/blur/mute",
+        ),
+        (
+            "WhatsApp / Signal / Messenger (E2E)",
+            "On-device only",
+            "Network can't read; on-device text check",
+        ),
+        (
+            "iPhone / iPad",
+            "Content filter only",
+            "Apple forbids message/screen access to apps",
+        ),
     ];
     rsx! {
         table { class: "cov",

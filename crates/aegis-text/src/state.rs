@@ -88,7 +88,10 @@ impl ThreadState {
         self.flagged_messages = self.flagged_messages.saturating_add(1);
         for &rule in fired {
             // Keep the most recent sighting.
-            let entry = self.last_seen_ms.entry(rule.as_str().to_string()).or_insert(now_ms);
+            let entry = self
+                .last_seen_ms
+                .entry(rule.as_str().to_string())
+                .or_insert(now_ms);
             if now_ms >= *entry {
                 *entry = now_ms;
             }

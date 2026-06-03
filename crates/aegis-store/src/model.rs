@@ -83,9 +83,7 @@ impl AuditRow {
     pub fn from_event(id: i64, ev: &StoredEvent) -> Self {
         let v = &ev.verdict;
         let evidence = v.evidence.as_ref();
-        let content_sha256 = evidence
-            .map(|e| hex_encode(&e.sha256))
-            .unwrap_or_default();
+        let content_sha256 = evidence.map(|e| hex_encode(&e.sha256)).unwrap_or_default();
         let model_id = evidence.map(|e| e.model_id.clone()).unwrap_or_default();
 
         // Reason codes: the grooming indicator categories that fired, if present.

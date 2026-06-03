@@ -229,7 +229,10 @@ mod tests {
     #[test]
     fn text_is_always_local_on_desktop() {
         let snap = PolicySnapshot::from_policy(&desktop_policy());
-        assert_eq!(decide(MediaKind::Text, &snap, &live(5, 0, -1, false)), Route::Local);
+        assert_eq!(
+            decide(MediaKind::Text, &snap, &live(5, 0, -1, false)),
+            Route::Local
+        );
     }
 
     // ---- mobile + low battery: offload image/video, keep text local ------

@@ -155,12 +155,10 @@ pub trait PolicyEngine: Send + Sync {
 
 /// The deterministic policy engine. Construct from a [`PolicyConfig`]
 /// (`Policy::new`) or use [`Policy::default`] for the built-in defaults.
-#[derive(Clone, Debug)]
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Policy {
     config: PolicyConfig,
 }
-
 
 impl Policy {
     /// Build an engine from a (validated) configuration.
@@ -205,12 +203,7 @@ impl Policy {
 
         // --- SAFE: always allow, no alert. ---
         if category == Category::Safe {
-            return PolicyDecision::new(
-                Action::Allow,
-                None,
-                Severity::Info,
-                "safe content",
-            );
+            return PolicyDecision::new(Action::Allow, None, Severity::Info, "safe content");
         }
 
         // --- Below the log threshold: allow, nothing recorded. ---
@@ -264,7 +257,11 @@ impl Policy {
             Action::Log,
             None,
             Severity::Low,
-            format!("{} in log band ({:.2}); recorded", category_label(category), score),
+            format!(
+                "{} in log band ({:.2}); recorded",
+                category_label(category),
+                score
+            ),
         )
     }
 
@@ -597,7 +594,10 @@ mod tests {
     fn adult_text_flag_band_blocks_for_young_child_warns_for_teen() {
         let p = Policy::default();
         // Young child flag band [0.4, 0.6): a score of 0.5 → BLOCK.
-        let young = p.evaluate(&verdict(Category::AdultText, 0.5), &ctx(AgeProfile::YoungChild));
+        let young = p.evaluate(
+            &verdict(Category::AdultText, 0.5),
+            &ctx(AgeProfile::YoungChild),
+        );
         assert_eq!(young.action, Action::Block);
         // Teen flag band [0.5, 0.7): a score of 0.55 → WARN (not block).
         let teen = p.evaluate(&verdict(Category::AdultText, 0.55), &ctx(AgeProfile::Teen));
@@ -619,7 +619,10 @@ mod tests {
     fn csam_is_critical_block_alert_and_report() {
         let p = Policy::default();
         // Even with a low score, CSAM short-circuits to the critical path.
-        let d = p.evaluate(&verdict(Category::CsamSuspected, 0.2), &ctx(AgeProfile::Teen));
+        let d = p.evaluate(
+            &verdict(Category::CsamSuspected, 0.2),
+            &ctx(AgeProfile::Teen),
+        );
         assert_eq!(d.action, Action::Block);
         assert_eq!(d.raise_alert, Some(AlertKind::Intervention));
         assert_eq!(d.severity, Severity::Critical);
@@ -633,7 +636,10 @@ mod tests {
             ..Default::default()
         };
         let p = Policy::new(cfg);
-        let d = p.evaluate(&verdict(Category::CsamSuspected, 0.9), &ctx(AgeProfile::Teen));
+        let d = p.evaluate(
+            &verdict(Category::CsamSuspected, 0.9),
+            &ctx(AgeProfile::Teen),
+        );
         // Still blocks + alerts critically; only the report flag is suppressed.
         assert_eq!(d.action, Action::Block);
         assert_eq!(d.severity, Severity::Critical);

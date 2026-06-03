@@ -243,7 +243,12 @@ mod tests {
         let lex = en();
         let eng = GroomingRuleEngine::new();
         let st = ThreadState::new("t");
-        let out = eng.evaluate("want to play minecraft after school?", lex.resolve("en"), &st, 0);
+        let out = eng.evaluate(
+            "want to play minecraft after school?",
+            lex.resolve("en"),
+            &st,
+            0,
+        );
         assert!(out.is_silent());
         assert_eq!(out.score, 0.0);
         assert_eq!(out.severity, Severity::Info);

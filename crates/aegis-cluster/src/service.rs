@@ -69,7 +69,11 @@ impl<M: ClusterMember + 'static> ClusterControl for ClusterControlService<M> {
         &self,
         req: Request<WatchHealthRequest>,
     ) -> Result<Response<Self::WatchHealthStream>, Status> {
-        let inner = self.inner.watch_health(req.into_inner()).await.map_err(to_status)?;
+        let inner = self
+            .inner
+            .watch_health(req.into_inner())
+            .await
+            .map_err(to_status)?;
         let mapped = inner.map(|r| r.map_err(to_status));
         Ok(Response::new(Box::pin(mapped)))
     }

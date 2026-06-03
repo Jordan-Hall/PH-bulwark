@@ -15,9 +15,9 @@ use std::sync::Arc;
 
 use aegis_core::Result;
 use aegis_proto::v1::{
-    DequeueRequest, DequeueResponse, DrainRequest, DrainResponse, EnqueueRequest,
-    EnqueueResponse, HealthRequest, HealthStatus, JoinRequest, JoinResponse, LeaveRequest,
-    LeaveResponse, NodeInfo, NodeState, WatchHealthRequest, WorkItem,
+    DequeueRequest, DequeueResponse, DrainRequest, DrainResponse, EnqueueRequest, EnqueueResponse,
+    HealthRequest, HealthStatus, JoinRequest, JoinResponse, LeaveRequest, LeaveResponse, NodeInfo,
+    NodeState, WatchHealthRequest, WorkItem,
 };
 use async_trait::async_trait;
 use futures_core::stream::BoxStream;
@@ -316,13 +316,18 @@ mod tests {
             ..Default::default()
         };
         let c = Cluster::new(cfg);
-        assert!(c
-            .enqueue(EnqueueRequest { item: Some(work("a")) })
+        assert!(
+            c.enqueue(EnqueueRequest {
+                item: Some(work("a"))
+            })
             .await
             .unwrap()
-            .accepted);
+            .accepted
+        );
         let refused = c
-            .enqueue(EnqueueRequest { item: Some(work("b")) })
+            .enqueue(EnqueueRequest {
+                item: Some(work("b")),
+            })
             .await
             .unwrap();
         assert!(!refused.accepted, "should refuse under backpressure");
@@ -338,7 +343,9 @@ mod tests {
         .await
         .unwrap();
         let refused = c
-            .enqueue(EnqueueRequest { item: Some(work("x")) })
+            .enqueue(EnqueueRequest {
+                item: Some(work("x")),
+            })
             .await
             .unwrap();
         assert!(!refused.accepted, "draining node must refuse new work");

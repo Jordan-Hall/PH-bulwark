@@ -18,10 +18,10 @@ use serde::{Deserialize, Serialize};
 /// A coarse signal lifted from a platform's family API.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SupervisionSignal {
-    pub platform: String,     // "google" | "microsoft" | "apple" | "meta"
-    pub kind: String,         // e.g. "friend_request", "app_install", "screen_time_exceeded"
+    pub platform: String, // "google" | "microsoft" | "apple" | "meta"
+    pub kind: String,     // e.g. "friend_request", "app_install", "screen_time_exceeded"
     pub subject_device: String,
-    pub summary: String,      // human-readable, no sensitive content
+    pub summary: String, // human-readable, no sensitive content
     pub ts: i64,
 }
 
@@ -75,10 +75,26 @@ macro_rules! stub_connector {
     };
 }
 
-stub_connector!(GoogleFamilyLink, "google", "Google Family Link connector (coarse signals).");
-stub_connector!(MicrosoftFamilySafety, "microsoft", "Microsoft Family Safety connector.");
-stub_connector!(AppleScreenTime, "apple", "Apple Screen Time connector (very limited API).");
-stub_connector!(MetaFamilyCenter, "meta", "Meta Family Center connector (limited API).");
+stub_connector!(
+    GoogleFamilyLink,
+    "google",
+    "Google Family Link connector (coarse signals)."
+);
+stub_connector!(
+    MicrosoftFamilySafety,
+    "microsoft",
+    "Microsoft Family Safety connector."
+);
+stub_connector!(
+    AppleScreenTime,
+    "apple",
+    "Apple Screen Time connector (very limited API)."
+);
+stub_connector!(
+    MetaFamilyCenter,
+    "meta",
+    "Meta Family Center connector (limited API)."
+);
 
 /// Aggregates all configured connectors and polls them.
 #[derive(Default)]

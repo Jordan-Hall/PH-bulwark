@@ -69,9 +69,7 @@ pub mod vpn;
 pub use ca::{CaKeyStore, CaManager, DevInMemoryKeyStore, KeyStoreTier};
 pub use config::NetConfig;
 pub use error::{NetError, Result};
-pub use interceptor::{
-    CapturedFlow, FlowPayload, InterceptDecision, Interceptor, NetInterceptor,
-};
+pub use interceptor::{CapturedFlow, FlowPayload, InterceptDecision, Interceptor, NetInterceptor};
 pub use pinning::{HostCapability, PinningRegistry, PinningSignal};
 pub use proxy::{FlowReceiver, FlowSender, MitmProxy};
 pub use quic::QuicDowngrade;

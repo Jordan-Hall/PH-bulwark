@@ -31,8 +31,11 @@ async fn main() -> anyhow::Result<()> {
 
     let registry = AnalyzerRegistry::with_text();
 
-    let cluster = matches!(role, ServerRole::AllInOne | ServerRole::Lb)
-        .then(|| Arc::new(aegis_cluster::Cluster::new(aegis_cluster::ClusterConfig::default())));
+    let cluster = matches!(role, ServerRole::AllInOne | ServerRole::Lb).then(|| {
+        Arc::new(aegis_cluster::Cluster::new(
+            aegis_cluster::ClusterConfig::default(),
+        ))
+    });
 
     // Alert relay is wired when SMTP is configured (aegis-alert). For a bare
     // local run we serve without it; the all-in-one client raises alerts itself.

@@ -23,8 +23,8 @@
 use std::time::Duration;
 
 use aegis_proto::v1::alert_relay_client::AlertRelayClient;
-use aegis_proto::v1::review_client::ReviewClient;
 use aegis_proto::v1::alert_relay_server::AlertRelayServer;
+use aegis_proto::v1::review_client::ReviewClient;
 use aegis_proto::v1::review_server::ReviewServer;
 use aegis_proto::v1::{
     AlertEvent, AlertKind, Category, DeviceFilter, Evidence, ReviewDecision, ReviewRequest,
@@ -127,7 +127,10 @@ async fn guardian_approve_deny_loop_over_grpc() {
         .expect("fanned-out alert did not hang")
         .expect("stream yielded an item")
         .expect("item is Ok");
-    assert_eq!(got.alert_id, "alert-1", "fan-out delivered the raised alert");
+    assert_eq!(
+        got.alert_id, "alert-1",
+        "fan-out delivered the raised alert"
+    );
     assert_eq!(got.device_id, "kids-tablet");
     assert_eq!(got.category, Category::AdultImage as i32);
     // Privacy invariant: no raw media crossed the wire.
@@ -147,9 +150,12 @@ async fn guardian_approve_deny_loop_over_grpc() {
         scope: ReviewScope::ThisHost as i32,
         ts: 2,
     };
-    let approve_ack = timeout(review_client.submit_decision(approve), "SubmitDecision APPROVE")
-        .await
-        .into_inner();
+    let approve_ack = timeout(
+        review_client.submit_decision(approve),
+        "SubmitDecision APPROVE",
+    )
+    .await
+    .into_inner();
     assert_eq!(approve_ack.alert_id, "alert-1");
     assert!(
         approve_ack.applied,

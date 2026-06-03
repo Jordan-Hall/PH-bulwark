@@ -159,10 +159,7 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
 
         let mut worst: Option<Verdict> = None;
         let mut take = |v: Verdict| {
-            let better = worst
-                .as_ref()
-                .map(|w| v.score > w.score)
-                .unwrap_or(true);
+            let better = worst.as_ref().map(|w| v.score > w.score).unwrap_or(true);
             if better {
                 worst = Some(v);
             }
@@ -171,7 +168,10 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
         for (i, frame) in decoded.frames.iter().enumerate() {
             let v = self
                 .vision
-                .analyze(image_req(&format!("{}-f{i}", req.request_id), frame.clone()))
+                .analyze(image_req(
+                    &format!("{}-f{i}", req.request_id),
+                    frame.clone(),
+                ))
                 .await?;
             if v.category == Category::AdultImage as i32 {
                 take(v);
@@ -324,7 +324,11 @@ pub mod ffmpeg {
         /// Decode an in-memory segment by staging it to a temp file (the segment
         /// API is byte-oriented; piping arbitrary container bytes through stdin
         /// is format-fragile, so a temp file is the robust path).
-        fn decode_segment_frames(&self, segment: &[u8], sample_fps: f32) -> Option<Vec<SampledFrame>> {
+        fn decode_segment_frames(
+            &self,
+            segment: &[u8],
+            sample_fps: f32,
+        ) -> Option<Vec<SampledFrame>> {
             if segment.is_empty() {
                 return Some(Vec::new());
             }

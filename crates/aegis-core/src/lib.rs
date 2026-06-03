@@ -42,6 +42,7 @@ pub mod telemetry;
 
 // --- Curated public prelude: the names other crates rely on directly. ---
 
+pub use analyze::Analyzer;
 pub use config::{
     ClusterConfig, Config, ModelConfig, PolicyPaths, SmtpConfig, CONFIG_PATH_ENV, ENV_PREFIX,
 };
@@ -49,7 +50,6 @@ pub use device::{
     detect_device_profile, detect_device_profile_with, detect_platform, exec_providers_for,
     DetectionHints,
 };
-pub use analyze::Analyzer;
 pub use error::{Error, Result};
 pub use flow::{AnalysisUnit, CapturedFlow, FlowPayload, Header, HttpHead, InterceptDecision};
 pub use ids::{DeviceId, RequestId, ThreadId};
