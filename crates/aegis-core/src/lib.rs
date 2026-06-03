@@ -31,6 +31,11 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+// Config load/validate (and the figment `Jail` tests) surface figment's large
+// error type by value. These are cold parse/load paths, so the `Err`-variant size
+// is not a hot-path concern; boxing figment's error would churn the API for no
+// runtime benefit. Allow `result_large_err` crate-wide (CI runs `-D warnings`).
+#![allow(clippy::result_large_err)]
 
 pub mod analyze;
 pub mod config;
