@@ -343,35 +343,43 @@ fn App() -> Element {
                     AlertCard {
                         key: "{a.id}",
                         alert: a.clone(),
-                        on_decide: move |approve: bool| {
-                            let id = a.id.clone();
-                            let device = a.device.clone();
-                            let mut alerts = alerts;
-                            let mut action_error = action_error;
+                        // Pre-clone (inside a block) the fields the callback needs so
+                        // the `move` closure captures THOSE, not `a` — the release
+                        // rsx expansion otherwise moves `a` while key/alert still use
+                        // it (compiles in debug via hot-reload, fails E0382 in release).
+                        on_decide: {
+                            let cb_id = a.id.clone();
+                            let cb_device = a.device.clone();
+                            move |approve: bool| {
+                                let id = cb_id.clone();
+                                let device = cb_device.clone();
+                                let mut alerts = alerts;
+                                let mut action_error = action_error;
 
-                            // Optimistically clear the row, then send the real
-                            // ReviewRequest (APPROVE/DENY) to the cluster. A
-                            // failed RPC restores the row and shows an inline
-                            // error — never a panic.
-                            let removed: Option<Alert> = {
-                                let mut list = alerts.write();
-                                let idx = list.iter().position(|x| x.id == id);
-                                idx.map(|i| list.remove(i))
-                            };
-                            action_error.set(None);
+                                // Optimistically clear the row, then send the real
+                                // ReviewRequest (APPROVE/DENY) to the cluster. A
+                                // failed RPC restores the row and shows an inline
+                                // error — never a panic.
+                                let removed: Option<Alert> = {
+                                    let mut list = alerts.write();
+                                    let idx = list.iter().position(|x| x.id == id);
+                                    idx.map(|i| list.remove(i))
+                                };
+                                action_error.set(None);
 
-                            spawn(async move {
-                                if let Err(e) = submit_decision(&id, &device, approve).await {
-                                    // Restore the optimistically-removed row.
-                                    if let Some(row) = removed {
-                                        let mut list = alerts.write();
-                                        if !list.iter().any(|x| x.id == row.id) {
-                                            list.insert(0, row);
+                                spawn(async move {
+                                    if let Err(e) = submit_decision(&id, &device, approve).await {
+                                        // Restore the optimistically-removed row.
+                                        if let Some(row) = removed {
+                                            let mut list = alerts.write();
+                                            if !list.iter().any(|x| x.id == row.id) {
+                                                list.insert(0, row);
+                                            }
                                         }
+                                        action_error.set(Some(e.to_string()));
                                     }
-                                    action_error.set(Some(e.to_string()));
-                                }
-                            });
+                                });
+                            }
                         }
                     }
                 }
