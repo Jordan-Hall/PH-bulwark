@@ -34,6 +34,15 @@ impl Normalization {
             std: [1.0, 1.0, 1.0],
         }
     }
+    /// `[-1, 1]` scaling (mean/std 0.5) — what the Falconsai / onnx-community
+    /// `nsfw_image_detection` ViT (and most HF `AutoImageProcessor` ViTs) expect.
+    /// Using ImageNet stats with such a model skews its scores.
+    pub const fn half() -> Self {
+        Self {
+            mean: [0.5, 0.5, 0.5],
+            std: [0.5, 0.5, 0.5],
+        }
+    }
 }
 impl Default for Normalization {
     fn default() -> Self {

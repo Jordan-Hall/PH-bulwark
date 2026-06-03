@@ -79,7 +79,15 @@ impl OnnxScorer {
             .ok()
             .filter(|s| !s.is_empty())
             .ok_or_else(|| anyhow::anyhow!("{} is not set", crate::MODEL_PATH_ENV))?;
-        Self::load(&path, input_size)
+        // Pixel normalization, selectable via AEGIS_NSFW_NORM (half | imagenet | unit).
+        // Default = `half` ([-1,1], mean/std 0.5): the Falconsai / onnx-community
+        // nsfw_image_detection ViT we ship needs this; ImageNet would skew its scores.
+        let norm = match std::env::var("AEGIS_NSFW_NORM").ok().as_deref() {
+            Some("imagenet") => Normalization::imagenet(),
+            Some("unit") => Normalization::unit(),
+            _ => Normalization::half(),
+        };
+        Self::load_with(&path, input_size, norm)
     }
 
     /// Run inference and return the NSFW probability in `[0, 1]`.
