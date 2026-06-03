@@ -25,6 +25,11 @@
 //! `mobile` (Android/iOS, experimental) and `web` targets, and bumps cleanly to
 //! the 0.7/0.8 native Blitz renderer (no webview) when it ships.
 
+use std::cell::RefCell;
+use std::process::Child;
+use std::rc::Rc;
+use std::time::Duration;
+
 use dioxus::prelude::*;
 
 use aegis_proto::v1::review_client::ReviewClient;
@@ -36,6 +41,25 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 fn main() {
     dioxus::launch(App);
 }
+
+// ---------------------------------------------------------------------------
+// Protection control panel — fixed local plumbing
+// ---------------------------------------------------------------------------
+
+/// The local content-filtering proxy listens here; this is also the address we
+/// program into the per-user Windows system proxy.
+const PROXY_HOST: &str = "127.0.0.1";
+const PROXY_PORT: u16 = 8080;
+const PROXY_ADDR: &str = "127.0.0.1:8080";
+
+/// Prebuilt proxy binary (preferred). If absent we fall back to `cargo run`.
+const PROXY_EXE: &str = r"C:\Users\Jordan\child-safety\target\debug\aegis_proxy.exe";
+/// Repo root — cwd for the `cargo run` fallback.
+const REPO_ROOT: &str = r"C:\Users\Jordan\child-safety";
+/// NSFW model handed to the proxy via `AEGIS_NSFW_MODEL`.
+const NSFW_MODEL: &str = r"C:\Users\Jordan\child-safety\models\nsfw.onnx";
+/// Cluster endpoint handed to the proxy via `AEGIS_CLUSTER_ENDPOINT`.
+const PROXY_CLUSTER_ENDPOINT: &str = "http://127.0.0.1:8443";
 
 // ---------------------------------------------------------------------------
 // Connection layer
@@ -286,6 +310,8 @@ fn App() -> Element {
                 "No device control, screen capture, or hidden monitoring."
             }
 
+            ProtectionPanel {}
+
             if offline() {
                 div { class: "banner", "Offline — showing sample data. Not connected to your home cluster." }
             }
@@ -379,6 +405,319 @@ async fn submit_decision(alert_id: &str, device_id: &str, approve: bool) -> anyh
         anyhow::bail!("the cluster did not apply the decision");
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Protection control panel — process + system-proxy plumbing
+// ---------------------------------------------------------------------------
+
+/// Path to the per-install root CA the proxy uses to decrypt HTTPS. We don't
+/// install it (that's a one-time `certutil` the user runs); we only report
+/// whether it has been generated, and surface the trust command if needed.
+fn ca_pem_path() -> std::path::PathBuf {
+    let base = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    std::path::Path::new(&base).join("Aegis").join("aegis-root-ca.pem")
+}
+
+/// True when the CA pem exists on disk (i.e. the proxy has a root to trust).
+fn ca_present() -> bool {
+    ca_pem_path().exists()
+}
+
+/// The one-time, no-admin command the user runs to trust the CA for their user.
+fn ca_trust_command() -> String {
+    format!(
+        "certutil -addstore -user Root \"{}\"",
+        ca_pem_path().display()
+    )
+}
+
+/// Spawn the content-filtering proxy.
+///
+/// Prefers the prebuilt `aegis_proxy.exe`; if that's missing, falls back to
+/// `cargo run -p aegis-client --features onnx --bin aegis_proxy` from the repo
+/// root. Either way the proxy gets `AEGIS_NSFW_MODEL` + `AEGIS_CLUSTER_ENDPOINT`.
+/// Returns the `Child` so the caller can kill it on Disconnect / shutdown.
+///
+/// Blocking (it touches the filesystem and spawns a process) — call from an
+/// event handler, never the render path.
+fn spawn_proxy() -> std::io::Result<Child> {
+    use std::process::Command;
+    if std::path::Path::new(PROXY_EXE).exists() {
+        Command::new(PROXY_EXE)
+            .env("AEGIS_NSFW_MODEL", NSFW_MODEL)
+            .env("AEGIS_CLUSTER_ENDPOINT", PROXY_CLUSTER_ENDPOINT)
+            .spawn()
+    } else {
+        // Dev fallback: build+run from source. cwd = repo root so cargo finds
+        // the workspace.
+        Command::new("cargo")
+            .args([
+                "run",
+                "-p",
+                "aegis-client",
+                "--features",
+                "onnx",
+                "--bin",
+                "aegis_proxy",
+            ])
+            .current_dir(REPO_ROOT)
+            .env("AEGIS_NSFW_MODEL", NSFW_MODEL)
+            .env("AEGIS_CLUSTER_ENDPOINT", PROXY_CLUSTER_ENDPOINT)
+            .spawn()
+    }
+}
+
+/// Is the proxy actually accepting connections right now? This is the source of
+/// truth for the status light — independent of whether *we* think we started it,
+/// so an externally-started proxy (or a crashed child) is reported honestly.
+///
+/// Blocking up to ~300ms; call from the status coroutine, not render.
+fn proxy_listening() -> bool {
+    use std::net::{TcpStream, ToSocketAddrs};
+    let addr = match (PROXY_HOST, PROXY_PORT).to_socket_addrs() {
+        Ok(mut it) => match it.next() {
+            Some(a) => a,
+            None => return false,
+        },
+        Err(_) => return false,
+    };
+    TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
+}
+
+/// Turn the per-user Windows system proxy ON, pointing all traffic at our local
+/// proxy. HKCU only — no admin. Best-effort notifies WinINET so already-open
+/// browsers re-read the setting; new windows pick it up regardless.
+#[cfg(windows)]
+fn enable_system_proxy() -> anyhow::Result<()> {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_WRITE};
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let settings = hkcu.open_subkey_with_flags(
+        r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+        KEY_WRITE,
+    )?;
+    settings.set_value("ProxyEnable", &1u32)?;
+    settings.set_value("ProxyServer", &PROXY_ADDR.to_string())?;
+    // Keep loopback + intranet direct so the console's own RPCs aren't proxied.
+    settings.set_value("ProxyOverride", &"<-loopback>".to_string())?;
+    refresh_wininet();
+    Ok(())
+}
+
+/// Turn the per-user system proxy OFF (ProxyEnable=0) and refresh WinINET.
+#[cfg(windows)]
+fn disable_system_proxy() -> anyhow::Result<()> {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_WRITE};
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let settings = hkcu.open_subkey_with_flags(
+        r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+        KEY_WRITE,
+    )?;
+    settings.set_value("ProxyEnable", &0u32)?;
+    refresh_wininet();
+    Ok(())
+}
+
+/// Best-effort: poke WinINET so open browsers re-read the proxy setting now.
+/// Failures are ignored — new browser windows always pick up the registry value.
+#[cfg(windows)]
+fn refresh_wininet() {
+    use windows::Win32::Networking::WinInet::{
+        InternetSetOptionW, INTERNET_OPTION_REFRESH, INTERNET_OPTION_SETTINGS_CHANGED,
+    };
+    unsafe {
+        let _ = InternetSetOptionW(None, INTERNET_OPTION_SETTINGS_CHANGED, None, 0);
+        let _ = InternetSetOptionW(None, INTERNET_OPTION_REFRESH, None, 0);
+    }
+}
+
+// Non-Windows stubs so the file still type-checks on other platforms (the app
+// only ships on Windows/macOS, but keeping the desktop build green elsewhere is
+// cheap). On non-Windows the system-proxy toggle is a documented no-op.
+#[cfg(not(windows))]
+fn enable_system_proxy() -> anyhow::Result<()> {
+    anyhow::bail!("system proxy toggle is only implemented on Windows")
+}
+#[cfg(not(windows))]
+fn disable_system_proxy() -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// Shared handle to the spawned proxy child, stored in app state so any handler
+/// (Connect/Disconnect/shutdown) can take and kill it. `Rc<RefCell<..>>` keeps
+/// it single-threaded on the UI thread, which is where our handlers run.
+type ProxyHandle = Rc<RefCell<Option<Child>>>;
+
+/// Kill the spawned proxy child if we have one (best-effort), then drop it.
+fn kill_proxy(handle: &ProxyHandle) {
+    if let Some(mut child) = handle.borrow_mut().take() {
+        let _ = child.kill();
+        // Reap so we don't leave a zombie; ignore the exit status.
+        let _ = child.wait();
+    }
+}
+
+#[component]
+fn ProtectionPanel() -> Element {
+    // Live truth from the 2s poll: is the proxy port actually accepting TCP?
+    let mut connected = use_signal(|| false);
+    // Whether the per-install CA pem exists (refreshed by the same poll).
+    let mut ca_trusted = use_signal(ca_present);
+    // Transient inline error from a failed Connect/Disconnect.
+    let control_error = use_signal(|| Option::<String>::None);
+    // True while a Connect/Disconnect action is in flight (debounce the button).
+    let busy = use_signal(|| false);
+
+    // The spawned proxy process, shared across handlers. use_signal stores it so
+    // the same Rc survives re-renders; we never read it on the render path.
+    let proxy: Signal<ProxyHandle> =
+        use_signal(|| Rc::new(RefCell::new(Option::<Child>::None)));
+
+    // Live status poll: every ~2s probe the port (source of truth) and re-check
+    // the CA file. Heavy/blocking work runs inside the async task, off render.
+    use_coroutine(move |_rx: UnboundedReceiver<()>| async move {
+        loop {
+            let listening = proxy_listening();
+            if connected() != listening {
+                connected.set(listening);
+            }
+            let ca = ca_present();
+            if ca_trusted() != ca {
+                ca_trusted.set(ca);
+            }
+            // Dioxus desktop runs on tokio; this yields without blocking the UI.
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    });
+
+    // Best-effort cleanup when the panel is torn down (app close). Dioxus 0.6
+    // has no first-class window-close hook on the desktop renderer, so we lean on
+    // use_drop: it runs when the component unmounts, which on a single-window app
+    // happens at shutdown. We kill the child and clear the system proxy so a
+    // closed window never leaves the machine proxied. (Hard kills, e.g. Task
+    // Manager, can't be caught — documented limitation; Disconnect is the
+    // guaranteed clean path.)
+    {
+        let proxy = proxy;
+        use_drop(move || {
+            kill_proxy(&proxy());
+            let _ = disable_system_proxy();
+        });
+    }
+
+    rsx! {
+        section { class: "protect",
+            div { class: "protect-head",
+                div {
+                    span {
+                        class: if connected() { "dot dot-on" } else { "dot dot-off" },
+                    }
+                    span { class: "protect-state",
+                        if connected() { "Protection on" } else { "Protection off" }
+                    }
+                }
+                button {
+                    class: if connected() { "disconnect" } else { "connect" },
+                    disabled: busy(),
+                    onclick: move |_| {
+                        // Snapshot state we need inside the (sync) handler.
+                        let want_connect = !connected();
+                        let proxy_handle = proxy();
+                        let mut control_error = control_error;
+                        let mut busy = busy;
+                        let mut connected = connected;
+
+                        busy.set(true);
+                        control_error.set(None);
+
+                        if want_connect {
+                            // 1) Spawn the proxy and stash the Child for later kill.
+                            match spawn_proxy() {
+                                Ok(child) => {
+                                    *proxy_handle.borrow_mut() = Some(child);
+                                }
+                                Err(e) => {
+                                    control_error
+                                        .set(Some(format!("Couldn't start the proxy: {e}")));
+                                    busy.set(false);
+                                    return;
+                                }
+                            }
+                            // 2) Flip the per-user Windows system proxy ON.
+                            if let Err(e) = enable_system_proxy() {
+                                control_error
+                                    .set(Some(format!("Started proxy but couldn't set system proxy: {e}")));
+                            }
+                        } else {
+                            // Disconnect: kill the child, then clear the proxy.
+                            kill_proxy(&proxy_handle);
+                            if let Err(e) = disable_system_proxy() {
+                                control_error
+                                    .set(Some(format!("Couldn't clear the system proxy: {e}")));
+                            }
+                            // Reflect "off" immediately; the poll confirms within 2s.
+                            connected.set(false);
+                        }
+
+                        busy.set(false);
+                    },
+                    if busy() {
+                        "Working…"
+                    } else if connected() {
+                        "Disconnect"
+                    } else {
+                        "Connect"
+                    }
+                }
+            }
+
+            if let Some(err) = control_error() {
+                div { class: "err", "{err}" }
+            }
+
+            div { class: "protect-grid",
+                div { class: "pg-row",
+                    span { class: "pg-k", "Status" }
+                    span { class: "pg-v",
+                        if connected() {
+                            span { class: "ok", "Connected" }
+                        } else {
+                            span { class: "off", "Off" }
+                        }
+                    }
+                }
+                div { class: "pg-row",
+                    span { class: "pg-k", "Proxy address" }
+                    span { class: "pg-v mono", "{PROXY_ADDR}" }
+                }
+                div { class: "pg-row",
+                    span { class: "pg-k", "Per-install CA" }
+                    span { class: "pg-v",
+                        if ca_trusted() {
+                            span { class: "ok", "Present" }
+                        } else {
+                            span { class: "off", "Missing" }
+                        }
+                    }
+                }
+                div { class: "pg-row",
+                    span { class: "pg-k", "NSFW model" }
+                    span { class: "pg-v mono", "{NSFW_MODEL}" }
+                }
+            }
+
+            if !ca_trusted() {
+                div { class: "ca-hint",
+                    "To decrypt HTTPS, trust the per-install CA once (no admin):"
+                    div { class: "mono ca-cmd", "{ca_trust_command()}" }
+                }
+            }
+        }
+    }
 }
 
 #[component]
@@ -536,4 +875,22 @@ const CSS: &str = r#"
     table.cov { width: 100%; border-collapse: collapse; font-size: 13px; }
     .cov th, .cov td { text-align: left; padding: 8px; border-bottom: 1px solid #232733; }
     .cov .how { color: #9aa0ad; }
+    .protect { background: #141821; border: 1px solid #232733; border-radius: 12px; padding: 16px; margin: 0 0 18px; }
+    .protect-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .protect-state { font-weight: 600; font-size: 15px; }
+    .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
+    .dot-on { background: #36c75f; box-shadow: 0 0 8px #36c75f88; }
+    .dot-off { background: #5a606e; }
+    .connect { background: #2f6f3e; color: #eaffea; font-weight: 600; padding: 9px 20px; }
+    .disconnect { background: #6f2f2f; color: #ffeaea; font-weight: 600; padding: 9px 20px; }
+    button:disabled { opacity: .6; cursor: default; }
+    .protect-grid { margin-top: 14px; display: grid; grid-template-columns: 1fr; gap: 6px; }
+    .pg-row { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; padding: 4px 0; border-bottom: 1px solid #1c212b; }
+    .pg-k { color: #8b91a0; }
+    .pg-v { text-align: right; word-break: break-all; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+    .ok { color: #6fe39a; }
+    .off { color: #9aa0ad; }
+    .ca-hint { margin-top: 12px; background: #12151c; border: 1px solid #232733; border-radius: 8px; padding: 10px 12px; font-size: 12px; color: #c8ccd6; }
+    .ca-cmd { margin-top: 6px; padding: 8px; background: #0c0e13; border-radius: 6px; word-break: break-all; user-select: all; }
 "#;

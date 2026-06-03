@@ -23,6 +23,15 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Control-panel plumbing (Windows-only, used by the Protection toggle):
+# - winreg flips the per-user WinINET proxy (HKCU, no admin) on Connect/Disconnect.
+# - windows/Win32_Networking_WinInet notifies already-open browsers to re-read the
+#   proxy setting (InternetSetOption SETTINGS_CHANGED + REFRESH); Win32_Foundation
+#   pulls in the shared BOOL/handle types those signatures use.
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+windows = { version = "0.60", features = ["Win32_Networking_WinInet", "Win32_Foundation"] }
+
 # Detached from the core cargo workspace so the verified `cargo build --workspace`
 # (the engine crates) doesn't pull the heavy Dioxus UI tree. This app builds on
 # its own: `cd apps/parent && cargo run`.
