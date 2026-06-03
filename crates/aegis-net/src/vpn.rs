@@ -28,9 +28,7 @@
 #![allow(unsafe_code)]
 
 pub use tokio_util::sync::CancellationToken;
-use tun2proxy::{ArgDns, ArgProxy, Args};
 
-use crate::quic::QuicDowngrade;
 use crate::{NetError, Result};
 
 /// The local MITM proxy captured TCP is redirected to. It speaks HTTP CONNECT, so
@@ -142,53 +140,32 @@ pub fn elevation_command() -> String {
 
 /// Run VPN mode until `shutdown` is cancelled.
 ///
-/// Brings up the TUN via tun2proxy, redirects captured TCP to the MITM proxy,
-/// NATs other traffic out, blocks QUIC so HTTP/3 can't bypass, installs the
-/// default route, and restores host routing on exit. **Requires admin +
-/// `wintun.dll`** (check [`is_elevated`] / [`wintun_available`] first).
-pub async fn run_vpn(cfg: VpnConfig, shutdown: CancellationToken) -> Result<()> {
-    let proxy = ArgProxy::try_from(cfg.proxy_url())
-        .map_err(|e| NetError::proxy(format!("invalid MITM proxy URL {}: {e}", cfg.proxy_url())))?;
-
-    // Block QUIC/UDP-443 so HTTP/3 can't slip past the TCP MITM. Best-effort —
-    // removed on exit. Empty allowlist = downgrade all QUIC to TCP.
-    let quic = QuicDowngrade::new(true, Vec::new());
-    if let Err(e) = quic.apply_rule() {
-        tracing::warn!(error = %e, "could not apply QUIC downgrade; HTTP/3 may bypass the filter");
-    }
-
-    // tun2proxy owns the wintun TUN + smoltcp netstack. `setup(true)` installs the
-    // default route and restores it on teardown; DNS over TCP keeps lookups on the
-    // captured/redirected path.
-    let mut args = Args::default();
-    args.proxy(proxy)
-        .tun(cfg.tun_name.clone())
-        .dns(ArgDns::OverTcp)
-        .setup(true);
-
-    tracing::info!(
-        tun = %cfg.tun_name,
-        proxy = %cfg.proxy_url(),
-        "VPN mode: starting tun2proxy (all TCP -> MITM, UDP NAT'd, QUIC blocked)"
-    );
-
-    let result = tun2proxy::general_run_async(args, tun2proxy::DEFAULT_MTU, false, shutdown).await;
-
-    let _ = quic.remove_rule();
-    result.map_err(|e| NetError::tun(format!("tun2proxy VPN run: {e}")))?;
-    tracing::info!("VPN mode stopped; host routing restored");
-    Ok(())
+/// ## Status: data path being rebuilt on a PERMISSIVE stack
+/// The transparent data path is being re-implemented on **`smoltcp`** (0BSD) —
+/// capture the TUN at L3, redirect TCP to the local MITM proxy ([`VpnConfig::
+/// proxy_url`], HTTP CONNECT), and route/observe UDP/QUIC/WebRTC — plus
+/// **`boringtun`/WireGuard** (BSD-3) for the secure device↔filter-node transport
+/// leg. The previous `tun2proxy` backend was removed because it linked
+/// `socks5-impl` = **GPL-3.0-or-later** (copyleft), incompatible with the
+/// MIT/Apache product license.
+///
+/// Until that permissive data path lands, VPN mode **fails closed**: it does NOT
+/// bring up a TUN (an un-redirected TUN would black-hole the device's
+/// connectivity), and returns an error so the caller falls back to explicit
+/// **proxy mode** (`aegis_proxy` + the per-user system proxy) — fully functional
+/// and MIT-clean. Requires admin + `wintun.dll` once the data path is wired
+/// (check [`is_elevated`] / [`wintun_available`] first).
+pub async fn run_vpn(_cfg: VpnConfig, _shutdown: CancellationToken) -> Result<()> {
+    Err(NetError::tun(
+        "transparent VPN is being rebuilt on the permissive smoltcp + WireGuard \
+         (boringtun) stack after removing the GPL tun2proxy backend; use proxy \
+         mode (aegis_proxy + system proxy) meanwhile",
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn default_proxy_url_parses_as_http() {
-        let p = ArgProxy::try_from(VpnConfig::default().proxy_url()).expect("valid proxy url");
-        assert_eq!(p.proxy_type, tun2proxy::ProxyType::Http);
-    }
 
     #[test]
     fn defaults_are_local_http_aegis_tun() {

@@ -69,13 +69,12 @@ windows = { version = "0.60", features = [
     "Win32_System_Threading",
 ] }
 
-# VPN mode — DESKTOP (Windows / Linux / macOS). tun2proxy owns the platform TUN
-# (wintun on Windows, /dev/net/tun on Linux, utun on macOS) + a smoltcp userspace
-# netstack, redirecting captured TCP to the local MITM proxy and NATing the rest;
-# tokio-util's CancellationToken drives clean shutdown / route teardown. Mobile
-# (Android/iOS) uses the native VpnService / NetworkExtension shells, NOT this.
+# VPN mode — DESKTOP (Windows / Linux / macOS). The transparent data path is being
+# rebuilt on the PERMISSIVE smoltcp netstack (0BSD) + boringtun/WireGuard (BSD-3)
+# instead of the GPL tun2proxy. `tokio-util`'s CancellationToken drives clean
+# shutdown / route teardown. Mobile (Android/iOS) uses the native VpnService /
+# NetworkExtension shells, NOT this.
 [target.'cfg(any(windows, target_os = "linux", target_os = "macos"))'.dependencies]
-tun2proxy = { workspace = true }
 tokio-util = { workspace = true }
 
 # Linux/macOS TUN — stubbed (todo!()) behind cfg; dependency declared so the
