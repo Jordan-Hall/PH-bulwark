@@ -56,6 +56,9 @@ pub enum AccountError {
     NotFound,
     /// The caller is not a guardian of the target child.
     NotGuardian,
+    /// The `device_id` is already registered to another child (routing by device
+    /// must be unambiguous, or two families would see each other's alerts).
+    DeviceInUse,
     /// A required field was empty or malformed.
     Validation(&'static str),
 }
@@ -73,6 +76,9 @@ impl From<AccountError> for Status {
             AccountError::NotFound => Status::not_found("no such child or account"),
             AccountError::NotGuardian => {
                 Status::permission_denied("caller is not a guardian of this child")
+            }
+            AccountError::DeviceInUse => {
+                Status::already_exists("device_id is already registered to another child")
             }
             AccountError::Validation(m) => Status::invalid_argument(m),
         }
@@ -280,6 +286,13 @@ impl AccountStore {
             .ok_or(AccountError::Unauthorized)?;
         if child_name.trim().is_empty() {
             return Err(AccountError::Validation("child_name is required"));
+        }
+        // A device_id must map to exactly one child — alerts route by device_id, so
+        // a reused device id would put the same device in two families' guardian
+        // scopes and leak alerts across families. Reject duplicates.
+        let device_id = device_id.trim();
+        if !device_id.is_empty() && inner.device_to_child.contains_key(device_id) {
+            return Err(AccountError::DeviceInUse);
         }
         let child_id = self.rand_hex(ID_BYTES);
         let mut guardians = HashSet::new();
@@ -563,5 +576,25 @@ mod tests {
             store.list_children("not-a-real-token"),
             Err(AccountError::Unauthorized)
         );
+    }
+
+    #[test]
+    fn add_child_rejects_duplicate_device_id() {
+        // A device_id maps to exactly one child — otherwise two families would
+        // both match it in StreamPendingReviews and leak alerts across families.
+        let store = AccountStore::new();
+        let (_a, _) = store.create_account("a@x.com", "passwordone", "A").unwrap();
+        let (a_tok, _, _) = store.login("a@x.com", "passwordone").unwrap();
+        let (_b, _) = store.create_account("b@x.com", "passwordtwo", "B").unwrap();
+        let (b_tok, _, _) = store.login("b@x.com", "passwordtwo").unwrap();
+
+        store.add_child(&a_tok, "Kid A", "shared-device").unwrap();
+        // A different family trying to claim the same device id is rejected.
+        assert_eq!(
+            store.add_child(&b_tok, "Kid B", "shared-device"),
+            Err(AccountError::DeviceInUse)
+        );
+        // A distinct device id is fine.
+        assert!(store.add_child(&b_tok, "Kid B", "other-device").is_ok());
     }
 }

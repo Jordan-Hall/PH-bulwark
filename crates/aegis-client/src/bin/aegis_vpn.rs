@@ -106,19 +106,37 @@ async fn main() -> anyhow::Result<()> {
     })
     .with_alert(relay);
 
-    // --- 3. Bring up the TUN redirect (tun2proxy → the MITM proxy). -----------
+    // --- 3. Bring up the TUN data path (permissive smoltcp + WireGuard). ------
     let shutdown = aegis_net::CancellationToken::new();
     let vpn_token = shutdown.clone();
-    let vpn = tokio::spawn(async move {
-        if let Err(e) = aegis_net::run_vpn(aegis_net::VpnConfig::default(), vpn_token).await {
-            tracing::error!(error = %e, "VPN data path stopped with error");
-        }
+    let mut vpn = tokio::spawn(async move {
+        aegis_net::run_vpn(aegis_net::VpnConfig::default(), vpn_token).await
     });
 
-    println!("aegis_vpn running — all traffic is being filtered. Press Ctrl-C to stop.");
+    println!("aegis_vpn: bringing up the transparent VPN…");
 
-    // --- 4. Run the block-reporting loop until Ctrl-C. ------------------------
+    // --- 4. Run until Ctrl-C, the flow loop ends, OR the VPN data path stops. --
+    // The VPN data path is the whole point of this binary. If it returns (fails or
+    // stops), we must NOT keep running as a bare proxy: the parent app reports
+    // "connected" by probing the local proxy port, so a lingering proxy with no
+    // TUN capturing would falsely show protection ON while nothing is filtered.
+    // So a VPN-task return is a FATAL startup error — tear down and exit non-zero.
     tokio::select! {
+        res = &mut vpn => {
+            let _ = interceptor.shutdown().await;
+            return match res {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => {
+                    eprintln!("VPN data path unavailable: {e}");
+                    eprintln!("Use proxy mode instead: run `aegis_proxy` (no admin), trust the CA, done.");
+                    std::process::exit(1);
+                }
+                Err(join) => {
+                    eprintln!("VPN task crashed: {join}");
+                    std::process::exit(1);
+                }
+            };
+        }
         r = run_loop(&pipeline, interceptor.clone()) => {
             if let Err(e) = r { tracing::warn!(error = %e, "flow loop ended"); }
         }
@@ -127,8 +145,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Cancel the TUN redirect (tun2proxy restores the default route on teardown),
-    // then tear down the proxy.
+    // Cancel the TUN data path (restores host routing on teardown), tear down proxy.
     shutdown.cancel();
     let _ = vpn.await;
     let _ = interceptor.shutdown().await;

@@ -368,34 +368,42 @@ impl aegis_proto::v1::review_server::Review for ReviewService {
         let rx = self.hub.subscribe();
         let base = broadcast_into_stream(rx);
 
-        // Per-guardian scoping: a session token + a wired account store restricts
-        // the stream to the children this guardian is assigned to. An alert is
-        // kept only if its child_id OR device_id belongs to one of those children
-        // (the data plane stamps device_id; child_id is set when known). An
-        // unknown token is rejected rather than leaking every family's alerts.
-        if !token.is_empty() {
-            if let Some(store) = &self.accounts {
-                let scope = store
-                    .guardian_scope(&token)
-                    .ok_or_else(|| Status::unauthenticated("invalid session token"))?;
-                let want_device = want_device.clone();
-                let stream: Self::StreamPendingReviewsStream = Box::pin(base.filter(move |item| {
-                    let keep = match item {
-                        Ok(ev) => {
-                            let in_scope = scope.child_ids.contains(&ev.child_id)
-                                || scope.device_ids.contains(&ev.device_id);
-                            let dev_ok = want_device.is_empty() || ev.device_id == want_device;
-                            in_scope && dev_ok
-                        }
-                        Err(_) => true, // surface transport errors regardless
-                    };
-                    async move { keep }
-                }));
-                return Ok(Response::new(stream));
+        // SECURITY: when an account store is wired (guardian accounts exist), a
+        // valid session token is REQUIRED. Without this gate a client that sends
+        // no token would fall through to the unscoped legacy path below and
+        // receive EVERY family's pending reviews. So the unscoped path is only
+        // reachable when no account store is configured (`self.accounts == None`).
+        if let Some(store) = &self.accounts {
+            if token.is_empty() {
+                return Err(Status::unauthenticated(
+                    "a session token is required (Accounts.Login) to stream pending reviews",
+                ));
             }
+            // Scope to the guardian's assigned children: keep an alert only if its
+            // child_id OR device_id belongs to one of those children (the data
+            // plane stamps device_id; child_id is set when known). An unknown
+            // token is rejected, never leaked to.
+            let scope = store
+                .guardian_scope(&token)
+                .ok_or_else(|| Status::unauthenticated("invalid session token"))?;
+            let want_device = want_device.clone();
+            let stream: Self::StreamPendingReviewsStream = Box::pin(base.filter(move |item| {
+                let keep = match item {
+                    Ok(ev) => {
+                        let in_scope = scope.child_ids.contains(&ev.child_id)
+                            || scope.device_ids.contains(&ev.device_id);
+                        let dev_ok = want_device.is_empty() || ev.device_id == want_device;
+                        in_scope && dev_ok
+                    }
+                    Err(_) => true, // surface transport errors regardless
+                };
+                async move { keep }
+            }));
+            return Ok(Response::new(stream));
         }
 
-        // Legacy path: empty device_id = all supervised devices; else that device.
+        // Legacy path — ONLY when no account store is configured (single-node dev
+        // without guardian accounts). Empty device_id = all supervised devices.
         let stream: Self::StreamPendingReviewsStream = if want_device.is_empty() {
             base
         } else {

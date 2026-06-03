@@ -174,7 +174,7 @@ impl OnnxScorer {
 /// stringify each step before `?`-converting into `anyhow`.
 fn build_session(
     model_path: &str,
-    providers: Vec<ort::execution_providers::ExecutionProviderDispatch>,
+    providers: Vec<ort::ep::ExecutionProviderDispatch>,
 ) -> anyhow::Result<Session> {
     let intra_threads = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -192,15 +192,15 @@ fn build_session(
 }
 
 /// CPU-only dispatch.
-fn cpu_only() -> Vec<ort::execution_providers::ExecutionProviderDispatch> {
-    use ort::execution_providers as ep;
+fn cpu_only() -> Vec<ort::ep::ExecutionProviderDispatch> {
+    use ort::ep;
     vec![ep::CPUExecutionProvider::default().build()]
 }
 
 /// GPU-preferring dispatch: the platform's best GPU EP(s) first, CPU last. `ort`
 /// silently uses CPU if a GPU EP isn't available at runtime, so this is always
 /// safe to register.
-fn gpu_then_cpu() -> Vec<ort::execution_providers::ExecutionProviderDispatch> {
+fn gpu_then_cpu() -> Vec<ort::ep::ExecutionProviderDispatch> {
     let mut out = platform_gpu_providers();
     out.extend(cpu_only());
     out
@@ -208,8 +208,8 @@ fn gpu_then_cpu() -> Vec<ort::execution_providers::ExecutionProviderDispatch> {
 
 /// The platform's best-first GPU execution providers (empty where none apply).
 /// Mirrors `aegis-infer`'s provider mapping.
-fn platform_gpu_providers() -> Vec<ort::execution_providers::ExecutionProviderDispatch> {
-    use ort::execution_providers as ep;
+fn platform_gpu_providers() -> Vec<ort::ep::ExecutionProviderDispatch> {
+    use ort::ep;
     #[cfg(target_os = "windows")]
     {
         vec![ep::DirectMLExecutionProvider::default().build()]
@@ -288,10 +288,15 @@ fn time_warmup(session: &mut Session, input_size: u32) -> Option<f32> {
         .ok()
     };
     let name = session.inputs().first()?.name().to_string();
-    // Warm (JIT / EP graph compile) — not timed.
-    let _ = session.run(ort::inputs![name.clone() => make_input()?]);
+    // Warm (JIT / EP graph compile) — not timed. A FAILED run means this EP can't
+    // actually execute the model (e.g. a GPU EP that builds but can't run it), so
+    // return None → auto-select treats it as unusable and keeps the CPU session.
+    // (Without this, a failed run is ~instant and would look "fastest".)
+    session
+        .run(ort::inputs![name.clone() => make_input()?])
+        .ok()?;
     let start = std::time::Instant::now();
-    let _ = session.run(ort::inputs![name => make_input()?]);
+    session.run(ort::inputs![name => make_input()?]).ok()?;
     Some(start.elapsed().as_secs_f32() * 1000.0)
 }
 

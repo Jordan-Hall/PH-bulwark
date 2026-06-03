@@ -46,6 +46,8 @@ const DPAPI_FLAGS: u32 = 0;
 /// Extra entropy mixed into DPAPI so that another process running as the same
 /// user cannot unwrap our blob without also knowing this value. Compiled in; it
 /// is NOT the secret (the user+machine key is) — it is a per-application salt.
+/// Windows-only (DPAPI): gated so it isn't an unused constant on other targets.
+#[cfg(windows)]
 const DPAPI_ENTROPY: &[u8] = b"aegis-net::per-install-ca::v1";
 
 /// Filename of the wrapped (DPAPI ciphertext) CA key under the store dir.

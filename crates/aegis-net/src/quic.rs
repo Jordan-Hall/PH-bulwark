@@ -90,7 +90,7 @@ impl QuicDowngrade {
                 rule = RULE_NAME,
                 "QUIC downgrade: dropping outbound UDP/443 (nft/iptables)"
             );
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(target_os = "android")]
@@ -99,7 +99,7 @@ impl QuicDowngrade {
             tracing::debug!(
                 "QUIC downgrade: handled by VpnService routing (no host firewall rule)"
             );
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
@@ -133,7 +133,7 @@ impl QuicDowngrade {
                 ),
                 Err(e) => tracing::debug!("QUIC downgrade rule removal: {e} (treating as absent)"),
             }
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(not(any(windows, target_os = "linux")))]

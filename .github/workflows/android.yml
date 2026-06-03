@@ -39,8 +39,14 @@ jobs:
       - name: Set up Android SDK + NDK
         uses: android-actions/setup-android@v3
 
-      - name: Install NDK
-        run: sdkmanager "ndk;26.3.11579264" "platforms;android-34" "build-tools;34.0.0"
+      - name: Install NDK + export its path
+        run: |
+          sdkmanager "ndk;26.3.11579264" "platforms;android-34" "build-tools;34.0.0"
+          # setup-android sets ANDROID_SDK_ROOT but NOT ANDROID_NDK_ROOT, so
+          # cargo-ndk would see an empty NDK path. Pin the concrete NDK dir for
+          # all subsequent steps.
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITHUB_ENV"
 
       - name: Set up Rust + Android targets
         uses: dtolnay/rust-toolchain@stable
@@ -61,8 +67,6 @@ jobs:
 
       - name: Build JNI lib (arm64-v8a + armeabi-v7a) into jniLibs
         working-directory: platform/android/rust/aegis-android
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_ROOT }}
         run: |
           cargo ndk \
             -t arm64-v8a \

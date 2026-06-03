@@ -175,7 +175,20 @@ mod tests {
     }
 
     #[test]
-    fn elevation_command_uses_runas() {
-        assert!(elevation_command().contains("RunAs"));
+    fn elevation_command_matches_platform() {
+        let cmd = elevation_command();
+        // Windows elevates via PowerShell `Start-Process -Verb RunAs`; Unix via
+        // `sudo`. The assertion must match the platform the test runs on (CI runs
+        // `cargo test --workspace` on ubuntu).
+        #[cfg(windows)]
+        assert!(
+            cmd.contains("RunAs"),
+            "windows elevation should use RunAs: {cmd}"
+        );
+        #[cfg(not(windows))]
+        assert!(
+            cmd.starts_with("sudo "),
+            "unix elevation should use sudo: {cmd}"
+        );
     }
 }
