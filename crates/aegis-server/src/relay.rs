@@ -160,6 +160,27 @@ impl AlertHub {
         }
     }
 
+    /// Choose the scope to actually apply. An APPROVE(THIS_HOST) for an alert that
+    /// has NO host — image blocks happen on the response leg, which carries no
+    /// hostname — but DOES have a content hash is downgraded to THIS_ITEM, so it
+    /// allowlists that specific image by hash (the "approve this image" model).
+    /// DENY and host-bearing alerts keep the requested scope.
+    fn effective_scope(
+        &self,
+        alert_id: &str,
+        requested: ReviewScope,
+        decision: ReviewDecision,
+    ) -> ReviewScope {
+        if decision != ReviewDecision::Approve || requested != ReviewScope::ThisHost {
+            return requested;
+        }
+        let pending = self.pending.lock().expect("pending-review mutex poisoned");
+        match pending.get(alert_id) {
+            Some(p) if p.host.trim().is_empty() && !p.sha256.is_empty() => ReviewScope::ThisItem,
+            _ => requested,
+        }
+    }
+
     /// Subscribe to the alert fan-out (used by `StreamPendingReviews`).
     fn subscribe(&self) -> tokio::sync::broadcast::Receiver<AlertEvent> {
         self.tx.subscribe()
@@ -273,6 +294,11 @@ impl aegis_proto::v1::review_server::Review for ReviewService {
         let item = self
             .hub
             .resolve_item(DeviceId(r.device_id.clone()), &r.alert_id);
+
+        // Image blocks carry no host (response leg) → approve the specific image by
+        // its content hash (THIS_ITEM) instead of THIS_HOST, so "approve" applies
+        // instead of failing with "THIS_HOST approve with no host".
+        let scope = self.hub.effective_scope(&r.alert_id, scope, decision);
 
         let outcome = self.hub.apply_decision(&item, decision, scope, r.ts);
 

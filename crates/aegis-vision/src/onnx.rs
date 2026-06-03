@@ -2,7 +2,10 @@
 //!
 //! Compiled only with `--features onnx`. Loads a single-purpose NSFW ONNX
 //! classifier from a filesystem path and runs it on the **CPU** execution
-//! provider, deterministically (single intra-op thread, deterministic compute).
+//! provider with **multi-threaded** intra-op parallelism (scaled to the
+//! machine's cores) so the live in-flight image filter scores fast. Strict
+//! deterministic compute is intentionally NOT set — it would serialize ops and
+//! cost throughput, and threshold scoring needs speed, not bit-reproducibility.
 //! The model must accept an NCHW `f32` input of shape `[1, 3, size, size]`.
 //!
 //! Output postprocessing auto-adapts to the two common NSFW heads:
@@ -48,20 +51,28 @@ impl OnnxScorer {
         input_size: u32,
         norm: Normalization,
     ) -> anyhow::Result<Self> {
-        // CPU EP, deterministic. No execution provider is registered → ort uses
+        // CPU EP, MULTI-THREADED. No execution provider is registered → ort uses
         // the built-in CPU provider. `commit_from_file` is the ort 2.x loader.
+        //
+        // Speed matters here (the live MITM image filter must score in-flight),
+        // so we run intra-op parallelism across the machine's cores instead of a
+        // single thread. We also drop the strict `with_deterministic_compute`
+        // flag: it serializes ops to make results bit-reproducible, which fights
+        // multi-thread throughput — and NSFW scoring only needs to clear a
+        // threshold, not be bit-identical run-to-run.
         //
         // `ort::Error<R>` carries the failed builder `R` (which is not
         // `Send + Sync`), so it cannot be `?`-converted straight into
         // `anyhow::Error`. Stringify each step to drop that payload.
+        let intra_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
         let session = Session::builder()
             .map_err(|e| anyhow::anyhow!("ort: session builder: {e}"))?
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|e| anyhow::anyhow!("ort: optimization level: {e}"))?
-            .with_intra_threads(1)
+            .with_intra_threads(intra_threads)
             .map_err(|e| anyhow::anyhow!("ort: intra threads: {e}"))?
-            .with_deterministic_compute(true)
-            .map_err(|e| anyhow::anyhow!("ort: deterministic compute: {e}"))?
             .commit_from_file(model_path)
             .map_err(|e| anyhow::anyhow!("ort: load model {model_path}: {e}"))?;
 

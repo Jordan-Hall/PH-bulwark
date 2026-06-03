@@ -21,10 +21,13 @@
 //! which:
 //!   * collects the (now-plaintext) request/response body,
 //!   * emits a [`CapturedFlow`] onto the bounded flow channel, and
-//!   * on responses, blocks on a per-`flow_id` rendezvous for the policy
-//!     [`InterceptDecision`] (Forward / Rewrite / Drop) supplied by
-//!     [`MitmProxy::apply`] — with a bounded timeout that fails **open**
-//!     (forward) so a slow/absent classifier never hangs the user's connection.
+//!   * on **scorable image** responses only, blocks on a per-`flow_id`
+//!     rendezvous for the policy [`InterceptDecision`] (Forward / Rewrite / Drop)
+//!     supplied by [`MitmProxy::apply`] — bounded by a timeout that fails
+//!     **CLOSED** (Drop) so a slow/absent classifier blocks the image rather than
+//!     leaking it (owner directive: "block instantly by default"). Every other
+//!     response (html/js/css/json/text/non-image/tiny icon) forwards immediately
+//!     with no gate, so page-structural resources add zero latency.
 //!
 //! WebSocket frames are passed through unchanged (hudsucker's default
 //! `NoopHandler` forwards every message both directions).
@@ -52,10 +55,12 @@ use crate::ca::CaManager;
 use crate::pinning::PinningRegistry;
 use crate::{NetError, Result};
 
-/// How long a response handler waits for a policy decision before forwarding the
-/// flow unchanged. The classifier round-trip is fast; this bound only guards
-/// against a stalled/absent decision sink so the user's connection never hangs
-/// (liveness-fail-OPEN — the captured flow has already been emitted for audit).
+/// How long a gated **image** response waits for a policy decision before the gate
+/// resolves. The classifier round-trip is fast; this bound guards against a
+/// stalled/absent decision sink. Owner directive: "block instantly by default" —
+/// so a timeout/dropped sender here fails **CLOSED** (Drop), not open. Only
+/// scorable image responses are ever gated; everything else forwards immediately
+/// with no wait, so this timeout never touches page-structural resources.
 const DECISION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Max leaf-cert cache entries held by the `RcgenAuthority` (one per visited
@@ -73,6 +78,13 @@ const BODY_PEEK_CAP: usize = 64 * 1024;
 /// image can't blow out the bounded flow channel's plaintext budget. 8 MiB
 /// comfortably covers real web imagery; larger bodies are skipped (fail-open).
 const IMAGE_BODY_CAP: usize = 8 * 1024 * 1024;
+
+/// Lower bound on an **image** body before we bother scoring/gating it. Icons,
+/// sprites, tracking pixels, emoji and the like are all well under 16 KiB; they
+/// carry no NSFW risk worth a model run and gating each one would stall page
+/// loads. Image bodies smaller than this are NOT surfaced for scoring (`None`),
+/// so they forward immediately like any other non-image resource.
+const MIN_SCORABLE_IMAGE_BYTES: usize = 16 * 1024;
 
 /// Source channel of a captured flow (mirrors `aegis_proto::SourceChannel`; kept
 /// as a small enum here so the proxy layer doesn't construct proto messages —
@@ -491,10 +503,15 @@ impl HttpHandler for FlowHandler {
         // classifier only receives a bounded peek (bounded plaintext on the channel).
         let full = collect_full(body).await;
 
-        // If this response is a still image of a type the NSFW scorer can decode,
-        // surface the WHOLE body (capped) so the pipeline can score the actual
-        // pixels — not just the magic-byte peek. Other bodies carry only a peek.
+        // If this response is a still image of a type the NSFW scorer can decode
+        // AND large enough to be worth scoring, surface the WHOLE body (capped) so
+        // the pipeline can score the actual pixels — not just the magic-byte peek.
+        // Tiny/oversized images and every non-image body return `None` here.
         let image_body = image_body_for(content_type.as_deref(), &full);
+
+        // Only SCORABLE IMAGE responses are decision-gated. Whether to gate is
+        // decided BEFORE `emit` moves `image_body` up the channel.
+        let is_scorable_image = image_body.is_some();
 
         // Emit the response flow for classification.
         let flow_id = self.emit(
@@ -508,21 +525,26 @@ impl HttpHandler for FlowHandler {
             image_body,
         );
 
-        // If inline gating is disarmed (default, until the interceptor wires
-        // `apply`), forward immediately — emit-only, zero added latency.
-        if !self.gate.is_armed() {
+        // Forward IMMEDIATELY (no gate registration, no wait) when EITHER:
+        //   * inline gating is disarmed (default, until the interceptor wires
+        //     `apply`), OR
+        //   * this is not a scorable image (html/js/css/json/text/icons/etc.).
+        // This is what removes the per-resource latency that was killing page
+        // loads — only the actual still images a guardian cares about are gated.
+        if !self.gate.is_armed() || !is_scorable_image {
             return Response::from_parts(parts, Body::from(full));
         }
 
-        // Gated: register the per-flow_id waiter, then await the policy decision
-        // bounded by DECISION_TIMEOUT — fail OPEN (forward) on timeout or a
-        // dropped sender so a slow/absent classifier never hangs the user.
+        // Gated image: register the per-flow_id waiter, then await the policy
+        // decision bounded by DECISION_TIMEOUT. Owner directive — "block instantly
+        // by default": a timeout OR a dropped sender fails **CLOSED** (Drop), so a
+        // slow/absent classifier blocks the image rather than leaking it through.
         let rx = self.gate.register(flow_id).await;
         let decision = match tokio::time::timeout(DECISION_TIMEOUT, rx).await {
             Ok(Ok(d)) => d,
             Ok(Err(_)) | Err(_) => {
                 self.gate.cancel(flow_id).await;
-                InterceptDecision::Forward
+                InterceptDecision::Drop
             }
         };
 
@@ -614,15 +636,23 @@ fn is_scorable_image_ct(ct: &str) -> bool {
 }
 
 /// Decide whether to surface the WHOLE response body as an image for scoring.
-/// Returns `Some(bytes)` only for a scorable image content-type within
-/// [`IMAGE_BODY_CAP`]; otherwise `None` (the peek alone is carried). Oversized
-/// images fail OPEN (skipped) rather than blowing the channel's plaintext budget.
+/// Returns `Some(bytes)` only for a scorable image content-type whose size is in
+/// `[MIN_SCORABLE_IMAGE_BYTES, IMAGE_BODY_CAP]`; otherwise `None` (the peek alone
+/// is carried and the response forwards immediately, ungated).
+///
+/// * Tiny images (icons/sprites/pixels under [`MIN_SCORABLE_IMAGE_BYTES`]) are
+///   skipped: not worth a model run, and gating them would stall page loads.
+/// * Oversized images (over [`IMAGE_BODY_CAP`]) are skipped to protect the
+///   channel's plaintext budget.
+///
+/// Only a `Some` result triggers the decision gate downstream; everything else
+/// forwards with zero added latency.
 fn image_body_for(content_type: Option<&str>, full: &[u8]) -> Option<Vec<u8>> {
     let ct = content_type?;
     if !is_scorable_image_ct(ct) {
         return None;
     }
-    if full.is_empty() || full.len() > IMAGE_BODY_CAP {
+    if full.len() < MIN_SCORABLE_IMAGE_BYTES || full.len() > IMAGE_BODY_CAP {
         return None;
     }
     Some(full.to_vec())
@@ -736,8 +766,8 @@ mod tests {
 
     #[test]
     fn image_body_surfaced_only_for_scorable_image_types() {
-        let jpeg = vec![0xFFu8, 0xD8, 0xFF, 0xE0, 1, 2, 3];
-        // A scorable image type → whole body surfaced.
+        // A scorable image type, large enough to score → whole body surfaced.
+        let jpeg = vec![0xABu8; MIN_SCORABLE_IMAGE_BYTES];
         assert_eq!(
             image_body_for(Some("image/jpeg"), &jpeg).as_deref(),
             Some(jpeg.as_slice())
@@ -751,6 +781,22 @@ mod tests {
     }
 
     #[test]
+    fn tiny_image_body_is_skipped_so_it_forwards_ungated() {
+        // Icons/sprites/pixels under the min are never surfaced for scoring, so
+        // they forward immediately (no gate, no latency) like any non-image.
+        let icon = vec![0xFFu8, 0xD8, 0xFF, 0xE0, 1, 2, 3]; // 7 bytes
+        assert!(
+            image_body_for(Some("image/jpeg"), &icon).is_none(),
+            "a sub-{MIN_SCORABLE_IMAGE_BYTES}-byte image must be skipped (forwards ungated)"
+        );
+        let just_under = vec![0u8; MIN_SCORABLE_IMAGE_BYTES - 1];
+        assert!(image_body_for(Some("image/png"), &just_under).is_none());
+        // Exactly at the threshold → scored.
+        let at_min = vec![0u8; MIN_SCORABLE_IMAGE_BYTES];
+        assert!(image_body_for(Some("image/png"), &at_min).is_some());
+    }
+
+    #[test]
     fn oversized_image_body_is_skipped_fail_open() {
         let huge = vec![0u8; IMAGE_BODY_CAP + 1];
         assert!(
@@ -759,6 +805,49 @@ mod tests {
         );
         let at_cap = vec![0u8; IMAGE_BODY_CAP];
         assert!(image_body_for(Some("image/jpeg"), &at_cap).is_some());
+    }
+
+    #[tokio::test]
+    async fn gated_image_timeout_fails_closed_to_drop() {
+        // Mirror the handler's gated-image branch: a registered waiter that never
+        // receives a decision must, on timeout, resolve to Drop (block instantly),
+        // NOT Forward. We use a near-zero timeout so the test is fast.
+        let gate = DecisionGate::default();
+        let flow_id = 99u64;
+        let rx = gate.register(flow_id).await;
+        let decision = match tokio::time::timeout(std::time::Duration::from_millis(1), rx).await {
+            Ok(Ok(d)) => d,
+            Ok(Err(_)) | Err(_) => {
+                gate.cancel(flow_id).await;
+                InterceptDecision::Drop
+            }
+        };
+        assert!(
+            matches!(decision, InterceptDecision::Drop),
+            "a gated image whose decision times out must fail CLOSED (Drop)"
+        );
+    }
+
+    #[tokio::test]
+    async fn gated_image_dropped_sender_fails_closed_to_drop() {
+        // If the decision sender is dropped (classifier gone), the waiter sees a
+        // RecvError and must also fail CLOSED to Drop.
+        let gate = DecisionGate::default();
+        let flow_id = 100u64;
+        let rx = gate.register(flow_id).await;
+        // Drop the registered sender out from under the waiter.
+        gate.cancel(flow_id).await;
+        let decision = match tokio::time::timeout(DECISION_TIMEOUT, rx).await {
+            Ok(Ok(d)) => d,
+            Ok(Err(_)) | Err(_) => {
+                gate.cancel(flow_id).await;
+                InterceptDecision::Drop
+            }
+        };
+        assert!(
+            matches!(decision, InterceptDecision::Drop),
+            "a gated image whose sender is dropped must fail CLOSED (Drop)"
+        );
     }
 
     #[test]

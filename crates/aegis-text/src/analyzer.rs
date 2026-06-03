@@ -33,7 +33,7 @@ use crate::classifier::{NoClassifier, TextClassifier};
 use crate::engine::{GroomingRuleEngine, RuleOutcome};
 use crate::error::TextError;
 use crate::lexicon::Lexicon;
-use crate::redact::{redacted_adult_excerpt, redacted_excerpt};
+use crate::redact::{full_excerpt, redacted_excerpt};
 use crate::state::ThreadState;
 use crate::traits::GroomingRules;
 use aegis_core::Analyzer;
@@ -156,13 +156,22 @@ impl<C: TextClassifier> TextAnalyzer<C> {
 
         let fired_names: Vec<String> =
             outcome.fired.iter().map(|r| r.as_str().to_string()).collect();
-        let excerpt = redacted_excerpt(&span.text, &outcome.fired);
 
         // Image request → CSAM-suspected (report-never-archive path, PLAN §0c).
         let category = if outcome.image_request {
             Category::CsamSuspected
         } else {
             Category::Grooming
+        };
+
+        // GUARDIAN TRANSPARENCY: show the parent the ACTUAL matched text for a
+        // normal grooming hit so they can understand/approve. HARD LEGAL
+        // EXCEPTION: a CSAM-suspected (image-request) hit stays REDACTED — its
+        // text is never surfaced verbatim.
+        let excerpt = if category == Category::CsamSuspected {
+            redacted_excerpt(&span.text, &outcome.fired)
+        } else {
+            full_excerpt(&span.text, &outcome.fired)
         };
 
         let action = action_for(outcome.severity);
@@ -192,7 +201,8 @@ impl<C: TextClassifier> TextAnalyzer<C> {
                 sha256: Vec::new(),
                 perceptual_hash: Vec::new(),
                 safe_thumbnail: Vec::new(),
-                // Redacted excerpt ONLY — never raw message text.
+                // Guardian-transparency: the REAL matched text for non-CSAM hits
+                // (so the parent can act); REDACTED only for CSAM-suspected.
                 text_snippet: excerpt,
                 model_id: RULE_ENGINE_ID.to_string(),
                 model_version: RULE_ENGINE_VERSION.to_string(),
@@ -214,10 +224,16 @@ impl<C: TextClassifier> GroomingRules for TextAnalyzer<C> {
         let lex = self.lexicon.resolve(&span.lang);
         let outcome = self.engine.evaluate(&span.text, lex, thread, 0);
         let classifier_backed = !outcome.is_silent() && self.classifier.agrees_grooming(span);
+        // Guardian transparency (real text) for non-CSAM; redact CSAM (image req).
+        let excerpt = if outcome.image_request {
+            redacted_excerpt(&span.text, &outcome.fired)
+        } else {
+            full_excerpt(&span.text, &outcome.fired)
+        };
         GroomingSignal {
             fired_categories: outcome.fired.iter().map(|r| r.as_str().to_string()).collect(),
             score: outcome.score,
-            excerpt: redacted_excerpt(&span.text, &outcome.fired),
+            excerpt,
             classifier_backed,
         }
     }
@@ -242,7 +258,8 @@ fn action_for(sev: Severity) -> Action {
 
 /// Verdict for explicit adult text with no grooming signal.
 fn adult_text_verdict(request_id: &str, span: &TextSpan) -> Verdict {
-    let excerpt = redacted_adult_excerpt(&span.text);
+    // Adult-text is non-CSAM → guardian sees the actual matched text (bounded).
+    let excerpt = full_excerpt(&span.text, &[]);
     Verdict {
         request_id: request_id.to_string(),
         category: Category::AdultText as i32,
@@ -354,14 +371,37 @@ mod tests {
     }
 
     #[test]
-    fn evidence_never_contains_raw_text() {
+    fn non_csam_evidence_shows_real_guardian_text() {
+        // GUARDIAN TRANSPARENCY: a normal (non-CSAM) grooming hit surfaces the
+        // ACTUAL matched text so the parent can understand/approve it — NOT a
+        // [redacted] placeholder.
         let a = TextAnalyzer::new().unwrap();
         let raw = "our little secret, dont tell your parents";
         let span = text_span("t", raw);
         let v = a.analyze_span("r1", &span, 0);
+        assert_eq!(v.category, Category::Grooming as i32);
         let ev = v.evidence.unwrap();
-        // The redacted snippet is marked and must not be the verbatim message.
-        assert!(ev.text_snippet.starts_with("[redacted"));
+        assert!(
+            !ev.text_snippet.starts_with("[redacted"),
+            "non-CSAM text must NOT be redacted: {}",
+            ev.text_snippet
+        );
+        // The real words appear (possibly with a fired-category tag prefix).
+        assert!(ev.text_snippet.contains("our little secret"));
+    }
+
+    #[test]
+    fn csam_suspected_text_stays_redacted() {
+        // HARD LEGAL EXCEPTION: an image-request (CSAM-suspected) hit keeps the
+        // redacted excerpt — its text is NEVER surfaced verbatim.
+        let a = TextAnalyzer::new().unwrap();
+        let raw = "can you send me a pic of you";
+        let span = text_span("t", raw);
+        let v = a.analyze_span("r1", &span, 0);
+        assert_eq!(v.category, Category::CsamSuspected as i32);
+        let ev = v.evidence.unwrap();
+        assert!(ev.text_snippet.starts_with("[redacted"), "CSAM stays redacted");
         assert_ne!(ev.text_snippet, raw);
+        assert!(v.grooming.unwrap().excerpt.starts_with("[redacted"));
     }
 }

@@ -20,7 +20,8 @@
 //! analysis is the deterministic rule engine and always runs locally.
 #![forbid(unsafe_code)]
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use aegis_core::Result;
 use aegis_flow::{AnalysisUnit, DefaultFlowClassifier, FlowClassifier};
@@ -59,6 +60,13 @@ impl Default for ClientConfig {
     }
 }
 
+/// The cached outcome of scoring one image, keyed by its content hash. We cache
+/// the policy-relevant verdict primitives (the decision triple) so a repeat of
+/// the SAME image bytes is answered instantly without re-running the model — this
+/// is the "hash everything we block or allow" the owner asked for. Evidence
+/// (thumbnail/hash) is rebuilt cheaply per hit from the same bytes.
+type ImageDecision = (Action, Category, f32);
+
 /// Maps a policy `Action` onto the interceptor decision applied to the flow.
 fn action_to_decision(action: Action, rewritten: Option<Vec<u8>>) -> InterceptDecision {
     match action {
@@ -86,6 +94,12 @@ pub struct Pipeline {
     /// AND a model at `AEGIS_NSFW_MODEL`; otherwise the fail-OPEN stub (score 0.0
     /// → Allow), so the default build classifies images but never false-blocks.
     nsfw: Box<dyn Scorer>,
+    /// Process-wide CONTENT-HASH decision cache: sha256(image bytes) → the
+    /// scored decision triple. The same image is never re-scored — a hit returns
+    /// the cached verdict instantly (no model run), which makes repeated imagery
+    /// (logos, hero shots, anything re-fetched) effectively free and is the
+    /// "hash everything we block or allow" the owner asked for.
+    image_cache: Mutex<HashMap<[u8; 32], ImageDecision>>,
 }
 
 impl Pipeline {
@@ -99,6 +113,7 @@ impl Pipeline {
             alert: None,
             store: None,
             nsfw: build_nsfw_scorer(),
+            image_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -156,19 +171,45 @@ impl Pipeline {
     /// category unconditionally so the guarantee holds for any future scorer too.
     fn analyze_image(&self, media: &InlineMedia) -> Verdict {
         let bytes = &media.data;
+        let hash = sha256_array(bytes);
+
+        // SEAM: a persisted, parent-APPROVED allowlist (aegis-policy::allowlist,
+        // keyed by this same content hash) should be consulted FIRST here — when
+        // a guardian taps "Approve" on a blocked image in the parent app, that
+        // hash is recorded and any future fetch of the identical bytes is allowed
+        // without re-scoring. The cross-process allowlist sync is a later pass;
+        // for now the in-process cache below provides the same shape (hash →
+        // decision) so wiring the allowlist is a drop-in replacement of this read.
+        // e.g.:  if let Some(v) = self.allowlist.approved(&hash) { return allow_verdict(...); }
+
+        // CONTENT-HASH DECISION CACHE: a repeat of the same image bytes returns
+        // the cached decision instantly — no model run. "Hash everything."
+        if let Some(cached) = self.cached_decision(&hash) {
+            return self.image_verdict_from(cached, bytes);
+        }
+
+        // Miss → score once, store the decision keyed by hash, then build it.
         let score = self.nsfw.score(bytes);
         let nsfw = score >= NSFW_BLOCK_THRESHOLD;
-
         let category = if nsfw { Category::AdultImage } else { Category::Safe };
         let action = if nsfw { Action::Block } else { Action::Allow };
-        let severity = if nsfw {
+        let decision: ImageDecision = (action, category, score);
+        self.cache_store(hash, decision);
+
+        self.image_verdict_from(decision, bytes)
+    }
+
+    /// Build an image [`Verdict`] from a (possibly cached) decision triple and the
+    /// original bytes. Evidence (hash + SAFE thumbnail, CSAM-gated) is rebuilt from
+    /// the bytes so a cache hit yields an identical verdict to a fresh score.
+    fn image_verdict_from(&self, decision: ImageDecision, bytes: &[u8]) -> Verdict {
+        let (action, category, score) = decision;
+        let severity = if action == Action::Block {
             aegis_proto::severity_for_score(score)
         } else {
             Severity::Info
         };
-
         let evidence = build_image_evidence(category, bytes, self.nsfw.model_id());
-
         Verdict {
             request_id: format!("{}-img", self.cfg.device_id),
             category: category as i32,
@@ -181,6 +222,18 @@ impl Pipeline {
             evidence: Some(evidence),
             ..Default::default()
         }
+    }
+
+    /// Store a freshly-scored image decision under its content hash.
+    fn cache_store(&self, hash: [u8; 32], decision: ImageDecision) {
+        if let Ok(mut map) = self.image_cache.lock() {
+            map.insert(hash, decision);
+        }
+    }
+
+    /// Copy out a cached decision for `hash`, if present (lock held briefly).
+    fn cached_decision(&self, hash: &[u8; 32]) -> Option<ImageDecision> {
+        self.image_cache.lock().ok()?.get(hash).copied()
     }
 
     /// Run one captured flow all the way through and return the actions applied.
@@ -405,6 +458,14 @@ fn sha256(bytes: &[u8]) -> Vec<u8> {
         .to_vec()
 }
 
+/// SHA-256 of content as a fixed `[u8; 32]`, the key for the image decision cache
+/// (and the future content-keyed allowlist). SHA-256 is always 32 bytes, so the
+/// conversion never fails; we fall back to zeroes defensively rather than panic.
+fn sha256_array(bytes: &[u8]) -> [u8; 32] {
+    let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
+    digest.as_ref().try_into().unwrap_or([0u8; 32])
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -439,6 +500,22 @@ mod tests {
         }
         fn model_id(&self) -> &str {
             "test-fixed"
+        }
+    }
+
+    /// A scorer that counts how many times it actually ran, to prove the
+    /// content-hash cache short-circuits a repeat of the same image.
+    struct CountingScorer {
+        score: f32,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    impl Scorer for CountingScorer {
+        fn score(&self, _: &[u8]) -> f32 {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.score
+        }
+        fn model_id(&self) -> &str {
+            "test-counting"
         }
     }
 
@@ -477,6 +554,52 @@ mod tests {
         assert!(!ev.safe_thumbnail.is_empty(), "non-CSAM block must attach a preview");
         // The preview is a fresh JPEG re-encode (SOI marker), not the PNG input.
         assert_eq!(&ev.safe_thumbnail[..3], &[0xFF, 0xD8, 0xFF]);
+    }
+
+    #[tokio::test]
+    async fn repeat_image_hits_cache_and_is_not_rescored() {
+        let counting = Arc::new(CountingScorer {
+            score: 0.95,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        // Box a thin forwarder so the Pipeline owns a Scorer while we keep the
+        // Arc to inspect the call count.
+        struct Fwd(Arc<CountingScorer>);
+        impl Scorer for Fwd {
+            fn score(&self, b: &[u8]) -> f32 {
+                self.0.score(b)
+            }
+            fn model_id(&self) -> &str {
+                self.0.model_id()
+            }
+        }
+        let p = Pipeline::new(ClientConfig::default())
+            .with_nsfw_scorer(Box::new(Fwd(counting.clone())));
+
+        let unit = AnalysisUnit::Image(InlineMedia {
+            data: tiny_png(),
+            mime_type: "image/png".into(),
+            ..Default::default()
+        });
+
+        let v1 = p.analyze(&unit).await;
+        let v2 = p.analyze(&unit).await; // identical bytes → cache hit
+        let v3 = p.analyze(&unit).await; // and again
+
+        // The model ran EXACTLY once for three identical images.
+        assert_eq!(
+            counting.calls.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the same image must be scored only once (hash-cache hit)"
+        );
+        // Cached verdicts match the first (decision + score identical).
+        assert_eq!(v2.category, v1.category);
+        assert_eq!(v2.action, v1.action);
+        assert_eq!(v2.score, v1.score);
+        assert_eq!(v3.action, Action::Block as i32);
+        // Evidence is still rebuilt on a hit (hash present, preview attached).
+        assert_eq!(v2.evidence.as_ref().unwrap().sha256.len(), 32);
+        assert!(!v2.evidence.unwrap().safe_thumbnail.is_empty());
     }
 
     #[tokio::test]
