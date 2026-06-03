@@ -218,9 +218,19 @@ impl NetInterceptor {
     /// no transparent TUN redirect (which needs admin / the wintun driver) is
     /// required. Decision-gating is armed exactly as in [`Interceptor::start`].
     pub async fn start_proxy_only(&self) -> crate::Result<()> {
-        // Install / confirm the per-install root CA in the trust store (idempotent),
-        // then spawn the MITM proxy. CA already loaded/generated in `new`.
-        self.install_ca()?;
+        // Best-effort CA trust: installing a root into the user store requires the
+        // user's consent (a Windows dialog), and the proxy can serve even if that is
+        // declined or deferred — the browser simply won't accept the MITM leaf certs
+        // until the printed root CA is trusted. So a trust-store failure here is a
+        // WARNING, not fatal: the proxy still comes up, and the user can trust the CA
+        // (the entrypoint prints the exact `certutil` command) and then browse.
+        if let Err(e) = self.install_ca() {
+            tracing::warn!(
+                error = %e,
+                "could not auto-trust the root CA (needs your consent / may have been declined); \
+                 the proxy is still serving — trust the printed CA cert to enable HTTPS interception"
+            );
+        }
         self.spawn_proxy().await
     }
 
