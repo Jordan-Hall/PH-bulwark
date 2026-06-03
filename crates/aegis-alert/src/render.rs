@@ -131,7 +131,7 @@ pub fn render_event(event: &AlertEvent, subject_prefix: &str) -> Result<Rendered
     );
 
     let mut body = String::new();
-    body.push_str(&intro_for(kind));
+    body.push_str(intro_for(kind));
     body.push_str("\n\n");
 
     push_field(&mut body, "Alert type", headline);

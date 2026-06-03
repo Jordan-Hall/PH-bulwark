@@ -55,6 +55,12 @@ impl From<String> for DeviceId {
     }
 }
 
+impl From<&str> for DeviceId {
+    fn from(s: &str) -> Self {
+        DeviceId(s.to_owned())
+    }
+}
+
 /// Stable identifier for a cluster node (SWIM member id).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NodeId(pub String);

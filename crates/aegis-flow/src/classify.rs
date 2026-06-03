@@ -102,17 +102,21 @@ impl Classifier {
         let ct = head.content_type();
         let path = head.path.as_deref().unwrap_or("");
 
-        // 1. Explicit Content-Type is the strongest signal.
+        // 1. Body manifest sniffing FIRST. An HLS/DASH manifest body is the
+        //    authoritative signal for both the streaming family AND liveness
+        //    (#EXT-X-ENDLIST / PLAYLIST-TYPE / MPD type=dynamic) — which the
+        //    content-type header cannot convey — and servers routinely mislabel
+        //    the content-type (e.g. text/plain for an .m3u8). So the body wins
+        //    over the header for manifests.
+        if let Some(c) = sniff_manifest(&head.body_peek, channel) {
+            return c;
+        }
+
+        // 2. Explicit Content-Type is the next strongest signal.
         if let Some(ct) = ct.as_deref() {
             if let Some(c) = classify_content_type(ct, channel) {
                 return c;
             }
-        }
-
-        // 2. Body sniffing: a manifest declares the streaming family even when a
-        //    server mislabels the content-type (very common for HLS/DASH).
-        if let Some(c) = sniff_manifest(&head.body_peek, channel) {
-            return c;
         }
 
         // 3. Magic bytes on the body peek (image/audio/video containers).

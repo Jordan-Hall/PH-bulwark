@@ -89,7 +89,13 @@ impl Cluster {
 
     /// Mark a unit of work finished (worker calls this after producing a Verdict).
     pub fn complete_inflight(&self) {
-        self.inflight.fetch_sub(1, Ordering::Relaxed).max(0);
+        // Saturating decrement: an extra completion (or one with nothing in
+        // flight) must not wrap the unsigned counter to u32::MAX.
+        let _ = self
+            .inflight
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(1))
+            });
     }
 
     async fn queue_depth(&self) -> u32 {
@@ -305,8 +311,10 @@ mod tests {
 
     #[tokio::test]
     async fn backpressure_refuses_when_full() {
-        let mut cfg = ClusterConfig::default();
-        cfg.backpressure_depth = 1;
+        let cfg = ClusterConfig {
+            backpressure_depth: 1,
+            ..Default::default()
+        };
         let c = Cluster::new(cfg);
         assert!(c
             .enqueue(EnqueueRequest { item: Some(work("a")) })

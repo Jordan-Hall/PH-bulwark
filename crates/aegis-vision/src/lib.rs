@@ -135,7 +135,10 @@ fn build_scorer(cfg: &VisionConfig) -> Box<dyn Scorer> {
     #[cfg(feature = "onnx")]
     {
         if let Some(path) = cfg.model_path.as_deref() {
-            match onnx::OnnxScorer::load(path, cfg.input_size) {
+            // Honours AEGIS_NSFW_MODEL_CLASS (vit|mobilenet) + AEGIS_NSFW_EP
+            // (auto|cpu|gpu): MobileNet-class models load with ImageNet norm, and
+            // `auto` benchmarks GPU vs CPU at load, keeping the faster.
+            match onnx::OnnxScorer::from_path_env(path, cfg.input_size) {
                 Ok(s) => {
                     tracing::info!(model = %path, "aegis-vision: loaded ONNX NSFW model");
                     return Box::new(s);

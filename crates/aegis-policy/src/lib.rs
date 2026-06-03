@@ -34,6 +34,11 @@
 //! genuinely critical (image-request / CSAM territory).
 
 #![forbid(unsafe_code)]
+// `PolicyError` carries rich, context-bearing variants (config parse + validation
+// detail). The functions that return it are COLD config-load/parse paths, so the
+// by-value size of the `Err` variant is not a hot-path concern; boxing it would
+// churn the error API for no runtime benefit. Allow `result_large_err` here.
+#![allow(clippy::result_large_err)]
 
 pub mod allowlist;
 mod config;
@@ -151,17 +156,11 @@ pub trait PolicyEngine: Send + Sync {
 /// The deterministic policy engine. Construct from a [`PolicyConfig`]
 /// (`Policy::new`) or use [`Policy::default`] for the built-in defaults.
 #[derive(Clone, Debug)]
+#[derive(Default)]
 pub struct Policy {
     config: PolicyConfig,
 }
 
-impl Default for Policy {
-    fn default() -> Self {
-        Policy {
-            config: PolicyConfig::default(),
-        }
-    }
-}
 
 impl Policy {
     /// Build an engine from a (validated) configuration.
@@ -629,8 +628,10 @@ mod tests {
 
     #[test]
     fn csam_report_flag_can_be_isolated_for_tests() {
-        let mut cfg = PolicyConfig::default();
-        cfg.csam_report_flag = false;
+        let cfg = PolicyConfig {
+            csam_report_flag: false,
+            ..Default::default()
+        };
         let p = Policy::new(cfg);
         let d = p.evaluate(&verdict(Category::CsamSuspected, 0.9), &ctx(AgeProfile::Teen));
         // Still blocks + alerts critically; only the report flag is suppressed.
@@ -674,8 +675,10 @@ mod tests {
 
     #[test]
     fn grooming_can_be_made_to_block_via_opt_out() {
-        let mut cfg = PolicyConfig::default();
-        cfg.grooming_alert_not_block = false;
+        let cfg = PolicyConfig {
+            grooming_alert_not_block: false,
+            ..Default::default()
+        };
         let p = Policy::new(cfg);
         let d = p.evaluate(&verdict(Category::Grooming, 0.9), &ctx(AgeProfile::Teen));
         assert_eq!(d.action, Action::Block);

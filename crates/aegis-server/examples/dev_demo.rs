@@ -106,6 +106,7 @@ fn demo_alert(n: u64) -> AlertEvent {
             model_id: "demo".to_string(),
             model_version: "0".to_string(),
         }),
+        ..Default::default()
     }
 }
 

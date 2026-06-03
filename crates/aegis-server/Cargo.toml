@@ -23,6 +23,9 @@ thiserror.workspace = true
 async-trait.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
+# Password hashing for parent accounts (PBKDF2-HMAC-SHA256). ring is already in
+# the build graph (tonic tls-ring) so this adds no new native dependency.
+ring.workspace = true
 
 [features]
 default = []

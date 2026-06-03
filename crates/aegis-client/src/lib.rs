@@ -266,7 +266,7 @@ impl Pipeline {
             let ctx = aegis_policy::PolicyContext {
                 device: self.cfg.device_id.clone().into(),
                 source_channel,
-                age_profile: self.age_profile.clone(),
+                age_profile: self.age_profile,
             };
             let action = self.policy.decide(&verdict, &ctx);
             let alert_kind = self.policy.alert_for(&verdict, action, &ctx);
@@ -306,16 +306,11 @@ impl Pipeline {
     /// The main loop: pull flows from the interceptor and process them until
     /// shutdown. The interceptor must already be `start()`ed.
     pub async fn run(&self, interceptor: Arc<dyn Interceptor>) -> Result<()> {
-        loop {
-            match interceptor.next_flow().await? {
-                Some(flow) => {
-                    // net + flow now share aegis_core::flow::CapturedFlow, so the
-                    // interceptor's output feeds the classifier directly (no adapter).
-                    if let Err(e) = self.handle_flow(flow, interceptor.as_ref()).await {
-                        tracing::warn!(error = %e, "flow handling failed; failing open");
-                    }
-                }
-                None => break, // interceptor closed
+        // net + flow now share aegis_core::flow::CapturedFlow, so the
+        // interceptor's output feeds the classifier directly (no adapter).
+        while let Some(flow) = interceptor.next_flow().await? {
+            if let Err(e) = self.handle_flow(flow, interceptor.as_ref()).await {
+                tracing::warn!(error = %e, "flow handling failed; failing open");
             }
         }
         Ok(())
@@ -350,6 +345,9 @@ fn build_alert(
         // redacted summary only — never raw content (Evidence carries hashes/safe thumb).
         redacted_context: verdict.rationale.clone(),
         evidence: verdict.evidence.clone(),
+        // child_id/family_id are resolved cluster-side from device_id (the client
+        // doesn't hold the family model); leave empty here.
+        ..Default::default()
     }
 }
 

@@ -471,6 +471,7 @@ mod tests {
                 model_id: "rules".to_string(),
                 model_version: "1.0".to_string(),
             }),
+            ..Default::default()
         }
     }
 

@@ -19,9 +19,11 @@ use aegis_proto::v1::{
 };
 use async_trait::async_trait;
 
+pub mod accounts;
 pub mod relay;
 pub mod service;
 
+pub use accounts::{AccountStore, AccountsService};
 pub use relay::{AlertHub, ReviewService};
 
 /// Which role this process plays. Chosen by `--role` / `AEGIS_ROLE`.

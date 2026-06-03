@@ -37,6 +37,7 @@
 //!   * [`ca::dpapi`] — DPAPI `CryptProtectData` / `CryptUnprotectData` via the
 //!     `windows` crate, plus the trust-store cert APIs in [`truststore`].
 //!   * [`tun::windows`] — loading `wintun.dll`.
+//!
 //! No `unsafe` leaks into the proxy / CA / interceptor logic.
 //!
 //! ## No AI/ML, no telemetry
@@ -58,6 +59,10 @@ pub mod proxy;
 pub mod quic;
 pub mod truststore;
 pub mod tun;
+// VPN mode is DESKTOP (Windows/Linux/macOS) — tun2proxy-backed. Mobile uses the
+// native VpnService / NetworkExtension shells instead.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+pub mod vpn;
 
 // --- Curated public API -----------------------------------------------------
 
@@ -72,6 +77,10 @@ pub use proxy::{FlowReceiver, FlowSender, MitmProxy};
 pub use quic::QuicDowngrade;
 pub use truststore::StoreScope;
 pub use tun::{open_tun, TunConfig, TunDevice};
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+pub use vpn::{
+    elevation_command, is_elevated, run_vpn, wintun_available, CancellationToken, VpnConfig,
+};
 
 // Re-export the proto SourceChannel so downstream code can name the flow source
 // without a separate aegis-proto import.

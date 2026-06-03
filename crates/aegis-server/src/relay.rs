@@ -253,11 +253,25 @@ fn broadcast_into_stream(
 #[derive(Clone)]
 pub struct ReviewService {
     hub: AlertHub,
+    /// When set, `StreamPendingReviews` scopes a guardian's stream (by session
+    /// token) to ONLY the children they're assigned to. `None` = legacy
+    /// device-only filtering (every subscriber sees every alert).
+    accounts: Option<crate::accounts::AccountStore>,
 }
 
 impl ReviewService {
+    /// Legacy constructor: no per-guardian scoping (device_id filter only).
     pub fn new(hub: AlertHub) -> Self {
-        Self { hub }
+        Self { hub, accounts: None }
+    }
+
+    /// Scope guardian streams by session token against `store`'s child→guardian
+    /// assignments.
+    pub fn with_accounts(hub: AlertHub, store: crate::accounts::AccountStore) -> Self {
+        Self {
+            hub,
+            accounts: Some(store),
+        }
     }
 }
 
@@ -340,17 +354,52 @@ impl aegis_proto::v1::review_server::Review for ReviewService {
         &self,
         req: Request<DeviceFilter>,
     ) -> Result<Response<Self::StreamPendingReviewsStream>, Status> {
+        use futures_util::StreamExt;
+
+        // Token may come from the message field or `authorization: Bearer …`.
+        let meta_token = crate::accounts::bearer_token(&req);
         let filter = req.into_inner();
         let want_device = filter.device_id.trim().to_string();
+        let token = if !filter.token.trim().is_empty() {
+            filter.token.trim().to_string()
+        } else {
+            meta_token.unwrap_or_default()
+        };
 
         let rx = self.hub.subscribe();
         let base = broadcast_into_stream(rx);
 
-        // Empty device_id = all supervised devices; otherwise only that device.
+        // Per-guardian scoping: a session token + a wired account store restricts
+        // the stream to the children this guardian is assigned to. An alert is
+        // kept only if its child_id OR device_id belongs to one of those children
+        // (the data plane stamps device_id; child_id is set when known). An
+        // unknown token is rejected rather than leaking every family's alerts.
+        if !token.is_empty() {
+            if let Some(store) = &self.accounts {
+                let scope = store
+                    .guardian_scope(&token)
+                    .ok_or_else(|| Status::unauthenticated("invalid session token"))?;
+                let want_device = want_device.clone();
+                let stream: Self::StreamPendingReviewsStream = Box::pin(base.filter(move |item| {
+                    let keep = match item {
+                        Ok(ev) => {
+                            let in_scope = scope.child_ids.contains(&ev.child_id)
+                                || scope.device_ids.contains(&ev.device_id);
+                            let dev_ok = want_device.is_empty() || ev.device_id == want_device;
+                            in_scope && dev_ok
+                        }
+                        Err(_) => true, // surface transport errors regardless
+                    };
+                    async move { keep }
+                }));
+                return Ok(Response::new(stream));
+            }
+        }
+
+        // Legacy path: empty device_id = all supervised devices; else that device.
         let stream: Self::StreamPendingReviewsStream = if want_device.is_empty() {
             base
         } else {
-            use futures_util::StreamExt;
             Box::pin(base.filter(move |item| {
                 let keep = match item {
                     Ok(ev) => ev.device_id == want_device,
@@ -381,6 +430,7 @@ mod tests {
             ts: 1,
             redacted_context: "redacted".into(),
             evidence: None,
+            ..Default::default()
         }
     }
 
@@ -415,8 +465,10 @@ mod tests {
         let hub = AlertHub::new();
         let svc = ReviewService::new(hub.clone());
 
-        let mut filter = DeviceFilter::default();
-        filter.device_id = "kids-tablet".into();
+        let filter = DeviceFilter {
+            device_id: "kids-tablet".into(),
+            ..Default::default()
+        };
         let resp = svc
             .stream_pending_reviews(Request::new(filter))
             .await
@@ -436,8 +488,10 @@ mod tests {
     async fn register_push_target_requires_token() {
         let hub = AlertHub::new();
         let svc = ReviewService::new(hub);
-        let mut t = PushTarget::default();
-        t.device_id = "guardian-phone".into();
+        let t = PushTarget {
+            device_id: "guardian-phone".into(),
+            ..Default::default()
+        };
         // missing fcm_token
         let err = svc
             .register_push_target(Request::new(t))

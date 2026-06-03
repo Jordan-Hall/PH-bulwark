@@ -76,7 +76,7 @@ impl QuicDowngrade {
             let _ = windows_delete_rule();
             windows_add_rule()?;
             tracing::info!(rule = RULE_NAME, "QUIC downgrade: blocking outbound UDP/443 (netsh)");
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(target_os = "linux")]
@@ -113,7 +113,7 @@ impl QuicDowngrade {
                 // A missing rule is fine on teardown; log at debug and succeed.
                 Err(e) => tracing::debug!("QUIC downgrade rule removal: {e} (treating as absent)"),
             }
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(target_os = "linux")]
@@ -266,7 +266,7 @@ mod tests {
         let q = QuicDowngrade::new(true, vec![]);
         assert!(q.should_block_udp(443, "youtube.com"));
         assert!(!q.should_block_udp(53, "youtube.com")); // not 443 → leave alone
-        assert!(!q.should_block_udp(443, "")); // still 443 → block (no allowlist)
+        assert!(q.should_block_udp(443, "")); // still 443 → block (no allowlist)
     }
 
     #[test]

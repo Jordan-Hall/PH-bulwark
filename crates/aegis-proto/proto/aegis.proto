@@ -280,6 +280,18 @@ message AlertEvent {
   int64     ts        = 7; // unix epoch millis
   string    redacted_context = 8; // safe summary / redacted excerpt — NO media
   Evidence  evidence  = 9; // hashes / safe thumbnail only (see Evidence invariant)
+  // Per-child routing (Accounts service): which supervised child this alert is
+  // about, so the relay fans it out ONLY to that child's assigned guardian(s).
+  // Empty = legacy device-only routing (every guardian stream sees it).
+  string    child_id  = 10;
+  string    family_id = 11; // the family the child belongs to (audit / scoping)
+
+  // LOCAL-ONLY content-addressed reference (`blob://<sha256-hex>`) to a
+  // blocked/borderline VIDEO segment retained on the GUARDIAN's node for review
+  // (aegis-video::SegmentStore). The parent app loads it from local storage; it
+  // is NEVER raw bytes and NEVER carries suspected CSAM (always empty for
+  // CSAM_SUSPECTED — the store refuses to persist it). Empty when no clip.
+  string    local_segment_uri = 12;
 }
 
 message AlertAck {
@@ -353,6 +365,12 @@ message PushAck {
 
 message DeviceFilter {
   string device_id = 1; // empty = all supervised devices
+  // Guardian session token (from Accounts.Login). When set, the pending-review
+  // stream is scoped to the children this guardian is assigned to — an alert is
+  // delivered only if its child_id is one of theirs. May also be supplied via the
+  // `authorization: Bearer <token>` gRPC metadata header. Empty = legacy
+  // device-only behaviour (no per-guardian scoping).
+  string token = 2;
 }
 
 // Guardian approve/deny review + remote-push registration. The pending-review
@@ -361,6 +379,83 @@ service Review {
   rpc SubmitDecision(ReviewRequest) returns (ReviewAck);
   rpc RegisterPushTarget(PushTarget) returns (PushAck);
   rpc StreamPendingReviews(DeviceFilter) returns (stream AlertEvent);
+}
+
+// ---------------------------------------------------------------------------
+// Accounts service — parent accounts + per-child assigned guardians.
+//   * A PARENT ACCOUNT is an email + password (password is KDF-hashed at rest,
+//     never stored plaintext — see aegis-server::accounts).
+//   * A CHILD belongs to a family; one or more guardian accounts are ASSIGNED to
+//     each child. Alerts for a child route ONLY to that child's guardians
+//     (AlertEvent.child_id → Review.StreamPendingReviews scoping by token).
+//   * Mutating RPCs authenticate with the Session token from Login (also accepted
+//     via `authorization: Bearer <token>` metadata).
+// In-memory today (SEAM for durable storage); no raw content ever touches here.
+// ---------------------------------------------------------------------------
+
+message CreateAccountRequest {
+  string email        = 1;
+  string password     = 2; // hashed server-side (PBKDF2-HMAC-SHA256); never stored
+  string display_name = 3;
+}
+
+message AccountAck {
+  string account_id = 1;
+  bool   created    = 2; // false if the email already exists
+  string detail     = 3;
+}
+
+message LoginRequest {
+  string email    = 1;
+  string password = 2;
+}
+
+message Session {
+  string token      = 1; // opaque bearer token for subsequent calls
+  string account_id = 2;
+  int64  issued_ts  = 3; // unix epoch millis
+}
+
+message AddChildRequest {
+  string token      = 1; // caller's session; caller is auto-assigned as guardian
+  string child_name = 2;
+  string device_id  = 3; // the child's supervised device (links alerts → child)
+}
+
+// A supervised child + the guardian accounts assigned to them.
+message Child {
+  string child_id   = 1;
+  string family_id  = 2;
+  string child_name = 3;
+  string device_id  = 4;
+  repeated string guardian_account_ids = 5;
+}
+
+message AssignGuardianRequest {
+  string token               = 1; // caller must already guard this child
+  string child_id            = 2;
+  string guardian_account_id = 3; // account to add as a guardian of the child
+}
+
+message GuardianAck {
+  bool   ok     = 1;
+  string detail = 2;
+}
+
+message ListChildrenRequest {
+  string token = 1; // returns the children this guardian is assigned to
+}
+
+message Children {
+  repeated Child children = 1;
+}
+
+service Accounts {
+  rpc CreateAccount(CreateAccountRequest) returns (AccountAck);
+  rpc Login(LoginRequest) returns (Session);
+  rpc AddChild(AddChildRequest) returns (Child);
+  rpc AssignGuardian(AssignGuardianRequest) returns (GuardianAck);
+  rpc ListChildren(ListChildrenRequest) returns (Children);
 }
 
 // ---------------------------------------------------------------------------

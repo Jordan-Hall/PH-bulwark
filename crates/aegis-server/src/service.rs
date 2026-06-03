@@ -5,6 +5,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
+use aegis_proto::v1::accounts_server::AccountsServer;
 use aegis_proto::v1::analysis_server::{Analysis, AnalysisServer};
 use aegis_proto::v1::offload_server::{Offload, OffloadServer};
 use aegis_proto::v1::alert_relay_server::{AlertRelay, AlertRelayServer};
@@ -16,6 +17,7 @@ use aegis_proto::v1::{
 use futures_util::StreamExt;
 use tonic::{Request, Response, Status, Streaming};
 
+use crate::accounts::{AccountStore, AccountsService};
 use crate::relay::{AlertHub, ReviewService};
 use crate::{default_offload_policy, AnalyzerRegistry, ServerConfig, ServerRole};
 
@@ -122,11 +124,12 @@ impl Offload for OffloadService {
         // Minimal: keep the same policy id, refresh the TTL. A richer impl would
         // re-derive from the fresh RTT/battery in the request.
         let r = req.into_inner();
-        let mut pol = OffloadPolicy::default();
-        pol.run_text_local = true;
-        pol.ttl_secs = 300;
-        pol.policy_id = r.policy_id;
-        Ok(Response::new(pol))
+        Ok(Response::new(OffloadPolicy {
+            run_text_local: true,
+            ttl_secs: 300,
+            policy_id: r.policy_id,
+            ..Default::default()
+        }))
     }
 }
 
@@ -249,6 +252,11 @@ pub async fn run(
         // per-device approve-allowlist Review::SubmitDecision writes through.
         let hub = AlertHub::new();
 
+        // Parent accounts + per-child guardians. The same store scopes Review's
+        // pending stream (a guardian sees only their assigned children) and backs
+        // the Accounts service (create/login/add-child/assign-guardian).
+        let accounts = AccountStore::new();
+
         // AlertRelay is always mounted on guardian-facing nodes (even without
         // an SMTP sink) so the broadcast fan-out path is available; the sink is
         // attached when SMTP is configured.
@@ -258,8 +266,15 @@ pub async fn run(
         )));
 
         // Review: guardian approve/deny + remote-push registration + the
-        // pending-review stream (subscribes to the same hub).
-        router = router.add_service(ReviewServer::new(ReviewService::new(hub)));
+        // pending-review stream, scoped per-guardian by the account store.
+        router = router.add_service(ReviewServer::new(ReviewService::with_accounts(
+            hub,
+            accounts.clone(),
+        )));
+
+        // Accounts: parent registration/login + child/guardian management.
+        router =
+            router.add_service(AccountsServer::new(AccountsService::new(accounts)));
 
         if let Some(c) = cluster {
             let svc = aegis_cluster::service::ClusterControlService::new(c);

@@ -50,6 +50,45 @@ impl Default for Normalization {
     }
 }
 
+/// Preprocessing profile for a model architecture — the input size + the pixel
+/// normalization it was trained with. Lets the client/mobile build swap a
+/// lightweight MobileNet-class NSFW model in for the server's ViT without code
+/// changes (the output head is auto-detected downstream in `nsfw_probability`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelClass {
+    /// Vision Transformer (the Falconsai `nsfw_image_detection` we ship): 224px,
+    /// `[-1,1]` (half) normalization. Server default.
+    Vit,
+    /// MobileNet-class CNN: 224px, ImageNet mean/std. The lightweight profile for
+    /// on-device (client/mobile) inference.
+    MobileNet,
+}
+
+impl ModelClass {
+    /// Select from `AEGIS_NSFW_MODEL_CLASS` (`vit` | `mobilenet`). Default `Vit`.
+    pub fn from_env() -> Self {
+        match std::env::var("AEGIS_NSFW_MODEL_CLASS").ok().as_deref() {
+            Some("mobilenet") | Some("mobile") => Self::MobileNet,
+            _ => Self::Vit,
+        }
+    }
+
+    /// Square input edge (pixels) this model class expects.
+    pub fn input_size(self) -> u32 {
+        match self {
+            Self::Vit | Self::MobileNet => 224,
+        }
+    }
+
+    /// Pixel normalization this model class was trained with.
+    pub fn normalization(self) -> Normalization {
+        match self {
+            Self::Vit => Normalization::half(),
+            Self::MobileNet => Normalization::imagenet(),
+        }
+    }
+}
+
 /// A preprocessed input tensor in NCHW layout (batch = 1).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tensor {
@@ -165,6 +204,21 @@ mod tests {
         assert!((t.data[0] - expected).abs() < 1e-4);
         assert_eq!(t.shape, [1, 3, 2, 2]);
         let _ = plane;
+    }
+
+    #[test]
+    fn model_class_profiles() {
+        assert_eq!(ModelClass::Vit.input_size(), 224);
+        assert_eq!(ModelClass::MobileNet.input_size(), 224);
+        // ViT trains on half [-1,1]; MobileNet on ImageNet stats.
+        assert_eq!(
+            ModelClass::Vit.normalization().mean,
+            Normalization::half().mean
+        );
+        assert_eq!(
+            ModelClass::MobileNet.normalization().mean,
+            Normalization::imagenet().mean
+        );
     }
 
     #[test]

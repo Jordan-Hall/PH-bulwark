@@ -89,7 +89,7 @@ pub fn open_in_memory() -> aegis_core::Result<std::sync::Arc<dyn Store>> {
     }
     #[cfg(all(not(feature = "sqlite"), feature = "portable"))]
     {
-        return portable::PortableStore::open_in_memory();
+        portable::PortableStore::open_in_memory()
     }
     #[cfg(all(not(feature = "sqlite"), not(feature = "portable")))]
     {

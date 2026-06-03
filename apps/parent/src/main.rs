@@ -60,6 +60,10 @@ const REPO_ROOT: &str = r"C:\Users\Jordan\child-safety";
 const NSFW_MODEL: &str = r"C:\Users\Jordan\child-safety\models\nsfw.onnx";
 /// Cluster endpoint handed to the proxy via `AEGIS_CLUSTER_ENDPOINT`.
 const PROXY_CLUSTER_ENDPOINT: &str = "http://127.0.0.1:8443";
+/// Prebuilt transparent-VPN binary. VPN mode captures ALL traffic via a TUN and
+/// needs Administrator; `aegis_vpn` self-checks elevation and exits immediately
+/// if not elevated. Unlike proxy mode it does NOT touch the system proxy.
+const VPN_EXE: &str = r"C:\Users\Jordan\child-safety\target\debug\aegis_vpn.exe";
 
 // ---------------------------------------------------------------------------
 // Connection layer
@@ -117,6 +121,10 @@ struct Alert {
     /// The actual flagged text from `Evidence.text_snippet` (full, not redacted
     /// to the guardian). Empty when none. Never rendered for CsamSuspected.
     snippet: String,
+    /// Local `blob://<sha256>` reference to a blocked/borderline VIDEO segment
+    /// retained on this node for review (`AlertEvent.local_segment_uri`). `None`
+    /// when no clip. Never set/played for CsamSuspected.
+    segment_uri: Option<String>,
 }
 
 impl Alert {
@@ -171,6 +179,12 @@ impl Alert {
             ev.device_id.clone()
         };
 
+        // A locally-stored video segment to review, if the cluster attached one.
+        // (The store never persists CSAM, so this is always empty for CSAM; the
+        // card also gates playback on category as defence in depth.)
+        let segment_uri = Some(ev.local_segment_uri)
+            .filter(|s| !s.is_empty());
+
         Self {
             id: ev.alert_id,
             title,
@@ -182,6 +196,7 @@ impl Alert {
             category,
             thumbnail,
             snippet,
+            segment_uri,
         }
     }
 }
@@ -224,6 +239,7 @@ fn seed() -> Vec<Alert> {
             // Offline sample: no real bytes to preview.
             thumbnail: Vec::new(),
             snippet: String::new(),
+            segment_uri: None,
         },
         Alert {
             id: "a-1002".into(),
@@ -235,6 +251,7 @@ fn seed() -> Vec<Alert> {
             category: Category::Grooming,
             thumbnail: Vec::new(),
             snippet: "hey don\u{2019}t tell your mum about this, let\u{2019}s talk on the other app".into(),
+            segment_uri: None,
         },
     ]
 }
@@ -265,9 +282,11 @@ fn App() -> Element {
 
         let mut client = ReviewClient::new(channel);
 
-        // Empty device_id == all supervised devices for this guardian.
+        // Empty device_id == all supervised devices; empty token == legacy
+        // (no per-guardian scoping — the desktop console has no login flow yet).
         let filter = DeviceFilter {
             device_id: String::new(),
+            ..Default::default()
         };
 
         let mut stream = match client.stream_pending_reviews(filter).await {
@@ -279,24 +298,19 @@ fn App() -> Element {
         // sample rows so we only ever show real, redacted alerts.
         let mut went_live = false;
 
-        loop {
-            match stream.message().await {
-                Ok(Some(event)) => {
-                    if !went_live {
-                        went_live = true;
-                        offline.set(false);
-                        alerts.write().clear();
-                    }
-                    let alert = Alert::from_event(event);
-                    let mut list = alerts.write();
-                    // Dedupe by alert_id (idempotency key) across retries.
-                    if !list.iter().any(|a| a.id == alert.id) {
-                        list.insert(0, alert);
-                    }
-                }
-                // Stream ended cleanly or errored — stop consuming; keep what we
-                // already showed. We do not crash or clear the list.
-                Ok(None) | Err(_) => break,
+        // A `None`/`Err` (stream ended cleanly or errored) ends the loop; we keep
+        // what we already showed and never crash or clear the list.
+        while let Ok(Some(event)) = stream.message().await {
+            if !went_live {
+                went_live = true;
+                offline.set(false);
+                alerts.write().clear();
+            }
+            let alert = Alert::from_event(event);
+            let mut list = alerts.write();
+            // Dedupe by alert_id (idempotency key) across retries.
+            if !list.iter().any(|a| a.id == alert.id) {
+                list.insert(0, alert);
             }
         }
     });
@@ -468,6 +482,37 @@ fn spawn_proxy() -> std::io::Result<Child> {
     }
 }
 
+/// Spawn the transparent-VPN binary (`aegis_vpn.exe`). Like [`spawn_proxy`] it
+/// passes the model + cluster endpoint, but VPN mode needs Administrator and does
+/// NOT touch the system proxy (the TUN captures everything). `aegis_vpn`
+/// self-checks elevation and exits immediately if not elevated — the Connect
+/// handler detects that fast exit and surfaces a "run as Administrator" hint.
+fn spawn_vpn() -> std::io::Result<Child> {
+    use std::process::Command;
+    if std::path::Path::new(VPN_EXE).exists() {
+        Command::new(VPN_EXE)
+            .env("AEGIS_NSFW_MODEL", NSFW_MODEL)
+            .env("AEGIS_CLUSTER_ENDPOINT", PROXY_CLUSTER_ENDPOINT)
+            .spawn()
+    } else {
+        // Dev fallback: build+run from source (will need an elevated shell).
+        Command::new("cargo")
+            .args([
+                "run",
+                "-p",
+                "aegis-client",
+                "--features",
+                "onnx",
+                "--bin",
+                "aegis_vpn",
+            ])
+            .current_dir(REPO_ROOT)
+            .env("AEGIS_NSFW_MODEL", NSFW_MODEL)
+            .env("AEGIS_CLUSTER_ENDPOINT", PROXY_CLUSTER_ENDPOINT)
+            .spawn()
+    }
+}
+
 /// Is the proxy actually accepting connections right now? This is the source of
 /// truth for the status light — independent of whether *we* think we started it,
 /// so an externally-started proxy (or a crashed child) is reported honestly.
@@ -547,7 +592,28 @@ fn disable_system_proxy() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Shared handle to the spawned proxy child, stored in app state so any handler
+/// Which local filter the Connect control launches.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Explicit per-user system proxy (no admin): spawns `aegis_proxy` and points
+    /// the Windows system proxy at it.
+    Proxy,
+    /// Transparent, system-wide TUN VPN (needs admin): spawns `aegis_vpn`. The TUN
+    /// captures everything, so no system-proxy change is made.
+    Vpn,
+}
+
+impl Mode {
+    /// One-line description shown under the selector.
+    fn explain(self) -> &'static str {
+        match self {
+            Mode::Proxy => "Routes traffic through the local filter via the per-user system proxy. No admin needed; covers browsers + apps that honour the system proxy.",
+            Mode::Vpn => "Captures ALL traffic system-wide through a TUN adapter — no proxy settings. Needs Aegis run as Administrator.",
+        }
+    }
+}
+
+/// Shared handle to the spawned proxy/VPN child, stored in app state so any handler
 /// (Connect/Disconnect/shutdown) can take and kill it. `Rc<RefCell<..>>` keeps
 /// it single-threaded on the UI thread, which is where our handlers run.
 type ProxyHandle = Rc<RefCell<Option<Child>>>;
@@ -571,6 +637,11 @@ fn ProtectionPanel() -> Element {
     let control_error = use_signal(|| Option::<String>::None);
     // True while a Connect/Disconnect action is in flight (debounce the button).
     let busy = use_signal(|| false);
+    // Which filter the Connect control launches (Proxy = no admin, default).
+    let mode = use_signal(|| Mode::Proxy);
+    // True once WE turned the per-user system proxy ON (proxy mode only), so
+    // Disconnect clears it iff we set it and VPN mode never touches it.
+    let proxy_set = use_signal(|| false);
 
     // The spawned proxy process, shared across handlers. use_signal stores it so
     // the same Rc survives re-renders; we never read it on the render path.
@@ -601,13 +672,11 @@ fn ProtectionPanel() -> Element {
     // closed window never leaves the machine proxied. (Hard kills, e.g. Task
     // Manager, can't be caught — documented limitation; Disconnect is the
     // guaranteed clean path.)
-    {
-        let proxy = proxy;
-        use_drop(move || {
-            kill_proxy(&proxy());
-            let _ = disable_system_proxy();
-        });
-    }
+    use_drop(move || {
+        // `proxy` is a Copy `Signal`, captured directly by this `move` closure.
+        kill_proxy(&proxy());
+        let _ = disable_system_proxy();
+    });
 
     rsx! {
         section { class: "protect",
@@ -626,38 +695,83 @@ fn ProtectionPanel() -> Element {
                     onclick: move |_| {
                         // Snapshot state we need inside the (sync) handler.
                         let want_connect = !connected();
+                        let selected_mode = mode();
                         let proxy_handle = proxy();
                         let mut control_error = control_error;
                         let mut busy = busy;
                         let mut connected = connected;
+                        let mut proxy_set = proxy_set;
 
                         busy.set(true);
                         control_error.set(None);
 
                         if want_connect {
-                            // 1) Spawn the proxy and stash the Child for later kill.
-                            match spawn_proxy() {
+                            // 1) Spawn the chosen filter and stash the Child for kill.
+                            let spawned = match selected_mode {
+                                Mode::Proxy => spawn_proxy(),
+                                Mode::Vpn => spawn_vpn(),
+                            };
+                            match spawned {
                                 Ok(child) => {
                                     *proxy_handle.borrow_mut() = Some(child);
                                 }
                                 Err(e) => {
+                                    let what = match selected_mode {
+                                        Mode::Proxy => "the proxy",
+                                        Mode::Vpn => "the VPN",
+                                    };
                                     control_error
-                                        .set(Some(format!("Couldn't start the proxy: {e}")));
+                                        .set(Some(format!("Couldn't start {what}: {e}")));
                                     busy.set(false);
                                     return;
                                 }
                             }
-                            // 2) Flip the per-user Windows system proxy ON.
-                            if let Err(e) = enable_system_proxy() {
-                                control_error
-                                    .set(Some(format!("Started proxy but couldn't set system proxy: {e}")));
+                            match selected_mode {
+                                // Proxy mode: flip the per-user system proxy ON.
+                                Mode::Proxy => {
+                                    if let Err(e) = enable_system_proxy() {
+                                        control_error.set(Some(format!(
+                                            "Started proxy but couldn't set system proxy: {e}"
+                                        )));
+                                    } else {
+                                        proxy_set.set(true);
+                                    }
+                                }
+                                // VPN mode: no system-proxy change. aegis_vpn exits
+                                // fast if not elevated — detect that and hint admin.
+                                Mode::Vpn => {
+                                    let probe = proxy_handle.clone();
+                                    let mut probe_err = control_error;
+                                    let mut probe_connected = connected;
+                                    spawn(async move {
+                                        tokio::time::sleep(Duration::from_secs(2)).await;
+                                        let exited = match probe.borrow_mut().as_mut() {
+                                            Some(c) => matches!(c.try_wait(), Ok(Some(_))),
+                                            None => false,
+                                        };
+                                        if exited {
+                                            kill_proxy(&probe);
+                                            probe_err.set(Some(
+                                                "VPN mode needs Aegis run as Administrator. \
+                                                 Re-launch as admin, then Connect again."
+                                                    .to_string(),
+                                            ));
+                                            probe_connected.set(false);
+                                        }
+                                    });
+                                }
                             }
                         } else {
-                            // Disconnect: kill the child, then clear the proxy.
+                            // Disconnect: kill the child; clear the system proxy
+                            // only if WE set it (proxy mode). VPN never touched it.
                             kill_proxy(&proxy_handle);
-                            if let Err(e) = disable_system_proxy() {
-                                control_error
-                                    .set(Some(format!("Couldn't clear the system proxy: {e}")));
+                            if proxy_set() {
+                                if let Err(e) = disable_system_proxy() {
+                                    control_error.set(Some(format!(
+                                        "Couldn't clear the system proxy: {e}"
+                                    )));
+                                }
+                                proxy_set.set(false);
                             }
                             // Reflect "off" immediately; the poll confirms within 2s.
                             connected.set(false);
@@ -674,6 +788,22 @@ fn ProtectionPanel() -> Element {
                     }
                 }
             }
+
+            div { class: "mode-sel",
+                button {
+                    class: if mode() == Mode::Proxy { "mode-opt mode-on" } else { "mode-opt" },
+                    disabled: busy() || connected(),
+                    onclick: move |_| { let mut mode = mode; mode.set(Mode::Proxy); },
+                    "Proxy (no admin)"
+                }
+                button {
+                    class: if mode() == Mode::Vpn { "mode-opt mode-on" } else { "mode-opt" },
+                    disabled: busy() || connected(),
+                    onclick: move |_| { let mut mode = mode; mode.set(Mode::Vpn); },
+                    "VPN (system-wide, admin)"
+                }
+            }
+            div { class: "mode-explain", "{mode().explain()}" }
 
             if let Some(err) = control_error() {
                 div { class: "err", "{err}" }
@@ -751,6 +881,9 @@ fn AlertCard(alert: Alert, on_decide: EventHandler<bool>) -> Element {
                     "Preview withheld — suspected illegal content is blocked and is never shown or stored."
                 }
             } else {
+                if let Some(seg) = alert.segment_uri.clone() {
+                    SegmentPlayer { uri: seg }
+                }
                 if let Some(uri) = preview_uri {
                     div { class: "preview",
                         div { class: "preview-label", "Preview of what was blocked:" }
@@ -772,6 +905,67 @@ fn AlertCard(alert: Alert, on_decide: EventHandler<bool>) -> Element {
                 }
             }
         }
+    }
+}
+
+/// Plays a locally-stored video segment for guardian review. The `blob://<sha>`
+/// URI resolves to the per-user segment store on disk (`%LOCALAPPDATA%/Aegis/
+/// segments/<sha>.blob`, written by `aegis-video::SegmentStore`). Bytes are read
+/// once and shown via a data URI in the desktop webview's `<video>`. The caller
+/// only mounts this for NON-CSAM alerts (CSAM is never stored, so the file would
+/// not exist anyway — defence in depth).
+#[component]
+fn SegmentPlayer(uri: String) -> Element {
+    let mut data_uri = use_signal(|| Option::<String>::None);
+    let mut load_err = use_signal(|| Option::<String>::None);
+
+    use_effect(move || {
+        let uri = uri.clone();
+        spawn(async move {
+            match load_segment_from_disk(&uri) {
+                Ok(Some(bytes)) => {
+                    data_uri.set(Some(format!("data:video/mp4;base64,{}", base64_encode(&bytes))))
+                }
+                Ok(None) => {
+                    load_err.set(Some("not found (expired, purged, or never stored)".to_string()))
+                }
+                Err(e) => load_err.set(Some(e)),
+            }
+        });
+    });
+
+    rsx! {
+        div { class: "player",
+            div { class: "preview-label", "Blocked video segment (review):" }
+            if let Some(src) = data_uri() {
+                video { class: "vid", controls: true, src: "{src}" }
+            } else if let Some(err) = load_err() {
+                div { class: "seg-note", "Segment unavailable — {err}" }
+            } else {
+                div { class: "seg-note", "Loading segment…" }
+            }
+        }
+    }
+}
+
+/// Resolve a `blob://<sha256>` URI to the per-user segment store path and read
+/// the bytes. `Ok(None)` = missing/purged; `Err` = malformed URI or read error.
+fn load_segment_from_disk(uri: &str) -> Result<Option<Vec<u8>>, String> {
+    let sha = uri
+        .strip_prefix("blob://")
+        .ok_or_else(|| "not a blob:// URI".to_string())?;
+    if sha.len() != 64 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("malformed segment id".to_string());
+    }
+    let base = std::env::var("LOCALAPPDATA").map_err(|_| "LOCALAPPDATA not set".to_string())?;
+    let path = std::path::Path::new(&base)
+        .join("Aegis")
+        .join("segments")
+        .join(format!("{sha}.blob"));
+    match std::fs::read(&path) {
+        Ok(b) => Ok(Some(b)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -891,6 +1085,13 @@ const CSS: &str = r#"
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
     .ok { color: #6fe39a; }
     .off { color: #9aa0ad; }
+    .mode-sel { display: flex; gap: 8px; margin-top: 14px; }
+    .mode-opt { background: #12151c; color: #c8ccd6; border: 1px solid #232733; font-weight: 500; padding: 7px 14px; }
+    .mode-on { background: #1f2a3a; color: #dce7ff; border-color: #3a5170; box-shadow: 0 0 0 1px #3a5170; }
+    .mode-explain { margin-top: 8px; color: #9aa0ad; font-size: 12px; }
+    .player { margin: 0 0 10px; }
+    .player .vid { display: block; max-width: 360px; width: 100%; height: auto; border-radius: 8px; border: 1px solid #232733; background: #000; }
+    .player .seg-note { color: #8b91a0; font-size: 12px; padding: 8px 0; }
     .ca-hint { margin-top: 12px; background: #12151c; border: 1px solid #232733; border-radius: 8px; padding: 10px 12px; font-size: 12px; color: #c8ccd6; }
     .ca-cmd { margin-top: 6px; padding: 8px; background: #0c0e13; border-radius: 6px; word-break: break-all; user-select: all; }
 "#;

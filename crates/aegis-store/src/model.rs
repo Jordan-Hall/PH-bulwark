@@ -252,7 +252,7 @@ pub fn hex_encode(bytes: &[u8]) -> String {
 /// input yields an empty vec rather than erroring — this is a read-back path).
 pub fn hex_decode(s: &str) -> Vec<u8> {
     let bytes = s.as_bytes();
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Vec::new();
     }
     let mut out = Vec::with_capacity(bytes.len() / 2);

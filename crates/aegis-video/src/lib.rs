@@ -25,6 +25,9 @@ use aegis_core::Analyzer;
 use aegis_audio::AudioAnalyzer;
 use aegis_vision::VisionAnalyzer;
 
+pub mod store;
+pub use store::{SegmentStore, StoredSegment};
+
 #[derive(Debug, Clone)]
 pub struct VideoConfig {
     /// Frames per second to sample for classification (plus scene-cut detection).
@@ -62,6 +65,9 @@ pub struct VideoAnalyzer<D: Demuxer = NullDemuxer> {
     demux: D,
     vision: VisionAnalyzer,
     audio: AudioAnalyzer,
+    /// Optional local store for blocked/borderline segments (guardian review).
+    /// `None` = don't retain clips (default). CSAM is never stored regardless.
+    segment_store: Option<SegmentStore>,
 }
 
 impl VideoAnalyzer<NullDemuxer> {
@@ -71,6 +77,7 @@ impl VideoAnalyzer<NullDemuxer> {
             demux: NullDemuxer,
             vision: VisionAnalyzer::new(),
             audio: AudioAnalyzer::new(),
+            segment_store: None,
         }
     }
 }
@@ -86,7 +93,15 @@ impl<D: Demuxer> VideoAnalyzer<D> {
             demux,
             vision: VisionAnalyzer::new(),
             audio: AudioAnalyzer::new(),
+            segment_store: None,
         }
+    }
+
+    /// Attach a [`SegmentStore`]: blocked/borderline non-CSAM segments are
+    /// written locally for guardian review (CSAM is never stored).
+    pub fn with_segment_store(mut self, store: SegmentStore) -> Self {
+        self.segment_store = Some(store);
+        self
     }
 }
 
@@ -172,14 +187,29 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
             }
         }
 
-        Ok(worst.unwrap_or(Verdict {
+        let verdict = worst.unwrap_or(Verdict {
             request_id: req.request_id,
             category: Category::Safe as i32,
             action: Action::Allow as i32,
             severity: Severity::Info as i32,
             rationale: "no flagged frames/audio in segment".into(),
             ..Default::default()
-        }))
+        });
+
+        // Retain the segment for guardian review when it was blocked/borderline.
+        // `store_if_safe` enforces the CSAM-never-stored boundary and skips benign
+        // ALLOW, so this is a no-op for safe traffic.
+        if let Some(store) = &self.segment_store {
+            match store.store_if_safe(verdict.category(), verdict.action(), &segment) {
+                Ok(Some(stored)) => {
+                    tracing::info!(uri = %stored.uri, "aegis-video: stored segment for review")
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!(error = %e, "aegis-video: segment store write failed"),
+            }
+        }
+
+        Ok(verdict)
     }
 }
 

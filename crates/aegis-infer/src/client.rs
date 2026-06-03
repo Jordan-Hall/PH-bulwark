@@ -68,7 +68,7 @@ impl ClientTlsIdentity {
 
 /// gRPC client to the cluster's `Offload` + `Analysis` services over one shared
 /// mTLS channel.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct OffloadClient {
     offload: ProtoOffloadClient<Channel>,
     analysis: AnalysisClient<Channel>,
@@ -174,10 +174,13 @@ mod tests {
     use super::*;
 
     fn dummy_identity() -> ClientTlsIdentity {
+        // Distinctive material so the test can assert the *bytes* never leak —
+        // without colliding with the field NAMES (client_key_pem/client_cert_pem),
+        // which legitimately contain "key"/"cert".
         ClientTlsIdentity {
-            client_cert_pem: b"cert".to_vec(),
-            client_key_pem: b"key".to_vec(),
-            ca_cert_pem: b"ca".to_vec(),
+            client_cert_pem: b"PEM-CERT-MATERIAL-AAAA".to_vec(),
+            client_key_pem: b"PEM-PRIVATE-MATERIAL-BBBB".to_vec(),
+            ca_cert_pem: b"PEM-CA-MATERIAL-CCCC".to_vec(),
             server_domain: "cluster.local".into(),
         }
     }
@@ -185,10 +188,13 @@ mod tests {
     #[test]
     fn tls_identity_debug_redacts_material() {
         let shown = format!("{:?}", dummy_identity());
+        // The non-secret server domain is shown; the byte fields are redacted.
         assert!(shown.contains("cluster.local"));
         assert!(shown.contains("<redacted>"));
-        assert!(!shown.contains("key"));
-        assert!(!shown.contains("cert"));
+        // The actual cert/key/CA MATERIAL must NEVER appear in Debug output.
+        assert!(!shown.contains("PEM-CERT-MATERIAL-AAAA"));
+        assert!(!shown.contains("PEM-PRIVATE-MATERIAL-BBBB"));
+        assert!(!shown.contains("PEM-CA-MATERIAL-CCCC"));
     }
 
     #[tokio::test]

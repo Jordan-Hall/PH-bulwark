@@ -61,6 +61,7 @@ fn synthetic_alert(alert_id: &str, device_id: &str, category: Category) -> Alert
             model_id: "test-model".to_string(),
             model_version: "0".to_string(),
         }),
+        ..Default::default()
     }
 }
 

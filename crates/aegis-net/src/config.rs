@@ -122,8 +122,10 @@ mod tests {
 
     #[test]
     fn rejects_unbounded_ca_validity() {
-        let mut c = NetConfig::default();
-        c.ca_validity_days = 100_000; // ~273 years — defeats rotation
+        let c = NetConfig {
+            ca_validity_days: 100_000, // ~273 years — defeats rotation
+            ..Default::default()
+        };
         assert!(c.validate().is_err());
     }
 }

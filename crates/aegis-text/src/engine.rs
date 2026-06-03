@@ -165,7 +165,7 @@ impl GroomingRuleEngine {
         }
 
         // --- normalize + cap ---
-        let score = (raw / NORMALIZE_DIVISOR).min(1.0).max(0.0);
+        let score = (raw / NORMALIZE_DIVISOR).clamp(0.0, 1.0);
 
         // --- severity band; image request hard-escalates to CRITICAL ---
         let severity = if image_request {

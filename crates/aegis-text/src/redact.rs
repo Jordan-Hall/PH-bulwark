@@ -70,24 +70,26 @@ fn squeeze_truncate(s: &str) -> String {
     squeeze_truncate_to(s, MAX_FRAGMENT)
 }
 
-/// Build a redacted excerpt for a grooming signal. Used ONLY for the CSAM-
-/// suspected branch now (non-CSAM hits use [`full_excerpt`]).
+/// Build a redacted excerpt for the CSAM-suspected branch. Used ONLY there
+/// (non-CSAM hits use [`full_excerpt`], which shows the real text).
 ///
-/// The excerpt names the fired categories and includes one short, digit-masked,
-/// truncated fragment of the message for reviewer context. It is explicitly
-/// **not** the verbatim message. Returns a `[redacted]` marker so it is obvious
-/// in logs/alerts.
+/// The suspected-CSAM message is **NEVER surfaced verbatim** — not even
+/// digit-masked. We return only a `[redacted]` marker naming the fired
+/// categories, so evidence/logs/alerts carry reviewer context (e.g. that an
+/// `image_request` fired) without ever reproducing the message content. This is
+/// the "CSAM is blocked and never shown or stored" invariant at the text layer.
 pub fn redacted_excerpt(text: &str, fired: &[GroomingRule]) -> String {
+    // The message text is intentionally NOT included in the output.
+    let _ = text;
     let cats = fired
         .iter()
         .map(|r| r.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    let fragment = squeeze_truncate(&mask_digits(text));
     if fired.is_empty() {
-        format!("[redacted] \"{fragment}\"")
+        "[redacted · content withheld]".to_string()
     } else {
-        format!("[redacted · {cats}] \"{fragment}\"")
+        format!("[redacted · {cats} · content withheld]")
     }
 }
 
@@ -109,11 +111,15 @@ mod tests {
     }
 
     #[test]
-    fn long_text_is_truncated() {
-        let long = "a ".repeat(200);
-        let out = redacted_excerpt(&long, &[]);
-        assert!(out.chars().count() < 80, "excerpt stays short: {}", out.len());
-        assert!(out.contains('…'));
+    fn redacted_excerpt_withholds_message_text() {
+        // CSAM branch: the verbatim message is NEVER reproduced, regardless of
+        // length — only the marker + fired categories.
+        let long = "secretphrase ".repeat(50);
+        let out = redacted_excerpt(&long, &[GroomingRule::Sexualization]);
+        assert!(out.starts_with("[redacted"));
+        assert!(!out.contains("secretphrase"), "verbatim text withheld: {out}");
+        assert!(out.contains("sexualization"));
+        assert!(out.chars().count() < 80, "stays short: {out}");
     }
 
     #[test]

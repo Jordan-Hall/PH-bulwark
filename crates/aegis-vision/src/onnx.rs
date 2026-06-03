@@ -24,8 +24,44 @@ use std::sync::Mutex;
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::Tensor as OrtTensor;
 
-use crate::preprocess::{preprocess, Normalization};
+use crate::preprocess::{preprocess, ModelClass, Normalization};
 use crate::Scorer;
+
+/// Execution-provider strategy for the NSFW session.
+///
+/// `auto` (default) builds a GPU-preferring session AND a CPU session, times a
+/// warmup inference on each, and KEEPS WHICHEVER IS FASTER — so a machine whose
+/// GPU is slower than its CPU (common on low-end mobile/integrated GPUs) silently
+/// runs on CPU. `gpu` forces the GPU-preferring dispatch (still CPU-backed by
+/// ort if the GPU EP is unavailable at runtime); `cpu` forces CPU only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecProviderMode {
+    /// Benchmark GPU vs CPU at load, keep the faster.
+    Auto,
+    /// CPU execution provider only.
+    Cpu,
+    /// GPU-preferring dispatch (platform EP first, CPU fallback).
+    Gpu,
+}
+
+impl ExecProviderMode {
+    /// Select from `AEGIS_NSFW_EP` (`auto` | `cpu` | `gpu`). Default `Auto`.
+    pub fn from_env() -> Self {
+        match std::env::var("AEGIS_NSFW_EP").ok().as_deref() {
+            Some("cpu") => Self::Cpu,
+            Some("gpu") => Self::Gpu,
+            _ => Self::Auto,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Cpu => "cpu",
+            Self::Gpu => "gpu",
+        }
+    }
+}
 
 pub struct OnnxScorer {
     model_id: String,
@@ -45,60 +81,63 @@ impl OnnxScorer {
         Self::load_with(model_path, input_size, Normalization::imagenet())
     }
 
-    /// Like [`OnnxScorer::load`] but with explicit input normalization.
+    /// Like [`OnnxScorer::load`] but with explicit input normalization. CPU only
+    /// (back-compat); use [`OnnxScorer::load_with_ep`] to opt into GPU selection.
     pub fn load_with(
         model_path: &str,
         input_size: u32,
         norm: Normalization,
     ) -> anyhow::Result<Self> {
-        // CPU EP, MULTI-THREADED. No execution provider is registered → ort uses
-        // the built-in CPU provider. `commit_from_file` is the ort 2.x loader.
-        //
-        // Speed matters here (the live MITM image filter must score in-flight),
-        // so we run intra-op parallelism across the machine's cores instead of a
-        // single thread. We also drop the strict `with_deterministic_compute`
-        // flag: it serializes ops to make results bit-reproducible, which fights
-        // multi-thread throughput — and NSFW scoring only needs to clear a
-        // threshold, not be bit-identical run-to-run.
-        //
-        // `ort::Error<R>` carries the failed builder `R` (which is not
-        // `Send + Sync`), so it cannot be `?`-converted straight into
-        // `anyhow::Error`. Stringify each step to drop that payload.
-        let intra_threads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
-        let session = Session::builder()
-            .map_err(|e| anyhow::anyhow!("ort: session builder: {e}"))?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|e| anyhow::anyhow!("ort: optimization level: {e}"))?
-            .with_intra_threads(intra_threads)
-            .map_err(|e| anyhow::anyhow!("ort: intra threads: {e}"))?
-            .commit_from_file(model_path)
-            .map_err(|e| anyhow::anyhow!("ort: load model {model_path}: {e}"))?;
+        Self::load_with_ep(model_path, input_size, norm, ExecProviderMode::Cpu)
+    }
 
+    /// Load with an explicit execution-provider [`ExecProviderMode`]: `Cpu`,
+    /// `Gpu` (platform EP first, CPU fallback), or `Auto` (benchmark GPU vs CPU at
+    /// load and keep the faster — the "fall back to CPU even on mobile if the GPU
+    /// is slower" path).
+    pub fn load_with_ep(
+        model_path: &str,
+        input_size: u32,
+        norm: Normalization,
+        mode: ExecProviderMode,
+    ) -> anyhow::Result<Self> {
+        let session = match mode {
+            ExecProviderMode::Cpu => build_session(model_path, cpu_only())?,
+            ExecProviderMode::Gpu => build_session(model_path, gpu_then_cpu())?,
+            ExecProviderMode::Auto => auto_select_session(model_path, input_size)?,
+        };
         Ok(Self {
-            model_id: format!("nsfw-onnx:{model_path}"),
+            model_id: format!("nsfw-onnx:{model_path}:{}", mode.label()),
             input_size,
             norm,
             session: Mutex::new(session),
         })
     }
 
-    /// Construct from the `AEGIS_NSFW_MODEL` env var, erroring if unset/empty.
+    /// Construct from `AEGIS_NSFW_MODEL`, picking the model class
+    /// (`AEGIS_NSFW_MODEL_CLASS`), normalization (`AEGIS_NSFW_NORM` override), and
+    /// execution provider (`AEGIS_NSFW_EP`) from the environment.
     pub fn from_env(input_size: u32) -> anyhow::Result<Self> {
         let path = std::env::var(crate::MODEL_PATH_ENV)
             .ok()
             .filter(|s| !s.is_empty())
             .ok_or_else(|| anyhow::anyhow!("{} is not set", crate::MODEL_PATH_ENV))?;
-        // Pixel normalization, selectable via AEGIS_NSFW_NORM (half | imagenet | unit).
-        // Default = `half` ([-1,1], mean/std 0.5): the Falconsai / onnx-community
-        // nsfw_image_detection ViT we ship needs this; ImageNet would skew its scores.
-        let norm = match std::env::var("AEGIS_NSFW_NORM").ok().as_deref() {
-            Some("imagenet") => Normalization::imagenet(),
-            Some("unit") => Normalization::unit(),
-            _ => Normalization::half(),
+        Self::from_path_env(&path, input_size)
+    }
+
+    /// Like [`OnnxScorer::from_env`] but for an already-resolved `model_path`
+    /// (so an explicit `VisionConfig.model_path` is honoured). Reads the model
+    /// class + normalization + EP mode from the environment.
+    pub fn from_path_env(model_path: &str, default_input_size: u32) -> anyhow::Result<Self> {
+        let class = ModelClass::from_env();
+        let input_size = if std::env::var("AEGIS_NSFW_MODEL_CLASS").is_ok() {
+            class.input_size()
+        } else {
+            default_input_size
         };
-        Self::load_with(&path, input_size, norm)
+        let norm = norm_from_env(class);
+        let mode = ExecProviderMode::from_env();
+        Self::load_with_ep(model_path, input_size, norm, mode)
     }
 
     /// Run inference and return the NSFW probability in `[0, 1]`.
@@ -126,6 +165,144 @@ impl OnnxScorer {
             .try_extract_tensor::<f32>()
             .map_err(|e| anyhow::anyhow!("ort: extract output: {e}"))?;
         Ok(nsfw_probability(logits))
+    }
+}
+
+/// Build an `ort` session for `model_path` with the given execution-provider
+/// dispatch list. Multi-threaded intra-op parallelism (live image filter must
+/// score in-flight); `ort::Error<R>` carries a non-`Send` builder payload so we
+/// stringify each step before `?`-converting into `anyhow`.
+fn build_session(
+    model_path: &str,
+    providers: Vec<ort::execution_providers::ExecutionProviderDispatch>,
+) -> anyhow::Result<Session> {
+    let intra_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    Session::builder()
+        .map_err(|e| anyhow::anyhow!("ort: session builder: {e}"))?
+        .with_execution_providers(providers)
+        .map_err(|e| anyhow::anyhow!("ort: execution providers: {e}"))?
+        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .map_err(|e| anyhow::anyhow!("ort: optimization level: {e}"))?
+        .with_intra_threads(intra_threads)
+        .map_err(|e| anyhow::anyhow!("ort: intra threads: {e}"))?
+        .commit_from_file(model_path)
+        .map_err(|e| anyhow::anyhow!("ort: load model {model_path}: {e}"))
+}
+
+/// CPU-only dispatch.
+fn cpu_only() -> Vec<ort::execution_providers::ExecutionProviderDispatch> {
+    use ort::execution_providers as ep;
+    vec![ep::CPUExecutionProvider::default().build()]
+}
+
+/// GPU-preferring dispatch: the platform's best GPU EP(s) first, CPU last. `ort`
+/// silently uses CPU if a GPU EP isn't available at runtime, so this is always
+/// safe to register.
+fn gpu_then_cpu() -> Vec<ort::execution_providers::ExecutionProviderDispatch> {
+    let mut out = platform_gpu_providers();
+    out.extend(cpu_only());
+    out
+}
+
+/// The platform's best-first GPU execution providers (empty where none apply).
+/// Mirrors `aegis-infer`'s provider mapping.
+fn platform_gpu_providers() -> Vec<ort::execution_providers::ExecutionProviderDispatch> {
+    use ort::execution_providers as ep;
+    #[cfg(target_os = "windows")]
+    {
+        vec![ep::DirectMLExecutionProvider::default().build()]
+    }
+    #[cfg(target_os = "linux")]
+    {
+        vec![
+            ep::CUDAExecutionProvider::default().build(),
+            ep::TensorRTExecutionProvider::default().build(),
+        ]
+    }
+    #[cfg(target_os = "macos")]
+    {
+        vec![ep::CoreMLExecutionProvider::default().build()]
+    }
+    #[cfg(target_os = "android")]
+    {
+        vec![ep::NNAPIExecutionProvider::default().build()]
+    }
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "android"
+    )))]
+    {
+        Vec::new()
+    }
+}
+
+/// `Auto` mode: build a GPU-preferring session and a CPU session, time a warmup
+/// inference on each, and keep whichever is faster. If there's no platform GPU
+/// EP, or the GPU session fails to build, we just use CPU. The slower session is
+/// dropped.
+fn auto_select_session(model_path: &str, input_size: u32) -> anyhow::Result<Session> {
+    // No GPU EP on this platform → straight to CPU.
+    if platform_gpu_providers().is_empty() {
+        return build_session(model_path, cpu_only());
+    }
+
+    let mut cpu = build_session(model_path, cpu_only())?;
+    let mut gpu = match build_session(model_path, gpu_then_cpu()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::info!(error = %e, "aegis-vision: GPU session unavailable, using CPU");
+            return Ok(cpu);
+        }
+    };
+
+    let cpu_ms = time_warmup(&mut cpu, input_size);
+    let gpu_ms = time_warmup(&mut gpu, input_size);
+
+    match (gpu_ms, cpu_ms) {
+        (Some(g), Some(c)) if g <= c => {
+            tracing::info!(gpu_ms = g, cpu_ms = c, "aegis-vision: GPU faster → GPU");
+            Ok(gpu)
+        }
+        (Some(g), Some(c)) => {
+            tracing::info!(gpu_ms = g, cpu_ms = c, "aegis-vision: CPU faster → CPU");
+            Ok(cpu)
+        }
+        // If either benchmark couldn't run, prefer the CPU session (always valid).
+        _ => Ok(cpu),
+    }
+}
+
+/// Time one inference of a zero-filled `[1,3,size,size]` input (after one warm
+/// run). Returns milliseconds, or `None` if the dummy run failed.
+fn time_warmup(session: &mut Session, input_size: u32) -> Option<f32> {
+    let make_input = || {
+        let n = (input_size as usize) * (input_size as usize) * 3;
+        OrtTensor::from_array((
+            vec![1i64, 3, input_size as i64, input_size as i64],
+            vec![0f32; n],
+        ))
+        .ok()
+    };
+    let name = session.inputs().first()?.name().to_string();
+    // Warm (JIT / EP graph compile) — not timed.
+    let _ = session.run(ort::inputs![name.clone() => make_input()?]);
+    let start = std::time::Instant::now();
+    let _ = session.run(ort::inputs![name => make_input()?]);
+    Some(start.elapsed().as_secs_f32() * 1000.0)
+}
+
+/// Normalization for a build: an explicit `AEGIS_NSFW_NORM` wins; otherwise the
+/// model class default (ViT → half `[-1,1]`, MobileNet → ImageNet).
+fn norm_from_env(class: ModelClass) -> Normalization {
+    match std::env::var("AEGIS_NSFW_NORM").ok().as_deref() {
+        Some("imagenet") => Normalization::imagenet(),
+        Some("unit") => Normalization::unit(),
+        Some("half") => Normalization::half(),
+        _ => class.normalization(),
     }
 }
 

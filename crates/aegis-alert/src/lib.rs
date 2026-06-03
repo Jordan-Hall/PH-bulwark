@@ -161,6 +161,7 @@ mod tests {
             ts: 1_717_200_000_000, // 2024-06-01T00:00:00Z
             redacted_context: "Blocked an adult image on a web page.".to_string(),
             evidence: Some(safe_evidence()),
+            ..Default::default()
         }
     }
 
@@ -176,6 +177,7 @@ mod tests {
             redacted_context: "Conversation shows secrecy + platform-switching patterns."
                 .to_string(),
             evidence: Some(safe_evidence()),
+            ..Default::default()
         }
     }
 
@@ -208,9 +210,13 @@ mod tests {
 
         assert!(rendered.subject.contains("Possible grooming detected"));
         assert!(rendered.subject.contains("Grooming"));
-        // Grooming-specific guidance (reporting path) only appears for grooming.
+        // Grooming-specific guidance only appears for grooming.
         assert!(rendered.body.contains("grooming-suspicion"));
-        assert!(rendered.body.to_lowercase().contains("ncmec"));
+        // NO-REPORTING policy: the email must NOT name a reporting authority
+        // (e.g. NCMEC) — it points the guardian to review + decide for themselves,
+        // never to an automated/authority report path.
+        assert!(!rendered.body.to_lowercase().contains("ncmec"));
+        assert!(rendered.body.contains("decide how you want to handle it"));
 
         // The intervention email must NOT contain that grooming guidance.
         let intv = render_event(&intervention_event(), "[Aegis]").unwrap();
