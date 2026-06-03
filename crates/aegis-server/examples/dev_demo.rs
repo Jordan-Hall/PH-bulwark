@@ -118,25 +118,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let relay = AlertRelayService::new(hub.clone(), None); // no SMTP sink in the demo
     let review = ReviewService::new(hub.clone());
 
-    // Inject a fresh redacted alert every few seconds so the parent always has
-    // something live to act on. publish() both fans out to subscribers and records
-    // the alert's content-free facts so a later APPROVE/DENY can resolve it.
-    let inject_hub = hub.clone();
-    tokio::spawn(async move {
-        // Small head start so the parent has time to connect & subscribe.
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        let mut n: u64 = 1;
-        loop {
-            let ev = demo_alert(n);
-            let reached = inject_hub.publish(ev.clone());
-            eprintln!(
-                "[demo] published {} (category={}) -> {reached} live guardian stream(s)",
-                ev.alert_id, ev.category
-            );
-            n += 1;
-            tokio::time::sleep(Duration::from_secs(4)).await;
-        }
-    });
+    // Synthetic-alert injection is OPT-IN (set AEGIS_DEMO_INJECT=1). By default this
+    // runs as a CLEAN relay: AlertRelay + Review only, so the parent console shows
+    // ONLY real blocks (e.g. from aegis_proxy). With the env set, it emits a sample
+    // alert every few seconds for a UI demo. publish() fans out + records the
+    // alert's content-free facts so a later APPROVE/DENY can resolve it.
+    if std::env::var("AEGIS_DEMO_INJECT").is_ok() {
+        let inject_hub = hub.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let mut n: u64 = 1;
+            loop {
+                let ev = demo_alert(n);
+                let reached = inject_hub.publish(ev.clone());
+                eprintln!(
+                    "[demo] published {} (category={}) -> {reached} live guardian stream(s)",
+                    ev.alert_id, ev.category
+                );
+                n += 1;
+                tokio::time::sleep(Duration::from_secs(4)).await;
+            }
+        });
+    } else {
+        eprintln!("[demo] sample injection OFF (set AEGIS_DEMO_INJECT=1 to emit demo alerts);");
+        eprintln!("[demo] running as a CLEAN relay — only real blocks will appear.");
+    }
 
     eprintln!("[demo] AlertRelay + Review serving PLAINTEXT on http://{addr}");
     eprintln!("[demo] run the parent with AEGIS_CLUSTER_ENDPOINT=http://127.0.0.1:8443");
