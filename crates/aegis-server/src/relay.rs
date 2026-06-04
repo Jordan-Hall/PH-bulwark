@@ -24,9 +24,13 @@
 //! (os error 4551, environmental) and `aegis-server` must keep building.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use serde::{Deserialize, Serialize};
+
+use crate::persist::JsonFile;
 use aegis_policy::{Allowlist, ApplyOutcome, ReviewItem};
 use aegis_proto::v1::{
     AlertEvent, Category, DeviceFilter, PushAck, PushTarget, ReviewAck, ReviewDecision,
@@ -68,17 +72,28 @@ pub struct AlertHub {
     /// host/category that alert referred to in order to (a) key an APPROVE on a
     /// real host and (b) re-check the CSAM-never-allowlistable rule. Content-free
     /// (host + hash + category only — never raw media or message text).
-    // SEAM: durable storage — this is the in-memory pending-review queue the
-    // `submit_decision` SEAM comment refers to; persist it so a decision can be
-    // resolved across a restart.
+    // Persisted as JSON when a state dir is configured (`with_state_dir`).
     pending: Arc<Mutex<HashMap<String, PendingReview>>>,
+    /// `Some` → write-through JSON persistence for push targets + pending reviews
+    /// (survive a restart). `None` (default) → pure in-memory. NOTE: the allowlist
+    /// is NOT yet persisted (its audit-chain replay is a tracked follow-up); a
+    /// restart re-asks the guardian for approve decisions.
+    persist: Option<HubPersist>,
+}
+
+/// Where the hub's push targets + pending reviews are persisted (push-target/
+/// pending-review JSON files under the state dir). Cheap to clone (paths only).
+#[derive(Clone, Debug)]
+struct HubPersist {
+    push: JsonFile,
+    pending: JsonFile,
 }
 
 /// The content-free facts the relay retains about a raised alert so a later
 /// guardian decision can be resolved into a `ReviewItem`. Mirrors the
 /// `Evidence`/`AlertEvent` no-media invariant: host (the app/site), the content
 /// hash, and the category only.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct PendingReview {
     /// `AlertEvent.app` — the host/site an APPROVE(THIS_HOST) allowlists.
     host: String,
@@ -103,6 +118,42 @@ impl AlertHub {
             allowlist: Arc::new(Mutex::new(Allowlist::new())),
             push_targets: Arc::new(Mutex::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
+            persist: None,
+        }
+    }
+
+    /// Durable hub rooted at `dir`: loads push targets + pending reviews on
+    /// startup and write-throughs each change. (The allowlist is not yet
+    /// persisted — see `persist`.) A corrupt file starts empty; only an unusable
+    /// directory is fatal.
+    pub fn with_state_dir(dir: &Path) -> std::io::Result<Self> {
+        let (tx, _rx) = tokio::sync::broadcast::channel(ALERT_BROADCAST_CAPACITY);
+        let push = JsonFile::new(dir, "push_targets.json")?;
+        let pending = JsonFile::new(dir, "pending_reviews.json")?;
+        let push_targets: HashMap<String, PushTarget> = push.load_or_default();
+        let pending_map: HashMap<String, PendingReview> = pending.load_or_default();
+        Ok(Self {
+            tx,
+            allowlist: Arc::new(Mutex::new(Allowlist::new())),
+            push_targets: Arc::new(Mutex::new(push_targets)),
+            pending: Arc::new(Mutex::new(pending_map)),
+            persist: Some(HubPersist { push, pending }),
+        })
+    }
+
+    fn persist_push(&self, map: &HashMap<String, PushTarget>) {
+        if let Some(p) = &self.persist {
+            if let Err(e) = p.push.store(map) {
+                tracing::warn!(error = %e, "failed to persist push targets; continuing in-memory");
+            }
+        }
+    }
+
+    fn persist_pending(&self, map: &HashMap<String, PendingReview>) {
+        if let Some(p) = &self.persist {
+            if let Err(e) = p.pending.store(map) {
+                tracing::warn!(error = %e, "failed to persist pending reviews; continuing in-memory");
+            }
         }
     }
 
@@ -126,10 +177,9 @@ impl AlertHub {
                     .unwrap_or_default(),
                 category: event.category(),
             };
-            self.pending
-                .lock()
-                .expect("pending-review mutex poisoned")
-                .insert(event.alert_id.clone(), record);
+            let mut guard = self.pending.lock().expect("pending-review mutex poisoned");
+            guard.insert(event.alert_id.clone(), record);
+            self.persist_pending(&guard);
         }
         // `send` errors only when there are zero receivers; that is normal
         // (no guardian streaming right now), so treat it as "reached 0".
@@ -209,6 +259,7 @@ impl AlertHub {
             .lock()
             .expect("push-target mutex poisoned");
         guard.insert(target.device_id.clone(), target);
+        self.persist_push(&guard);
     }
 
     /// Snapshot of every registered guardian FCM token (empties dropped). Read at
@@ -497,6 +548,39 @@ mod tests {
             evidence: None,
             ..Default::default()
         }
+    }
+
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "aegis-relay-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn push_targets_and_pending_persist_across_restart() {
+        let dir = tmp_dir("persist");
+        let hub1 = AlertHub::with_state_dir(&dir).unwrap();
+        hub1.register_push(PushTarget {
+            device_id: "g-phone".into(),
+            fcm_token: "tok".into(),
+            platform: "android".into(),
+        });
+        hub1.publish(alert("kids-tablet")); // writes a pending review
+        drop(hub1); // simulate a restart
+
+        let hub2 = AlertHub::with_state_dir(&dir).unwrap();
+        // Push targets reloaded.
+        assert_eq!(hub2.push_tokens(), vec!["tok".to_string()]);
+        // Pending reviews were persisted on publish.
+        assert!(dir.join("pending_reviews.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

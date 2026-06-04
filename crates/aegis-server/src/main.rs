@@ -91,7 +91,12 @@ async fn main() -> anyhow::Result<()> {
     // push_targets at raise time; compose email + push best-effort.
     #[cfg(feature = "push")]
     let (alert_sink, hub) = {
-        let hub = aegis_server::AlertHub::new();
+        let hub = match &cfg.state_dir {
+            Some(dir) => {
+                aegis_server::AlertHub::with_state_dir(dir).map_err(|e| anyhow::anyhow!(e))?
+            }
+            None => aegis_server::AlertHub::new(),
+        };
         let push_sink: Option<Arc<dyn aegis_alert::AlertSink>> =
             match aegis_alert::FcmConfig::from_env().map_err(|e| anyhow::anyhow!(e))? {
                 Some(fcm) => {

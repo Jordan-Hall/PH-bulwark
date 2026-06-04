@@ -257,8 +257,12 @@ pub async fn run(
         // from AlertRelay out to Review's StreamPendingReviews, and carries the
         // per-device approve-allowlist Review::SubmitDecision writes through. A
         // caller may pass a pre-built hub (so a push fan-out sink can read its
-        // tokens); otherwise build one here.
-        let hub = hub.unwrap_or_default();
+        // tokens); otherwise build one here — persisted when a state dir is set.
+        let hub = match (hub, &cfg.state_dir) {
+            (Some(h), _) => h,
+            (None, Some(dir)) => AlertHub::with_state_dir(dir)?,
+            (None, None) => AlertHub::default(),
+        };
 
         // AlertRelay is always mounted on guardian-facing nodes (even without
         // an SMTP sink) so the broadcast fan-out path is available; the sink is
