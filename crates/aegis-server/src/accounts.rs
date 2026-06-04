@@ -63,6 +63,51 @@ fn session_live(issued_ms: i64, now_ms: i64, ttl_ms: i64) -> bool {
     now_ms >= issued_ms && now_ms.saturating_sub(issued_ms) < ttl_ms
 }
 
+/// Login brute-force throttle defaults; override with `AEGIS_LOGIN_MAX_FAILS` /
+/// `AEGIS_LOGIN_WINDOW_SECS`. After `max` failed logins for one email within the
+/// window, that email is locked out until the window elapses.
+const DEFAULT_LOGIN_MAX_FAILS: u32 = 5;
+const DEFAULT_LOGIN_WINDOW_SECS: i64 = 15 * 60;
+
+/// `(max_fails, window_ms)` from the environment, else the defaults.
+fn login_throttle_params() -> (u32, i64) {
+    let max = std::env::var("AEGIS_LOGIN_MAX_FAILS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_LOGIN_MAX_FAILS);
+    let window = std::env::var("AEGIS_LOGIN_WINDOW_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_LOGIN_WINDOW_SECS)
+        .saturating_mul(1000);
+    (max, window)
+}
+
+/// Per-email failed-login counter within a sliding window.
+#[derive(Clone)]
+struct LoginThrottle {
+    fails: u32,
+    window_start_ms: i64,
+}
+
+/// Is this email currently locked out? Pure (unit-tested).
+fn throttle_locked(t: &LoginThrottle, now_ms: i64, window_ms: i64, max: u32) -> bool {
+    t.fails >= max && now_ms.saturating_sub(t.window_start_ms) <= window_ms
+}
+
+/// Record one failed login: start a fresh window if the old one elapsed, else
+/// increment within it. Pure (unit-tested).
+fn record_failure(t: &mut LoginThrottle, now_ms: i64, window_ms: i64) {
+    if now_ms.saturating_sub(t.window_start_ms) > window_ms {
+        t.fails = 1;
+        t.window_start_ms = now_ms;
+    } else {
+        t.fails = t.fails.saturating_add(1);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Errors + public value types
 // ---------------------------------------------------------------------------
@@ -85,6 +130,8 @@ pub enum AccountError {
     DeviceInUse,
     /// A required field was empty or malformed.
     Validation(&'static str),
+    /// Too many failed logins for this email within the window — locked out.
+    TooManyAttempts,
 }
 
 impl From<AccountError> for Status {
@@ -105,6 +152,9 @@ impl From<AccountError> for Status {
                 Status::already_exists("device_id is already registered to another child")
             }
             AccountError::Validation(m) => Status::invalid_argument(m),
+            AccountError::TooManyAttempts => {
+                Status::resource_exhausted("too many login attempts; try again later")
+            }
         }
     }
 }
@@ -170,6 +220,9 @@ struct Inner {
     /// session token → (account_id, issued time). Expired tokens are rejected
     /// (see [`session_live`]). Never persisted — dropped on restart.
     sessions: HashMap<String, SessionEntry>,
+    /// email (lowercased) → failed-login throttle (brute-force lockout). Cleared
+    /// on a successful login; not persisted.
+    login_fails: HashMap<String, LoginThrottle>,
     /// child_id → child record.
     children: HashMap<String, ChildRec>,
     /// device_id → child_id (for routing alerts by device to a child).
@@ -303,23 +356,55 @@ impl AccountStore {
         password: &str,
     ) -> Result<(String, String, i64), AccountError> {
         let email_key = normalize_email(email);
+        let now = Self::now_ms();
+        let (max_fails, window_ms) = login_throttle_params();
         let mut inner = self.inner.lock().expect("account mutex poisoned");
-        let account = inner
+
+        // Brute-force lockout: once an email has too many recent failures, reject
+        // (without even checking the password) until the window elapses.
+        if inner
+            .login_fails
+            .get(&email_key)
+            .is_some_and(|t| throttle_locked(t, now, window_ms, max_fails))
+        {
+            return Err(AccountError::TooManyAttempts);
+        }
+
+        // An unknown email and a wrong password are indistinguishable to the caller
+        // (both `BadCredentials`) and both count toward the lockout. salt/hash are
+        // fixed-size arrays (Copy), so cloning them drops the `by_email` borrow.
+        let creds = inner
             .by_email
             .get(&email_key)
-            .ok_or(AccountError::BadCredentials)?;
-        // Constant-time verify; a wrong password and an unknown user both fail.
-        pbkdf2::verify(
-            PBKDF2_ALG,
-            NonZeroU32::new(PBKDF2_ITERS).unwrap(),
-            &account.salt,
-            password.as_bytes(),
-            &account.hash,
-        )
-        .map_err(|_| AccountError::BadCredentials)?;
-        let account_id = account.account_id.clone();
+            .map(|a| (a.salt, a.hash, a.account_id.clone()));
+        let verified = match &creds {
+            Some((salt, hash, _)) => pbkdf2::verify(
+                PBKDF2_ALG,
+                NonZeroU32::new(PBKDF2_ITERS).unwrap(),
+                salt,
+                password.as_bytes(),
+                hash,
+            )
+            .is_ok(),
+            None => false,
+        };
+        if !verified {
+            let t = inner
+                .login_fails
+                .entry(email_key.clone())
+                .or_insert(LoginThrottle {
+                    fails: 0,
+                    window_start_ms: now,
+                });
+            record_failure(t, now, window_ms);
+            return Err(AccountError::BadCredentials);
+        }
+
+        // Success: clear the failure counter and mint a session.
+        inner.login_fails.remove(&email_key);
+        let account_id = creds.expect("verified implies creds present").2;
         let token = self.rand_hex(TOKEN_BYTES);
-        let issued_ms = Self::now_ms();
+        let issued_ms = now;
         inner.sessions.insert(
             token.clone(),
             SessionEntry {
@@ -785,6 +870,70 @@ mod tests {
             s.add_child(&tok, "Kid", "dev-1"),
             Err(AccountError::Unauthorized)
         );
+    }
+
+    #[test]
+    fn throttle_locks_after_max_then_releases_after_window() {
+        let mut t = LoginThrottle {
+            fails: 0,
+            window_start_ms: 0,
+        };
+        for _ in 0..4 {
+            record_failure(&mut t, 100, 1000);
+        }
+        assert!(!throttle_locked(&t, 100, 1000, 5)); // 4 < 5
+        record_failure(&mut t, 100, 1000); // 5th
+        assert!(throttle_locked(&t, 100, 1000, 5)); // locked within window
+        assert!(!throttle_locked(&t, 2000, 1000, 5)); // window elapsed → released
+    }
+
+    #[test]
+    fn record_failure_resets_after_window() {
+        let mut t = LoginThrottle {
+            fails: 5,
+            window_start_ms: 0,
+        };
+        record_failure(&mut t, 5000, 1000); // window elapsed → reset to a fresh 1
+        assert_eq!(t.fails, 1);
+        assert_eq!(t.window_start_ms, 5000);
+    }
+
+    #[test]
+    fn login_locks_out_after_repeated_failures() {
+        let s = AccountStore::new();
+        s.create_account("a@x.com", "passwordone", "A").unwrap();
+        for _ in 0..DEFAULT_LOGIN_MAX_FAILS {
+            assert_eq!(
+                s.login("a@x.com", "wrong"),
+                Err(AccountError::BadCredentials)
+            );
+        }
+        // Locked: even the CORRECT password is now rejected until the window ends.
+        assert_eq!(
+            s.login("a@x.com", "passwordone"),
+            Err(AccountError::TooManyAttempts)
+        );
+    }
+
+    #[test]
+    fn successful_login_clears_failure_counter() {
+        let s = AccountStore::new();
+        s.create_account("b@x.com", "passwordtwo", "B").unwrap();
+        for _ in 0..(DEFAULT_LOGIN_MAX_FAILS - 1) {
+            assert_eq!(
+                s.login("b@x.com", "wrong"),
+                Err(AccountError::BadCredentials)
+            );
+        }
+        assert!(s.login("b@x.com", "passwordtwo").is_ok()); // success clears the counter
+                                                            // After clearing, max-1 more failures still don't lock.
+        for _ in 0..(DEFAULT_LOGIN_MAX_FAILS - 1) {
+            assert_eq!(
+                s.login("b@x.com", "wrong"),
+                Err(AccountError::BadCredentials)
+            );
+        }
+        assert!(s.login("b@x.com", "passwordtwo").is_ok());
     }
 
     #[test]
