@@ -69,7 +69,7 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: |
-            set -uo pipefail
+            set -eu
             # Wait for the device to be fully booted (avoids the "device offline" race).
             adb wait-for-device
             timeout 180 bash -c 'until [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d "\r")" = "1" ]; do sleep 3; done' || true
