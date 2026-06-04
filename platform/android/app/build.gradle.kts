@@ -1,3 +1,5 @@
+import java.util.Base64
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -31,9 +33,29 @@ android {
     // libaegis_client.so) is placed under src/main/jniLibs/<abi>/. See README.md.
     sourceSets["main"].jniLibs.srcDirs("src/main/jniLibs")
 
+    // Release signing is configured ONLY when the keystore is provided via env
+    // (CI store-publish job → ANDROID_* secrets). Without it, release stays unsigned
+    // and the debug build (used by android.yml) is unaffected — no keystore in repo.
+    signingConfigs {
+        create("release") {
+            val b64 = System.getenv("ANDROID_KEYSTORE_BASE64")
+            if (!b64.isNullOrBlank()) {
+                val ks = File.createTempFile("release", ".keystore")
+                ks.writeBytes(Base64.getDecoder().decode(b64))
+                storeFile = ks
+                storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("ANDROID_KEY_ALIAS")
+                keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (!System.getenv("ANDROID_KEYSTORE_BASE64").isNullOrBlank()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 }
