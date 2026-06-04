@@ -25,7 +25,9 @@ use std::sync::{Arc, Mutex};
 
 use aegis_core::{Analyzer, Result};
 use aegis_flow::{AnalysisUnit, DefaultFlowClassifier, FlowClassifier};
-use aegis_infer::OffloadRouter;
+use aegis_infer::{
+    ClientTlsIdentity, DefaultOffloadRouter, NullAnalyzer, OffloadClient, OffloadRouter,
+};
 use aegis_net::{InterceptDecision, Interceptor};
 use aegis_policy::PolicyEngine; // trait providing Policy::decide / Policy::alert_for
 use aegis_proto::v1::{
@@ -57,6 +59,13 @@ pub struct ClientConfig {
     pub device_id: String,
     /// gRPC endpoint of the (possibly local) server cluster for heavy media.
     pub cluster_endpoint: Option<String>,
+    /// mTLS material for the cluster-offload link. `Some` → the composition root
+    /// can build a real `DefaultOffloadRouter` and offload AUDIO/heavy media;
+    /// `None` → no client identity provisioned, so heavy non-local media fails
+    /// OPEN exactly as the default build does. Operator-provisioned PEM files
+    /// (the client does NOT mint its own cluster identity — the per-install
+    /// `aegis-net` CA is the MITM proxy CA, a different PKI).
+    pub tls: Option<ClientTlsIdentity>,
 }
 
 impl Default for ClientConfig {
@@ -64,6 +73,62 @@ impl Default for ClientConfig {
         Self {
             device_id: "device-local".to_string(),
             cluster_endpoint: Some("https://127.0.0.1:8443".to_string()),
+            tls: None,
+        }
+    }
+}
+
+/// Load operator-provisioned cluster mTLS material from the environment, or
+/// `None` (logged) when any piece is missing/unreadable — the caller then leaves
+/// offload OFF and heavy media fails OPEN. The client never mints its own cluster
+/// identity; these PEM files are issued out-of-band and trusted by the cluster's
+/// `client_ca_pem`.
+///
+/// Contract: `AEGIS_CLIENT_CERT` / `AEGIS_CLIENT_KEY` / `AEGIS_CLIENT_CA` (PEM
+/// file paths) + `AEGIS_CLUSTER_DOMAIN` (expected server name / SNI).
+pub fn load_cluster_tls_from_env() -> Option<ClientTlsIdentity> {
+    let read = |var: &str| -> Option<Vec<u8>> {
+        let path = std::env::var(var).ok().filter(|s| !s.is_empty())?;
+        match std::fs::read(&path) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                tracing::warn!(var, path, error = %e,
+                    "cluster mTLS material unreadable; offload disabled (fail open)");
+                None
+            }
+        }
+    };
+    Some(ClientTlsIdentity {
+        client_cert_pem: read("AEGIS_CLIENT_CERT")?,
+        client_key_pem: read("AEGIS_CLIENT_KEY")?,
+        ca_cert_pem: read("AEGIS_CLIENT_CA")?,
+        server_domain: std::env::var("AEGIS_CLUSTER_DOMAIN")
+            .ok()
+            .filter(|s| !s.is_empty())?,
+    })
+}
+
+/// Build a concrete cluster-offload router from `cfg`, IF both a cluster endpoint
+/// and complete mTLS material are present AND the mTLS connect succeeds. Returns
+/// `None` otherwise — the caller then does NOT call [`Pipeline::with_offload`], so
+/// heavy non-local media fails OPEN (the fail-safe). The local first-pass is
+/// [`NullAnalyzer`] (offload-everything seam); a real on-device model can replace
+/// it later without touching callers.
+pub async fn build_offload_router(cfg: &ClientConfig) -> Option<Arc<dyn OffloadRouter>> {
+    let endpoint = cfg.cluster_endpoint.as_deref()?;
+    let tls = cfg.tls.as_ref()?;
+    match OffloadClient::connect(endpoint, tls).await {
+        Ok(client) => {
+            tracing::info!(endpoint, "cluster-offload router active (mTLS)");
+            Some(Arc::new(DefaultOffloadRouter::new(
+                Arc::new(NullAnalyzer),
+                client,
+            )))
+        }
+        Err(e) => {
+            tracing::warn!(endpoint, error = %e,
+                "cluster-offload connect failed; offload disabled (fail open)");
+            None
         }
     }
 }
@@ -1139,6 +1204,75 @@ mod tests {
             Action::Allow as i32,
             "offload failure must fail OPEN"
         );
+    }
+
+    /// `build_offload_router` short-circuits to `None` (no network) when the
+    /// endpoint or TLS material is missing — so heavy media keeps failing open.
+    #[tokio::test]
+    async fn build_offload_router_none_when_unconfigured() {
+        // No TLS material → None (connect is never attempted).
+        let cfg = ClientConfig {
+            tls: None,
+            ..ClientConfig::default()
+        };
+        assert!(build_offload_router(&cfg).await.is_none());
+
+        // No endpoint → None even with TLS material.
+        let cfg = ClientConfig {
+            cluster_endpoint: None,
+            tls: Some(ClientTlsIdentity {
+                client_cert_pem: b"x".to_vec(),
+                client_key_pem: b"x".to_vec(),
+                ca_cert_pem: b"x".to_vec(),
+                server_domain: "cluster".into(),
+            }),
+            ..ClientConfig::default()
+        };
+        assert!(build_offload_router(&cfg).await.is_none());
+    }
+
+    /// The env loader is all-or-nothing: a complete set of PEM paths + domain →
+    /// `Some`; any piece missing → `None` (so offload stays off).
+    #[test]
+    fn load_cluster_tls_from_env_all_or_nothing() {
+        let dir = std::env::temp_dir().join(format!(
+            "aegis-tls-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mk = |name: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, b"PEM").unwrap();
+            p
+        };
+        let (cert, key, ca) = (mk("c.pem"), mk("k.pem"), mk("ca.pem"));
+        let vars = [
+            "AEGIS_CLIENT_CERT",
+            "AEGIS_CLIENT_KEY",
+            "AEGIS_CLIENT_CA",
+            "AEGIS_CLUSTER_DOMAIN",
+        ];
+        for v in vars {
+            std::env::remove_var(v);
+        }
+        // Nothing set → None.
+        assert!(load_cluster_tls_from_env().is_none());
+
+        std::env::set_var("AEGIS_CLIENT_CERT", &cert);
+        std::env::set_var("AEGIS_CLIENT_KEY", &key);
+        std::env::set_var("AEGIS_CLIENT_CA", &ca);
+        std::env::set_var("AEGIS_CLUSTER_DOMAIN", "cluster.example");
+        let id = load_cluster_tls_from_env().expect("complete set");
+        assert_eq!(id.client_cert_pem, b"PEM");
+        assert_eq!(id.server_domain, "cluster.example");
+
+        for v in vars {
+            std::env::remove_var(v);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
