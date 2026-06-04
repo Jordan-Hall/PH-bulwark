@@ -47,14 +47,25 @@ child device                              home cluster                guardian
   single-home).
 - Model: parent = email + password (PBKDF2-HMAC-SHA256, 100k iters; never stored
   plaintext); child linked to a `device_id`; guardians assigned per child; alerts
-  scoped by session token. Provision via the `Accounts` gRPC service:
-  `CreateAccount → Login → AddChild → AssignGuardian`. The `Login` token is what you
-  put in `AEGIS_GUARDIAN_TOKEN` for the parent app.
+  scoped by session token.
+- **Provision with the `aegis_admin` CLI** (talks to the running server's `Accounts`
+  service at `AEGIS_ADMIN_ENDPOINT`, default `http://127.0.0.1:8443`; pins
+  `AEGIS_CLUSTER_CA` if set):
+  ```text
+  aegis_admin create-account  guardian@home.example <password> "Guardian"
+  aegis_admin login           guardian@home.example <password>   # -> session token
+  aegis_admin add-child       <token> "Kid" kids-tablet-01
+  aegis_admin assign-guardian <token> <child_id> <other_account_id>
+  aegis_admin list-children   <token>
+  ```
+  The `login` token is what you put in `AEGIS_GUARDIAN_TOKEN` for the parent app.
 - **Durable now:** set `AEGIS_STATE_DIR=/var/lib/aegis` and accounts/children/
   guardian assignments are persisted (JSON) and reload on restart (session tokens
   are intentionally dropped — guardians re-login). Unset ⇒ in-memory.
-- **Not-yet-wired:** no admin CLI/UI for provisioning (RPC-only); allowlist +
-  pending-review state is still in-memory (follow-up).
+- **Durable:** with `AEGIS_STATE_DIR` set, accounts + push targets + pending
+  reviews + the approve-allowlist all persist and reload on restart (atomic JSON).
+  **Not-yet-wired:** no web admin UI (the `aegis_admin` CLI covers provisioning);
+  no durable DB for multi-node scale (rusqlite won't build here).
 
 ## 4. Client ↔ cluster mTLS (heavy-media offload)
 - Set **all four** on the child: `AEGIS_CLIENT_CERT`, `AEGIS_CLIENT_KEY`,
@@ -131,7 +142,8 @@ defeats software-only prevention short of zero-touch/ABM — detection still fir
 | `AEGIS_ROLE` | server | role (lb\|worker\|all-in-one) | all-in-one | never (flag/default) |
 | `AEGIS_BIND` | server | gRPC listen host:port | 127.0.0.1:8443 | non-loopback bind |
 | `AEGIS_ACCOUNTS` | server | enable guardian accounts | off | provisioning guardians |
-| `AEGIS_STATE_DIR` | server | persist accounts (JSON) | unset (in-memory) | durable accounts |
+| `AEGIS_STATE_DIR` | server | persist guardian state — accounts/push/pending/allowlist (JSON) | unset (in-memory) | durable state |
+| `AEGIS_ADMIN_ENDPOINT` | aegis_admin | Accounts service endpoint for the CLI | `http://127.0.0.1:8443` | remote/TLS provisioning |
 | `AEGIS_UI_BIND` | aegis-ui | dashboard host:port | 127.0.0.1:8080 | non-loopback UI |
 | `AEGIS_SMTP_HOST` | aegis-alert | SMTP host (email on-switch) | unset | with FROM+RECIPIENTS |
 | `AEGIS_SMTP_PORT` | aegis-alert | SMTP port | 465/587 | never |
@@ -164,7 +176,7 @@ defeats software-only prevention short of zero-touch/ABM — detection still fir
 - All guardian state (accounts, push targets, pending reviews, approve-allowlist)
   persists via `AEGIS_STATE_DIR` as atomic JSON; a real DB is still wanted for
   multi-node scale (rusqlite won't build on the Windows host, error 4551).
-- No provisioning CLI/admin UI (Accounts RPC only).
+- Provisioning is via the `aegis_admin` CLI (§3); no web admin UI yet.
 - Multi-node gossip/quorum/Postgres unverified on the Windows host (rusqlite 4551).
 - Android release keystore + QR/zero-touch unverified in CI (debug APK only).
 - Distributed (remote-parent) video review unimplemented — `blob://` is local-only.
