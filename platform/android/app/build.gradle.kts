@@ -16,7 +16,13 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.0.1"
-        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
+        ndk {
+            // Phones are arm; we ship arm only. The CI emulator smoke test
+            // (android-emulator.yml) sets EMULATOR_X86=1 to also include x86_64 so
+            // the APK installs on the x86_64 emulator — release/phone builds stay arm.
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+            if (System.getenv("EMULATOR_X86") == "1") abiFilters += "x86_64"
+        }
     }
 
     buildFeatures { compose = true }

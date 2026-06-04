@@ -51,8 +51,10 @@ jobs:
         run: cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o ../../app/src/main/jniLibs build --release
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
-      - name: Assemble debug APK
+      - name: Assemble debug APK (incl. x86_64 for the emulator)
         working-directory: platform/android
+        env:
+          EMULATOR_X86: "1"
         run: gradle assembleDebug --no-daemon --stacktrace
       - name: Enable KVM (emulator acceleration)
         run: |
