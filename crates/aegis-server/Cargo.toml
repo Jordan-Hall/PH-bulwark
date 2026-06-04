@@ -19,7 +19,8 @@ aegis-policy = { path = "../aegis-policy" }
 aegis-video = { path = "../aegis-video" }
 tonic.workspace = true
 prost.workspace = true
-tokio.workspace = true
+# `signal` for graceful shutdown (Ctrl-C / SIGTERM) on top of the workspace features.
+tokio = { workspace = true, features = ["signal"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
