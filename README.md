@@ -13,11 +13,14 @@ grooming in text, retains blocked clips for guardian review, raises tamper alert
 protection is disabled, and notifies a guardian (email + push) whenever it intervenes
 or suspects grooming. Thin device clients; a horizontally-scalable analysis backend.
 
-> **Status (2026-06):** all 14 crates are **implemented** (~16.5k lines) against the
-> `aegis-proto` contract, but the tree has **not been compile-verified yet** (it was
-> developed in an environment without network access to crates.io). The remaining work
-> is a first `cargo build`/`test` + integration pass — see
-> [`docs/integration-todo.md`](docs/integration-todo.md). **Not yet runnable.**
+> **Status (2026-06):** all crates **implemented + compile-verified in CI**
+> (`.github/workflows/ci.yml`: clippy + build + test + feature builds + windows-gated
+> + cargo-deny, all required-green on `master`). The **server is deployed live** on a
+> single EC2 in London (`deploy/aws/`), with CI redeploy via AWS SSM. SQLite-backed
+> crates build on CI/Linux (a local Windows SAC quirk blocks only the local
+> build-script binary). **Remaining:** the cross-platform transparent-VPN data path
+> on Linux/macOS/Android (`docs/design/vpn-data-path-plan.md`) — Windows VPN + proxy
+> mode work today; plus model/ffmpeg provisioning + a `/security-review`.
 
 ---
 
@@ -102,11 +105,14 @@ Optional features: `aegis-text/classifier`, `aegis-vision|aegis-audio/onnx`,
 `aegis-video/ffmpeg`, `aegis-ui/llm-explain` (all off by default).
 
 ## Status & roadmap
-- **Done:** research (Wave A) · contract + security/design docs (Wave B) · all 14 crate
-  implementations (Wave C) · started integration (shared-type hoist, cargo-deny).
-- **Next (Wave D):** first green build + `Analyzer`-trait unification + tonic codegen
-  reconciliation + `/security-review` + model/ffmpeg provisioning. See
-  [`docs/integration-todo.md`](docs/integration-todo.md).
+- **Done:** research (Wave A) · contract + security/design docs (Wave B) · all crate
+  implementations (Wave C) · integration — shared-type hoist, `Analyzer` unification,
+  tonic 0.14 codegen, cargo-deny (Wave D) · **green CI build** · **live AWS deployment
+  + SSM continuous deploy** · Android APK + desktop/server release builds.
+- **Next:** the cross-platform transparent-VPN data path on Linux/macOS/Android
+  ([`docs/design/vpn-data-path-plan.md`](docs/design/vpn-data-path-plan.md)) ·
+  model/ffmpeg provisioning · `/security-review` · app-store submission (Play wired;
+  MS Store/iOS pending).
 
 ## Legal & ethical
 For **guardians monitoring their own minor children on devices they own/control.** On-device

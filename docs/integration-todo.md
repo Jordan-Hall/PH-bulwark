@@ -17,8 +17,13 @@ Several types were defined independently by multiple crates and must become one:
   `AnalysisUnit` now live canonically in **`aegis-core::flow`**; `aegis-net` and `aegis-flow`
   re-export them (the SAME type), and the `aegis-client` adapter was deleted. `aegis-net::convert`
   builds `FlowPayload::Http` from its flat proxy flow.
-  - REMAINING: `aegis-net`'s proxy should surface response **Content-Type/headers** so
-    `aegis-flow`'s content-type fast-path engages (today `headers` is empty → magic-byte/extension sniff).
+  - ✅ **DONE** — `aegis-net`'s proxy now captures the response **Content-Type**
+    (`proxy.rs::content_type_of` → `ProxyFlow.content_type`) and `interceptor.rs`
+    plumbs it into the canonical `HttpHead.content_type`, so `aegis-flow`'s
+    content-type fast-path engages (`classify.rs` uses explicit Content-Type before
+    falling back to manifest/magic/extension sniffing). Covered by
+    `interceptor.rs` tests (`convert_surfaces_full_image_body_and_content_type`,
+    `convert_*_video_mp2t`).
   - **Divergence found (reconcile, don't just rename):** `aegis-net::FlowPayload` is a flat
     struct `{method, uri, bytes, is_response}`; `aegis-flow::FlowPayload` is an enum
     `Http(HttpHead{method,path,status,headers,body_peek}) | StreamChunk{data,mime_type,url}`.
