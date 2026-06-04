@@ -74,8 +74,10 @@ child device                              home cluster                guardian
 - Video: build `--features ffmpeg` + install ffmpeg (or `FFMPEG_BINARY`); else the
   NullDemuxer fails open (nothing sampled/stored). Pair `onnx`+`ffmpeg` for real
   frame scoring.
-- **Release blocker:** the parent app currently hard-codes a model path
-  (`apps/parent`); make it configurable/relative before shipping.
+- The parent console passes the model to the filter it spawns via `AEGIS_NSFW_MODEL`
+  (unset → the filter's fail-open stub). It locates the filter binaries via
+  `AEGIS_PROXY_EXE`/`AEGIS_VPN_EXE`, else beside its own exe (packaged release),
+  else a dev `cargo run`.
 
 ## 6. Email (SMTP) alerts
 - On-switch **triple** (all or none, else startup error): `AEGIS_SMTP_HOST` +
@@ -142,9 +144,11 @@ defeats software-only prevention short of zero-touch/ABM — detection still fir
 | `AEGIS_FCM_SERVICE_ACCOUNT` | aegis-alert (push) | SA JSON path | unset | push (with project) |
 | `AEGIS_CLIENT_CERT`/`_KEY`/`_CA` | client | mTLS material (PEM paths) | unset | cluster offload |
 | `AEGIS_CLUSTER_DOMAIN` | client | mTLS SNI / server name | unset | cluster offload |
-| `AEGIS_CLUSTER_ENDPOINT` | client/parent | cluster gRPC endpoint | http(s)://127.0.0.1:8443 | remote cluster (https for mTLS) |
+| `AEGIS_CLUSTER_ENDPOINT` | client/parent | cluster gRPC endpoint (one source of truth: console + spawned filter) | `http://127.0.0.1:8443` | remote cluster (https for mTLS) |
 | `AEGIS_CLUSTER_CA` | parent | pin cluster server cert | unset | parent → TLS cluster |
 | `AEGIS_GUARDIAN_TOKEN` | parent | guardian session token | empty | accounts mode |
+| `AEGIS_PROXY_EXE`/`AEGIS_VPN_EXE` | parent | override the filter binary path | beside the console exe | binaries not beside the console |
+| `AEGIS_REPO_ROOT` | parent | cwd for the dev `cargo run` filter fallback | cwd | dev (no bundled binary) |
 | `AEGIS_NSFW_MODEL` | vision | ONNX model path | unset (stub) | real scoring (with onnx) |
 | `AEGIS_NSFW_MODEL_CLASS`/`_NORM`/`AEGIS_NSFW_EP` | vision | model tunables | vit/derived/auto | non-default |
 | `AEGIS_POLICY_*` | aegis-policy | nested (`__`) threshold overrides | compiled | tuning |
@@ -157,13 +161,13 @@ defeats software-only prevention short of zero-touch/ABM — detection still fir
 
 ## 13. Not-yet-wired / needs real infra (collected)
 - No enrollment PKI; cluster mTLS certs are operator-issued (no rotation/revocation).
-- Allowlist + pending-review state in-memory (accounts now persist via `AEGIS_STATE_DIR`).
+- All guardian state (accounts, push targets, pending reviews, approve-allowlist)
+  persists via `AEGIS_STATE_DIR` as atomic JSON; a real DB is still wanted for
+  multi-node scale (rusqlite won't build on the Windows host, error 4551).
 - No provisioning CLI/admin UI (Accounts RPC only).
 - Multi-node gossip/quorum/Postgres unverified on the Windows host (rusqlite 4551).
 - Android release keystore + QR/zero-touch unverified in CI (debug APK only).
 - Distributed (remote-parent) video review unimplemented — `blob://` is local-only.
-- Parent app: hard-coded NSFW model path + an `http`/`https` endpoint default
-  mismatch — fix before release.
 - Desktop transparent VPN data path (smoltcp/boringtun) is fail-closed; proxy mode
   is the shipping path.
 - No real NSFW model artifact, FCM creds, SMTP creds, or code-signing keys ship in
