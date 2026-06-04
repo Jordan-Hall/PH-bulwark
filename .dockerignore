@@ -1,0 +1,10 @@
+# Keep the build context small. Do NOT exclude any `crates/**` source — they are
+# root-workspace members and cargo needs them all to build `-p aegis-server`.
+**/target
+.git
+.github
+*.log
+/models
+# Detached sub-workspaces not needed to build the server tier.
+apps
+platform
