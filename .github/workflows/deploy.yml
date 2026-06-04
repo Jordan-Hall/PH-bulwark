@@ -1,55 +1,71 @@
 name: deploy
 
-# Redeploy / update a running PH Bulwark server (the build-on-instance EC2) from
-# CI: SSH in, pull the latest code, rebuild the image, restart the container.
+# Redeploy / update a running PH Bulwark server from CI WITHOUT inbound SSH:
+# GitHub calls AWS SSM Run Command, and the SSM agent on the instance runs the
+# redeploy (git pull -> rebuild image -> restart). The EC2 keeps its SSH port
+# locked to the operator's IP; CI never connects to it directly.
 #
-# Gated on the GitHub Environment named `production` — create it under
-# Settings → Environments and add (optionally with required reviewers for a manual
-# approval gate before each deploy):
-#   secret  AEGIS_SSH_KEY      the private key (contents of e.g. ph-bulwark-london.pem)
-#   var     AEGIS_SERVER_HOST  the server's public DNS or IP
-#   var     AEGIS_SSH_USER     login user (optional; defaults to "ubuntu")
+# Gated on the GitHub Environment named `production`. Required secrets/vars:
+#   secret AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY  the SCOPED deploy IAM user
+#                                                     (ph-bulwark-deployer; ssm:SendCommand)
+#   var    AWS_REGION        e.g. eu-west-2
+#   var    AWS_INSTANCE_ID   the EC2 instance id (must have the ph-bulwark-ssm role)
+#   var    AEGIS_PORT        optional, default 8443 (must match the server's port)
 #
-# Triggers: a published Release (auto-update the server to the released code), or a
-# manual run. For multiple servers (UK + US) add more Environments and duplicate the
-# job with `environment: production-us` etc.
+# The instance needs an SSM instance profile (AmazonSSMManagedInstanceCore) — a
+# one-time setup, see docs/release.md §5. Triggers: published Release or manual run.
 
 on:
   release:
     types: [published]
-  workflow_dispatch:
-    inputs:
-      host:
-        description: "Override server host (else the environment's AEGIS_SERVER_HOST)"
-        required: false
+  workflow_dispatch: {}
 
 jobs:
   deploy-server:
-    name: redeploy server over SSH
+    name: redeploy server via SSM (no SSH)
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - name: Pull + rebuild + restart on the server
-        uses: appleboy/ssh-action@v1
+      - name: Configure AWS credentials (scoped deploy user)
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          host: ${{ github.event.inputs.host || vars.AEGIS_SERVER_HOST }}
-          username: ${{ vars.AEGIS_SSH_USER || 'ubuntu' }}
-          key: ${{ secrets.AEGIS_SSH_KEY }}
-          script: |
-            set -euxo pipefail
-            # Use the server's configured port (env var AEGIS_PORT) — NOT a hardcoded
-            # 8443 — so a server provisioned on a non-default port (Terraform
-            # aegis_port) keeps the same port the security group + clients target.
-            PORT="${{ vars.AEGIS_PORT }}"
-            PORT="${PORT:-8443}"
-            cd /opt/aegis-src
-            sudo git pull --ff-only
-            sudo docker build -f deploy/docker/Dockerfile -t aegis-server:local .
-            sudo docker rm -f aegis-server || true
-            sudo docker run -d --name aegis-server --restart unless-stopped \
-              -p ${PORT}:${PORT} \
-              -v /var/lib/aegis:/var/lib/aegis \
-              -e AEGIS_BIND=0.0.0.0:${PORT} \
-              -e AEGIS_ACCOUNTS=1 \
-              -e AEGIS_STATE_DIR=/var/lib/aegis \
-              aegis-server:local --role all-in-one
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Redeploy via SSM Run Command
+        env:
+          IID: ${{ vars.AWS_INSTANCE_ID }}
+          AEGIS_PORT: ${{ vars.AEGIS_PORT }}
+        run: |
+          set -euo pipefail
+          PORT="${AEGIS_PORT:-8443}"
+          # One command per array element. SSM runs these as root on the instance.
+          cat > params.json <<JSON
+          {"commands":[
+            "set -eux",
+            "cd /opt/aegis-src",
+            "git pull --ff-only",
+            "docker build -f deploy/docker/Dockerfile -t aegis-server:local .",
+            "docker rm -f aegis-server || true",
+            "docker run -d --name aegis-server --restart unless-stopped -p ${PORT}:${PORT} -v /var/lib/aegis:/var/lib/aegis -e AEGIS_BIND=0.0.0.0:${PORT} -e AEGIS_ACCOUNTS=1 -e AEGIS_STATE_DIR=/var/lib/aegis aegis-server:local --role all-in-one"
+          ]}
+          JSON
+          CID=$(aws ssm send-command --instance-ids "$IID" \
+            --document-name AWS-RunShellScript --comment "PH Bulwark redeploy" \
+            --parameters file://params.json --query Command.CommandId --output text)
+          echo "SSM command: $CID"
+          for i in $(seq 1 90); do
+            ST=$(aws ssm get-command-invocation --command-id "$CID" --instance-id "$IID" --query Status --output text 2>/dev/null || echo Pending)
+            echo "status: $ST"
+            case "$ST" in
+              Success) break;;
+              Failed|Cancelled|TimedOut)
+                echo "::error::SSM redeploy $ST"
+                aws ssm get-command-invocation --command-id "$CID" --instance-id "$IID" --query StandardErrorContent --output text
+                exit 1;;
+            esac
+            sleep 10
+          done
+          echo "=== server output ==="
+          aws ssm get-command-invocation --command-id "$CID" --instance-id "$IID" --query StandardOutputContent --output text
