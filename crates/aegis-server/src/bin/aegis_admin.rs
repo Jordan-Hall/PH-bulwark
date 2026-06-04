@@ -7,15 +7,17 @@
 //! must be running with `AEGIS_ACCOUNTS=1` (and ideally `AEGIS_STATE_DIR` set, so
 //! the provisioned accounts persist).
 //!
-//! The password is read from `$AEGIS_ADMIN_PASSWORD` — never passed on the command
-//! line, where it would leak into `ps` output and shell history.
+//! Secrets are read from the environment — NEVER from argv, where they would leak
+//! into `ps` output and shell history. The password comes from
+//! `$AEGIS_ADMIN_PASSWORD`; the session token from `$AEGIS_GUARDIAN_TOKEN` (the
+//! same var the parent app reads, set from `login`'s output).
 //!
 //! ```text
 //! AEGIS_ADMIN_PASSWORD=… aegis_admin create-account  <email> [display_name]
 //! AEGIS_ADMIN_PASSWORD=… aegis_admin login           <email>   # -> session token
-//! aegis_admin add-child       <token> <child_name> <device_id>
-//! aegis_admin assign-guardian <token> <child_id> <guardian_account_id>
-//! aegis_admin list-children   <token>
+//! AEGIS_GUARDIAN_TOKEN=… aegis_admin add-child       <child_name> <device_id>
+//! AEGIS_GUARDIAN_TOKEN=… aegis_admin assign-guardian <child_id> <guardian_account_id>
+//! AEGIS_GUARDIAN_TOKEN=… aegis_admin list-children
 //! ```
 #![forbid(unsafe_code)]
 
@@ -35,27 +37,23 @@ enum Cmd {
         email: String,
     },
     AddChild {
-        token: String,
         child_name: String,
         device_id: String,
     },
     AssignGuardian {
-        token: String,
         child_id: String,
         guardian_account_id: String,
     },
-    ListChildren {
-        token: String,
-    },
+    ListChildren,
 }
 
 fn usage() -> String {
     "usage: aegis_admin <subcommand> ...\n  \
      create-account  <email> [display_name]   (password from $AEGIS_ADMIN_PASSWORD)\n  \
      login           <email>                  (password from $AEGIS_ADMIN_PASSWORD)\n  \
-     add-child       <token> <child_name> <device_id>\n  \
-     assign-guardian <token> <child_id> <guardian_account_id>\n  \
-     list-children   <token>"
+     add-child       <child_name> <device_id>           (token from $AEGIS_GUARDIAN_TOKEN)\n  \
+     assign-guardian <child_id> <guardian_account_id>   (token from $AEGIS_GUARDIAN_TOKEN)\n  \
+     list-children                                      (token from $AEGIS_GUARDIAN_TOKEN)"
         .to_string()
 }
 
@@ -68,6 +66,19 @@ fn require_password(env_val: Option<String>) -> Result<String, String> {
         _ => Err(
             "set the password in $AEGIS_ADMIN_PASSWORD (not on the command \
                   line — argv is visible to other processes / shell history)"
+                .to_string(),
+        ),
+    }
+}
+
+/// Resolve the guardian session token from `$AEGIS_GUARDIAN_TOKEN` — also kept off
+/// argv (a token is a bearer credential). Same env var the parent app reads. Pure.
+fn require_token(env_val: Option<String>) -> Result<String, String> {
+    match env_val {
+        Some(t) if !t.trim().is_empty() => Ok(t.trim().to_string()),
+        _ => Err(
+            "set the session token in $AEGIS_GUARDIAN_TOKEN (from `login`; \
+                  kept off the command line — it is a bearer credential)"
                 .to_string(),
         ),
     }
@@ -103,27 +114,20 @@ fn parse(args: &[String]) -> Result<Cmd, String> {
             })
         }
         "add-child" => {
-            need(3)?;
+            need(2)?;
             Ok(Cmd::AddChild {
-                token: rest[0].clone(),
-                child_name: rest[1].clone(),
-                device_id: rest[2].clone(),
+                child_name: rest[0].clone(),
+                device_id: rest[1].clone(),
             })
         }
         "assign-guardian" => {
-            need(3)?;
+            need(2)?;
             Ok(Cmd::AssignGuardian {
-                token: rest[0].clone(),
-                child_id: rest[1].clone(),
-                guardian_account_id: rest[2].clone(),
+                child_id: rest[0].clone(),
+                guardian_account_id: rest[1].clone(),
             })
         }
-        "list-children" => {
-            need(1)?;
-            Ok(Cmd::ListChildren {
-                token: rest[0].clone(),
-            })
-        }
+        "list-children" => Ok(Cmd::ListChildren),
         other => Err(format!("unknown subcommand `{other}`\n{}", usage())),
     }
 }
@@ -157,11 +161,18 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Resolve the password (env-only) BEFORE connecting, so a missing password
-    // fails fast and never reaches the wire / a process listing.
+    // Resolve secrets (env-only) BEFORE connecting, so a missing secret fails fast
+    // and never reaches the wire / a process listing.
     let password = match &cmd {
         Cmd::CreateAccount { .. } | Cmd::Login { .. } => Some(
             require_password(std::env::var("AEGIS_ADMIN_PASSWORD").ok())
+                .map_err(|e| anyhow::anyhow!(e))?,
+        ),
+        _ => None,
+    };
+    let token = match &cmd {
+        Cmd::AddChild { .. } | Cmd::AssignGuardian { .. } | Cmd::ListChildren => Some(
+            require_token(std::env::var("AEGIS_GUARDIAN_TOKEN").ok())
                 .map_err(|e| anyhow::anyhow!(e))?,
         ),
         _ => None,
@@ -199,13 +210,12 @@ async fn main() -> anyhow::Result<()> {
             println!("account_id={}", s.account_id);
         }
         Cmd::AddChild {
-            token,
             child_name,
             device_id,
         } => {
             let c = client
                 .add_child(AddChildRequest {
-                    token,
+                    token: token.expect("token resolved for add-child"),
                     child_name,
                     device_id,
                 })
@@ -215,13 +225,12 @@ async fn main() -> anyhow::Result<()> {
             println!("device_id={}", c.device_id);
         }
         Cmd::AssignGuardian {
-            token,
             child_id,
             guardian_account_id,
         } => {
             let a = client
                 .assign_guardian(AssignGuardianRequest {
-                    token,
+                    token: token.expect("token resolved for assign-guardian"),
                     child_id,
                     guardian_account_id,
                 })
@@ -232,9 +241,11 @@ async fn main() -> anyhow::Result<()> {
                 println!("{}", a.detail);
             }
         }
-        Cmd::ListChildren { token } => {
+        Cmd::ListChildren => {
             let kids = client
-                .list_children(ListChildrenRequest { token })
+                .list_children(ListChildrenRequest {
+                    token: token.expect("token resolved for list-children"),
+                })
                 .await?
                 .into_inner();
             if kids.children.is_empty() {
@@ -284,7 +295,8 @@ mod tests {
 
     #[test]
     fn rejects_missing_args_no_subcommand_and_unknown() {
-        assert!(parse(&v(&["add-child", "tok", "name"])).is_err()); // needs 3
+        assert!(parse(&v(&["add-child", "only-name"])).is_err()); // needs name + device
+        assert!(parse(&v(&["assign-guardian", "only-child"])).is_err()); // needs 2
         assert!(parse(&v(&["create-account"])).is_err()); // needs an email
         assert!(parse(&v(&["login"])).is_err()); // needs an email
         assert!(parse(&v(&["bogus"])).is_err());
@@ -292,27 +304,35 @@ mod tests {
     }
 
     #[test]
-    fn require_password_is_env_only() {
+    fn secrets_are_env_only() {
         assert_eq!(require_password(Some("pw".into())).unwrap(), "pw");
-        assert!(require_password(None).is_err()); // not set
-        assert!(require_password(Some(String::new())).is_err()); // empty
+        assert!(require_password(None).is_err());
+        assert!(require_password(Some(String::new())).is_err());
+        assert_eq!(require_token(Some(" tok ".into())).unwrap(), "tok"); // trimmed
+        assert!(require_token(None).is_err());
+        assert!(require_token(Some("   ".into())).is_err()); // blank
     }
 
     #[test]
-    fn parses_the_remaining_subcommands() {
+    fn parses_token_commands_without_token_on_argv() {
         assert_eq!(
             parse(&v(&["login", "a@x.com"])).unwrap(),
             Cmd::Login {
                 email: "a@x.com".into(),
             }
         );
+        // Token is from $AEGIS_GUARDIAN_TOKEN, so these take only their data args.
+        assert_eq!(
+            parse(&v(&["add-child", "Kid", "dev-1"])).unwrap(),
+            Cmd::AddChild {
+                child_name: "Kid".into(),
+                device_id: "dev-1".into(),
+            }
+        );
         assert!(matches!(
-            parse(&v(&["assign-guardian", "t", "cid", "gid"])).unwrap(),
+            parse(&v(&["assign-guardian", "cid", "gid"])).unwrap(),
             Cmd::AssignGuardian { .. }
         ));
-        assert!(matches!(
-            parse(&v(&["list-children", "t"])).unwrap(),
-            Cmd::ListChildren { .. }
-        ));
+        assert_eq!(parse(&v(&["list-children"])).unwrap(), Cmd::ListChildren);
     }
 }

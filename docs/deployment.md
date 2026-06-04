@@ -50,17 +50,18 @@ child device                              home cluster                guardian
   scoped by session token.
 - **Provision with the `aegis_admin` CLI** (talks to the running server's `Accounts`
   service at `AEGIS_ADMIN_ENDPOINT`, default `http://127.0.0.1:8443`; pins
-  `AEGIS_CLUSTER_CA` if set). The account password is read from
-  `$AEGIS_ADMIN_PASSWORD` — never passed on the command line (argv leaks into `ps`
-  output and shell history):
+  `AEGIS_CLUSTER_CA` if set). Secrets come from the environment, never argv (which
+  leaks into `ps` output and shell history): the password from
+  `$AEGIS_ADMIN_PASSWORD`, the session token from `$AEGIS_GUARDIAN_TOKEN`:
   ```text
   AEGIS_ADMIN_PASSWORD='…' aegis_admin create-account guardian@home.example "Guardian"
   AEGIS_ADMIN_PASSWORD='…' aegis_admin login          guardian@home.example  # -> token
-  aegis_admin add-child       <token> "Kid" kids-tablet-01
-  aegis_admin assign-guardian <token> <child_id> <other_account_id>
-  aegis_admin list-children   <token>
+  AEGIS_GUARDIAN_TOKEN='…' aegis_admin add-child       "Kid" kids-tablet-01
+  AEGIS_GUARDIAN_TOKEN='…' aegis_admin assign-guardian <child_id> <other_account_id>
+  AEGIS_GUARDIAN_TOKEN='…' aegis_admin list-children
   ```
-  The `login` token is what you put in `AEGIS_GUARDIAN_TOKEN` for the parent app.
+  The `login` token is what you put in `AEGIS_GUARDIAN_TOKEN` (for both this CLI and
+  the parent app).
   Tokens expire after `AEGIS_SESSION_TTL_SECS` (default 12h) and are dropped on
   restart, so a leaked token is short-lived — re-`login` to refresh.
 - **Brute-force lockout:** after `AEGIS_LOGIN_MAX_FAILS` (default 5) failed logins
