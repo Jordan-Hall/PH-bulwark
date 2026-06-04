@@ -63,16 +63,20 @@ Three tiers, weakest → strongest. All are visible/consented on the managed dev
   it once in Settings → Network → Advanced → Always-on VPN).
 
 ### 4. Device Owner (DPC) — the only *robust* tier
-Provisioned on a **factory-reset** device (QR / zero-touch / NFC), or in dev:
-```
-adb shell dpm set-device-owner co.libertyware.aegis/.admin.AegisDeviceAdminReceiver
-```
-As Device Owner, `Lockdown.enforce` (re-asserted in `AegisApp.onCreate`) applies:
-`setUninstallBlocked(self)`, `DISALLOW_FACTORY_RESET`, `DISALLOW_SAFE_BOOT`,
-`DISALLOW_UNINSTALL_APPS`, and the always-on-VPN lockdown above. A Device Owner DPC
-**cannot** be deactivated or its app uninstalled without `dpm remove-active-admin`
-or a factory reset. `Lockdown.release` relaxes everything for guardian-initiated
-un-enrollment.
+Provisioned on a **factory-reset** device via QR / NFC / zero-touch, or in dev with
+`adb shell dpm set-device-owner co.libertyware.aegis/.admin.AegisDeviceAdminReceiver`.
+`AegisDeviceAdminReceiver` handles `onProfileProvisioningComplete` (QR/NFC/zero-touch)
+and `DEVICE_OWNER_CHANGED` (the dev `dpm` path): both call `Lockdown.enforce`, record
+enrollment (`Enrollment`, reading `family_id`/`child_id`/`cluster_endpoint` from the
+provisioning extras), and open the dashboard. `Lockdown.enforce` is also re-asserted
+in `AegisApp.onCreate`.
+
+As Device Owner it applies `setUninstallBlocked(self)`, `DISALLOW_FACTORY_RESET`,
+`DISALLOW_SAFE_BOOT`, `DISALLOW_UNINSTALL_APPS`, and the always-on-VPN lockdown — and
+the app **cannot** be deactivated or uninstalled without `dpm remove-active-admin` or
+a factory reset. `Lockdown.release` relaxes everything for guardian-initiated
+un-enrollment. Provisioning recipes (QR JSON, signing-cert checksum, dev `dpm`, FRP
+limits): **`deploy/android/device-owner-provisioning.md`**.
 
 ---
 
@@ -85,10 +89,17 @@ and the guardian holds the admin password. Then:
   stop, and the uninstaller requires admin (UAC / `sudo` / polkit). A standard user
   cannot uninstall a machine-wide install or stop a system service.
 - Auto-start scaffolding ships under `deploy/`:
-  - **Windows** — `deploy/windows/install-aegis-autostart.ps1` (admin) registers a
-    logon Scheduled Task the child user can't modify. *Production* should ship a
-    real Windows **service** (SCM handler via the `windows-service` crate) so the
-    child can't stop it even within their session — tracked as a follow-up.
+  - **Windows** — `deploy/windows/install-aegis-service.ps1` (admin) installs the
+    `aegis_svc` **SCM service** (LocalSystem, auto-start) and **locks its DACL**
+    (`sc sdset`) so Interactive/Service users get query-only access — a Standard
+    child can't `sc stop`/`sc delete` it or stop it from Services.msc; only
+    LocalSystem + Administrators (the guardian) can. The service supervises
+    `aegis_proxy.exe` and respawns it if killed. *Refinement (documented):* a
+    session-0 service can't set the child's per-user WinINET proxy, so production
+    should launch the proxy INTO the active session via `WTSQueryUserToken` +
+    `CreateProcessAsUserW` (isolated Win32 in `aegis-net`), or host the in-process
+    transparent VPN once its data path lands. `install-aegis-autostart.ps1` remains
+    the no-service logon-task fallback.
   - **macOS** — `deploy/macos/co.libertyware.aegis.proxy.plist` (a LaunchDaemon for
     root-owned auto-start; a LaunchAgent variant for per-user). A managed Mac can
     additionally pin a Network/System Extension via MDM so it can't be removed
@@ -123,7 +134,11 @@ and contributes to the tamper heartbeat (§1) for *detection*.
 - **Factory reset / recovery / re-flash defeats anything** short of devices
   **enrolled as managed from setup** (Android zero-touch / Knox, Apple ABM/DEP),
   where Factory Reset Protection / Activation Lock re-bind the device to the
-  org/family. v1 does not implement provisioning enrollment.
+  org/family. Aegis now supports Device Owner *provisioning* (QR / NFC / dev `dpm`;
+  see `deploy/android/device-owner-provisioning.md`), so `DISALLOW_FACTORY_RESET`
+  blocks reset-from-Settings — but re-binding *after* a recovery-mode wipe still
+  requires **zero-touch** registration (an operational EMM/reseller step), which is
+  not something the app can set programmatically.
 - **Distributed video/parent review** still assumes a co-located guardian for
   `blob://` clips (see `on-device-scanning.md`); unrelated to tamper protection but
   the same "managed-device" assumption.

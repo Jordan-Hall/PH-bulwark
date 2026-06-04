@@ -19,6 +19,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import co.libertyware.aegis.admin.Enrollment
 import co.libertyware.aegis.vpn.AegisVpnService
 
 /**
@@ -35,13 +36,23 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val managed = Enrollment.isProvisioned(this)
         setContent {
             MaterialTheme {
                 Surface(Modifier.fillMaxSize()) {
-                    Dashboard(onEnableVpn = ::enableVpn, onGrantOcr = ::openAccessibilitySettings)
+                    Dashboard(
+                        onEnableVpn = ::enableVpn,
+                        onGrantOcr = ::openAccessibilitySettings,
+                        managed = managed,
+                    )
                 }
             }
         }
+    }
+
+    companion object {
+        /** Set when MainActivity is launched right after Device Owner provisioning. */
+        const val EXTRA_FROM_PROVISIONING = "from_provisioning"
     }
 
     private fun enableVpn() {
@@ -56,12 +67,20 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun Dashboard(onEnableVpn: () -> Unit, onGrantOcr: () -> Unit) {
+private fun Dashboard(onEnableVpn: () -> Unit, onGrantOcr: () -> Unit, managed: Boolean = false) {
     Column(
         Modifier.fillMaxSize().padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         Text("Aegis — child-safety filter", style = MaterialTheme.typography.headlineSmall)
+
+        if (managed) {
+            Text(
+                "✓ This device is managed by Aegis (Device Owner). Protection can't be " +
+                    "removed without the guardian, and the guardian is alerted if it's turned off.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
 
         Text("1. Turn on the filtering VPN. It blocks adult content in real time and emails you " +
             "when it steps in or detects grooming signals.")

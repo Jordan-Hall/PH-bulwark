@@ -39,6 +39,12 @@ ring.workspace = true
 # Construct CapturedFlow payloads (HttpHead.body_peek: Bytes) in tests.
 bytes.workspace = true
 
+# SCM service-control handler for the `aegis_svc` bin (Windows-only). Safe wrapper
+# over StartServiceCtrlDispatcher / RegisterServiceCtrlHandlerEx; uses windows-sys
+# internally so it doesn't clash with the `windows` 0.60 facade elsewhere.
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"
+
 [features]
 default = []
 # Real local NSFW scoring via ONNX Runtime. Forwards to aegis-vision's `onnx`
