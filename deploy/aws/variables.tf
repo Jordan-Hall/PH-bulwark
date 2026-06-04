@@ -51,6 +51,17 @@ variable "aegis_port" {
   default     = 8443
 }
 
+variable "ssm_instance_profile" {
+  description = <<-EOT
+    Name of an EXISTING IAM instance profile (with AmazonSSMManagedInstanceCore) to
+    attach, enabling CI deploys via AWS SSM with NO inbound SSH (see docs/release.md
+    §5). Empty = no profile (SSH-only). Created out-of-band: the scoped deploy user
+    can't create IAM roles, so it's a one-time admin step.
+  EOT
+  type        = string
+  default     = ""
+}
+
 variable "build_on_instance" {
   description = "Build the image ON the instance from source (no registry needed). Slower first boot (~10 min Rust build); recommend instance_type >= t3.medium so it doesn't OOM (a swapfile is also added). When false, pull var.aegis_image."
   type        = bool
