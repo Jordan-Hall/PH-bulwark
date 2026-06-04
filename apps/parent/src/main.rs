@@ -975,16 +975,32 @@ fn load_segment_from_disk(uri: &str) -> Result<Option<Vec<u8>>, String> {
     if sha.len() != 64 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("malformed segment id".to_string());
     }
-    let base = std::env::var("LOCALAPPDATA").map_err(|_| "LOCALAPPDATA not set".to_string())?;
-    let path = std::path::Path::new(&base)
-        .join("Aegis")
-        .join("segments")
-        .join(format!("{sha}.blob"));
+    let path = segments_dir().join(format!("{sha}.blob"));
     match std::fs::read(&path) {
         Ok(b) => Ok(Some(b)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// The per-user segment store directory. MUST mirror
+/// `aegis_video::store::default_segments_dir()` exactly — the child writes blobs
+/// there; this lean parent UI deliberately does NOT depend on `aegis-video` (it
+/// would drag the whole video/vision/ONNX tree into the desktop app), so the
+/// resolution is duplicated here. Keep the two in sync: Windows `%LOCALAPPDATA%`,
+/// then `$XDG_DATA_HOME`, then `$HOME/.local/share`, else the temp dir.
+fn segments_dir() -> std::path::PathBuf {
+    use std::path::PathBuf;
+    if let Some(local) = std::env::var_os("LOCALAPPDATA").filter(|s| !s.is_empty()) {
+        return PathBuf::from(local).join("Aegis").join("segments");
+    }
+    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME").filter(|s| !s.is_empty()) {
+        return PathBuf::from(xdg).join("aegis").join("segments");
+    }
+    if let Some(home) = std::env::var_os("HOME").filter(|s| !s.is_empty()) {
+        return PathBuf::from(home).join(".local/share/aegis/segments");
+    }
+    std::env::temp_dir().join("aegis-segments")
 }
 
 // ---------------------------------------------------------------------------

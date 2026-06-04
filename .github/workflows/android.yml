@@ -18,6 +18,10 @@ on:
   pull_request:
     paths:
       - "platform/android/**"
+      # aegis-android depends on the root crates via ../../../../crates/...,
+      # so a PR that only touches a crate (aegis-text/policy/core/proto) can
+      # break the JNI/APK build; mirror the push filter to catch it pre-merge.
+      - "crates/**"
       - ".github/workflows/android.yml"
   workflow_dispatch: {}
 
