@@ -282,6 +282,8 @@ impl aegis_proto::v1::review_server::Review for ReviewService {
         &self,
         req: Request<ReviewRequest>,
     ) -> Result<Response<ReviewAck>, Status> {
+        // Bearer token (if any) for accounts-mode authentication of the decision.
+        let meta_token = crate::accounts::bearer_token(&req);
         let r = req.into_inner();
 
         // --- validate ----------------------------------------------------
@@ -295,6 +297,29 @@ impl aegis_proto::v1::review_server::Review for ReviewService {
         if decision == ReviewDecision::Unspecified {
             return Err(Status::invalid_argument("decision must be APPROVE or DENY"));
         }
+
+        // SECURITY: when accounts are wired, a guardian decision must be
+        // AUTHENTICATED and SCOPED — a valid session token (authorization: Bearer)
+        // whose assigned children include this alert's device. Without this, anyone
+        // reaching `Review` could approve/deny another family's item by guessing an
+        // alert_id/device_id. (Previously only StreamPendingReviews was gated.)
+        if let Some(store) = &self.accounts {
+            let token = meta_token.unwrap_or_default();
+            if token.is_empty() {
+                return Err(Status::unauthenticated(
+                    "a session token (authorization: Bearer …) is required to submit a review decision",
+                ));
+            }
+            let gscope = store
+                .guardian_scope(&token)
+                .ok_or_else(|| Status::unauthenticated("invalid session token"))?;
+            if !gscope.device_ids.contains(r.device_id.trim()) {
+                return Err(Status::permission_denied(
+                    "guardian is not assigned to the child/device for this decision",
+                ));
+            }
+        }
+
         let scope = r.scope(); // ignored for DENY by the allowlist
 
         // Resolve the host/sha256/category for this alert_id from the in-memory
@@ -541,5 +566,26 @@ mod tests {
             .into_inner();
         assert!(ack.applied);
         assert_eq!(ack.alert_id, "a1");
+    }
+
+    #[tokio::test]
+    async fn submit_decision_requires_auth_in_accounts_mode() {
+        use crate::accounts::AccountStore;
+        // Accounts wired → a decision needs a valid session token (bearer); a
+        // tokenless request must be rejected, so no one can approve/deny another
+        // family's item by guessing an alert_id/device_id.
+        let svc = ReviewService::with_accounts(AlertHub::new(), AccountStore::new());
+        let req = ReviewRequest {
+            alert_id: "a1".into(),
+            decision: ReviewDecision::Deny as i32,
+            device_id: "kids-tablet".into(),
+            scope: ReviewScope::Unspecified as i32,
+            ts: 1,
+        };
+        let err = svc
+            .submit_decision(Request::new(req))
+            .await
+            .expect_err("must require a session token");
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }
 }

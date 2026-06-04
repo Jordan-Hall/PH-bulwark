@@ -287,11 +287,15 @@ impl AccountStore {
         if child_name.trim().is_empty() {
             return Err(AccountError::Validation("child_name is required"));
         }
-        // A device_id must map to exactly one child — alerts route by device_id, so
-        // a reused device id would put the same device in two families' guardian
-        // scopes and leak alerts across families. Reject duplicates.
+        // device_id is the link from alerts to this child (alerts route by it), so
+        // it is REQUIRED — a blank id makes the child un-routable (guardian streams
+        // can't match its alerts). It must also map to exactly ONE child — a reused
+        // id would put the same device in two families' scopes and leak alerts.
         let device_id = device_id.trim();
-        if !device_id.is_empty() && inner.device_to_child.contains_key(device_id) {
+        if device_id.is_empty() {
+            return Err(AccountError::Validation("device_id is required"));
+        }
+        if inner.device_to_child.contains_key(device_id) {
             return Err(AccountError::DeviceInUse);
         }
         let child_id = self.rand_hex(ID_BYTES);
@@ -304,11 +308,10 @@ impl AccountStore {
             device_id: device_id.trim().to_string(),
             guardians,
         };
-        if !rec.device_id.is_empty() {
-            inner
-                .device_to_child
-                .insert(rec.device_id.clone(), child_id.clone());
-        }
+        // device_id is guaranteed non-empty (validated above) → always indexed.
+        inner
+            .device_to_child
+            .insert(rec.device_id.clone(), child_id.clone());
         let proto = rec.to_proto();
         inner.children.insert(child_id, rec);
         Ok(proto)
@@ -596,5 +599,17 @@ mod tests {
         );
         // A distinct device id is fine.
         assert!(store.add_child(&b_tok, "Kid B", "other-device").is_ok());
+    }
+
+    #[test]
+    fn add_child_rejects_blank_device_id() {
+        // A blank device_id makes the child un-routable (alerts route by device_id).
+        let store = AccountStore::new();
+        let (_a, _) = store.create_account("a@x.com", "passwordone", "A").unwrap();
+        let (tok, _, _) = store.login("a@x.com", "passwordone").unwrap();
+        assert_eq!(
+            store.add_child(&tok, "Kid", "   "),
+            Err(AccountError::Validation("device_id is required"))
+        );
     }
 }
