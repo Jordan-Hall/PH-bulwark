@@ -36,6 +36,12 @@ ssh -D 1080 -N ubuntu@<ec2-public-dns>     # SOCKS5 proxy on localhost:1080
 ```
 This uses the EC2 you already deployed — no extra cost.
 
+## Data residency — pick your country, data routes only there
+Each client connects to exactly **one** server, so a user's data only ever routes
+through the country they pick. **Deploy a UK/London (`eu-west-2`) server** for UK
+users (UK data residency), a US server for US users, etc., and let the client choose
+its country (PH Bulwark Cloud — UK / US / …, or self-hosted). No cross-region routing.
+
 ## Multi-country (let users pick) — one workspace per region
 Each workspace keeps its own state, so you get one instance per country:
 ```sh

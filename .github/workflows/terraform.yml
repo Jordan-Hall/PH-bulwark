@@ -6,7 +6,7 @@ name: terraform
 
 on:
   push:
-    branches: [master, main]
+    branches: [master]
     paths:
       - deploy/aws/**
       - .github/workflows/terraform.yml
