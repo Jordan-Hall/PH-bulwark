@@ -239,18 +239,30 @@ impl<C: OnScreenClassifier> ScreenGuard<C> {
 
     /// Process one captured text span (if any): classify → cover/warn + alert on a
     /// flag. Returns the verdict it acted on (for the run loop / tests).
+    ///
+    /// IMPORTANT: when the captured content is no longer flagged (safe verdict, or
+    /// nothing to act on), any active cover/banner is CLEARED — otherwise an
+    /// overlay shown for earlier content would stay stuck over benign screens. A
+    /// scan with no new capture leaves the current overlay untouched.
     pub async fn scan_once(&self) -> Result<Option<ScreenVerdict>> {
         let Some(span) = self.ocr.next_text().await? else {
+            // No new capture this tick → don't change the current overlay state.
             return Ok(None);
         };
         let app = span.app.clone();
         let Some(verdict) = self.classifier.classify_text(&span).await else {
+            // Captured content classified SAFE → clear any active intervention.
+            self.clear_overlay().await;
             return Ok(None);
         };
-        let action = Self::intervention_for(&verdict);
-        if !matches!(action, Intervention::AlertOnly) {
-            if let Err(e) = self.overlay.show(&action).await {
-                tracing::warn!(error = %e, "on-screen overlay failed");
+        match Self::intervention_for(&verdict) {
+            // Not flagged for a surface (ALLOW/LOG) → the screen is benign now;
+            // clear any cover/banner left from earlier flagged content.
+            Intervention::AlertOnly => self.clear_overlay().await,
+            action => {
+                if let Err(e) = self.overlay.show(&action).await {
+                    tracing::warn!(error = %e, "on-screen overlay failed");
+                }
             }
         }
         if verdict.raise_alert {
@@ -260,6 +272,13 @@ impl<C: OnScreenClassifier> ScreenGuard<C> {
             }
         }
         Ok(Some(verdict))
+    }
+
+    /// Remove any active overlay, logging (never failing the scan) on error.
+    async fn clear_overlay(&self) {
+        if let Err(e) = self.overlay.clear().await {
+            tracing::warn!(error = %e, "on-screen overlay clear failed");
+        }
     }
 }
 
@@ -305,18 +324,48 @@ mod tests {
         }
     }
 
-    struct RecOverlay(Arc<Mutex<Vec<Intervention>>>);
+    struct RecOverlay {
+        shown: Arc<Mutex<Vec<Intervention>>>,
+        cleared: Arc<Mutex<u32>>,
+    }
     #[async_trait]
     impl Overlay for RecOverlay {
         async fn show(&self, i: &Intervention) -> Result<()> {
-            self.0.lock().await.push(i.clone());
+            self.shown.lock().await.push(i.clone());
             Ok(())
         }
         async fn clear(&self) -> Result<()> {
+            *self.cleared.lock().await += 1;
             Ok(())
         }
         fn platform(&self) -> &'static str {
             "test"
+        }
+    }
+
+    /// Flags the 1st span (WARN), returns a safe ALLOW verdict for the 2nd, and
+    /// `None` (safe, no verdict) for the 3rd — to exercise both safe paths.
+    struct FlagThenSafe(Arc<Mutex<u32>>);
+    #[async_trait]
+    impl OnScreenClassifier for FlagThenSafe {
+        async fn classify_text(&self, _s: &TextSpan) -> Option<ScreenVerdict> {
+            let mut n = self.0.lock().await;
+            *n += 1;
+            match *n {
+                1 => Some(ScreenVerdict {
+                    category: Category::Grooming,
+                    action: Action::Warn,
+                    redacted: "[redacted] grooming-suspicion".into(),
+                    raise_alert: true,
+                }),
+                2 => Some(ScreenVerdict {
+                    category: Category::Safe,
+                    action: Action::Allow,
+                    redacted: String::new(),
+                    raise_alert: false,
+                }),
+                _ => None,
+            }
         }
     }
 
@@ -345,7 +394,10 @@ mod tests {
             DeviceId::from("kids-phone"),
             ocr,
             AlwaysGrooming,
-            Arc::new(RecOverlay(shown.clone())),
+            Arc::new(RecOverlay {
+                shown: shown.clone(),
+                cleared: Arc::new(Mutex::new(0)),
+            }),
         )
         .with_alert(Arc::new(RecAlert(alerts.clone())));
 
@@ -360,5 +412,46 @@ mod tests {
         assert_eq!(*alerts.lock().await, 1);
         // Queue drained → next scan is a no-op.
         assert!(guard.scan_once().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn safe_scan_clears_a_previously_shown_overlay() {
+        let shown = Arc::new(Mutex::new(Vec::new()));
+        let cleared = Arc::new(Mutex::new(0u32));
+        let ocr = OcrAgent::new();
+        for t in [
+            "our little secret",
+            "what time is football",
+            "see you at school",
+        ] {
+            ocr.push("whatsapp", "t1", t.into(), SourceChannel::OcrOnscreen)
+                .await;
+        }
+
+        let guard = ScreenGuard::new(
+            DeviceId::from("kids-phone"),
+            ocr,
+            FlagThenSafe(Arc::new(Mutex::new(0))),
+            Arc::new(RecOverlay {
+                shown: shown.clone(),
+                cleared: cleared.clone(),
+            }),
+        );
+
+        // 1) flagged → overlay shown, nothing cleared yet.
+        guard.scan_once().await.unwrap().expect("flagged");
+        assert_eq!(shown.lock().await.len(), 1);
+        assert_eq!(*cleared.lock().await, 0);
+
+        // 2) safe ALLOW verdict (AlertOnly) → the stuck overlay is cleared.
+        guard.scan_once().await.unwrap().expect("safe verdict");
+        assert_eq!(*cleared.lock().await, 1);
+
+        // 3) safe with no verdict (None) → also clears.
+        assert!(guard.scan_once().await.unwrap().is_none());
+        assert_eq!(*cleared.lock().await, 2);
+
+        // No further overlays were shown for the benign content.
+        assert_eq!(shown.lock().await.len(), 1);
     }
 }
