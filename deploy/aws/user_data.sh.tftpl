@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# cloud-init: install Docker and run the PH Bulwark server (all-in-one). Idempotent
+# enough for first boot; for upgrades, re-pull + recreate (or use the Ansible role).
+set -euxo pipefail
+
+apt-get update
+apt-get install -y docker.io
+systemctl enable --now docker
+
+mkdir -p /var/lib/aegis
+
+docker run -d --name aegis-server --restart unless-stopped \
+  -p ${aegis_port}:${aegis_port} \
+  -v /var/lib/aegis:/var/lib/aegis \
+  -e AEGIS_BIND=0.0.0.0:${aegis_port} \
+  -e AEGIS_ACCOUNTS=1 \
+  -e AEGIS_STATE_DIR=/var/lib/aegis \
+  ${aegis_image} --role all-in-one
