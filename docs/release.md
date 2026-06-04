@@ -90,6 +90,7 @@ rebuilds the image, and restarts the container. It's gated on a GitHub
 | secret | `AEGIS_SSH_KEY` | the private key (contents of `ph-bulwark-london.pem`) |
 | var | `AEGIS_SERVER_HOST` | the server's public DNS/IP (e.g. the Terraform `endpoint` host) |
 | var | `AEGIS_SSH_USER` | optional, default `ubuntu` |
+| var | `AEGIS_PORT` | optional, default `8443` — MUST match the server's configured port (Terraform `aegis_port`) |
 
 Add **required reviewers** on the Environment for a manual approve-before-deploy
 gate. For multiple servers (UK + US), add more Environments (`production-us`, …)

@@ -37,14 +37,19 @@ jobs:
           key: ${{ secrets.AEGIS_SSH_KEY }}
           script: |
             set -euxo pipefail
+            # Use the server's configured port (env var AEGIS_PORT) — NOT a hardcoded
+            # 8443 — so a server provisioned on a non-default port (Terraform
+            # aegis_port) keeps the same port the security group + clients target.
+            PORT="${{ vars.AEGIS_PORT }}"
+            PORT="${PORT:-8443}"
             cd /opt/aegis-src
             sudo git pull --ff-only
             sudo docker build -f deploy/docker/Dockerfile -t aegis-server:local .
             sudo docker rm -f aegis-server || true
             sudo docker run -d --name aegis-server --restart unless-stopped \
-              -p 8443:8443 \
+              -p ${PORT}:${PORT} \
               -v /var/lib/aegis:/var/lib/aegis \
-              -e AEGIS_BIND=0.0.0.0:8443 \
+              -e AEGIS_BIND=0.0.0.0:${PORT} \
               -e AEGIS_ACCOUNTS=1 \
               -e AEGIS_STATE_DIR=/var/lib/aegis \
               aegis-server:local --role all-in-one
