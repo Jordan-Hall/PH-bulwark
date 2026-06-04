@@ -50,3 +50,15 @@ variable "aegis_port" {
   type        = number
   default     = 8443
 }
+
+variable "build_on_instance" {
+  description = "Build the image ON the instance from source (no registry needed). Slower first boot (~10 min Rust build); recommend instance_type >= t3.medium so it doesn't OOM (a swapfile is also added). When false, pull var.aegis_image."
+  type        = bool
+  default     = false
+}
+
+variable "repo_url" {
+  description = "Git repo to clone + build when build_on_instance = true (must be reachable from the instance; public for an unauthenticated clone)."
+  type        = string
+  default     = "https://github.com/Jordan-Hall/child-safety.git"
+}

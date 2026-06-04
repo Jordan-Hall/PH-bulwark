@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# cloud-init (build_on_instance = true): install Docker + git, BUILD the server image
+# from source on the instance (no registry needed), then run it. Slower first boot.
+set -euxo pipefail
+
+apt-get update
+apt-get install -y docker.io git
+systemctl enable --now docker
+
+# Swap so the Rust build doesn't OOM on a small instance.
+if [ ! -f /swapfile ]; then
+  fallocate -l 4G /swapfile
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+
+mkdir -p /var/lib/aegis
+rm -rf /opt/aegis-src
+git clone --depth 1 ${repo_url} /opt/aegis-src
+cd /opt/aegis-src
+docker build -f deploy/docker/Dockerfile -t aegis-server:local .
+
+docker run -d --name aegis-server --restart unless-stopped \
+  -p ${aegis_port}:${aegis_port} \
+  -v /var/lib/aegis:/var/lib/aegis \
+  -e AEGIS_BIND=0.0.0.0:${aegis_port} \
+  -e AEGIS_ACCOUNTS=1 \
+  -e AEGIS_STATE_DIR=/var/lib/aegis \
+  aegis-server:local --role all-in-one
