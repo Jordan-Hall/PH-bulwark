@@ -21,9 +21,18 @@ async fn main() -> anyhow::Result<()> {
 
     let bind = std::env::var("AEGIS_BIND").unwrap_or_else(|_| "127.0.0.1:8443".to_string());
 
+    // Accounts (multi-tenant guardian sessions) are OFF by default so a local/dev
+    // install works with an empty token (device-scoped Review). Opt in with
+    // AEGIS_ACCOUNTS=1 once guardian sessions are provisioned.
+    let accounts_enabled = matches!(
+        std::env::var("AEGIS_ACCOUNTS").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    );
+
     let cfg = ServerConfig {
         role,
         bind,
+        accounts_enabled,
         // mTLS material is loaded from aegis-core Config in a full deployment;
         // left None here so a local single-node run works out of the box (dev).
         ..ServerConfig::default()

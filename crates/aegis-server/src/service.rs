@@ -253,11 +253,6 @@ pub async fn run(
         // per-device approve-allowlist Review::SubmitDecision writes through.
         let hub = AlertHub::new();
 
-        // Parent accounts + per-child guardians. The same store scopes Review's
-        // pending stream (a guardian sees only their assigned children) and backs
-        // the Accounts service (create/login/add-child/assign-guardian).
-        let accounts = AccountStore::new();
-
         // AlertRelay is always mounted on guardian-facing nodes (even without
         // an SMTP sink) so the broadcast fan-out path is available; the sink is
         // attached when SMTP is configured.
@@ -266,15 +261,29 @@ pub async fn run(
             alert_sink,
         )));
 
-        // Review: guardian approve/deny + remote-push registration + the
-        // pending-review stream, scoped per-guardian by the account store.
-        router = router.add_service(ReviewServer::new(ReviewService::with_accounts(
-            hub,
-            accounts.clone(),
-        )));
-
-        // Accounts: parent registration/login + child/guardian management.
-        router = router.add_service(AccountsServer::new(AccountsService::new(accounts)));
+        // Review (+ optional Accounts) depends on the deployment mode:
+        //   * accounts_enabled = false (DEFAULT, single-home/dev): device-scoped
+        //     Review only — a client connects with an EMPTY token and gets its
+        //     device's alerts/decisions. The Accounts service is NOT mounted, so
+        //     the token gate never rejects the default client.
+        //   * accounts_enabled = true (productised multi-tenant): Review is scoped
+        //     to a guardian session token and the Accounts service is mounted for
+        //     registration/login/child/guardian management. Enable only once
+        //     guardian sessions exist (else the gate rejects empty-token clients).
+        if cfg.accounts_enabled {
+            // Parent accounts + per-child guardians: the store scopes Review's
+            // pending stream/decisions AND backs the Accounts service.
+            let accounts = AccountStore::new();
+            router = router.add_service(ReviewServer::new(ReviewService::with_accounts(
+                hub,
+                accounts.clone(),
+            )));
+            router = router.add_service(AccountsServer::new(AccountsService::new(accounts)));
+            tracing::info!("accounts mode ENABLED — Review requires a guardian session token");
+        } else {
+            router = router.add_service(ReviewServer::new(ReviewService::new(hub)));
+            tracing::info!("accounts mode disabled — device-scoped Review (legacy/dev)");
+        }
 
         if let Some(c) = cluster {
             let svc = aegis_cluster::service::ClusterControlService::new(c);

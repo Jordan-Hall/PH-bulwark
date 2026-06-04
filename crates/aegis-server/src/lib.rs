@@ -57,6 +57,15 @@ pub struct ServerConfig {
     pub tls_cert_pem: Option<Vec<u8>>,
     pub tls_key_pem: Option<Vec<u8>>,
     pub client_ca_pem: Option<Vec<u8>>,
+    /// Enable parent ACCOUNTS mode: mount the Accounts service and scope
+    /// Review (pending stream + decisions) to a guardian session token.
+    ///
+    /// Default `false` = legacy device-scoped relay: a client connects with an
+    /// empty token and receives/decides alerts for its device (single-home / dev).
+    /// Set `true` (productised multi-tenant) only once guardian sessions exist —
+    /// otherwise the token check rejects every default empty-token client. See the
+    /// round-3/round-7 review threads on PR #1.
+    pub accounts_enabled: bool,
 }
 
 impl Default for ServerConfig {
@@ -67,6 +76,7 @@ impl Default for ServerConfig {
             tls_cert_pem: None,
             tls_key_pem: None,
             client_ca_pem: None,
+            accounts_enabled: false,
         }
     }
 }
@@ -209,6 +219,14 @@ mod tests {
         let reg = AnalyzerRegistry::with_text();
         assert!(reg.analyzer_for(MediaKind::Text as i32).is_some());
         assert!(reg.analyzer_for(MediaKind::Video as i32).is_none());
+    }
+
+    #[test]
+    fn accounts_mode_is_off_by_default() {
+        // Safety default: a local/dev server must NOT require a guardian session
+        // token, or a default empty-token client connects but never gets alerts
+        // (the round-7 regression). Productised multi-tenant opts in explicitly.
+        assert!(!ServerConfig::default().accounts_enabled);
     }
 
     #[tokio::test]
