@@ -89,10 +89,17 @@ and the guardian holds the admin password. Then:
   stop, and the uninstaller requires admin (UAC / `sudo` / polkit). A standard user
   cannot uninstall a machine-wide install or stop a system service.
 - Auto-start scaffolding ships under `deploy/`:
-  - **Windows** — `deploy/windows/install-aegis-autostart.ps1` (admin) registers a
-    logon Scheduled Task the child user can't modify. *Production* should ship a
-    real Windows **service** (SCM handler via the `windows-service` crate) so the
-    child can't stop it even within their session — tracked as a follow-up.
+  - **Windows** — `deploy/windows/install-aegis-service.ps1` (admin) installs the
+    `aegis_svc` **SCM service** (LocalSystem, auto-start) and **locks its DACL**
+    (`sc sdset`) so Interactive/Service users get query-only access — a Standard
+    child can't `sc stop`/`sc delete` it or stop it from Services.msc; only
+    LocalSystem + Administrators (the guardian) can. The service supervises
+    `aegis_proxy.exe` and respawns it if killed. *Refinement (documented):* a
+    session-0 service can't set the child's per-user WinINET proxy, so production
+    should launch the proxy INTO the active session via `WTSQueryUserToken` +
+    `CreateProcessAsUserW` (isolated Win32 in `aegis-net`), or host the in-process
+    transparent VPN once its data path lands. `install-aegis-autostart.ps1` remains
+    the no-service logon-task fallback.
   - **macOS** — `deploy/macos/co.libertyware.aegis.proxy.plist` (a LaunchDaemon for
     root-owned auto-start; a LaunchAgent variant for per-user). A managed Mac can
     additionally pin a Network/System Extension via MDM so it can't be removed
