@@ -220,7 +220,7 @@ pub struct AlertConfig {
 
 impl AlertConfig {
     fn default_subject_prefix() -> String {
-        "[Aegis]".to_string()
+        "[PH Bulwark]".to_string()
     }
 
     /// Validate the whole configuration up front so a misconfiguration fails at

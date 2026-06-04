@@ -41,7 +41,7 @@ object AlertNotifier {
         val a = runCatching { JSONObject(alertJson) }.getOrNull() ?: return
         val alertId = a.optString("alert_id", System.nanoTime().toString())
         val category = a.optInt("category", 0)
-        val body = a.optString("redacted_context", "Aegis flagged content on this device.")
+        val body = a.optString("redacted_context", "Predator Hunters Bulwark flagged content on this device.")
 
         ensureChannel(ctx)
 
@@ -75,7 +75,7 @@ object AlertNotifier {
         CAT_ADULT_TEXT -> "Blocked adult text"
         CAT_GROOMING -> "Possible grooming detected"
         CAT_CSAM -> "Possible CSAM — blocked & flagged (image not shown)"
-        else -> "Aegis stepped in"
+        else -> "Predator Hunters Bulwark stepped in"
     }
 
     private fun thumbnail(a: JSONObject): Bitmap? {
@@ -102,7 +102,7 @@ object AlertNotifier {
 
     private fun ensureChannel(ctx: Context) {
         ctx.getSystemService(NotificationManager::class.java).createNotificationChannel(
-            NotificationChannel(CHANNEL, "Aegis alerts", NotificationManager.IMPORTANCE_HIGH)
+            NotificationChannel(CHANNEL, "Predator Hunters Bulwark alerts", NotificationManager.IMPORTANCE_HIGH)
         )
     }
 }

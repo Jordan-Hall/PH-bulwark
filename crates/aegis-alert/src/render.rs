@@ -153,7 +153,7 @@ pub fn render_event(event: &AlertEvent, subject_prefix: &str) -> Result<Rendered
     if kind == AlertKind::GroomingSuspected {
         body.push_str(
             "\nThis is a grooming-suspicion alert. The full conversation has \
-             NOT been copied here. Review the flagged thread in the Aegis \
+             NOT been copied here. Review the flagged thread in the Predator Hunters Bulwark \
              dashboard and decide how you want to handle it.\n",
         );
     }
@@ -161,7 +161,7 @@ pub fn render_event(event: &AlertEvent, subject_prefix: &str) -> Result<Rendered
     render_evidence(&mut body, event.evidence.as_ref());
 
     body.push_str(
-        "\n— Aegis. This message contains redacted summaries only; no images, \
+        "\n— Predator Hunters Bulwark. This message contains redacted summaries only; no images, \
          video, audio, or full message text is included by design.\n",
     );
 
@@ -182,7 +182,7 @@ pub fn render_digest(events: &[AlertEvent], subject_prefix: &str) -> Result<Rend
 
     let mut body = String::new();
     body.push_str(
-        "Several Aegis alerts were grouped to avoid flooding your inbox. \
+        "Several Predator Hunters Bulwark alerts were grouped to avoid flooding your inbox. \
          Summaries only — no media or full message text is included.\n\n",
     );
 
@@ -213,7 +213,7 @@ pub fn render_digest(events: &[AlertEvent], subject_prefix: &str) -> Result<Rend
     }
 
     body.push_str(
-        "Open the Aegis dashboard for the full (still redacted) detail and any \
+        "Open the Predator Hunters Bulwark dashboard for the full (still redacted) detail and any \
          safe thumbnails.\n",
     );
 
@@ -251,7 +251,7 @@ fn render_evidence(body: &mut String, evidence: Option<&Evidence>) {
     if !ev.safe_thumbnail.is_empty() {
         // We intentionally do NOT inline the bytes — only note availability.
         body.push_str(
-            "  A safe (blurred/cropped) thumbnail is available in the Aegis \
+            "  A safe (blurred/cropped) thumbnail is available in the Predator Hunters Bulwark \
              dashboard. It is not attached to this email.\n",
         );
     }
@@ -267,30 +267,30 @@ fn render_evidence(body: &mut String, evidence: Option<&Evidence>) {
 
 fn headline_for(kind: AlertKind) -> &'static str {
     match kind {
-        AlertKind::Intervention => "Aegis blocked something",
+        AlertKind::Intervention => "Predator Hunters Bulwark blocked something",
         AlertKind::GroomingSuspected => "Possible grooming detected",
-        AlertKind::ProtectionDisabled => "Aegis protection was changed",
-        AlertKind::Unspecified => "Aegis alert",
+        AlertKind::ProtectionDisabled => "Predator Hunters Bulwark protection was changed",
+        AlertKind::Unspecified => "Predator Hunters Bulwark alert",
     }
 }
 
 fn intro_for(kind: AlertKind) -> &'static str {
     match kind {
         AlertKind::Intervention => {
-            "Aegis stepped in and acted on content on a supervised device \
+            "Predator Hunters Bulwark stepped in and acted on content on a supervised device \
              (blocked, blurred, or muted it). Here is a redacted summary of \
              what happened."
         }
         AlertKind::GroomingSuspected => {
-            "Aegis detected conversation patterns that may indicate grooming \
+            "Predator Hunters Bulwark detected conversation patterns that may indicate grooming \
              on a supervised device. Please review this carefully."
         }
         AlertKind::ProtectionDisabled => {
-            "Aegis protection on a supervised device was turned off, removed, or \
+            "Predator Hunters Bulwark protection on a supervised device was turned off, removed, or \
              stopped checking in. The child's device may no longer be filtered — \
              please check it."
         }
-        AlertKind::Unspecified => "Aegis raised an alert on a supervised device.",
+        AlertKind::Unspecified => "Predator Hunters Bulwark raised an alert on a supervised device.",
     }
 }
 

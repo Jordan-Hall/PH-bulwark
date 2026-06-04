@@ -192,7 +192,9 @@ mod tests {
         let rendered = render_event(&event, "[Aegis]").unwrap();
 
         // Safe fields are present.
-        assert!(rendered.subject.contains("Aegis blocked something"));
+        assert!(rendered
+            .subject
+            .contains("Predator Hunters Bulwark blocked something"));
         assert!(rendered.subject.contains("Adult image"));
         assert!(rendered.body.contains("example.com"));
         assert!(rendered.body.contains("kids-tablet"));
@@ -300,7 +302,9 @@ mod tests {
         let events = vec![intervention_event(), grooming_event()];
         let rendered = render_digest(&events, "[Aegis]").unwrap();
         assert!(rendered.subject.contains("2 alert(s)"));
-        assert!(rendered.body.contains("Aegis blocked something"));
+        assert!(rendered
+            .body
+            .contains("Predator Hunters Bulwark blocked something"));
         assert!(rendered.body.contains("Possible grooming detected"));
         // No thumbnail bytes in the digest either.
         assert!(!rendered

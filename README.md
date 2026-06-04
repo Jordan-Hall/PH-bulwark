@@ -1,9 +1,17 @@
-# Aegis
+# Predator Hunters Bulwark
 
-Free / open-source, Rust **client/server** child-safety filtering VPN. It blocks
+> **Names.** The product is **Predator Hunters Bulwark** (short: **PH Bulwark**) —
+> the on-device child-safety shield. The guardian/parent console is **Predator
+> Hunters HQ** (**PH HQ**). `aegis` / `aegis-*` is the internal engineering
+> codename used throughout the crates, binaries (`aegis_proxy`/`aegis_vpn`/
+> `aegis_svc`), `AEGIS_*` env vars, and the `co.libertyware.aegis` package — that
+> stays as-is (a codename ≠ the marketing name).
+
+Free / open-source, Rust **client/server** child-safety system. It blocks
 non-child-safe content **in real time** (not whole-site blocking), detects signs of
-grooming in text, and emails a guardian whenever it intervenes or suspects grooming.
-Thin device clients; a horizontally-scalable (clusterable) analysis backend.
+grooming in text, retains blocked clips for guardian review, raises tamper alerts if
+protection is disabled, and notifies a guardian (email + push) whenever it intervenes
+or suspects grooming. Thin device clients; a horizontally-scalable analysis backend.
 
 > **Status (2026-06):** all 14 crates are **implemented** (~16.5k lines) against the
 > `aegis-proto` contract, but the tree has **not been compile-verified yet** (it was
