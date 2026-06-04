@@ -74,10 +74,9 @@ pub struct AlertHub {
     /// (host + hash + category only — never raw media or message text).
     // Persisted as JSON when a state dir is configured (`with_state_dir`).
     pending: Arc<Mutex<HashMap<String, PendingReview>>>,
-    /// `Some` → write-through JSON persistence for push targets + pending reviews
-    /// (survive a restart). `None` (default) → pure in-memory. NOTE: the allowlist
-    /// is NOT yet persisted (its audit-chain replay is a tracked follow-up); a
-    /// restart re-asks the guardian for approve decisions.
+    /// `Some` → write-through JSON persistence for push targets, pending reviews,
+    /// AND the approve-allowlist (persisted as a decision journal + replayed on
+    /// load — see `replay_audit`). `None` (default) → pure in-memory.
     persist: Option<HubPersist>,
 }
 
@@ -87,6 +86,24 @@ pub struct AlertHub {
 struct HubPersist {
     push: JsonFile,
     pending: JsonFile,
+    /// The guardian-decision journal (`Vec<AuditEntryRow>`). The live `Allowlist`
+    /// is rebuilt by re-applying these rows on load (`replay_audit`), which also
+    /// re-derives a valid audit chain deterministically.
+    audit: JsonFile,
+}
+
+/// One persisted guardian-decision journal row (content-free). Enough to re-run
+/// `Allowlist::apply` and reproduce both the allow-sets and the audit chain.
+#[derive(Serialize, Deserialize)]
+struct AuditEntryRow {
+    device_id: String,
+    alert_id: String,
+    decision: i32, // ReviewDecision
+    scope: i32,    // ReviewScope
+    host: String,
+    sha256_hex: String,
+    category: i32, // Category
+    ts: i64,
 }
 
 /// The content-free facts the relay retains about a raised alert so a later
@@ -130,15 +147,30 @@ impl AlertHub {
         let (tx, _rx) = tokio::sync::broadcast::channel(ALERT_BROADCAST_CAPACITY);
         let push = JsonFile::new(dir, "push_targets.json")?;
         let pending = JsonFile::new(dir, "pending_reviews.json")?;
+        let audit = JsonFile::new(dir, "allowlist_audit.json")?;
         let push_targets: HashMap<String, PushTarget> = push.load_or_default();
         let pending_map: HashMap<String, PendingReview> = pending.load_or_default();
+        // Rebuild the allowlist by re-applying the persisted decision journal.
+        let allowlist = replay_audit(audit.load_or_default());
         Ok(Self {
             tx,
-            allowlist: Arc::new(Mutex::new(Allowlist::new())),
+            allowlist: Arc::new(Mutex::new(allowlist)),
             push_targets: Arc::new(Mutex::new(push_targets)),
             pending: Arc::new(Mutex::new(pending_map)),
-            persist: Some(HubPersist { push, pending }),
+            persist: Some(HubPersist {
+                push,
+                pending,
+                audit,
+            }),
         })
+    }
+
+    fn persist_audit(&self, allowlist: &Allowlist) {
+        if let Some(p) = &self.persist {
+            if let Err(e) = p.audit.store(&audit_rows(allowlist)) {
+                tracing::warn!(error = %e, "failed to persist allowlist audit; continuing in-memory");
+            }
+        }
     }
 
     fn persist_push(&self, map: &HashMap<String, PushTarget>) {
@@ -249,7 +281,9 @@ impl AlertHub {
         // audited allowlist. The in-memory `Allowlist` already chains its audit
         // log (`allowlist.audit().verify()`); persistence would flush it.
         let mut guard = self.allowlist.lock().expect("allowlist mutex poisoned");
-        guard.apply(item, decision, scope, ts)
+        let outcome = guard.apply(item, decision, scope, ts);
+        self.persist_audit(&guard);
+        outcome
     }
 
     /// Record a guardian's remote-push routing token (no alert content).
@@ -294,6 +328,64 @@ impl aegis_alert::TokenRegistry for HubTokenRegistry {
     fn tokens(&self) -> Vec<String> {
         self.hub.push_tokens()
     }
+}
+
+/// Build the persistable decision journal from the live allowlist's audit log.
+fn audit_rows(allowlist: &Allowlist) -> Vec<AuditEntryRow> {
+    allowlist
+        .audit()
+        .entries()
+        .iter()
+        .map(|e| AuditEntryRow {
+            device_id: e.device_id.clone(),
+            alert_id: e.alert_id.clone(),
+            decision: e.decision as i32,
+            scope: e.scope as i32,
+            host: e.host.clone(),
+            sha256_hex: e.sha256_hex.clone(),
+            category: e.category as i32,
+            ts: e.ts,
+        })
+        .collect()
+}
+
+/// Rebuild an [`Allowlist`] by re-applying a persisted decision journal in order.
+/// Each row reproduces the original `apply` (same per-device allow-sets + a fresh,
+/// valid audit chain — re-derived deterministically). A malformed row is skipped;
+/// CSAM approvals replay to `Refused` again. Never panics.
+fn replay_audit(rows: Vec<AuditEntryRow>) -> Allowlist {
+    let mut allowlist = Allowlist::new();
+    for r in rows {
+        let decision = ReviewDecision::try_from(r.decision).unwrap_or(ReviewDecision::Unspecified);
+        let scope = ReviewScope::try_from(r.scope).unwrap_or(ReviewScope::Unspecified);
+        let category = Category::try_from(r.category).unwrap_or(Category::Unspecified);
+        let item = ReviewItem::new(
+            DeviceId(r.device_id),
+            r.alert_id,
+            r.host,
+            from_hex_bytes(&r.sha256_hex),
+            category,
+        );
+        allowlist.apply(&item, decision, scope, r.ts);
+    }
+    allowlist
+}
+
+/// Decode a lowercase-hex string to bytes; empty on odd-length/invalid input.
+fn from_hex_bytes(s: &str) -> Vec<u8> {
+    if !s.len().is_multiple_of(2) {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    let mut i = 0;
+    while i < s.len() {
+        match u8::from_str_radix(&s[i..i + 2], 16) {
+            Ok(b) => out.push(b),
+            Err(_) => return Vec::new(),
+        }
+        i += 2;
+    }
+    out
 }
 
 /// The response-stream type tonic expects for `Review::StreamPendingReviews`.
@@ -581,6 +673,40 @@ mod tests {
         // Pending reviews were persisted on publish.
         assert!(dir.join("pending_reviews.json").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn allowlist_journal_round_trips_via_replay() {
+        // Apply an APPROVE(THIS_HOST), then rebuild the allowlist from its journal.
+        let mut a = Allowlist::new();
+        let dev = DeviceId("kids-tablet".into());
+        let item = ReviewItem::new(
+            dev.clone(),
+            "a1",
+            "example.com",
+            Vec::new(),
+            Category::AdultImage,
+        );
+        a.apply(&item, ReviewDecision::Approve, ReviewScope::ThisHost, 1);
+        assert!(a.is_host_allowed(&dev, "example.com"));
+
+        let replayed = replay_audit(audit_rows(&a));
+        // The allow-set survived the journal round-trip and the chain re-verifies.
+        assert!(replayed.is_host_allowed(&dev, "example.com"));
+        assert!(replayed.audit().verify().is_ok());
+
+        // CSAM approvals are never allow-listed — replay reproduces the refusal.
+        let mut c = Allowlist::new();
+        let csam = ReviewItem::new(
+            dev.clone(),
+            "a2",
+            "bad.example",
+            Vec::new(),
+            Category::CsamSuspected,
+        );
+        c.apply(&csam, ReviewDecision::Approve, ReviewScope::ThisHost, 2);
+        let replayed_c = replay_audit(audit_rows(&c));
+        assert!(!replayed_c.is_host_allowed(&dev, "bad.example"));
     }
 
     #[test]
