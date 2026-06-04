@@ -3,7 +3,7 @@
 //! This is the Rust side of the contract declared in
 //! `platform/android/app/src/main/java/co/libertyware/aegis/core/RustBridge.kt`.
 //! The Kotlin `object RustBridge` loads us via `System.loadLibrary("aegis_client")`
-//! and declares six `external fun`s. We export the matching
+//! and declares the `external fun`s. We export the matching
 //! `Java_co_libertyware_aegis_core_RustBridge_<method>` C-ABI symbols and forward
 //! the on-device-captured text into the LEGITIMATE, deterministic analyzers:
 //!
@@ -11,12 +11,17 @@
 //!   * [`aegis_policy::Policy`]     — the `Verdict -> Action` policy engine.
 //!
 //! ## What this bridge is (and is NOT)
-//! It is a TRANSPARENT content-safety bridge: text the child's apps have already
-//! rendered on screen (the accessibility path) is analysed on-device by the same
-//! deterministic grooming pipeline the network path uses, and a content-free
-//! verdict is returned. It performs **no** device-control / surveillance surface
-//! — no anti-uninstall, no screen mirroring, no remote control/wipe, no hidden
-//! location, no reading of other apps beyond this on-device safety check.
+//! It is a TRANSPARENT content-safety + tamper-EVIDENCE bridge: text the child's
+//! apps have already rendered on screen (the accessibility path) is analysed
+//! on-device by the same deterministic grooming pipeline the network path uses and
+//! a content-free verdict is returned; and `reportTamper` relays redacted
+//! PROTECTION_DISABLED events (an uninstall attempt, or a protection turned off) so
+//! the guardian is told. Anti-removal *enforcement* (device admin / Device Owner /
+//! always-on-VPN lockdown) lives in the consented Android policy layer
+//! (`co.libertyware.aegis.admin`), applied OPENLY on a managed child device — never
+//! covertly from here. This bridge still performs **no** screen mirroring, remote
+//! control/wipe, hidden location, or reading of other apps beyond the on-device
+//! safety check + the uninstall-guard the child app transparently runs.
 //!
 //! ## Privacy
 //! Evidence and logs carry only category names, scores and **redacted excerpts**
@@ -37,7 +42,8 @@
 
 #![allow(unsafe_code)]
 
-use std::sync::OnceLock;
+use std::collections::VecDeque;
+use std::sync::{Mutex, OnceLock};
 
 use jni::objects::{JClass, JString};
 use jni::sys::{jboolean, jint, jlong, jstring};
@@ -80,6 +86,34 @@ static ENGINE: OnceLock<Option<Engine>> = OnceLock::new();
 
 fn engine() -> Option<&'static Engine> {
     ENGINE.get_or_init(Engine::build).as_ref()
+}
+
+// ---------------------------------------------------------------------------
+// Tamper queue — child-device protection-downgrade events (uninstall attempt,
+// device-admin/accessibility/VPN turned off). `reportTamper` enqueues a redacted
+// PROTECTION_DISABLED alert JSON; `nextAlert` drains it (so the existing alert
+// poller surfaces it, and the same path relays it to the cluster once wired).
+// Content-free: only WHICH protection changed. Bounded so a misbehaving caller
+// can't grow it without limit.
+// ---------------------------------------------------------------------------
+
+const TAMPER_QUEUE_CAP: usize = 64;
+
+fn tamper_queue() -> &'static Mutex<VecDeque<String>> {
+    static Q: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
+    Q.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+/// Guardian-facing, content-free description for an `aegis.v1.TamperKind` ordinal.
+fn tamper_message(kind: i32) -> &'static str {
+    match kind {
+        1 => "Someone tried to remove the Aegis app on the child's device.",
+        2 => "Aegis device management was turned off on the child's device.",
+        3 => "Aegis on-device monitoring was turned off on the child's device.",
+        4 => "The Aegis filtering VPN was turned off on the child's device.",
+        6 => "The child's device entered safe mode or was factory-reset.",
+        _ => "Protection status changed on the child's device.",
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -346,11 +380,17 @@ pub extern "system" fn Java_co_libertyware_aegis_core_RustBridge_analyzeText(
 /// JNI entry point with no pointer arguments.
 #[no_mangle]
 pub extern "system" fn Java_co_libertyware_aegis_core_RustBridge_nextAlert(
-    _env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
 ) -> jstring {
-    // null jstring == Kotlin `null`.
-    std::ptr::null_mut()
+    // Drain a pending tamper (PROTECTION_DISABLED) alert if any. Content verdicts
+    // from the live filtering loop are queued by the owning crate (SEAM); until
+    // that is wired the only entries are the tamper events `reportTamper` enqueues.
+    let next = tamper_queue().lock().ok().and_then(|mut q| q.pop_front());
+    match next {
+        Some(json) => string_to_jstring(&mut env, &json),
+        None => std::ptr::null_mut(), // null jstring == Kotlin `null`
+    }
 }
 
 /// `external fun submitReviewDecision(alertId: String, approve: Boolean)`
@@ -391,6 +431,39 @@ pub extern "system" fn Java_co_libertyware_aegis_core_RustBridge_registerParentP
 ) {
     let _token = jstring_to_string(&mut env, &token).unwrap_or_default();
     // No-op until remote FCM delivery is wired through this bridge.
+}
+
+/// `external fun reportTamper(kind: Int)`
+///
+/// Enqueue a redacted PROTECTION_DISABLED alert for a child-device protection
+/// downgrade (`aegis.v1.TamperKind` ordinal) so the guardian is told via the same
+/// alert path as content alerts (`nextAlert` drains it). Content-free — only the
+/// kind of change. Never panics across the FFI boundary.
+///
+/// # Safety
+/// JNI entry point with a primitive `jint` argument only.
+#[no_mangle]
+pub extern "system" fn Java_co_libertyware_aegis_core_RustBridge_reportTamper(
+    _env: JNIEnv,
+    _class: JClass,
+    kind: jint,
+) {
+    let now_s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // AlertKind::PROTECTION_DISABLED == 3; category 0 (a status signal, not content).
+    let obj = serde_json::json!({
+        "alert_id": format!("tamper-{kind}-{now_s}"),
+        "kind": 3,
+        "category": 0,
+        "redacted_context": tamper_message(kind),
+    });
+    if let Ok(mut q) = tamper_queue().lock() {
+        if q.len() < TAMPER_QUEUE_CAP {
+            q.push_back(obj.to_string());
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -458,7 +531,11 @@ mod tests {
         let e = Engine::build().unwrap();
         // Secrecy then platform switch in one thread should reach a grooming
         // verdict whose JSON the Kotlin `contains("\"GROOMING")` check catches.
-        analyze(&e, "g1", "hey this is our little secret ok, dont tell your parents");
+        analyze(
+            &e,
+            "g1",
+            "hey this is our little secret ok, dont tell your parents",
+        );
         let (v, d) = analyze(&e, "g1", "lets move to telegram so we can talk there");
         assert_eq!(v.category(), Category::Grooming);
         let json = verdict_json(&v, &d);

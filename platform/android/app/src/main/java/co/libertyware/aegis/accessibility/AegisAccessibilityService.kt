@@ -5,6 +5,7 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import co.libertyware.aegis.core.RustBridge
+import co.libertyware.aegis.tamper.TamperReporter
 
 /**
  * The end-to-end / cert-pinned answer.
@@ -30,6 +31,16 @@ class AegisAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
         val pkg = event.packageName?.toString() ?: return
+
+        // Uninstall-guard: when the package installer / Settings opens, check
+        // whether it's an attempt to remove US and, if so, alert + bounce away.
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            pkg in UNINSTALL_SURFACES
+        ) {
+            guardAgainstUninstall()
+            return
+        }
+
         if (pkg !in MONITORED) return
 
         when (event.eventType) {
@@ -53,6 +64,25 @@ class AegisAccessibilityService : AccessibilityService() {
             .getOrDefault("{\"error\":\"bridge unavailable\"}")
         if (verdictJson.contains("\"GROOMING") || verdictJson.contains("\"CSAM")) {
             Log.w(TAG, "flagged text in $pkg")
+        }
+    }
+
+    /**
+     * On an installer / Settings screen, if the visible text is about removing the
+     * Aegis app, raise an `APP_UNINSTALL_ATTEMPT` alert and navigate Home. This is
+     * FRICTION + DETECTION, not an absolute block — a determined user can still
+     * proceed (and on Device Owner the uninstall is blocked outright), but the
+     * guardian is always told.
+     */
+    private fun guardAgainstUninstall() {
+        val root = rootInActiveWindow ?: return
+        val screen = collectText(root).lowercase()
+        val mentionsAegis = screen.contains("aegis")
+        val isUninstall = screen.contains("uninstall") || screen.contains("do you want to uninstall")
+        if (mentionsAegis && isUninstall) {
+            Log.w(TAG, "uninstall attempt detected on Aegis — alerting guardian")
+            TamperReporter.report(this, TamperReporter.APP_UNINSTALL_ATTEMPT)
+            performGlobalAction(GLOBAL_ACTION_HOME)
         }
     }
 
@@ -82,6 +112,13 @@ class AegisAccessibilityService : AccessibilityService() {
             "com.instagram.android",
             "com.snapchat.android",
             "org.telegram.messenger",
+        )
+
+        // Surfaces an app-removal flows through — watched by the uninstall-guard.
+        private val UNINSTALL_SURFACES = setOf(
+            "com.google.android.packageinstaller",
+            "com.android.packageinstaller",
+            "com.android.settings",
         )
     }
 }

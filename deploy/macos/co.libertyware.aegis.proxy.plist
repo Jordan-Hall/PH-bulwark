@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Aegis child-safety filter — macOS launchd LaunchDaemon (tamper resistance, item 5).
+
+  Install (guardian, with sudo) so it runs at boot as root and a Standard child
+  user cannot stop or remove it:
+
+    sudo cp co.libertyware.aegis.proxy.plist /Library/LaunchDaemons/
+    sudo chown root:wheel /Library/LaunchDaemons/co.libertyware.aegis.proxy.plist
+    sudo chmod 644       /Library/LaunchDaemons/co.libertyware.aegis.proxy.plist
+    sudo launchctl bootstrap system /Library/LaunchDaemons/co.libertyware.aegis.proxy.plist
+
+  THE MODEL (docs/design/tamper-protection.md §5): the child is a *Standard* (non-
+  admin) account; the guardian holds the admin password. A LaunchDaemon in
+  /Library/LaunchDaemons is root-owned, so the child cannot unload or delete it.
+  A managed Mac can additionally pin a Network/System Extension via MDM so the
+  content filter can't be removed without the management profile.
+
+  Adjust ProgramArguments to the installed binary path.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>co.libertyware.aegis.proxy</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/aegis_proxy</string>
+    </array>
+
+    <!-- Start at load and keep it running: relaunch if it exits or is killed. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/aegis/aegis.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/aegis/aegis.err.log</string>
+</dict>
+</plist>

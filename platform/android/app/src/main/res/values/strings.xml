@@ -3,4 +3,8 @@
     <string name="a11y_description">Aegis reads on-screen text in messaging apps on this device to
         check for grooming and adult content and alert the guardian. Message content is analysed
         on-device and is never sent off the device except as redacted alerts to the guardian.</string>
+    <string name="device_admin_label">Aegis child-safety protection</string>
+    <string name="device_admin_description">Keeps Aegis child-safety protection active on this
+        device and notifies the guardian if it is turned off or removed. Enabled with guardian
+        consent; visible in Settings and removable by the guardian.</string>
 </resources>
