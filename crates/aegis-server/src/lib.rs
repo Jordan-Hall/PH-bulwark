@@ -20,6 +20,7 @@ use aegis_proto::v1::{
 use async_trait::async_trait;
 
 pub mod accounts;
+pub mod persist;
 pub mod relay;
 pub mod service;
 pub mod tamper;
@@ -68,6 +69,10 @@ pub struct ServerConfig {
     /// otherwise the token check rejects every default empty-token client. See the
     /// round-3/round-7 review threads on PR #1.
     pub accounts_enabled: bool,
+    /// When set (`AEGIS_STATE_DIR`), guardian accounts are persisted as JSON under
+    /// this directory and reloaded on startup (the `persist` module). `None`
+    /// (default) = pure in-memory, so dev/tests are unaffected.
+    pub state_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for ServerConfig {
@@ -79,6 +84,7 @@ impl Default for ServerConfig {
             tls_key_pem: None,
             client_ca_pem: None,
             accounts_enabled: false,
+            state_dir: None,
         }
     }
 }

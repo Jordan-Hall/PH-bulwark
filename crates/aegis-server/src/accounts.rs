@@ -19,8 +19,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use serde::{Deserialize, Serialize};
+
+use crate::persist::JsonFile;
 use aegis_proto::v1::accounts_server::Accounts;
 use aegis_proto::v1::{
     AccountAck, AddChildRequest, AssignGuardianRequest, Child, Children, CreateAccountRequest,
@@ -150,6 +154,9 @@ struct Inner {
 pub struct AccountStore {
     inner: Arc<Mutex<Inner>>,
     rng: Arc<SystemRandom>,
+    /// `Some` → write-through JSON persistence (accounts survive a restart);
+    /// `None` (default) → pure in-memory, unchanged behaviour.
+    persist: Option<JsonFile>,
 }
 
 impl Default for AccountStore {
@@ -163,6 +170,33 @@ impl AccountStore {
         Self {
             inner: Arc::new(Mutex::new(Inner::default())),
             rng: Arc::new(SystemRandom::new()),
+            persist: None,
+        }
+    }
+
+    /// Durable store rooted at `dir`: loads `accounts.json` on startup and
+    /// write-throughs every account/child/guardian mutation. Session tokens are
+    /// NOT persisted — guardians simply re-`login` after a restart (keeps the
+    /// at-rest credential surface to the KDF hash only). A corrupt file starts
+    /// empty (logged); only an unusable directory is fatal.
+    pub fn with_state_dir(dir: &Path) -> std::io::Result<Self> {
+        let file = JsonFile::new(dir, "accounts.json")?;
+        let snap: AccountSnapshot = file.load_or_default();
+        Ok(Self {
+            inner: Arc::new(Mutex::new(Inner::from_snapshot(snap))),
+            rng: Arc::new(SystemRandom::new()),
+            persist: Some(file),
+        })
+    }
+
+    /// Persist the current state. Call AFTER a mutation; builds the snapshot under
+    /// the held lock (consistent), then writes (a write failure is logged, never
+    /// fatal — the in-memory state remains authoritative).
+    fn persist_locked(&self, inner: &Inner) {
+        if let Some(file) = &self.persist {
+            if let Err(e) = file.store(&inner.snapshot()) {
+                tracing::warn!(error = %e, "failed to persist accounts; continuing in-memory");
+            }
         }
     }
 
@@ -230,6 +264,7 @@ impl AccountStore {
                 hash,
             },
         );
+        self.persist_locked(&inner);
         Ok((account_id, true))
     }
 
@@ -314,6 +349,7 @@ impl AccountStore {
             .insert(rec.device_id.clone(), child_id.clone());
         let proto = rec.to_proto();
         inner.children.insert(child_id, rec);
+        self.persist_locked(&inner);
         Ok(proto)
     }
 
@@ -338,6 +374,7 @@ impl AccountStore {
             return Err(AccountError::NotGuardian);
         }
         rec.guardians.insert(guardian_account_id.to_string());
+        self.persist_locked(&inner);
         Ok(())
     }
 
@@ -387,6 +424,134 @@ fn to_hex(bytes: &[u8]) -> String {
         s.push(H[(b & 0x0f) as usize] as char);
     }
     s
+}
+
+/// Decode an exactly-`N`-byte lowercase-hex string into `[u8; N]`. `None` on a
+/// wrong-length or non-hex string (a corrupt snapshot row is skipped, not fatal).
+fn from_hex_array<const N: usize>(s: &str) -> Option<[u8; N]> {
+    if s.len() != N * 2 {
+        return None;
+    }
+    let mut out = [0u8; N];
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+// ---------------------------------------------------------------------------
+// Durable snapshot (serde JSON). Content-free: the KDF salt+hash (never the
+// password), ids, hosts. Session tokens are deliberately NOT persisted.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Default)]
+struct AccountSnapshot {
+    accounts: Vec<AccountRow>,
+    children: Vec<ChildRow>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct AccountRow {
+    email_key: String,
+    account_id: String,
+    family_id: String,
+    salt_hex: String,
+    hash_hex: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ChildRow {
+    child_id: String,
+    family_id: String,
+    name: String,
+    device_id: String,
+    guardians: Vec<String>,
+}
+
+impl Inner {
+    /// Build a stable (sorted) serde snapshot. Omits `sessions`.
+    fn snapshot(&self) -> AccountSnapshot {
+        let mut accounts: Vec<AccountRow> = self
+            .by_email
+            .iter()
+            .map(|(email_key, a)| AccountRow {
+                email_key: email_key.clone(),
+                account_id: a.account_id.clone(),
+                family_id: a.family_id.clone(),
+                salt_hex: to_hex(&a.salt),
+                hash_hex: to_hex(&a.hash),
+            })
+            .collect();
+        accounts.sort_by(|a, b| a.email_key.cmp(&b.email_key));
+
+        let mut children: Vec<ChildRow> = self
+            .children
+            .values()
+            .map(|c| {
+                let mut guardians: Vec<String> = c.guardians.iter().cloned().collect();
+                guardians.sort();
+                ChildRow {
+                    child_id: c.child_id.clone(),
+                    family_id: c.family_id.clone(),
+                    name: c.name.clone(),
+                    device_id: c.device_id.clone(),
+                    guardians,
+                }
+            })
+            .collect();
+        children.sort_by(|a, b| a.child_id.cmp(&b.child_id));
+
+        AccountSnapshot { accounts, children }
+    }
+
+    /// Rebuild from a snapshot, deriving the reverse maps; `sessions` starts empty
+    /// (tokens are not persisted). Rows with malformed salt/hash are skipped.
+    fn from_snapshot(snap: AccountSnapshot) -> Inner {
+        let mut inner = Inner::default();
+        for row in snap.accounts {
+            let (salt, hash) = match (
+                from_hex_array::<SALT_LEN>(&row.salt_hex),
+                from_hex_array::<HASH_LEN>(&row.hash_hex),
+            ) {
+                (Some(s), Some(h)) => (s, h),
+                _ => {
+                    tracing::warn!(account = %row.account_id, "skipping account with malformed salt/hash");
+                    continue;
+                }
+            };
+            inner
+                .email_by_id
+                .insert(row.account_id.clone(), row.email_key.clone());
+            inner.by_email.insert(
+                row.email_key,
+                Account {
+                    account_id: row.account_id,
+                    family_id: row.family_id,
+                    salt,
+                    hash,
+                },
+            );
+        }
+        for row in snap.children {
+            let guardians: HashSet<String> = row.guardians.into_iter().collect();
+            if !row.device_id.is_empty() {
+                inner
+                    .device_to_child
+                    .insert(row.device_id.clone(), row.child_id.clone());
+            }
+            inner.children.insert(
+                row.child_id.clone(),
+                ChildRec {
+                    child_id: row.child_id,
+                    family_id: row.family_id,
+                    name: row.name,
+                    device_id: row.device_id,
+                    guardians,
+                },
+            );
+        }
+        inner
+    }
 }
 
 /// Extract a bearer token from the `authorization: Bearer <token>` metadata, if
@@ -489,6 +654,64 @@ impl Accounts for AccountsService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "aegis-accounts-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn accounts_persist_and_reload_across_restart() {
+        let dir = tmp_dir("reload");
+        // Fresh persisted store: account + child + a second guardian.
+        let s1 = AccountStore::with_state_dir(&dir).unwrap();
+        let (alice, created) = s1.create_account("a@x.com", "passwordone", "A").unwrap();
+        assert!(created);
+        let (a_tok, _, _) = s1.login("a@x.com", "passwordone").unwrap();
+        let child = s1.add_child(&a_tok, "Kid", "kids-tablet").unwrap();
+        let (bob, _) = s1.create_account("b@x.com", "passwordtwo", "B").unwrap();
+        s1.assign_guardian(&a_tok, &child.child_id, &bob).unwrap();
+        drop(s1); // simulate a server restart
+
+        // Reload from the same dir.
+        let s2 = AccountStore::with_state_dir(&dir).unwrap();
+        // KDF hash survived → login works again; wrong password still rejected.
+        let (a_tok2, acct2, _) = s2.login("a@x.com", "passwordone").unwrap();
+        assert_eq!(acct2, alice);
+        assert_eq!(
+            s2.login("a@x.com", "wrong"),
+            Err(AccountError::BadCredentials)
+        );
+        // Child + guardian assignment + device routing survived.
+        let kids = s2.list_children(&a_tok2).unwrap();
+        assert_eq!(kids.len(), 1);
+        assert_eq!(kids[0].device_id, "kids-tablet");
+        assert!(kids[0].guardian_account_ids.contains(&bob));
+        assert_eq!(
+            s2.add_child(&a_tok2, "Kid2", "kids-tablet"),
+            Err(AccountError::DeviceInUse)
+        );
+        // Sessions are NOT persisted: the OLD token is invalid after restart.
+        assert!(s2.guardian_scope(&a_tok).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_accounts_file_starts_empty_not_panic() {
+        let dir = tmp_dir("corrupt");
+        std::fs::write(dir.join("accounts.json"), b"{ not json").unwrap();
+        let s = AccountStore::with_state_dir(&dir).unwrap(); // must not panic
+        assert!(s.create_account("c@x.com", "passwordthree", "C").unwrap().1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn password_round_trips_and_rejects_wrong() {

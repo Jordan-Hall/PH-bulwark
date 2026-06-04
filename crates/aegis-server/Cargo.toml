@@ -30,6 +30,10 @@ futures-util.workspace = true
 # Password hashing for parent accounts (PBKDF2-HMAC-SHA256). ring is already in
 # the build graph (tonic tls-ring) so this adds no new native dependency.
 ring.workspace = true
+# Optional file-backed durability for guardian state (AEGIS_STATE_DIR) — JSON
+# snapshots via the `persist` module. NO rusqlite (won't build on this host).
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 
 [features]
 default = []
