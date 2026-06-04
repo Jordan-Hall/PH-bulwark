@@ -27,7 +27,7 @@ import co.libertyware.aegis.tamper.TamperReporter
 class AegisDeviceAdminReceiver : DeviceAdminReceiver() {
 
     override fun onDisableRequested(context: Context, intent: Intent): CharSequence =
-        "Turning this off removes Aegis child-safety protection from this device. " +
+        "Turning this off removes PH Bulwark child-safety protection from this device. " +
             "Your guardian will be notified."
 
     override fun onDisabled(context: Context, intent: Intent) {
@@ -66,7 +66,7 @@ class AegisDeviceAdminReceiver : DeviceAdminReceiver() {
         runCatching {
             val dpm = Lockdown.dpm(context)
             val admin = Lockdown.adminComponent(context)
-            dpm.setProfileName(admin, "Aegis managed")
+            dpm.setProfileName(admin, "PH Bulwark managed")
         }
         runCatching { Enrollment.markProvisioned(context, extras) }
         runCatching {
