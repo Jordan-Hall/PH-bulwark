@@ -44,6 +44,19 @@ resource "aws_security_group" "aegis" {
     protocol    = "tcp"
     cidr_blocks = [var.ssh_cidr]
   }
+  # WireGuard transport for the route-to-London VPN mode (deploy/wireguard/).
+  # Enabled only when wg_enabled = true. WireGuard is silent to unauthenticated
+  # packets, so an open UDP port is low-risk; keys are the gate.
+  dynamic "ingress" {
+    for_each = var.wg_enabled ? [1] : []
+    content {
+      description = "WireGuard"
+      from_port   = var.wg_port
+      to_port     = var.wg_port
+      protocol    = "udp"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  }
   egress {
     description = "all outbound"
     from_port   = 0

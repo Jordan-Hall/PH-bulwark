@@ -51,6 +51,18 @@ variable "aegis_port" {
   default     = 8443
 }
 
+variable "wg_enabled" {
+  description = "Open the WireGuard UDP port for the route-to-London VPN mode (deploy/wireguard/setup-london.sh). WireGuard ignores unauthenticated packets, so an open port is low-risk."
+  type        = bool
+  default     = false
+}
+
+variable "wg_port" {
+  description = "WireGuard UDP listen port."
+  type        = number
+  default     = 51820
+}
+
 variable "ssm_instance_profile" {
   description = <<-EOT
     Name of an EXISTING IAM instance profile (with AmazonSSMManagedInstanceCore) to
