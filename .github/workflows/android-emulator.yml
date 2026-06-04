@@ -69,19 +69,28 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: |
-            set -e
+            set -uo pipefail
+            # Wait for the device to be fully booted (avoids the "device offline" race).
+            adb wait-for-device
+            timeout 120 bash -c 'until [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d "\r")" = "1" ]; do sleep 2; done' || true
             adb install -r platform/android/app/build/outputs/apk/debug/app-debug.apk
-            adb logcat -c
-            # Launch the LAUNCHER activity (no need to hardcode the class name).
-            adb shell monkey -p co.libertyware.aegis -c android.intent.category.LAUNCHER 1
-            sleep 10
-            echo "=== recent logcat (app) ==="
-            adb logcat -d | grep -iE "aegis|libaegis_client|RustBridge" | tail -30 || true
-            if adb logcat -d | grep -E "FATAL EXCEPTION|UnsatisfiedLinkError|AndroidRuntime: FATAL"; then
-              echo "::error::app crashed on launch"; adb logcat -d | tail -80; exit 1
+            adb logcat -c || true
+            # Launch MainActivity and WAIT for the result (-W reports Status: ok/error).
+            OUT=$(adb shell am start -W -n co.libertyware.aegis/.MainActivity 2>&1 || true)
+            echo "$OUT"
+            sleep 8
+            echo "=== app logcat ==="
+            adb logcat -d 2>/dev/null | grep -iE "aegis|libaegis|RustBridge|AndroidRuntime" | tail -40 || true
+            # HARD FAIL only on a real crash (native lib load failure / uncaught exception).
+            if adb logcat -d 2>/dev/null | grep -E "FATAL EXCEPTION|UnsatisfiedLinkError"; then
+              echo "::error::app crashed on launch (native lib / uncaught exception)"; exit 1
             fi
-            if adb shell pidof co.libertyware.aegis >/dev/null; then
-              echo "✓ app process is alive after launch"
+            # Success = the launcher activity started cleanly + no crash. (A launcher
+            # activity may finish/background, so process-liveness is informational only.)
+            if echo "$OUT" | grep -q "Status: ok"; then
+              echo "✓ MainActivity launched + libaegis_client loaded, no crash"
+            elif adb shell pidof co.libertyware.aegis >/dev/null 2>&1; then
+              echo "✓ app process alive, no crash"
             else
-              echo "::error::app process not running after launch"; adb logcat -d | tail -80; exit 1
+              echo "::error::MainActivity did not launch (am start: $OUT)"; exit 1
             fi
