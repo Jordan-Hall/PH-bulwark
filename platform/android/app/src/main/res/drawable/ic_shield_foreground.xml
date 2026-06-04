@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive-icon FOREGROUND: a white shield, centred in the 108dp canvas (within
+     the ~66dp safe zone so launchers can mask it). This is the PH Bulwark emblem.
+     To use the processed Predator Hunters logo instead, replace this drawable (or
+     drop a foreground PNG into res/mipmap-*/) — the adaptive-icon wrapper stays. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Shield body -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,28 L80,38 L80,58 C80,72 68,82 54,86 C40,82 28,72 28,58 L28,38 Z" />
+    <!-- Inner check mark, cut in the background colour, to read as 'protected' -->
+    <path
+        android:fillColor="#0F3D5C"
+        android:pathData="M45,57 l6,6 l13,-15 l4,3.5 l-17,19.5 l-10,-10 Z" />
+</vector>
