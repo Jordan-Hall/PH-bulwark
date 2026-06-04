@@ -1,8 +1,8 @@
 # Predator Hunters Bulwark
 
-> **Names.** The product is **Predator Hunters Bulwark** (short: **PH Bulwark**) —
-> the on-device child-safety shield. The guardian/parent console is **Predator
-> Hunters HQ** (**PH HQ**). `aegis` / `aegis-*` is the internal engineering
+> **Names.** The product is **Predator Hunters Bulwark**. The **child's app is
+> simply "PH Bulwark"** (the on-device shield); the **guardian/parent console is
+> "PH Bulwark Manager"**. `aegis` / `aegis-*` is the internal engineering
 > codename used throughout the crates, binaries (`aegis_proxy`/`aegis_vpn`/
 > `aegis_svc`), `AEGIS_*` env vars, and the `co.libertyware.aegis` package — that
 > stays as-is (a codename ≠ the marketing name).

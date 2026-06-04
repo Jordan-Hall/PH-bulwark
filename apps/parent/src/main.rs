@@ -1,4 +1,4 @@
-//! Predator Hunters HQ — the guardian console (all-Rust Dioxus UI). "aegis" is
+//! PH Bulwark Manager — the guardian console (all-Rust Dioxus UI). "aegis" is
 //! the internal engineering codename; the product is Predator Hunters Bulwark.
 //!
 //! LEGITIMATE features only: review guardian alerts, **approve / keep-blocked**
@@ -323,7 +323,7 @@ fn App() -> Element {
     rsx! {
         style { {CSS} }
         div { class: "wrap",
-            h1 { "Predator Hunters HQ" }
+            h1 { "PH Bulwark Manager" }
             p { class: "sub",
                 "Transparent content-safety: alerts, approve/deny, and an honest coverage view. "
                 "No device control, screen capture, or hidden monitoring."
