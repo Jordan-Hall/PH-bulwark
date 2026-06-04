@@ -105,17 +105,58 @@ fn nsfw_model_display() -> String {
 // Connection layer
 // ---------------------------------------------------------------------------
 
-/// Cluster endpoint, from `AEGIS_CLUSTER_ENDPOINT` — the SINGLE source of truth
-/// for both the console's own review channel AND the filter the console spawns
-/// (previously these disagreed http vs https). Default is the plaintext dev
-/// gateway so a local all-in-one node works out of the box; production sets this
-/// to `https://…` (and `AEGIS_CLUSTER_CA`) for the TLS review channel + mTLS
-/// offload.
+/// "PH Bulwark Cloud" — the default hosted server, used unless the user picks
+/// self-hosted in Settings. Point this at the real cloud gateway when it launches.
+const CLOUD_ENDPOINT: &str = "https://cloud.phbulwark.app";
+
+/// Where the chosen server is persisted (one line: `cloud`, or a self-hosted URL).
+/// Sits in the per-user config dir (Windows `%LOCALAPPDATA%\Aegis`, else
+/// `$XDG_CONFIG_HOME`/`$HOME/.config`, else temp).
+fn server_config_path() -> std::path::PathBuf {
+    use std::path::PathBuf;
+    let base = if let Some(local) = std::env::var_os("LOCALAPPDATA").filter(|s| !s.is_empty()) {
+        PathBuf::from(local).join("Aegis")
+    } else if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|s| !s.is_empty()) {
+        PathBuf::from(xdg).join("aegis")
+    } else if let Some(home) = std::env::var_os("HOME").filter(|s| !s.is_empty()) {
+        PathBuf::from(home).join(".config/aegis")
+    } else {
+        std::env::temp_dir().join("aegis")
+    };
+    base.join("server.txt")
+}
+
+/// The saved self-hosted URL, or `None` when the user is on PH Bulwark Cloud
+/// (`cloud`/empty/missing file). Drives the Settings UI's initial state.
+fn saved_self_hosted_url() -> Option<String> {
+    std::fs::read_to_string(server_config_path())
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|t| !t.is_empty() && !t.eq_ignore_ascii_case("cloud"))
+}
+
+/// Persist the server choice: `None` → PH Bulwark Cloud; `Some(url)` → self-hosted.
+fn save_server_choice(url: Option<&str>) -> std::io::Result<()> {
+    let path = server_config_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let body = match url {
+        Some(u) if !u.trim().is_empty() => u.trim().to_string(),
+        _ => "cloud".to_string(),
+    };
+    std::fs::write(path, body)
+}
+
+/// The cluster endpoint to dial: the `AEGIS_CLUSTER_ENDPOINT` env (advanced/ops
+/// override) wins; otherwise the user's saved choice — **PH Bulwark Cloud by
+/// default**, or their self-hosted server (Bitwarden-style). This is the single
+/// source of truth for both the console's review channel AND the filter it spawns.
 fn cluster_endpoint() -> String {
     std::env::var("AEGIS_CLUSTER_ENDPOINT")
         .ok()
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "http://127.0.0.1:8443".to_string())
+        .unwrap_or_else(|| saved_self_hosted_url().unwrap_or_else(|| CLOUD_ENDPOINT.to_string()))
 }
 
 /// Build a tonic [`Channel`] to the cluster.
@@ -373,6 +414,8 @@ fn App() -> Element {
             }
 
             ProtectionPanel {}
+
+            ServerSettings {}
 
             if offline() {
                 div { class: "banner", "Offline — showing sample data. Not connected to your home cluster." }
@@ -907,6 +950,69 @@ fn ProtectionPanel() -> Element {
                     "To decrypt HTTPS, trust the per-install CA once (no admin):"
                     div { class: "mono ca-cmd", "{ca_trust_command()}" }
                 }
+            }
+        }
+    }
+}
+
+/// Bitwarden-style server picker: PH Bulwark Cloud (default) or a self-hosted URL.
+/// Persists the choice (used by the console's review channel AND the filter it
+/// spawns). `AEGIS_CLUSTER_ENDPOINT` still overrides for advanced/ops use.
+#[component]
+fn ServerSettings() -> Element {
+    let initial = saved_self_hosted_url();
+    let mut self_hosted = use_signal(|| initial.is_some());
+    let mut url = use_signal(|| initial.unwrap_or_default());
+    let mut note = use_signal(|| Option::<String>::None);
+
+    rsx! {
+        section {
+            h2 { "Server" }
+            p { class: "sub",
+                "Use PH Bulwark Cloud, or point at your own self-hosted server."
+            }
+            div { class: "row",
+                label {
+                    input {
+                        r#type: "radio",
+                        name: "srv",
+                        checked: !self_hosted(),
+                        onclick: move |_| self_hosted.set(false),
+                    }
+                    " PH Bulwark Cloud"
+                }
+                label {
+                    input {
+                        r#type: "radio",
+                        name: "srv",
+                        checked: self_hosted(),
+                        onclick: move |_| self_hosted.set(true),
+                    }
+                    " Self-hosted"
+                }
+            }
+            if self_hosted() {
+                input {
+                    class: "url",
+                    r#type: "text",
+                    placeholder: "https://your-server:8443",
+                    value: "{url}",
+                    oninput: move |e| url.set(e.value()),
+                }
+            }
+            button {
+                class: "approve",
+                onclick: move |_| {
+                    let choice = if self_hosted() { Some(url()) } else { None };
+                    match save_server_choice(choice.as_deref()) {
+                        Ok(()) => note.set(Some("Saved — reconnect or restart to apply.".to_string())),
+                        Err(e) => note.set(Some(format!("Couldn't save: {e}"))),
+                    }
+                },
+                "Save server"
+            }
+            if let Some(n) = note() {
+                div { class: "seg-note", "{n}" }
             }
         }
     }
