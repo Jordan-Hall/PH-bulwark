@@ -224,6 +224,9 @@ pub async fn run(
     registry: AnalyzerRegistry,
     alert_sink: Option<Arc<dyn aegis_alert::AlertSink>>,
     cluster: Option<Arc<aegis_cluster::Cluster>>,
+    // Pre-built guardian relay hub (so main.rs can wire a push fan-out sink that
+    // reads its live tokens). `None` → build one here (default / all-in-one path).
+    hub: Option<AlertHub>,
 ) -> anyhow::Result<()> {
     use tonic::transport::Server;
 
@@ -252,8 +255,10 @@ pub async fn run(
 
         // Shared guardian relay state: the broadcast hub fans redacted alerts
         // from AlertRelay out to Review's StreamPendingReviews, and carries the
-        // per-device approve-allowlist Review::SubmitDecision writes through.
-        let hub = AlertHub::new();
+        // per-device approve-allowlist Review::SubmitDecision writes through. A
+        // caller may pass a pre-built hub (so a push fan-out sink can read its
+        // tokens); otherwise build one here.
+        let hub = hub.unwrap_or_default();
 
         // AlertRelay is always mounted on guardian-facing nodes (even without
         // an SMTP sink) so the broadcast fan-out path is available; the sink is

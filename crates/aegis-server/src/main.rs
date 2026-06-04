@@ -59,12 +59,10 @@ async fn main() -> anyhow::Result<()> {
         ))
     });
 
-    // Alert relay e-mails the guardian when SMTP is configured via env
-    // (AEGIS_SMTP_HOST + AEGIS_ALERT_FROM + AEGIS_ALERT_RECIPIENTS, see
-    // aegis_alert::AlertConfig::from_env). Unset → no sink (default local run:
-    // the broadcast fan-out / all-in-one client is the delivery path). A partial/
+    // Email sink: SMTP via env (AEGIS_SMTP_HOST + AEGIS_ALERT_FROM +
+    // AEGIS_ALERT_RECIPIENTS, see AlertConfig::from_env), or None. A partial/
     // invalid config fails at startup rather than silently dropping alerts.
-    let alert_sink: Option<Arc<dyn aegis_alert::AlertSink>> =
+    let email_sink: Option<Arc<dyn aegis_alert::AlertSink>> =
         match aegis_alert::AlertConfig::from_env().map_err(|e| anyhow::anyhow!(e))? {
             Some(cfg) => {
                 let sink = aegis_alert::EmailAlertSink::new(cfg).map_err(|e| anyhow::anyhow!(e))?;
@@ -72,11 +70,44 @@ async fn main() -> anyhow::Result<()> {
                 Some(Arc::new(sink))
             }
             None => {
-                tracing::info!("no email alert sink (AEGIS_SMTP_HOST unset); fan-out only");
+                tracing::info!("no email alert sink (AEGIS_SMTP_HOST unset)");
                 None
             }
         };
 
+    // DEFAULT build: the relay hub is built inside `run`; only email is wired, so
+    // the default server build + host CI stay byte-identical.
+    #[cfg(not(feature = "push"))]
+    let (alert_sink, hub) = (email_sink, None::<aegis_server::AlertHub>);
+
+    // PUSH build: build the hub HERE so the FCM fan-out sink can read its live
+    // push_targets at raise time; compose email + push best-effort.
+    #[cfg(feature = "push")]
+    let (alert_sink, hub) = {
+        let hub = aegis_server::AlertHub::new();
+        let push_sink: Option<Arc<dyn aegis_alert::AlertSink>> =
+            match aegis_alert::FcmConfig::from_env().map_err(|e| anyhow::anyhow!(e))? {
+                Some(fcm) => {
+                    let reg = Arc::new(aegis_server::relay::HubTokenRegistry::new(hub.clone()));
+                    let sink = aegis_alert::FcmFanoutSink::new(&fcm, reg)
+                        .map_err(|e| anyhow::anyhow!(e))?;
+                    tracing::info!("FCM push fan-out sink configured");
+                    Some(Arc::new(sink))
+                }
+                None => {
+                    tracing::info!("no FCM push sink (AEGIS_FCM_PROJECT_ID unset)");
+                    None
+                }
+            };
+        let combined: Option<Arc<dyn aegis_alert::AlertSink>> = match (email_sink, push_sink) {
+            (Some(e), Some(p)) => Some(Arc::new(aegis_alert::CompositeSink::new(vec![e, p]))),
+            (Some(e), None) => Some(e),
+            (None, Some(p)) => Some(p),
+            (None, None) => None,
+        };
+        (combined, Some(hub))
+    };
+
     tracing::info!(?role, "starting aegis-server");
-    service::run(cfg, registry, alert_sink, cluster).await
+    service::run(cfg, registry, alert_sink, cluster, hub).await
 }

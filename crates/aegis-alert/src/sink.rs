@@ -181,3 +181,57 @@ impl AlertSink for EmailAlertSink {
         Ok(AlertAckBatch { acks })
     }
 }
+
+/// Fan an alert out to several [`AlertSink`]s (e.g. email + FCM push) best-effort.
+/// One sink's failure is logged and does NOT abort the others; the ack from the
+/// FIRST sink that succeeds is returned (email is the system of record when
+/// present). Used by the server to deliver via every configured channel.
+pub struct CompositeSink {
+    sinks: Vec<Arc<dyn AlertSink>>,
+}
+
+impl CompositeSink {
+    pub fn new(sinks: Vec<Arc<dyn AlertSink>>) -> Self {
+        Self { sinks }
+    }
+}
+
+#[async_trait]
+impl AlertSink for CompositeSink {
+    async fn raise(&self, event: AlertEvent) -> Result<AlertAck> {
+        let mut primary: Option<AlertAck> = None;
+        for sink in &self.sinks {
+            match sink.raise(event.clone()).await {
+                Ok(ack) => {
+                    if primary.is_none() {
+                        primary = Some(ack);
+                    }
+                }
+                Err(e) => tracing::warn!(alert_id = %event.alert_id, error = %e,
+                    "one alert sink failed in composite (continuing)"),
+            }
+        }
+        Ok(primary.unwrap_or_else(|| AlertAck {
+            alert_id: event.alert_id,
+            delivered: false,
+            deduped: false,
+            detail: "all alert sinks failed".to_string(),
+        }))
+    }
+
+    async fn raise_batch(&self, batch: AlertBatch) -> Result<AlertAckBatch> {
+        let mut primary: Option<AlertAckBatch> = None;
+        for sink in &self.sinks {
+            match sink.raise_batch(batch.clone()).await {
+                Ok(acks) => {
+                    if primary.is_none() {
+                        primary = Some(acks);
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e,
+                    "one alert sink failed in composite batch (continuing)"),
+            }
+        }
+        Ok(primary.unwrap_or(AlertAckBatch { acks: Vec::new() }))
+    }
+}
