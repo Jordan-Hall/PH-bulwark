@@ -18,6 +18,8 @@ aegis-policy = { path = "../aegis-policy" }
 # links without the ffmpeg binary; real sampling is a feature-gated upgrade.
 aegis-video = { path = "../aegis-video" }
 tonic.workspace = true
+# Standard gRPC health service (grpc.health.v1.Health) for readiness probes.
+tonic-health = "0.14"
 prost.workspace = true
 # `signal` for graceful shutdown (Ctrl-C / SIGTERM) on top of the workspace features.
 tokio = { workspace = true, features = ["signal"] }
