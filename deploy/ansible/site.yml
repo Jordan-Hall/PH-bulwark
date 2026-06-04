@@ -1,0 +1,93 @@
+---
+# Deploy-as-code for the Aegis cluster tier. Give it Ubuntu host IPs (inventory);
+# it installs Docker and runs aegis-server on each node — one LB/coordinator + N
+# workers that seed off the LB. Scale by adding [workers] IPs and re-running; every
+# task is idempotent.
+#
+# Requires the collections in requirements.yml:
+#   ansible-galaxy collection install -r deploy/ansible/requirements.yml
+
+- name: Provision Aegis nodes (Docker + firewall + state dir)
+  hosts: aegis
+  become: true
+  tasks:
+    - name: Install Docker engine
+      ansible.builtin.apt:
+        name: docker.io
+        state: present
+        update_cache: true
+
+    - name: Ensure Docker is running and enabled
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Create the durable state directory
+      ansible.builtin.file:
+        path: /var/lib/aegis
+        state: directory
+        mode: "0750"
+
+    - name: Allow the Aegis gRPC port (best-effort; skip if ufw absent)
+      community.general.ufw:
+        rule: allow
+        port: "{{ aegis_port }}"
+        proto: tcp
+      failed_when: false
+
+    - name: Pull the aegis-server image
+      community.docker.docker_image:
+        name: "{{ aegis_image }}"
+        source: pull
+        force_source: true
+
+- name: Run the load-balancer / coordinator node
+  hosts: lb
+  become: true
+  tasks:
+    - name: Run aegis-server (role lb)
+      community.docker.docker_container:
+        name: aegis-server
+        image: "{{ aegis_image }}"
+        command: ["--role", "lb"]
+        restart_policy: unless-stopped
+        recreate: true
+        published_ports:
+          - "{{ aegis_port }}:{{ aegis_port }}"
+        volumes:
+          - /var/lib/aegis:/var/lib/aegis
+        env:
+          AEGIS_BIND: "0.0.0.0:{{ aegis_port }}"
+          AEGIS_ACCOUNTS: "1"
+          AEGIS_STATE_DIR: "/var/lib/aegis"
+          AEGIS_NODE_ID: "{{ inventory_hostname }}"
+          AEGIS_CLUSTER_ID: "{{ aegis_cluster_id }}"
+          AEGIS_CLUSTER_ADDRESS: "{{ inventory_hostname }}:{{ aegis_port }}"
+          AEGIS_QUORUM_DSN: "{{ aegis_quorum_dsn | default('') }}"
+
+- name: Run the worker nodes (seed off the LB)
+  hosts: workers
+  become: true
+  vars:
+    aegis_lb_address: "{{ hostvars[groups['lb'][0]].inventory_hostname }}:{{ aegis_port }}"
+  tasks:
+    - name: Run aegis-server (role worker)
+      community.docker.docker_container:
+        name: aegis-server
+        image: "{{ aegis_image }}"
+        command: ["--role", "worker"]
+        restart_policy: unless-stopped
+        recreate: true
+        published_ports:
+          - "{{ aegis_port }}:{{ aegis_port }}"
+        volumes:
+          - /var/lib/aegis:/var/lib/aegis
+        env:
+          AEGIS_BIND: "0.0.0.0:{{ aegis_port }}"
+          AEGIS_STATE_DIR: "/var/lib/aegis"
+          AEGIS_NODE_ID: "{{ inventory_hostname }}"
+          AEGIS_CLUSTER_ID: "{{ aegis_cluster_id }}"
+          AEGIS_CLUSTER_ADDRESS: "{{ inventory_hostname }}:{{ aegis_port }}"
+          AEGIS_CLUSTER_SEEDS: "{{ aegis_lb_address }}"
+          AEGIS_QUORUM_DSN: "{{ aegis_quorum_dsn | default('') }}"

@@ -1,0 +1,38 @@
+name: ansible
+
+# Validate the cluster deploy-as-code playbook (syntax + lint) so it can't rot.
+# Runs only when the playbook changes.
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - deploy/ansible/**
+      - .github/workflows/ansible.yml
+  pull_request:
+    paths:
+      - deploy/ansible/**
+      - .github/workflows/ansible.yml
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: syntax-check + lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ansible + collections
+        run: |
+          pip install ansible-core ansible-lint
+          ansible-galaxy collection install -r deploy/ansible/requirements.yml
+      - name: Syntax check (gate)
+        run: >-
+          ansible-playbook --syntax-check
+          -i deploy/ansible/inventory.example.ini
+          deploy/ansible/site.yml
+      - name: ansible-lint (advisory)
+        run: ansible-lint --profile min deploy/ansible/site.yml
+        continue-on-error: true
