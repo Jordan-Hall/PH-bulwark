@@ -63,16 +63,20 @@ Three tiers, weakest → strongest. All are visible/consented on the managed dev
   it once in Settings → Network → Advanced → Always-on VPN).
 
 ### 4. Device Owner (DPC) — the only *robust* tier
-Provisioned on a **factory-reset** device (QR / zero-touch / NFC), or in dev:
-```
-adb shell dpm set-device-owner co.libertyware.aegis/.admin.AegisDeviceAdminReceiver
-```
-As Device Owner, `Lockdown.enforce` (re-asserted in `AegisApp.onCreate`) applies:
-`setUninstallBlocked(self)`, `DISALLOW_FACTORY_RESET`, `DISALLOW_SAFE_BOOT`,
-`DISALLOW_UNINSTALL_APPS`, and the always-on-VPN lockdown above. A Device Owner DPC
-**cannot** be deactivated or its app uninstalled without `dpm remove-active-admin`
-or a factory reset. `Lockdown.release` relaxes everything for guardian-initiated
-un-enrollment.
+Provisioned on a **factory-reset** device via QR / NFC / zero-touch, or in dev with
+`adb shell dpm set-device-owner co.libertyware.aegis/.admin.AegisDeviceAdminReceiver`.
+`AegisDeviceAdminReceiver` handles `onProfileProvisioningComplete` (QR/NFC/zero-touch)
+and `DEVICE_OWNER_CHANGED` (the dev `dpm` path): both call `Lockdown.enforce`, record
+enrollment (`Enrollment`, reading `family_id`/`child_id`/`cluster_endpoint` from the
+provisioning extras), and open the dashboard. `Lockdown.enforce` is also re-asserted
+in `AegisApp.onCreate`.
+
+As Device Owner it applies `setUninstallBlocked(self)`, `DISALLOW_FACTORY_RESET`,
+`DISALLOW_SAFE_BOOT`, `DISALLOW_UNINSTALL_APPS`, and the always-on-VPN lockdown — and
+the app **cannot** be deactivated or uninstalled without `dpm remove-active-admin` or
+a factory reset. `Lockdown.release` relaxes everything for guardian-initiated
+un-enrollment. Provisioning recipes (QR JSON, signing-cert checksum, dev `dpm`, FRP
+limits): **`deploy/android/device-owner-provisioning.md`**.
 
 ---
 
@@ -123,7 +127,11 @@ and contributes to the tamper heartbeat (§1) for *detection*.
 - **Factory reset / recovery / re-flash defeats anything** short of devices
   **enrolled as managed from setup** (Android zero-touch / Knox, Apple ABM/DEP),
   where Factory Reset Protection / Activation Lock re-bind the device to the
-  org/family. v1 does not implement provisioning enrollment.
+  org/family. Aegis now supports Device Owner *provisioning* (QR / NFC / dev `dpm`;
+  see `deploy/android/device-owner-provisioning.md`), so `DISALLOW_FACTORY_RESET`
+  blocks reset-from-Settings — but re-binding *after* a recovery-mode wipe still
+  requires **zero-touch** registration (an operational EMM/reseller step), which is
+  not something the app can set programmatically.
 - **Distributed video/parent review** still assumes a co-located guardian for
   `blob://` clips (see `on-device-scanning.md`); unrelated to tamper protection but
   the same "managed-device" assumption.

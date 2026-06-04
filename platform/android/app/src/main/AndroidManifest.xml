@@ -73,6 +73,11 @@
                 android:resource="@xml/device_admin" />
             <intent-filter>
                 <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+                <!-- Managed-provisioning completion (QR / NFC / zero-touch) and the
+                     explicit Device-Owner transition: both finalize enrollment and
+                     auto-apply the anti-removal lockdown (see AegisDeviceAdminReceiver). -->
+                <action android:name="android.app.action.PROFILE_PROVISIONING_COMPLETE" />
+                <action android:name="android.app.action.DEVICE_OWNER_CHANGED" />
             </intent-filter>
         </receiver>
     </application>
