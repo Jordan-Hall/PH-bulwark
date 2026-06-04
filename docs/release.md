@@ -79,19 +79,25 @@ These can't live in the repo — provide them out-of-band / as CI secrets:
 - **Versioning**: bump `versionCode` every upload (Play requires monotonic codes).
 - Nothing here ships secrets; signing happens only in CI with the secrets set.
 
-## 5. Continuous deployment to the servers
-`.github/workflows/deploy.yml` redeploys a running server (the build-on-instance
-EC2) on a **published Release** or manual dispatch: it SSHes in, `git pull`s,
-rebuilds the image, and restarts the container. It's gated on a GitHub
-**Environment** named `production` — create it (Settings → Environments) and add:
+## 5. Continuous deployment to the servers (AWS SSM — no inbound SSH)
+`.github/workflows/deploy.yml` redeploys a running server on a **published Release**
+or manual dispatch via **AWS SSM Run Command**: GitHub authenticates as the scoped
+deploy user and tells the instance's SSM agent to `git pull` → rebuild → restart.
+**No inbound SSH** — the EC2's SSH port stays locked to the operator's IP. Gated on
+a GitHub **Environment** `production`:
 
 | kind | name | value |
 |---|---|---|
-| secret | `AEGIS_SSH_KEY` | the private key (contents of `ph-bulwark-london.pem`) |
-| var | `AEGIS_SERVER_HOST` | the server's public DNS/IP (e.g. the Terraform `endpoint` host) |
-| var | `AEGIS_SSH_USER` | optional, default `ubuntu` |
-| var | `AEGIS_PORT` | optional, default `8443` — MUST match the server's configured port (Terraform `aegis_port`) |
+| secret | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | the scoped `ph-bulwark-deployer` IAM user (needs `ssm:SendCommand`) |
+| var | `AWS_REGION` | e.g. `eu-west-2` |
+| var | `AWS_INSTANCE_ID` | the EC2 id (must carry the `ph-bulwark-ssm` instance profile) |
+| var | `AEGIS_PORT` | optional, default `8443` — MUST match the server's port (Terraform `aegis_port`) |
 
-Add **required reviewers** on the Environment for a manual approve-before-deploy
-gate. For multiple servers (UK + US), add more Environments (`production-us`, …)
-and duplicate the job with `environment: production-us`.
+**One-time SSM enablement** (admin/root, once): create role `ph-bulwark-ssm` with
+`AmazonSSMManagedInstanceCore` (EC2 trust), attach it to the instance, and grant the
+deploy user `ssm:SendCommand`/`GetCommandInvocation`/`DescribeInstanceInformation`.
+Terraform sets `iam_instance_profile = "ph-bulwark-ssm"` on the instance so it isn't
+stripped on the next apply.
+
+Add **required reviewers** on the Environment for an approve-before-deploy gate. For
+multiple servers (UK + US), add Environments (`production-us`, …) + duplicate the job.
