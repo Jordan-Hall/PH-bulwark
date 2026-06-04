@@ -7,9 +7,12 @@
 //! must be running with `AEGIS_ACCOUNTS=1` (and ideally `AEGIS_STATE_DIR` set, so
 //! the provisioned accounts persist).
 //!
+//! The password is read from `$AEGIS_ADMIN_PASSWORD` — never passed on the command
+//! line, where it would leak into `ps` output and shell history.
+//!
 //! ```text
-//! aegis_admin create-account  <email> <password> [display_name]
-//! aegis_admin login           <email> <password>            # -> session token
+//! AEGIS_ADMIN_PASSWORD=… aegis_admin create-account  <email> [display_name]
+//! AEGIS_ADMIN_PASSWORD=… aegis_admin login           <email>   # -> session token
 //! aegis_admin add-child       <token> <child_name> <device_id>
 //! aegis_admin assign-guardian <token> <child_id> <guardian_account_id>
 //! aegis_admin list-children   <token>
@@ -26,12 +29,10 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 enum Cmd {
     CreateAccount {
         email: String,
-        password: String,
         display_name: String,
     },
     Login {
         email: String,
-        password: String,
     },
     AddChild {
         token: String,
@@ -50,12 +51,26 @@ enum Cmd {
 
 fn usage() -> String {
     "usage: aegis_admin <subcommand> ...\n  \
-     create-account  <email> <password> [display_name]\n  \
-     login           <email> <password>\n  \
+     create-account  <email> [display_name]   (password from $AEGIS_ADMIN_PASSWORD)\n  \
+     login           <email>                  (password from $AEGIS_ADMIN_PASSWORD)\n  \
      add-child       <token> <child_name> <device_id>\n  \
      assign-guardian <token> <child_id> <guardian_account_id>\n  \
      list-children   <token>"
         .to_string()
+}
+
+/// Resolve the account password from `$AEGIS_ADMIN_PASSWORD` — never from argv
+/// (which leaks into `ps`, shell history, and process listings). Pure over the
+/// env value so it can be unit-tested.
+fn require_password(env_val: Option<String>) -> Result<String, String> {
+    match env_val {
+        Some(p) if !p.is_empty() => Ok(p),
+        _ => Err(
+            "set the password in $AEGIS_ADMIN_PASSWORD (not on the command \
+                  line — argv is visible to other processes / shell history)"
+                .to_string(),
+        ),
+    }
 }
 
 /// Parse argv (without the program name) into a [`Cmd`]. Pure — unit-tested.
@@ -75,18 +90,16 @@ fn parse(args: &[String]) -> Result<Cmd, String> {
     };
     match sub {
         "create-account" => {
-            need(2)?;
+            need(1)?;
             Ok(Cmd::CreateAccount {
                 email: rest[0].clone(),
-                password: rest[1].clone(),
-                display_name: rest.get(2).cloned().unwrap_or_default(),
+                display_name: rest.get(1).cloned().unwrap_or_default(),
             })
         }
         "login" => {
-            need(2)?;
+            need(1)?;
             Ok(Cmd::Login {
                 email: rest[0].clone(),
-                password: rest[1].clone(),
             })
         }
         "add-child" => {
@@ -144,17 +157,26 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Resolve the password (env-only) BEFORE connecting, so a missing password
+    // fails fast and never reaches the wire / a process listing.
+    let password = match &cmd {
+        Cmd::CreateAccount { .. } | Cmd::Login { .. } => Some(
+            require_password(std::env::var("AEGIS_ADMIN_PASSWORD").ok())
+                .map_err(|e| anyhow::anyhow!(e))?,
+        ),
+        _ => None,
+    };
+
     let mut client = connect().await?;
     match cmd {
         Cmd::CreateAccount {
             email,
-            password,
             display_name,
         } => {
             let ack = client
                 .create_account(CreateAccountRequest {
                     email,
-                    password,
+                    password: password.expect("password resolved for create-account"),
                     display_name,
                 })
                 .await?
@@ -165,9 +187,12 @@ async fn main() -> anyhow::Result<()> {
                 println!("{}", ack.detail);
             }
         }
-        Cmd::Login { email, password } => {
+        Cmd::Login { email } => {
             let s = client
-                .login(LoginRequest { email, password })
+                .login(LoginRequest {
+                    email,
+                    password: password.expect("password resolved for login"),
+                })
                 .await?
                 .into_inner();
             println!("token={}", s.token);
@@ -239,19 +264,19 @@ mod tests {
 
     #[test]
     fn parses_create_account_with_optional_display_name() {
+        // Password is NOT taken from argv (env only) — so create-account takes
+        // just the email and an optional display name.
         assert_eq!(
-            parse(&v(&["create-account", "a@x.com", "secretpw"])).unwrap(),
+            parse(&v(&["create-account", "a@x.com"])).unwrap(),
             Cmd::CreateAccount {
                 email: "a@x.com".into(),
-                password: "secretpw".into(),
                 display_name: String::new(),
             }
         );
         assert_eq!(
-            parse(&v(&["create-account", "a@x.com", "secretpw", "Alice"])).unwrap(),
+            parse(&v(&["create-account", "a@x.com", "Alice"])).unwrap(),
             Cmd::CreateAccount {
                 email: "a@x.com".into(),
-                password: "secretpw".into(),
                 display_name: "Alice".into(),
             }
         );
@@ -260,18 +285,25 @@ mod tests {
     #[test]
     fn rejects_missing_args_no_subcommand_and_unknown() {
         assert!(parse(&v(&["add-child", "tok", "name"])).is_err()); // needs 3
-        assert!(parse(&v(&["create-account", "only-email"])).is_err()); // needs 2
+        assert!(parse(&v(&["create-account"])).is_err()); // needs an email
+        assert!(parse(&v(&["login"])).is_err()); // needs an email
         assert!(parse(&v(&["bogus"])).is_err());
         assert!(parse(&v(&[])).is_err());
     }
 
     #[test]
+    fn require_password_is_env_only() {
+        assert_eq!(require_password(Some("pw".into())).unwrap(), "pw");
+        assert!(require_password(None).is_err()); // not set
+        assert!(require_password(Some(String::new())).is_err()); // empty
+    }
+
+    #[test]
     fn parses_the_remaining_subcommands() {
         assert_eq!(
-            parse(&v(&["login", "a@x.com", "pw"])).unwrap(),
+            parse(&v(&["login", "a@x.com"])).unwrap(),
             Cmd::Login {
                 email: "a@x.com".into(),
-                password: "pw".into()
             }
         );
         assert!(matches!(
