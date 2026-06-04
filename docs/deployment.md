@@ -36,7 +36,13 @@ child device                              home cluster                guardian
   `AEGIS_BIND=0.0.0.0:8443` for LAN. Only this role keeps a server-side
   `SegmentStore` for co-located video replay.
 - **lb + worker** (multi-node): build `--features gossip,quorum`; one `--role lb`,
-  N `--role worker` seeded at the LB, all on one Postgres.
+  N `--role worker`. Each node's cluster identity comes from env (no code changes):
+  `AEGIS_NODE_ID` (unique, e.g. the host IP), `AEGIS_CLUSTER_ID` (same across the
+  cluster), `AEGIS_CLUSTER_ADDRESS` (this node's `host:port`), `AEGIS_CLUSTER_SEEDS`
+  (comma-separated peers — give every worker the LB's address), and
+  `AEGIS_QUORUM_DSN` (shared Postgres for the authoritative lease store). Scale out
+  by starting more workers with the LB as their seed (the Ansible playbook in
+  `deploy/ansible/` automates this — add a host IP + re-run).
 - Server build features: `classifier` (text backstop), `push` (FCM sink). Default
   build is byte-identical without `push`.
 - **Lifecycle:** the server shuts down gracefully on `SIGTERM` (systemd/Docker
@@ -162,6 +168,12 @@ defeats software-only prevention short of zero-touch/ABM — detection still fir
 |---|---|---|---|---|
 | `AEGIS_ROLE` | server | role (lb\|worker\|all-in-one) | all-in-one | never (flag/default) |
 | `AEGIS_BIND` | server | gRPC listen host:port | 127.0.0.1:8443 | non-loopback bind |
+| `AEGIS_NODE_ID` | server (cluster) | unique node id (e.g. host IP) | node-local | multi-node |
+| `AEGIS_CLUSTER_ID` | server (cluster) | shared id across the cluster | aegis-local | multi-node |
+| `AEGIS_CLUSTER_ADDRESS` | server (cluster) | this node's advertised host:port | 127.0.0.1:8443 | multi-node |
+| `AEGIS_CLUSTER_SEEDS` | server (cluster) | comma-sep peer host:port to join (workers → LB) | none | multi-node |
+| `AEGIS_BACKPRESSURE_DEPTH` | server (cluster) | queue depth above which Enqueue is refused | 512 | tune |
+| `AEGIS_QUORUM_DSN` | server (cluster) | Postgres DSN for the lease store | unset | quorum (split-brain safety) |
 | `AEGIS_ACCOUNTS` | server | enable guardian accounts | off | provisioning guardians |
 | `AEGIS_SESSION_TTL_SECS` | server | guardian session-token lifetime (seconds) | 43200 (12h) | tune session expiry |
 | `AEGIS_LOGIN_MAX_FAILS` | server | failed logins per email before lockout | 5 | tune brute-force throttle |

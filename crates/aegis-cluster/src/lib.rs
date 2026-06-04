@@ -55,6 +55,45 @@ impl Default for ClusterConfig {
     }
 }
 
+impl ClusterConfig {
+    /// Build from `AEGIS_*` environment, falling back to [`Default`] per field. Lets
+    /// a deployment (e.g. the Ansible cluster playbook) configure each node's
+    /// identity, advertised address, gossip seeds, backpressure, and the quorum
+    /// store WITHOUT code changes — give every worker the LB's `address` as a seed.
+    ///
+    /// - `AEGIS_NODE_ID`           — unique per node (e.g. the host IP).
+    /// - `AEGIS_CLUSTER_ID`        — same across all nodes in one cluster.
+    /// - `AEGIS_CLUSTER_ADDRESS`   — this node's `host:port` advertised to peers.
+    /// - `AEGIS_CLUSTER_SEEDS`     — comma-separated peer `host:port`s to join.
+    /// - `AEGIS_BACKPRESSURE_DEPTH`— queue depth above which Enqueue is refused.
+    /// - `AEGIS_QUORUM_DSN`        — Postgres DSN for the authoritative lease store.
+    pub fn from_env() -> Self {
+        let mut cfg = Self::default();
+        let v = |k: &str| std::env::var(k).ok().filter(|s| !s.trim().is_empty());
+        if let Some(x) = v("AEGIS_NODE_ID") {
+            cfg.node_id = x;
+        }
+        if let Some(x) = v("AEGIS_CLUSTER_ID") {
+            cfg.cluster_id = x;
+        }
+        if let Some(x) = v("AEGIS_CLUSTER_ADDRESS") {
+            cfg.address = x;
+        }
+        if let Some(x) = v("AEGIS_CLUSTER_SEEDS") {
+            cfg.seeds = x
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+        if let Some(x) = v("AEGIS_BACKPRESSURE_DEPTH").and_then(|s| s.parse::<u32>().ok()) {
+            cfg.backpressure_depth = x;
+        }
+        cfg.quorum_dsn = v("AEGIS_QUORUM_DSN");
+        cfg
+    }
+}
+
 #[derive(Default)]
 struct Queue {
     items: VecDeque<WorkItem>,
@@ -275,6 +314,44 @@ pub trait ClusterMember: Send + Sync {
 mod tests {
     use super::*;
     use aegis_proto::v1::AnalysisRequest;
+
+    #[test]
+    fn cluster_config_from_env_overrides_and_defaults() {
+        let keys = [
+            "AEGIS_NODE_ID",
+            "AEGIS_CLUSTER_ID",
+            "AEGIS_CLUSTER_ADDRESS",
+            "AEGIS_CLUSTER_SEEDS",
+            "AEGIS_BACKPRESSURE_DEPTH",
+            "AEGIS_QUORUM_DSN",
+        ];
+        for k in keys {
+            std::env::remove_var(k);
+        }
+        let d = ClusterConfig::from_env();
+        assert_eq!(d.node_id, "node-local");
+        assert!(d.seeds.is_empty());
+        assert!(d.quorum_dsn.is_none());
+        assert_eq!(d.backpressure_depth, 512);
+
+        std::env::set_var("AEGIS_NODE_ID", "lb-1");
+        std::env::set_var("AEGIS_CLUSTER_ADDRESS", "10.0.0.10:8443");
+        std::env::set_var("AEGIS_CLUSTER_SEEDS", "10.0.0.10:8443, 10.0.0.11:8443 ,");
+        std::env::set_var("AEGIS_BACKPRESSURE_DEPTH", "1024");
+        std::env::set_var("AEGIS_QUORUM_DSN", "postgres://db/aegis");
+        let c = ClusterConfig::from_env();
+        assert_eq!(c.node_id, "lb-1");
+        assert_eq!(c.address, "10.0.0.10:8443");
+        assert_eq!(
+            c.seeds,
+            vec!["10.0.0.10:8443".to_string(), "10.0.0.11:8443".to_string()]
+        );
+        assert_eq!(c.backpressure_depth, 1024);
+        assert_eq!(c.quorum_dsn.as_deref(), Some("postgres://db/aegis"));
+        for k in keys {
+            std::env::remove_var(k);
+        }
+    }
 
     fn work(id: &str) -> WorkItem {
         WorkItem {
