@@ -970,12 +970,13 @@ fn AlertCard(alert: Alert, on_decide: EventHandler<bool>) -> Element {
     }
 }
 
-/// Plays a locally-stored video segment for guardian review. The `blob://<sha>`
-/// URI resolves to the per-user segment store on disk (`%LOCALAPPDATA%/Aegis/
-/// segments/<sha>.blob`, written by `aegis-video::SegmentStore`). Bytes are read
-/// once and shown via a data URI in the desktop webview's `<video>`. The caller
-/// only mounts this for NON-CSAM alerts (CSAM is never stored, so the file would
-/// not exist anyway — defence in depth).
+/// Plays a blocked video segment for guardian review. The `blob://<sha>` URI is
+/// resolved from the per-user segment store on disk (`%LOCALAPPDATA%/Aegis/
+/// segments/<sha>.blob`, written by `aegis-video::SegmentStore`) when the parent is
+/// co-located with the server; otherwise it falls back to pulling the clip from the
+/// cluster over `Review.FetchSegment`. Bytes are shown via a data URI in the desktop
+/// webview's `<video>`. The caller only mounts this for NON-CSAM alerts (CSAM is
+/// never stored/served, so it would not exist anyway — defence in depth).
 #[component]
 fn SegmentPlayer(uri: String) -> Element {
     let mut data_uri = use_signal(|| Option::<String>::None);
@@ -984,22 +985,27 @@ fn SegmentPlayer(uri: String) -> Element {
     use_effect(move || {
         let uri = uri.clone();
         spawn(async move {
-            match load_segment_from_disk(&uri) {
-                Ok(Some(bytes)) => {
-                    // Sniff the container — stored clips may be MP4/fMP4, DASH .m4s,
-                    // HLS .ts, or WebM; a hard-coded MP4 MIME breaks playback when
-                    // the bytes are something else.
-                    let mime = sniff_video_mime(&bytes);
-                    data_uri.set(Some(format!(
-                        "data:{};base64,{}",
-                        mime,
-                        base64_encode(&bytes)
-                    )));
+            // Local disk first (co-located parent); fall back to the cluster over
+            // Review.FetchSegment for a guardian on a DIFFERENT device than the server.
+            let bytes = match load_segment_from_disk(&uri) {
+                Ok(Some(b)) => Some(b),
+                Ok(None) => match fetch_segment_remote(&uri).await {
+                    Ok(b) => Some(b),
+                    Err(e) => {
+                        load_err.set(Some(format!("not on disk; cluster fetch failed: {e}")));
+                        None
+                    }
+                },
+                Err(e) => {
+                    load_err.set(Some(e));
+                    None
                 }
-                Ok(None) => load_err.set(Some(
-                    "not found (expired, purged, or never stored)".to_string(),
-                )),
-                Err(e) => load_err.set(Some(e)),
+            };
+            if let Some(b) = bytes {
+                // Sniff the container — clips may be MP4/fMP4, DASH .m4s, HLS .ts, or
+                // WebM; a hard-coded MP4 MIME breaks playback when it's something else.
+                let mime = sniff_video_mime(&b);
+                data_uri.set(Some(format!("data:{};base64,{}", mime, base64_encode(&b))));
             }
         });
     });
@@ -1033,6 +1039,37 @@ fn load_segment_from_disk(uri: &str) -> Result<Option<Vec<u8>>, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Pull a retained clip from the cluster over `Review.FetchSegment` (for a guardian
+/// on a DIFFERENT device than the server — the clip isn't on local disk). Streams
+/// the chunks and reassembles. Authenticated via `$AEGIS_GUARDIAN_TOKEN` in accounts
+/// mode (CSAM is never retained, so it can never be fetched).
+async fn fetch_segment_remote(uri: &str) -> Result<Vec<u8>, String> {
+    use aegis_proto::v1::SegmentRequest;
+    let channel = connect_channel().await.map_err(|e| e.to_string())?;
+    let mut client = ReviewClient::new(channel);
+    let token = std::env::var("AEGIS_GUARDIAN_TOKEN").unwrap_or_default();
+    let mut stream = client
+        .fetch_segment(SegmentRequest {
+            local_segment_uri: uri.to_string(),
+            token,
+        })
+        .await
+        .map_err(|e| e.message().to_string())?
+        .into_inner();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream
+        .message()
+        .await
+        .map_err(|e| e.message().to_string())?
+    {
+        bytes.extend_from_slice(&chunk.data);
+    }
+    if bytes.is_empty() {
+        return Err("empty or unavailable segment".to_string());
+    }
+    Ok(bytes)
 }
 
 /// The per-user segment store directory. MUST mirror
