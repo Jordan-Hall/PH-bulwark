@@ -22,9 +22,11 @@ use async_trait::async_trait;
 pub mod accounts;
 pub mod relay;
 pub mod service;
+pub mod tamper;
 
 pub use accounts::{AccountStore, AccountsService};
 pub use relay::{AlertHub, ReviewService};
+pub use tamper::TamperService;
 
 /// Which role this process plays. Chosen by `--role` / `AEGIS_ROLE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

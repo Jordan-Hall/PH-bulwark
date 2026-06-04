@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Aegis device-admin policy set. Being an active admin is what creates the
+     "deactivate before you can uninstall" friction; the real lockdown comes from
+     Device Owner mode (see Lockdown.kt). Policies are intentionally minimal. -->
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-policies>
+        <force-lock />
+        <watch-login />
+    </uses-policies>
+</device-admin>

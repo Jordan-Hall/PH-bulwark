@@ -89,6 +89,21 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("aegis_proxy running — point your browser at {PROXY_LISTEN}");
 
+    // --- 3b. Tamper heartbeat: tell the cluster we're alive + protected. If this
+    // process is killed/removed the beats stop and a guardian PROTECTION_DISABLED
+    // alert fires. Best-effort background task — never blocks filtering.
+    {
+        let probe: Box<dyn aegis_client::ProtectionProbe> = Box::new(aegis_client::DesktopProbe {
+            device_id: "aegis-proxy-local".to_string(),
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+        });
+        tokio::spawn(aegis_client::tamper::run_heartbeats(
+            cluster_endpoint.clone(),
+            probe,
+            std::time::Duration::from_secs(120),
+        ));
+    }
+
     // --- 4. The block-reporting loop. -----------------------------------------
     let result = run_loop(&pipeline, interceptor.clone()).await;
     let _ = interceptor.shutdown().await;

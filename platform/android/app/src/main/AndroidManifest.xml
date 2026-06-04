@@ -57,5 +57,23 @@
         <receiver
             android:name=".notify.ReviewActionReceiver"
             android:exported="false" />
+
+        <!-- Tamper-resistance: active device admin can't be uninstalled until it's
+             deactivated (friction); deactivation fires a guardian PROTECTION_DISABLED
+             alert. Device Owner provisioning (Lockdown.kt) upgrades this to true
+             anti-removal. Transparent + consented on the managed child device. -->
+        <receiver
+            android:name=".admin.AegisDeviceAdminReceiver"
+            android:label="@string/device_admin_label"
+            android:description="@string/device_admin_description"
+            android:exported="true"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

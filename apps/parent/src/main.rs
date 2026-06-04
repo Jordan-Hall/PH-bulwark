@@ -160,6 +160,7 @@ impl Alert {
                 Category::CsamSuspected => "Blocked suspected illegal content".to_string(),
                 _ => "Blocked flagged content".to_string(),
             },
+            AlertKind::ProtectionDisabled => "Protection changed on the device".to_string(),
             AlertKind::Unspecified => "Safety alert".to_string(),
         };
 

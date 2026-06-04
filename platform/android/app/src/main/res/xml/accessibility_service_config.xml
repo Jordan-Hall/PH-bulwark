@@ -3,7 +3,7 @@
      the monitored messaging apps so end-to-end-encrypted conversations can be
      checked on-device. canRetrieveWindowContent is required to read the tree. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeWindowContentChanged|typeViewTextChanged|typeNotificationStateChanged"
+    android:accessibilityEventTypes="typeWindowContentChanged|typeViewTextChanged|typeNotificationStateChanged|typeWindowStateChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagDefault|flagIncludeNotImportantViews|flagReportViewIds"
     android:canRetrieveWindowContent="true"

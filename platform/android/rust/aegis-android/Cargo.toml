@@ -8,10 +8,13 @@
 #   * aegis-text   — the rules-first grooming / adult-text detector (TextAnalyzer)
 #   * aegis-policy — the Verdict -> Action policy engine (Policy)
 #
-# It is a TRANSPARENT content-safety bridge. It does NOT implement any
-# device-control / surveillance surface (no anti-uninstall, no screen mirroring,
-# no remote wipe, no hidden location, no reading other apps beyond the on-device
-# safety check the child app transparently performs).
+# It is a TRANSPARENT content-safety + tamper-EVIDENCE bridge: it analyses
+# on-device text and relays redacted PROTECTION_DISABLED events (uninstall attempt
+# / protection turned off) to the guardian. Anti-removal ENFORCEMENT (device admin
+# / Device Owner / always-on-VPN lockdown) lives in the consented Android policy
+# layer (co.libertyware.aegis.admin), applied openly on a managed child device —
+# never covertly. No screen mirroring, no remote wipe, no hidden location, no
+# reading other apps beyond the transparent on-device safety check.
 #
 # DETACHED from the root cargo workspace (own empty `[workspace]` table, like
 # apps/parent/Cargo.toml) so it never perturbs `cargo build --workspace` for the

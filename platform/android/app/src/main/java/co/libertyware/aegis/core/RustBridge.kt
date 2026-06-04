@@ -60,4 +60,12 @@ object RustBridge {
     /** Register this parent device's push token so the cluster can deliver alerts
      *  remotely via FCM. No-op when the parent reviews on the same device. */
     external fun registerParentPushToken(token: String)
+
+    /**
+     * Report a tamper / protection-downgrade event (an `aegis.v1.TamperKind`
+     * ordinal) so it reaches the guardian as a redacted PROTECTION_DISABLED alert.
+     * Content-free — only *which* protection changed. See
+     * [TamperReporter][co.libertyware.aegis.tamper.TamperReporter].
+     */
+    external fun reportTamper(kind: Int)
 }
