@@ -1,0 +1,85 @@
+name: android-emulator
+
+# A "real Android box" in CI: builds the child APK (incl. an x86_64 native lib so
+# the JNI loads on the emulator), boots an Android emulator, installs the app, and
+# launches it — proving the app actually RUNS on a real Android runtime (loads
+# libaegis_client.so, starts MainActivity) and doesn't crash on launch.
+#
+# Non-blocking (not a required check): the emulator is slow (~10-15 min) and can be
+# flaky, so it informs without gating merges. Runs on Android changes + manual.
+# NOTE: this smoke-tests launch + JNI load. The VpnService/Accessibility flows need
+# user grants a bare launch can't give — full device validation is still manual.
+
+on:
+  workflow_dispatch: {}
+  push:
+    paths:
+      - "platform/android/**"
+      - "crates/**"
+      - ".github/workflows/android-emulator.yml"
+
+env:
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_MULTIPLEXING: "false"
+
+jobs:
+  smoke:
+    name: APK boots + runs on emulator
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Set up Android SDK + NDK
+        uses: android-actions/setup-android@v3
+      - name: Install NDK + export its path
+        run: |
+          sdkmanager "ndk;26.3.11579264" "platforms;android-34" "build-tools;34.0.0"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITHUB_ENV"
+      - name: Set up Rust + Android targets (incl. x86_64 for the emulator)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+      - name: Build JNI libs (arm64 + armv7 + x86_64) into jniLibs
+        working-directory: platform/android/rust/aegis-android
+        run: cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o ../../app/src/main/jniLibs build --release
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+      - name: Assemble debug APK
+        working-directory: platform/android
+        run: gradle assembleDebug --no-daemon --stacktrace
+      - name: Enable KVM (emulator acceleration)
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+      - name: Boot emulator, install, launch, assert no crash
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 29
+          arch: x86_64
+          target: default
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: |
+            set -e
+            adb install -r platform/android/app/build/outputs/apk/debug/app-debug.apk
+            adb logcat -c
+            # Launch the LAUNCHER activity (no need to hardcode the class name).
+            adb shell monkey -p co.libertyware.aegis -c android.intent.category.LAUNCHER 1
+            sleep 10
+            echo "=== recent logcat (app) ==="
+            adb logcat -d | grep -iE "aegis|libaegis_client|RustBridge" | tail -30 || true
+            if adb logcat -d | grep -E "FATAL EXCEPTION|UnsatisfiedLinkError|AndroidRuntime: FATAL"; then
+              echo "::error::app crashed on launch"; adb logcat -d | tail -80; exit 1
+            fi
+            if adb shell pidof co.libertyware.aegis >/dev/null; then
+              echo "✓ app process is alive after launch"
+            else
+              echo "::error::app process not running after launch"; adb logcat -d | tail -80; exit 1
+            fi
