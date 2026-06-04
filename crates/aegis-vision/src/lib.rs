@@ -135,7 +135,10 @@ fn build_scorer(cfg: &VisionConfig) -> Box<dyn Scorer> {
     #[cfg(feature = "onnx")]
     {
         if let Some(path) = cfg.model_path.as_deref() {
-            match onnx::OnnxScorer::load(path, cfg.input_size) {
+            // Honours AEGIS_NSFW_MODEL_CLASS (vit|mobilenet) + AEGIS_NSFW_EP
+            // (auto|cpu|gpu): MobileNet-class models load with ImageNet norm, and
+            // `auto` benchmarks GPU vs CPU at load, keeping the faster.
+            match onnx::OnnxScorer::from_path_env(path, cfg.input_size) {
                 Ok(s) => {
                     tracing::info!(model = %path, "aegis-vision: loaded ONNX NSFW model");
                     return Box::new(s);
@@ -222,12 +225,23 @@ impl<S: Scorer> Analyzer for VisionAnalyzer<S> {
         };
         Ok(Verdict {
             request_id: req.request_id,
-            category: if nsfw { Category::AdultImage } else { Category::Safe } as i32,
+            category: if nsfw {
+                Category::AdultImage
+            } else {
+                Category::Safe
+            } as i32,
             // Blur the frame rather than hard-drop, so non-flagged context survives.
             action: if nsfw { Action::Blur } else { Action::Allow } as i32,
-            severity: if nsfw { severity_for(score) } else { Severity::Info } as i32,
+            severity: if nsfw {
+                severity_for(score)
+            } else {
+                Severity::Info
+            } as i32,
             score,
-            rationale: format!("nsfw score {score:.3} vs threshold {:.2}", self.cfg.nsfw_threshold),
+            rationale: format!(
+                "nsfw score {score:.3} vs threshold {:.2}",
+                self.cfg.nsfw_threshold
+            ),
             evidence: Some(evidence),
             ..Default::default()
         })

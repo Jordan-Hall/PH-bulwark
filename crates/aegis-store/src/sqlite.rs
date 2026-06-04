@@ -335,11 +335,9 @@ impl SqliteStore {
     /// Read a config value.
     pub fn config_get_sync(&self, key: &str) -> Result<Option<String>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
-        conn.query_row(
-            "SELECT v FROM config_kv WHERE k = ?1",
-            params![key],
-            |r| r.get::<_, String>(0),
-        )
+        conn.query_row("SELECT v FROM config_kv WHERE k = ?1", params![key], |r| {
+            r.get::<_, String>(0)
+        })
         .optional()
         .map_err(StoreError::backend)
     }
@@ -544,7 +542,8 @@ mod tests {
         }
         {
             let conn = s.conn.lock().unwrap();
-            conn.execute("DELETE FROM audit_log WHERE id = 2", []).unwrap();
+            conn.execute("DELETE FROM audit_log WHERE id = 2", [])
+                .unwrap();
         }
         assert!(matches!(
             s.verify_audit_chain_sync(),

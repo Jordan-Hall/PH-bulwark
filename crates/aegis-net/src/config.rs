@@ -71,7 +71,7 @@ impl Default for NetConfig {
             ca_store_dir: None,
             quic_downgrade: true,
             quic_allowlist: Vec::new(),
-            pinning_fail_open: true,    // disruptive to block all pinned apps
+            pinning_fail_open: true, // disruptive to block all pinned apps
             ca_missing_fail_closed: true, // crown-jewel: never pass unfiltered silently
             flow_channel_capacity: 1024,
         }
@@ -95,9 +95,7 @@ impl NetConfig {
             )));
         }
         if self.flow_channel_capacity == 0 {
-            return Err(crate::NetError::proxy(
-                "flow_channel_capacity must be > 0",
-            ));
+            return Err(crate::NetError::proxy("flow_channel_capacity must be > 0"));
         }
         Ok(())
     }
@@ -122,8 +120,10 @@ mod tests {
 
     #[test]
     fn rejects_unbounded_ca_validity() {
-        let mut c = NetConfig::default();
-        c.ca_validity_days = 100_000; // ~273 years — defeats rotation
+        let c = NetConfig {
+            ca_validity_days: 100_000, // ~273 years — defeats rotation
+            ..Default::default()
+        };
         assert!(c.validate().is_err());
     }
 }

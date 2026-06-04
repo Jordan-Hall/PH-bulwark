@@ -12,7 +12,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
-use aegis_proto::v1::{AlertAck, AlertBatch, AlertAckBatch, AlertEvent};
+use aegis_proto::v1::{AlertAck, AlertAckBatch, AlertBatch, AlertEvent};
 
 use crate::config::AlertConfig;
 use crate::error::Result;

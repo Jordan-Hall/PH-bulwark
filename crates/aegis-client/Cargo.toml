@@ -17,6 +17,11 @@ aegis-text = { path = "../aegis-text" }
 # Local NSFW image scoring. Default build uses its fail-OPEN stub; the `onnx`
 # feature turns on aegis-vision/onnx for real scoring (see [features]).
 aegis-vision = { path = "../aegis-vision" }
+# Buffered-video analysis: samples frames/audio (ffmpeg sidecar, gated) and
+# retains blocked/borderline NON-CSAM segments in a local SegmentStore so the
+# guardian app can replay the clip (verdict.local_segment_uri). Default features
+# = no ffmpeg (NullDemuxer fail-open) so the default build links without ffmpeg.
+aegis-video = { path = "../aegis-video" }
 tokio.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
@@ -30,9 +35,16 @@ tonic.workspace = true
 # SHA-256 for Evidence.sha256 (hash-only audit of analysed media).
 ring.workspace = true
 
+[dev-dependencies]
+# Construct CapturedFlow payloads (HttpHead.body_peek: Bytes) in tests.
+bytes.workspace = true
+
 [features]
 default = []
 # Real local NSFW scoring via ONNX Runtime. Forwards to aegis-vision's `onnx`
 # feature (which gates the `ort` dependency). Absent → fail-OPEN stub, so the
 # DEFAULT build stays green with no model and no onnxruntime.dll.
 onnx = ["aegis-vision/onnx"]
+# Real video frame/audio sampling via the ffmpeg sidecar (else NullDemuxer
+# fail-opens). Pairs with `onnx` for actual frame scoring on the video path.
+ffmpeg = ["aegis-video/ffmpeg"]

@@ -68,7 +68,9 @@ impl<S: AudioScorer> AudioAnalyzer<S> {
 }
 
 fn sha256(b: &[u8]) -> Vec<u8> {
-    ring::digest::digest(&ring::digest::SHA256, b).as_ref().to_vec()
+    ring::digest::digest(&ring::digest::SHA256, b)
+        .as_ref()
+        .to_vec()
 }
 
 #[async_trait]
@@ -96,9 +98,21 @@ impl<S: AudioScorer> Analyzer for AudioAnalyzer<S> {
         let explicit = score >= self.cfg.explicit_threshold;
         Ok(Verdict {
             request_id: req.request_id,
-            category: if explicit { Category::AdultAudio } else { Category::Safe } as i32,
-            action: if explicit { Action::Mute } else { Action::Allow } as i32,
-            severity: if explicit { Severity::Medium } else { Severity::Info } as i32,
+            category: if explicit {
+                Category::AdultAudio
+            } else {
+                Category::Safe
+            } as i32,
+            action: if explicit {
+                Action::Mute
+            } else {
+                Action::Allow
+            } as i32,
+            severity: if explicit {
+                Severity::Medium
+            } else {
+                Severity::Info
+            } as i32,
             score,
             rationale: format!("explicit-audio score {score:.3}"),
             evidence: Some(Evidence {

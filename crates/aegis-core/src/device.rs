@@ -172,7 +172,10 @@ fn detect_ram_mb(sys: &System) -> u64 {
 /// Returns an empty string when no GPU is known (the documented `DeviceProfile`
 /// "no GPU" sentinel), which keeps the exec-provider list CPU-only.
 fn detect_gpu() -> String {
-    std::env::var("AEGIS_GPU").unwrap_or_default().trim().to_owned()
+    std::env::var("AEGIS_GPU")
+        .unwrap_or_default()
+        .trim()
+        .to_owned()
 }
 
 #[cfg(test)]
@@ -186,9 +189,7 @@ mod tests {
         assert!(p.cpu_cores >= 1, "expected at least one core");
         // Exec providers are never empty: CPU is the floor.
         assert!(!p.exec_providers.is_empty());
-        assert!(p
-            .exec_providers
-            .contains(&(ExecutionProvider::Cpu as i32)));
+        assert!(p.exec_providers.contains(&(ExecutionProvider::Cpu as i32)));
         // Platform is one of the canonical strings (or "unknown" on exotic hosts).
         assert!(matches!(
             p.platform.as_str(),
@@ -231,7 +232,10 @@ mod tests {
 
     #[test]
     fn windows_cpu_only_without_gpu() {
-        assert_eq!(exec_providers_for("windows", ""), vec![ExecutionProvider::Cpu]);
+        assert_eq!(
+            exec_providers_for("windows", ""),
+            vec![ExecutionProvider::Cpu]
+        );
     }
 
     #[test]

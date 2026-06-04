@@ -6,7 +6,7 @@
 //! is annotated with exactly which crate + OS mechanism the real impl uses.
 
 use crate::tun::{TunConfig, TunDevice};
-use crate::{NetError, Result};
+use crate::Result;
 
 /// Pick the stub backend for the current non-Windows target. Returns an
 /// `Unsupported` error rather than a fake device, so callers fail loudly until
@@ -14,15 +14,17 @@ use crate::{NetError, Result};
 pub fn open_stub() -> Result<Box<dyn TunDevice>> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        Ok(Box::new(TunRsStub::default()))
+        Ok(Box::new(TunRsStub))
     }
     #[cfg(target_os = "android")]
     {
-        Ok(Box::new(VpnServiceStub::default()))
+        Ok(Box::new(VpnServiceStub))
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "android")))]
     {
-        Err(NetError::unsupported("no TUN backend for this target"))
+        Err(crate::NetError::unsupported(
+            "no TUN backend for this target",
+        ))
     }
 }
 
@@ -35,7 +37,6 @@ pub fn open_stub() -> Result<Box<dyn TunDevice>> {
 ///   * `close()` MUST tear down the nft rules (add `ExecStop`) and duplicate the
 ///     rules for **IPv6**, or the LAN blackholes on exit.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-#[derive(Default)]
 pub struct TunRsStub;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -69,7 +70,6 @@ impl TunDevice for TunRsStub {
 ///     the wire MITM only covers ~30–50% of Android-7+ apps; the rest are OCR.
 ///   * Play Store: VPN disclosure + Data Safety (no plaintext exfil) + MASA L2.
 #[cfg(target_os = "android")]
-#[derive(Default)]
 pub struct VpnServiceStub;
 
 #[cfg(target_os = "android")]

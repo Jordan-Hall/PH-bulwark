@@ -56,24 +56,32 @@ http-body-util = "0.1" # BodyExt::collect() for the hudsucker MITM handler (alre
 # pulled in on Windows. Listed in the workspace allowlist already.
 [target.'cfg(windows)'.dependencies]
 wintun = { workspace = true }
-# The `windows` crate provides the FFI for BOTH:
-#   * DPAPI key wrapping  -> feature "Win32_Security_Cryptography"
-#   * Trusted Root store  -> feature "Win32_Security_Cryptography" (cert store
-#                            APIs: CertOpenStore / CertAddEncodedCertificateToStore
-#                            / CertDeleteCertificateFromStore live here)
-#   * Foundation handles  -> feature "Win32_Foundation"
-# These are the explicit feature set this crate needs (reported in the handoff).
-# Version tracks docs/research/crate-research.md (`windows` 0.60+).
+# The `windows` crate provides the FFI for:
+#   * DPAPI key wrapping + Trusted Root cert store -> "Win32_Security_Cryptography"
+#   * Foundation handles                           -> "Win32_Foundation"
+#   * VPN elevation probe (OpenProcessToken / GetTokenInformation)
+#     -> "Win32_System_Threading" + "Win32_Security"
 windows = { version = "0.60", features = [
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_Security_Cryptography",
     "Win32_System_Memory",
+    "Win32_System_Threading",
 ] }
+
+# VPN mode — DESKTOP (Windows / Linux / macOS). The transparent data path is being
+# rebuilt on the PERMISSIVE smoltcp netstack (0BSD) + boringtun/WireGuard (BSD-3)
+# instead of the GPL tun2proxy. `tokio-util`'s CancellationToken drives clean
+# shutdown / route teardown. Mobile (Android/iOS) uses the native VpnService /
+# NetworkExtension shells, NOT this.
+[target.'cfg(any(windows, target_os = "linux", target_os = "macos"))'.dependencies]
+tokio-util = { workspace = true }
 
 # Linux/macOS TUN — stubbed (todo!()) behind cfg; dependency declared so the
 # stub module's doc references resolve and the real impl can slot in later.
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 tun-rs = { workspace = true }
+libc = "0.2" # geteuid() for the VPN elevation pre-flight check
 
 # Android VpnService shim — stubbed behind cfg; JNI dep declared for later.
 [target.'cfg(target_os = "android")'.dependencies]

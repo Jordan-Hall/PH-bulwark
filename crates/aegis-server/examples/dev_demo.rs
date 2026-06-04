@@ -87,7 +87,11 @@ fn demo_alert(n: u64) -> AlertEvent {
     } else {
         Vec::new()
     };
-    let text_snippet = if is_csam { String::new() } else { snippet.to_string() };
+    let text_snippet = if is_csam {
+        String::new()
+    } else {
+        snippet.to_string()
+    };
 
     AlertEvent {
         alert_id: format!("demo-{n}"),
@@ -106,6 +110,7 @@ fn demo_alert(n: u64) -> AlertEvent {
             model_id: "demo".to_string(),
             model_version: "0".to_string(),
         }),
+        ..Default::default()
     }
 }
 

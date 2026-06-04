@@ -1,50 +1,79 @@
-//! `aegis_proxy` — a runnable, browser-pointable Aegis MITM proxy.
+//! `aegis_vpn` — a runnable, **transparent VPN** entrypoint (desktop: Windows /
+//! Linux / macOS).
 //!
-//! This is the end-to-end demo entrypoint the product brief asks for. It:
-//!   1. Brings up the `aegis-net` interceptor — the hudsucker MITM proxy on
-//!      `127.0.0.1:8080`, backed by the **per-install CA** (`CaManager`).
-//!   2. **Writes the root CA cert to disk and PRINTS its path**, so the user can
-//!      trust it (Windows: `certutil -addstore -user Root <path>`; or import it
-//!      via the browser's certificate settings).
-//!   3. Runs the device-side [`Pipeline`] (deterministic text rules + LOCAL NSFW
-//!      image scoring) over every decrypted flow.
-//!   4. For each BLOCK, prints `BLOCKED <host> <category> score=<n>` and sends a
-//!      redacted [`AlertEvent`] to `AEGIS_CLUSTER_ENDPOINT` (default
-//!      `http://127.0.0.1:8443`) via `AlertRelay.RaiseAlert`.
+//! Unlike `aegis_proxy` (which needs each app pointed at `127.0.0.1:8080`), this
+//! captures **all** traffic at layer 3 via a TUN and routes it through the same
+//! MITM filter — no per-app proxy settings. It:
+//!   1. Refuses to run un-elevated (TUN + default route need admin/root) and
+//!      prints the exact elevation command.
+//!   2. Checks the TUN driver is available (`wintun.dll` on Windows).
+//!   3. Brings up the in-process MITM proxy (`aegis-net`) on `127.0.0.1:8080`,
+//!      writing + printing the per-install CA to trust.
+//!   4. Starts the TUN redirect (`aegis_net::run_vpn` → tun2proxy): all captured
+//!      TCP → the MITM proxy, UDP NAT'd out, QUIC blocked, default route installed
+//!      and restored on exit.
+//!   5. Runs the device-side [`Pipeline`] (text rules + local NSFW image scoring)
+//!      over every decrypted flow, printing each block and relaying a redacted
+//!      [`AlertEvent`] to the cluster.
 //!
-//! Point your browser's HTTP/HTTPS proxy at `127.0.0.1:8080`, trust the printed
-//! CA, and browse. Adult images are scored locally and blocked in-line; the alert
-//! carries a small SAFE preview of what was blocked (NEVER for suspected CSAM).
+//! Mobile (Android/iOS) uses the native VpnService / NetworkExtension shells, not
+//! this binary.
 //!
 //! NSFW scoring is real only when built `--features onnx` with `AEGIS_NSFW_MODEL`
-//! pointing at an ONNX model; otherwise it fails OPEN (allows) so the default
-//! build is runnable end-to-end without a model.
+//! set; otherwise it fails OPEN so the default build runs end-to-end without a model.
 #![forbid(unsafe_code)]
 
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn main() {
+    eprintln!("aegis_vpn: VPN mode is desktop-only (Windows/Linux/macOS). Mobile uses the native VpnService / NetworkExtension.");
+}
+
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 use std::sync::Arc;
 
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 use async_trait::async_trait;
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 use tokio::sync::Mutex;
 
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 use aegis_alert::{AlertAck, AlertAckBatch, AlertBatch, AlertEvent, AlertSink};
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 use aegis_client::{ClientConfig, Pipeline};
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 use aegis_proto::v1::alert_relay_client::AlertRelayClient;
 
-/// The loopback address the user points their browser proxy at.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 const PROXY_LISTEN: &str = "127.0.0.1:8080";
-/// Default cluster (AlertRelay) endpoint; override with `AEGIS_CLUSTER_ENDPOINT`.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 const DEFAULT_CLUSTER_ENDPOINT: &str = "http://127.0.0.1:8443";
 
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _ = aegis_core::init_tracing_default();
+
+    // --- 0. Pre-flight: VPN mode needs elevation + a TUN driver. --------------
+    if !aegis_net::is_elevated() {
+        eprintln!("aegis_vpn needs elevation (TUN adapter + default route).");
+        eprintln!(
+            "Re-run as administrator/root:\n  {}",
+            aegis_net::elevation_command()
+        );
+        std::process::exit(1);
+    }
+    if !aegis_net::wintun_available() {
+        eprintln!("wintun.dll not found. VPN mode needs the WireGuard-signed wintun.dll");
+        eprintln!("next to this exe or on PATH — download it from https://www.wintun.net/ .");
+        std::process::exit(1);
+    }
 
     let cluster_endpoint = std::env::var("AEGIS_CLUSTER_ENDPOINT")
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| DEFAULT_CLUSTER_ENDPOINT.to_string());
 
-    // --- 1. Build the interceptor on the fixed loopback proxy port. -----------
+    // --- 1. MITM proxy (the TUN redirects captured TCP here). -----------------
     let net_cfg = aegis_net::NetConfig {
         proxy_listen: PROXY_LISTEN.to_owned(),
         ..aegis_net::NetConfig::default()
@@ -52,11 +81,10 @@ async fn main() -> anyhow::Result<()> {
     let net =
         aegis_net::NetInterceptor::new(net_cfg).map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-    // --- 2. Persist + PRINT the CA cert path so the user can trust it. --------
     let ca_path = write_ca_cert(net.ca_cert_pem())?;
     println!("=================================================================");
-    println!(" Aegis MITM proxy");
-    println!(" Listening:     http://{PROXY_LISTEN}  (set this as your browser proxy)");
+    println!(" Aegis VPN (transparent, system-wide)");
+    println!(" MITM proxy:    http://{PROXY_LISTEN}  (TUN redirects all TCP here)");
     println!(" Root CA cert:  {}", ca_path.display());
     println!(" CA fingerprint: {}", net.ca_fingerprint());
     println!(" Trust it (Windows):");
@@ -64,38 +92,71 @@ async fn main() -> anyhow::Result<()> {
     println!(" Cluster (alerts): {cluster_endpoint}  (AlertRelay.RaiseAlert)");
     println!("=================================================================");
 
-    // Explicit-proxy mode: bring up ONLY the MITM proxy (install CA + spawn
-    // hudsucker), skipping the TUN device + QUIC firewall (which need admin). The
-    // user points their browser proxy at 127.0.0.1:8080, so no transparent
-    // redirect is required.
     let net = Arc::new(net);
     net.start_proxy_only()
         .await
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let interceptor: Arc<dyn aegis_net::Interceptor> = net;
 
-    // --- 3. Build the pipeline (text rules + local NSFW image scoring). -------
-    // The AlertRelay sink forwards each redacted AlertEvent to the cluster.
+    // --- 2. Pipeline (text rules + local NSFW image scoring). -----------------
     let relay = Arc::new(RelaySink::new(&cluster_endpoint));
-    // Retain blocked/borderline NON-CSAM video clips locally (default store
-    // location) so the guardian app can replay them; video analysis runs on this
-    // device (offload is a seam), so this is where local_segment_uri is set.
+    // Retain blocked/borderline NON-CSAM video clips locally for guardian replay
+    // (see aegis_proxy for the rationale).
     let pipeline = Pipeline::new(ClientConfig {
-        device_id: "aegis-proxy-local".to_string(),
+        device_id: "aegis-vpn-local".to_string(),
         cluster_endpoint: Some(cluster_endpoint.clone()),
     })
     .with_alert(relay)
     .with_default_segment_store();
 
-    tracing::info!("aegis_proxy running — point your browser at {PROXY_LISTEN}");
+    // --- 3. Bring up the TUN data path (permissive smoltcp + WireGuard). ------
+    let shutdown = aegis_net::CancellationToken::new();
+    let vpn_token = shutdown.clone();
+    let mut vpn = tokio::spawn(async move {
+        aegis_net::run_vpn(aegis_net::VpnConfig::default(), vpn_token).await
+    });
 
-    // --- 4. The block-reporting loop. -----------------------------------------
-    let result = run_loop(&pipeline, interceptor.clone()).await;
+    println!("aegis_vpn: bringing up the transparent VPN…");
+
+    // --- 4. Run until Ctrl-C, the flow loop ends, OR the VPN data path stops. --
+    // The VPN data path is the whole point of this binary. If it returns (fails or
+    // stops), we must NOT keep running as a bare proxy: the parent app reports
+    // "connected" by probing the local proxy port, so a lingering proxy with no
+    // TUN capturing would falsely show protection ON while nothing is filtered.
+    // So a VPN-task return is a FATAL startup error — tear down and exit non-zero.
+    tokio::select! {
+        res = &mut vpn => {
+            let _ = interceptor.shutdown().await;
+            return match res {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => {
+                    eprintln!("VPN data path unavailable: {e}");
+                    eprintln!("Use proxy mode instead: run `aegis_proxy` (no admin), trust the CA, done.");
+                    std::process::exit(1);
+                }
+                Err(join) => {
+                    eprintln!("VPN task crashed: {join}");
+                    std::process::exit(1);
+                }
+            };
+        }
+        r = run_loop(&pipeline, interceptor.clone()) => {
+            if let Err(e) = r { tracing::warn!(error = %e, "flow loop ended"); }
+        }
+        _ = tokio::signal::ctrl_c() => {
+            println!("\nshutting down — restoring routing…");
+        }
+    }
+
+    // Cancel the TUN data path (restores host routing on teardown), tear down proxy.
+    shutdown.cancel();
+    let _ = vpn.await;
     let _ = interceptor.shutdown().await;
-    result
+    Ok(())
 }
 
 /// Pull flows, classify+score, apply decisions, and PRINT each block.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 async fn run_loop(
     pipeline: &Pipeline,
     interceptor: Arc<dyn aegis_net::Interceptor>,
@@ -114,7 +175,6 @@ async fn run_loop(
                             } else {
                                 &r.host
                             };
-                            // The line the brief asks for, on stdout.
                             println!(
                                 "BLOCKED {host} {} score={:.3}",
                                 category_name(r.category),
@@ -125,7 +185,7 @@ async fn run_loop(
                     Err(e) => tracing::warn!(error = %e, "flow handling failed; failing open"),
                 }
             }
-            Ok(None) => break, // interceptor closed
+            Ok(None) => break,
             Err(e) => {
                 tracing::warn!(error = %e, "next_flow error; stopping loop");
                 break;
@@ -136,7 +196,7 @@ async fn run_loop(
 }
 
 /// Write the root CA cert PEM to a stable per-user file and return its path.
-/// (`%LOCALAPPDATA%\Aegis\aegis-root-ca.pem` on Windows, else the temp dir.)
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 fn write_ca_cert(pem: &str) -> anyhow::Result<std::path::PathBuf> {
     let dir = ca_dir();
     std::fs::create_dir_all(&dir)
@@ -147,6 +207,7 @@ fn write_ca_cert(pem: &str) -> anyhow::Result<std::path::PathBuf> {
     Ok(path)
 }
 
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 fn ca_dir() -> std::path::PathBuf {
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
         if !local.is_empty() {
@@ -157,6 +218,7 @@ fn ca_dir() -> std::path::PathBuf {
 }
 
 /// Stable, human-readable category name for the BLOCKED line.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 fn category_name(c: aegis_proto::v1::Category) -> &'static str {
     use aegis_proto::v1::Category;
     match c {
@@ -174,13 +236,15 @@ fn category_name(c: aegis_proto::v1::Category) -> &'static str {
 }
 
 /// An [`AlertSink`] that relays each redacted [`AlertEvent`] to the cluster's
-/// `AlertRelay.RaiseAlert` over gRPC. Connection is lazy + best-effort: if the
-/// cluster is down, alerting fails (logged) but filtering continues.
+/// `AlertRelay.RaiseAlert`. Lazy + best-effort: a down cluster fails (logged) but
+/// filtering continues.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 struct RelaySink {
     endpoint: String,
     client: Mutex<Option<AlertRelayClient<tonic::transport::Channel>>>,
 }
 
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 impl RelaySink {
     fn new(endpoint: &str) -> Self {
         Self {
@@ -189,8 +253,6 @@ impl RelaySink {
         }
     }
 
-    /// Get-or-connect the gRPC client. Reconnects on the next call if a prior
-    /// connection failed (the slot stays `None`).
     async fn client(
         &self,
     ) -> Result<AlertRelayClient<tonic::transport::Channel>, tonic::transport::Error> {
@@ -204,6 +266,7 @@ impl RelaySink {
     }
 }
 
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 #[async_trait]
 impl AlertSink for RelaySink {
     async fn raise(&self, event: AlertEvent) -> aegis_alert::Result<AlertAck> {

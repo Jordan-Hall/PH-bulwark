@@ -221,9 +221,7 @@ pub type AlertEventStream =
 /// A lagged receiver (slow guardian client) skips the dropped events rather
 /// than failing the whole stream; a closed channel ends the stream cleanly.
 /// Built with `futures_util::stream::unfold` so we need no `tokio-stream` dep.
-fn broadcast_into_stream(
-    rx: tokio::sync::broadcast::Receiver<AlertEvent>,
-) -> AlertEventStream {
+fn broadcast_into_stream(rx: tokio::sync::broadcast::Receiver<AlertEvent>) -> AlertEventStream {
     use tokio::sync::broadcast::error::RecvError;
 
     let stream = futures_util::stream::unfold(rx, |mut rx| async move {
@@ -253,11 +251,28 @@ fn broadcast_into_stream(
 #[derive(Clone)]
 pub struct ReviewService {
     hub: AlertHub,
+    /// When set, `StreamPendingReviews` scopes a guardian's stream (by session
+    /// token) to ONLY the children they're assigned to. `None` = legacy
+    /// device-only filtering (every subscriber sees every alert).
+    accounts: Option<crate::accounts::AccountStore>,
 }
 
 impl ReviewService {
+    /// Legacy constructor: no per-guardian scoping (device_id filter only).
     pub fn new(hub: AlertHub) -> Self {
-        Self { hub }
+        Self {
+            hub,
+            accounts: None,
+        }
+    }
+
+    /// Scope guardian streams by session token against `store`'s child→guardian
+    /// assignments.
+    pub fn with_accounts(hub: AlertHub, store: crate::accounts::AccountStore) -> Self {
+        Self {
+            hub,
+            accounts: Some(store),
+        }
     }
 }
 
@@ -267,6 +282,8 @@ impl aegis_proto::v1::review_server::Review for ReviewService {
         &self,
         req: Request<ReviewRequest>,
     ) -> Result<Response<ReviewAck>, Status> {
+        // Bearer token (if any) for accounts-mode authentication of the decision.
+        let meta_token = crate::accounts::bearer_token(&req);
         let r = req.into_inner();
 
         // --- validate ----------------------------------------------------
@@ -278,10 +295,31 @@ impl aegis_proto::v1::review_server::Review for ReviewService {
         }
         let decision = r.decision();
         if decision == ReviewDecision::Unspecified {
-            return Err(Status::invalid_argument(
-                "decision must be APPROVE or DENY",
-            ));
+            return Err(Status::invalid_argument("decision must be APPROVE or DENY"));
         }
+
+        // SECURITY: when accounts are wired, a guardian decision must be
+        // AUTHENTICATED and SCOPED — a valid session token (authorization: Bearer)
+        // whose assigned children include this alert's device. Without this, anyone
+        // reaching `Review` could approve/deny another family's item by guessing an
+        // alert_id/device_id. (Previously only StreamPendingReviews was gated.)
+        if let Some(store) = &self.accounts {
+            let token = meta_token.unwrap_or_default();
+            if token.is_empty() {
+                return Err(Status::unauthenticated(
+                    "a session token (authorization: Bearer …) is required to submit a review decision",
+                ));
+            }
+            let gscope = store
+                .guardian_scope(&token)
+                .ok_or_else(|| Status::unauthenticated("invalid session token"))?;
+            if !gscope.device_ids.contains(r.device_id.trim()) {
+                return Err(Status::permission_denied(
+                    "guardian is not assigned to the child/device for this decision",
+                ));
+            }
+        }
+
         let scope = r.scope(); // ignored for DENY by the allowlist
 
         // Resolve the host/sha256/category for this alert_id from the in-memory
@@ -340,17 +378,60 @@ impl aegis_proto::v1::review_server::Review for ReviewService {
         &self,
         req: Request<DeviceFilter>,
     ) -> Result<Response<Self::StreamPendingReviewsStream>, Status> {
+        use futures_util::StreamExt;
+
+        // Token may come from the message field or `authorization: Bearer …`.
+        let meta_token = crate::accounts::bearer_token(&req);
         let filter = req.into_inner();
         let want_device = filter.device_id.trim().to_string();
+        let token = if !filter.token.trim().is_empty() {
+            filter.token.trim().to_string()
+        } else {
+            meta_token.unwrap_or_default()
+        };
 
         let rx = self.hub.subscribe();
         let base = broadcast_into_stream(rx);
 
-        // Empty device_id = all supervised devices; otherwise only that device.
+        // SECURITY: when an account store is wired (guardian accounts exist), a
+        // valid session token is REQUIRED. Without this gate a client that sends
+        // no token would fall through to the unscoped legacy path below and
+        // receive EVERY family's pending reviews. So the unscoped path is only
+        // reachable when no account store is configured (`self.accounts == None`).
+        if let Some(store) = &self.accounts {
+            if token.is_empty() {
+                return Err(Status::unauthenticated(
+                    "a session token is required (Accounts.Login) to stream pending reviews",
+                ));
+            }
+            // Scope to the guardian's assigned children: keep an alert only if its
+            // child_id OR device_id belongs to one of those children (the data
+            // plane stamps device_id; child_id is set when known). An unknown
+            // token is rejected, never leaked to.
+            let scope = store
+                .guardian_scope(&token)
+                .ok_or_else(|| Status::unauthenticated("invalid session token"))?;
+            let want_device = want_device.clone();
+            let stream: Self::StreamPendingReviewsStream = Box::pin(base.filter(move |item| {
+                let keep = match item {
+                    Ok(ev) => {
+                        let in_scope = scope.child_ids.contains(&ev.child_id)
+                            || scope.device_ids.contains(&ev.device_id);
+                        let dev_ok = want_device.is_empty() || ev.device_id == want_device;
+                        in_scope && dev_ok
+                    }
+                    Err(_) => true, // surface transport errors regardless
+                };
+                async move { keep }
+            }));
+            return Ok(Response::new(stream));
+        }
+
+        // Legacy path — ONLY when no account store is configured (single-node dev
+        // without guardian accounts). Empty device_id = all supervised devices.
         let stream: Self::StreamPendingReviewsStream = if want_device.is_empty() {
             base
         } else {
-            use futures_util::StreamExt;
             Box::pin(base.filter(move |item| {
                 let keep = match item {
                     Ok(ev) => ev.device_id == want_device,
@@ -381,6 +462,7 @@ mod tests {
             ts: 1,
             redacted_context: "redacted".into(),
             evidence: None,
+            ..Default::default()
         }
     }
 
@@ -415,8 +497,10 @@ mod tests {
         let hub = AlertHub::new();
         let svc = ReviewService::new(hub.clone());
 
-        let mut filter = DeviceFilter::default();
-        filter.device_id = "kids-tablet".into();
+        let filter = DeviceFilter {
+            device_id: "kids-tablet".into(),
+            ..Default::default()
+        };
         let resp = svc
             .stream_pending_reviews(Request::new(filter))
             .await
@@ -436,8 +520,10 @@ mod tests {
     async fn register_push_target_requires_token() {
         let hub = AlertHub::new();
         let svc = ReviewService::new(hub);
-        let mut t = PushTarget::default();
-        t.device_id = "guardian-phone".into();
+        let t = PushTarget {
+            device_id: "guardian-phone".into(),
+            ..Default::default()
+        };
         // missing fcm_token
         let err = svc
             .register_push_target(Request::new(t))
@@ -480,5 +566,26 @@ mod tests {
             .into_inner();
         assert!(ack.applied);
         assert_eq!(ack.alert_id, "a1");
+    }
+
+    #[tokio::test]
+    async fn submit_decision_requires_auth_in_accounts_mode() {
+        use crate::accounts::AccountStore;
+        // Accounts wired → a decision needs a valid session token (bearer); a
+        // tokenless request must be rejected, so no one can approve/deny another
+        // family's item by guessing an alert_id/device_id.
+        let svc = ReviewService::with_accounts(AlertHub::new(), AccountStore::new());
+        let req = ReviewRequest {
+            alert_id: "a1".into(),
+            decision: ReviewDecision::Deny as i32,
+            device_id: "kids-tablet".into(),
+            scope: ReviewScope::Unspecified as i32,
+            ts: 1,
+        };
+        let err = svc
+            .submit_decision(Request::new(req))
+            .await
+            .expect_err("must require a session token");
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }
 }

@@ -93,7 +93,12 @@ impl Classifier {
                 data,
                 mime_type,
                 url,
-            } => self.classify_chunk(flow.source_channel, data, mime_type.as_deref(), url.as_deref()),
+            } => self.classify_chunk(
+                flow.source_channel,
+                data,
+                mime_type.as_deref(),
+                url.as_deref(),
+            ),
         }
     }
 
@@ -102,17 +107,21 @@ impl Classifier {
         let ct = head.content_type();
         let path = head.path.as_deref().unwrap_or("");
 
-        // 1. Explicit Content-Type is the strongest signal.
+        // 1. Body manifest sniffing FIRST. An HLS/DASH manifest body is the
+        //    authoritative signal for both the streaming family AND liveness
+        //    (#EXT-X-ENDLIST / PLAYLIST-TYPE / MPD type=dynamic) — which the
+        //    content-type header cannot convey — and servers routinely mislabel
+        //    the content-type (e.g. text/plain for an .m3u8). So the body wins
+        //    over the header for manifests.
+        if let Some(c) = sniff_manifest(&head.body_peek, channel) {
+            return c;
+        }
+
+        // 2. Explicit Content-Type is the next strongest signal.
         if let Some(ct) = ct.as_deref() {
             if let Some(c) = classify_content_type(ct, channel) {
                 return c;
             }
-        }
-
-        // 2. Body sniffing: a manifest declares the streaming family even when a
-        //    server mislabels the content-type (very common for HLS/DASH).
-        if let Some(c) = sniff_manifest(&head.body_peek, channel) {
-            return c;
         }
 
         // 3. Magic bytes on the body peek (image/audio/video containers).
@@ -174,7 +183,11 @@ impl Classifier {
         // Unknown chunk on a known streaming channel: buffer it as video, since
         // it arrived on a VIDEO/LIVE channel and is opaque bytes — fail toward
         // analysis, not toward bypass.
-        buffered_video(channel, live, "opaque chunk on streaming channel → buffer as video")
+        buffered_video(
+            channel,
+            live,
+            "opaque chunk on streaming channel → buffer as video",
+        )
     }
 }
 
@@ -200,11 +213,7 @@ fn strip_ct_params(ct: &str) -> String {
 fn is_textual_ct(ct: &str) -> bool {
     matches!(
         ct,
-        "text/html"
-            | "text/plain"
-            | "application/xhtml+xml"
-            | "application/json"
-            | "text/json"
+        "text/html" | "text/plain" | "application/xhtml+xml" | "application/json" | "text/json"
     ) || ct.starts_with("text/")
 }
 
@@ -232,7 +241,10 @@ fn looks_like_html(peek: &Bytes) -> bool {
         .take(64)
         .map(|b| b.to_ascii_lowercase())
         .collect();
-    starts_with_any(&lower, &[b"<!doctype html", b"<html", b"<?xml", b"<head", b"<body"])
+    starts_with_any(
+        &lower,
+        &[b"<!doctype html", b"<html", b"<?xml", b"<head", b"<body"],
+    )
 }
 
 fn starts_with_any(hay: &[u8], needles: &[&[u8]]) -> bool {
@@ -243,26 +255,44 @@ fn starts_with_any(hay: &[u8], needles: &[&[u8]]) -> bool {
 /// no media signal (caller then falls back to sniffing / extension).
 fn classify_content_type(ct: &str, channel: SourceChannel) -> Option<Classification> {
     // --- streaming manifests (highest-specificity content-types) ---
-    if ct == "application/vnd.apple.mpegurl" || ct == "application/x-mpegurl" || ct == "audio/mpegurl"
+    if ct == "application/vnd.apple.mpegurl"
+        || ct == "application/x-mpegurl"
+        || ct == "audio/mpegurl"
     {
         // HLS manifest. Liveness is decided from body (#EXT-X-PLAYLIST-TYPE /
         // absence of #EXT-X-ENDLIST); content-type alone keeps the channel hint.
         let live = is_live(channel);
-        return Some(manifest(promote_video(channel), live, "content-type HLS manifest"));
+        return Some(manifest(
+            promote_video(channel),
+            live,
+            "content-type HLS manifest",
+        ));
     }
     if ct == "application/dash+xml" {
         let live = is_live(channel);
-        return Some(manifest(promote_video(channel), live, "content-type DASH manifest"));
+        return Some(manifest(
+            promote_video(channel),
+            live,
+            "content-type DASH manifest",
+        ));
     }
 
     // --- transport-stream / segment content-types → buffered video ---
     if ct == "video/mp2t" {
         let live = is_live(channel);
-        return Some(buffered_video(promote_video(channel), live, "content-type video/mp2t (HLS .ts)"));
+        return Some(buffered_video(
+            promote_video(channel),
+            live,
+            "content-type video/mp2t (HLS .ts)",
+        ));
     }
     if ct.starts_with("video/") || ct == "application/mp4" {
         let live = is_live(channel);
-        return Some(buffered_video(promote_video(channel), live, "content-type video/*"));
+        return Some(buffered_video(
+            promote_video(channel),
+            live,
+            "content-type video/*",
+        ));
     }
 
     // --- audio ---
@@ -313,7 +343,8 @@ fn sniff_manifest(peek: &Bytes, channel: SourceChannel) -> Option<Classification
 
     // DASH: an MPD XML document. Liveness is type="dynamic" (vs "static").
     let lower = trimmed.to_ascii_lowercase();
-    if lower.contains("<mpd") && (lower.contains("urn:mpeg:dash:schema:mpd") || lower.contains("dash"))
+    if lower.contains("<mpd")
+        && (lower.contains("urn:mpeg:dash:schema:mpd") || lower.contains("dash"))
     {
         let live = lower.contains("type=\"dynamic\"") || lower.contains("type='dynamic'");
         return Some(manifest(
@@ -361,7 +392,8 @@ fn sniff_magic(peek: &Bytes, channel: SourceChannel) -> Option<Classification> {
     // --- ISO-BMFF (mp4/m4a/m4v/m4s): bytes 4..8 == "ftyp" (or styp for segments) ---
     if b.len() >= 8 {
         let box_type = &b[4..8];
-        if box_type == b"ftyp" || box_type == b"styp" || box_type == b"moof" || box_type == b"moov" {
+        if box_type == b"ftyp" || box_type == b"styp" || box_type == b"moof" || box_type == b"moov"
+        {
             let brand = if b.len() >= 12 { &b[8..12] } else { &b[4..8] };
             let live = is_live(channel);
             // Audio-only MP4 brands (M4A ) → audio; everything else → video.
@@ -389,7 +421,11 @@ fn sniff_magic(peek: &Bytes, channel: SourceChannel) -> Option<Classification> {
     // --- WebM / Matroska (EBML): 1A 45 DF A3 ---
     if b.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
         let live = is_live(channel);
-        return Some(buffered_video(promote_video(channel), live, "magic EBML (WebM/MKV)"));
+        return Some(buffered_video(
+            promote_video(channel),
+            live,
+            "magic EBML (WebM/MKV)",
+        ));
     }
 
     // --- audio: ID3 (mp3), MPEG audio frame, OggS, fLaC ---
@@ -415,14 +451,32 @@ fn classify_extension(path: &str, channel: SourceChannel) -> Option<Classificati
     let live = is_live(channel);
     match ext.as_str() {
         // streaming manifests
-        "m3u8" => Some(manifest(promote_video(channel), live, "extension .m3u8 (HLS manifest)")),
-        "mpd" => Some(manifest(promote_video(channel), live, "extension .mpd (DASH manifest)")),
+        "m3u8" => Some(manifest(
+            promote_video(channel),
+            live,
+            "extension .m3u8 (HLS manifest)",
+        )),
+        "mpd" => Some(manifest(
+            promote_video(channel),
+            live,
+            "extension .mpd (DASH manifest)",
+        )),
         // streaming segments → buffered video
-        "ts" => Some(buffered_video(promote_video(channel), live, "extension .ts (HLS segment)")),
-        "m4s" => Some(buffered_video(promote_video(channel), live, "extension .m4s (DASH segment)")),
-        "mp4" | "m4v" | "mov" | "webm" | "mkv" => {
-            Some(buffered_video(promote_video(channel), live, "extension progressive video"))
-        }
+        "ts" => Some(buffered_video(
+            promote_video(channel),
+            live,
+            "extension .ts (HLS segment)",
+        )),
+        "m4s" => Some(buffered_video(
+            promote_video(channel),
+            live,
+            "extension .m4s (DASH segment)",
+        )),
+        "mp4" | "m4v" | "mov" | "webm" | "mkv" => Some(buffered_video(
+            promote_video(channel),
+            live,
+            "extension progressive video",
+        )),
         // audio
         "mp3" | "aac" | "m4a" | "ogg" | "oga" | "opus" | "flac" | "wav" => {
             Some(audio(channel, "extension audio"))
@@ -610,7 +664,11 @@ mod tests {
         let manifest = b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-PLAYLIST-TYPE:VOD\n\
                          #EXTINF:6.0,\nseg0.ts\n#EXTINF:6.0,\nseg1.ts\n#EXT-X-ENDLIST\n";
         // Served (as is common) with the wrong content-type to prove sniffing wins.
-        let c = Classifier::new().classify(&http_with(Some("text/plain"), Some("/master.m3u8"), manifest));
+        let c = Classifier::new().classify(&http_with(
+            Some("text/plain"),
+            Some("/master.m3u8"),
+            manifest,
+        ));
         assert_eq!(c.source_channel, SourceChannel::VideoStream);
         assert_eq!(c.disposition, Disposition::Manifest { live: false });
         assert!(c.reason.contains("ENDLIST"));
@@ -636,7 +694,11 @@ mod tests {
             <MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" minBufferTime="PT2S">
               <Period><AdaptationSet mimeType="video/mp4"></AdaptationSet></Period>
             </MPD>"#;
-        let c = Classifier::new().classify(&http_with(Some("application/dash+xml"), Some("/manifest.mpd"), mpd));
+        let c = Classifier::new().classify(&http_with(
+            Some("application/dash+xml"),
+            Some("/manifest.mpd"),
+            mpd,
+        ));
         assert_eq!(c.source_channel, SourceChannel::VideoStream);
         assert_eq!(c.disposition, Disposition::Manifest { live: false });
     }
@@ -648,14 +710,19 @@ mod tests {
               <Period><AdaptationSet mimeType="video/mp4"></AdaptationSet></Period>
             </MPD>"#;
         // Wrong content-type again → sniffing must still win.
-        let c = Classifier::new().classify(&http_with(Some("application/octet-stream"), Some("/live.mpd"), mpd));
+        let c = Classifier::new().classify(&http_with(
+            Some("application/octet-stream"),
+            Some("/live.mpd"),
+            mpd,
+        ));
         assert_eq!(c.source_channel, SourceChannel::LiveStream);
         assert_eq!(c.disposition, Disposition::Manifest { live: true });
     }
 
     #[test]
     fn ts_segment_extension_buffers_as_video() {
-        let c = Classifier::new().classify(&http_with(Some("video/mp2t"), Some("/hls/seg42.ts"), b""));
+        let c =
+            Classifier::new().classify(&http_with(Some("video/mp2t"), Some("/hls/seg42.ts"), b""));
         assert_eq!(c.media_kind, MediaKind::Video);
         assert_eq!(c.disposition, Disposition::BufferSegment { live: false });
     }
@@ -697,7 +764,8 @@ mod tests {
 
     #[test]
     fn html_body_sniff_without_content_type() {
-        let c = Classifier::new().classify(&http_with(None, Some("/page"), b"<!DOCTYPE html><html>"));
+        let c =
+            Classifier::new().classify(&http_with(None, Some("/page"), b"<!DOCTYPE html><html>"));
         assert_eq!(c.media_kind, MediaKind::Text);
     }
 

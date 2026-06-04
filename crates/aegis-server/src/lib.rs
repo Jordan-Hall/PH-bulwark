@@ -19,9 +19,11 @@ use aegis_proto::v1::{
 };
 use async_trait::async_trait;
 
+pub mod accounts;
 pub mod relay;
 pub mod service;
 
+pub use accounts::{AccountStore, AccountsService};
 pub use relay::{AlertHub, ReviewService};
 
 /// Which role this process plays. Chosen by `--role` / `AEGIS_ROLE`.
@@ -55,6 +57,15 @@ pub struct ServerConfig {
     pub tls_cert_pem: Option<Vec<u8>>,
     pub tls_key_pem: Option<Vec<u8>>,
     pub client_ca_pem: Option<Vec<u8>>,
+    /// Enable parent ACCOUNTS mode: mount the Accounts service and scope
+    /// Review (pending stream + decisions) to a guardian session token.
+    ///
+    /// Default `false` = legacy device-scoped relay: a client connects with an
+    /// empty token and receives/decides alerts for its device (single-home / dev).
+    /// Set `true` (productised multi-tenant) only once guardian sessions exist —
+    /// otherwise the token check rejects every default empty-token client. See the
+    /// round-3/round-7 review threads on PR #1.
+    pub accounts_enabled: bool,
 }
 
 impl Default for ServerConfig {
@@ -65,6 +76,7 @@ impl Default for ServerConfig {
             tls_cert_pem: None,
             tls_key_pem: None,
             client_ca_pem: None,
+            accounts_enabled: false,
         }
     }
 }
@@ -95,6 +107,28 @@ impl AnalyzerRegistry {
     pub fn with_text() -> Self {
         let mut r = Self::new();
         r.register(Arc::new(TextAnalyzerAdapter::new()));
+        r
+    }
+
+    /// Default wiring plus buffered-video dispatch (`MediaKind::VIDEO` →
+    /// [`aegis_video::VideoAnalyzer`]). Without aegis-video's `ffmpeg` feature the
+    /// analyzer fails open, so registering it is safe; it makes the worker dispatch
+    /// VIDEO units instead of returning "no analyzer".
+    ///
+    /// `store`: where blocked/borderline NON-CSAM clips are retained so a verdict
+    /// can carry `local_segment_uri`. Pass `Some` ONLY when the reviewer (guardian
+    /// app) can read that location — i.e. an **all-in-one** node where the parent
+    /// app resolves `blob://` from the same disk. For a distributed worker the
+    /// parent is remote and a local `blob://` is unreachable, so pass `None`
+    /// (segment retention then stays the device-side client's job; remote video
+    /// review needs a clip-fetch API — tracked as a follow-up).
+    pub fn with_text_and_video(store: Option<aegis_video::SegmentStore>) -> Self {
+        let mut r = Self::with_text();
+        let mut video = aegis_video::VideoAnalyzer::new();
+        if let Some(store) = store {
+            video = video.with_segment_store(store);
+        }
+        r.register(Arc::new(video));
         r
     }
 }
@@ -136,10 +170,9 @@ impl Analyzer for TextAnalyzerAdapter {
 /// GPU-less devices offload heavy media; text always stays local.
 pub fn default_offload_policy(profile: &DeviceProfile) -> OffloadPolicy {
     let is_mobile = matches!(profile.platform.as_str(), "android" | "ios");
-    let has_gpu = profile
-        .exec_providers
-        .iter()
-        .any(|p| *p != ExecutionProvider::Cpu as i32 && *p != ExecutionProvider::Unspecified as i32);
+    let has_gpu = profile.exec_providers.iter().any(|p| {
+        *p != ExecutionProvider::Cpu as i32 && *p != ExecutionProvider::Unspecified as i32
+    });
     OffloadPolicy {
         run_text_local: true, // grooming rules are cheap + explainable
         run_image_local: has_gpu && !is_mobile,
@@ -169,7 +202,10 @@ mod tests {
     fn offload_policy_mobile_offloads_heavy_keeps_text_local() {
         let p = DeviceProfile {
             platform: "android".into(),
-            exec_providers: vec![ExecutionProvider::Nnapi as i32, ExecutionProvider::Cpu as i32],
+            exec_providers: vec![
+                ExecutionProvider::Nnapi as i32,
+                ExecutionProvider::Cpu as i32,
+            ],
             ..Default::default()
         };
         let pol = default_offload_policy(&p);
@@ -183,5 +219,23 @@ mod tests {
         let reg = AnalyzerRegistry::with_text();
         assert!(reg.analyzer_for(MediaKind::Text as i32).is_some());
         assert!(reg.analyzer_for(MediaKind::Video as i32).is_none());
+    }
+
+    #[test]
+    fn accounts_mode_is_off_by_default() {
+        // Safety default: a local/dev server must NOT require a guardian session
+        // token, or a default empty-token client connects but never gets alerts
+        // (the round-7 regression). Productised multi-tenant opts in explicitly.
+        assert!(!ServerConfig::default().accounts_enabled);
+    }
+
+    #[tokio::test]
+    async fn registry_with_video_dispatches_text_and_video() {
+        let reg = AnalyzerRegistry::with_text_and_video(None);
+        assert!(reg.analyzer_for(MediaKind::Text as i32).is_some());
+        assert!(
+            reg.analyzer_for(MediaKind::Video as i32).is_some(),
+            "video units must dispatch to the video analyzer, not fall through"
+        );
     }
 }

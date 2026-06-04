@@ -491,11 +491,7 @@ impl HttpHandler for FlowHandler {
         RequestOrResponse::Request(Request::from_parts(parts, Body::from(full)))
     }
 
-    async fn handle_response(
-        &mut self,
-        _ctx: &HttpContext,
-        res: Response<Body>,
-    ) -> Response<Body> {
+    async fn handle_response(&mut self, _ctx: &HttpContext, res: Response<Body>) -> Response<Body> {
         let status = res.status().as_u16();
         let content_type = content_type_of(res.headers());
         let (mut parts, body) = res.into_parts();
@@ -516,8 +512,8 @@ impl HttpHandler for FlowHandler {
         // Emit the response flow for classification.
         let flow_id = self.emit(
             FlowSource::Web,
-            "",                       // host is request-side; response carries none
-            "",                       // no method on a response
+            "", // host is request-side; response carries none
+            "", // no method on a response
             &format!("status:{status}"),
             peek(&full),
             true,
@@ -554,9 +550,15 @@ impl HttpHandler for FlowHandler {
                 Response::from_parts(parts, Body::from(full))
             }
             InterceptDecision::Rewrite(new_body) => {
-                tracing::debug!(flow_id, len = new_body.len(), "decision: rewrite response body");
+                tracing::debug!(
+                    flow_id,
+                    len = new_body.len(),
+                    "decision: rewrite response body"
+                );
                 // Drop a stale Content-Length; hyper recomputes from the Full body.
-                parts.headers.remove(hudsucker::hyper::header::CONTENT_LENGTH);
+                parts
+                    .headers
+                    .remove(hudsucker::hyper::header::CONTENT_LENGTH);
                 Response::from_parts(parts, Body::from(new_body))
             }
             InterceptDecision::Drop => {
@@ -663,7 +665,10 @@ fn image_body_for(content_type: Option<&str>, full: &[u8]) -> Option<Vec<u8>> {
 fn blocked_response() -> Response<Body> {
     Response::builder()
         .status(StatusCode::FORBIDDEN)
-        .header(hudsucker::hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(
+            hudsucker::hyper::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )
         .body(Body::from("Blocked by Aegis".as_bytes().to_vec()))
         .unwrap_or_else(|_| Response::new(Body::empty()))
 }
@@ -759,7 +764,13 @@ mod tests {
         for ct in ["image/jpeg", "image/png", "image/webp", "image/gif"] {
             assert!(is_scorable_image_ct(ct), "{ct} should be scorable");
         }
-        for ct in ["image/avif", "image/svg+xml", "text/html", "video/mp4", "application/json"] {
+        for ct in [
+            "image/avif",
+            "image/svg+xml",
+            "text/html",
+            "video/mp4",
+            "application/json",
+        ] {
             assert!(!is_scorable_image_ct(ct), "{ct} should NOT be scorable");
         }
     }
@@ -863,9 +874,18 @@ mod tests {
 
     #[tokio::test]
     async fn classify_source_routes_media_extensions() {
-        assert_eq!(classify_source("https://x/y/index.m3u8"), FlowSource::VideoStream);
-        assert_eq!(classify_source("https://x/seg1.m4s"), FlowSource::VideoStream);
-        assert_eq!(classify_source("https://x/manifest.mpd"), FlowSource::VideoStream);
+        assert_eq!(
+            classify_source("https://x/y/index.m3u8"),
+            FlowSource::VideoStream
+        );
+        assert_eq!(
+            classify_source("https://x/seg1.m4s"),
+            FlowSource::VideoStream
+        );
+        assert_eq!(
+            classify_source("https://x/manifest.mpd"),
+            FlowSource::VideoStream
+        );
         assert_eq!(classify_source("https://x/page.html"), FlowSource::Web);
     }
 }

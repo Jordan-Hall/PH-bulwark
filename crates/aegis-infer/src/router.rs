@@ -19,10 +19,10 @@ use aegis_proto::v1::{
     AnalysisRequest, DeviceProfile, MediaKind, OffloadPolicy, RefreshOffloadRequest, Verdict,
 };
 
-use aegis_core::Analyzer;
 use crate::client::OffloadClient;
 use crate::error::{InferError, Result};
 use crate::policy::{decide, LiveConditions, PolicySnapshot, Route};
+use aegis_core::Analyzer;
 
 /// Decides local vs. cluster per unit, negotiates + caches the
 /// [`OffloadPolicy`], and is the client's single door to the `Analysis` /
@@ -169,8 +169,9 @@ impl OffloadRouter for DefaultOffloadRouter {
         // best-effort non-blocking lock. If a writer holds it (a concurrent
         // negotiate/refresh) or no policy exists yet, fail safe to Local.
         match self.state.try_read() {
-            Ok(st) => Self::route_with_state(&st, kind, rtt_ms, queue_depth)
-                .unwrap_or(Route::Local),
+            Ok(st) => {
+                Self::route_with_state(&st, kind, rtt_ms, queue_depth).unwrap_or(Route::Local)
+            }
             Err(_) => Route::Local,
         }
     }

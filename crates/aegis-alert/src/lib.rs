@@ -161,6 +161,7 @@ mod tests {
             ts: 1_717_200_000_000, // 2024-06-01T00:00:00Z
             redacted_context: "Blocked an adult image on a web page.".to_string(),
             evidence: Some(safe_evidence()),
+            ..Default::default()
         }
     }
 
@@ -176,6 +177,7 @@ mod tests {
             redacted_context: "Conversation shows secrecy + platform-switching patterns."
                 .to_string(),
             evidence: Some(safe_evidence()),
+            ..Default::default()
         }
     }
 
@@ -208,9 +210,13 @@ mod tests {
 
         assert!(rendered.subject.contains("Possible grooming detected"));
         assert!(rendered.subject.contains("Grooming"));
-        // Grooming-specific guidance (reporting path) only appears for grooming.
+        // Grooming-specific guidance only appears for grooming.
         assert!(rendered.body.contains("grooming-suspicion"));
-        assert!(rendered.body.to_lowercase().contains("ncmec"));
+        // NO-REPORTING policy: the email must NOT name a reporting authority
+        // (e.g. NCMEC) — it points the guardian to review + decide for themselves,
+        // never to an automated/authority report path.
+        assert!(!rendered.body.to_lowercase().contains("ncmec"));
+        assert!(rendered.body.contains("decide how you want to handle it"));
 
         // The intervention email must NOT contain that grooming guidance.
         let intv = render_event(&intervention_event(), "[Aegis]").unwrap();
@@ -225,9 +231,11 @@ mod tests {
             // HARD INVARIANT: the safe-thumbnail bytes must NEVER appear in the
             // rendered email — neither raw nor as a recognisable hex run.
             assert!(
-                !rendered.body.as_bytes().windows(SECRET_THUMB_BYTES.len()).any(
-                    |w| w == SECRET_THUMB_BYTES
-                ),
+                !rendered
+                    .body
+                    .as_bytes()
+                    .windows(SECRET_THUMB_BYTES.len())
+                    .any(|w| w == SECRET_THUMB_BYTES),
                 "raw thumbnail bytes leaked into the email body"
             );
             let hex_thumb: String = SECRET_THUMB_BYTES
@@ -252,8 +260,7 @@ mod tests {
     #[test]
     fn assert_no_media_rejects_data_uri_in_context() {
         let mut event = intervention_event();
-        event.redacted_context =
-            "see this data:image/jpeg;base64,/9j/4AAQSkZJRg==".to_string();
+        event.redacted_context = "see this data:image/jpeg;base64,/9j/4AAQSkZJRg==".to_string();
         let err = assert_no_media(&event).unwrap_err();
         assert!(matches!(err, AlertError::UnsafeContent(_)));
         // And the full render path also refuses.
@@ -305,8 +312,7 @@ mod tests {
     #[tokio::test]
     async fn dedupes_same_alert_id() {
         let transport = CapturingTransport::default();
-        let sink =
-            EmailAlertSink::with_transport(test_config(), Arc::new(transport.clone()));
+        let sink = EmailAlertSink::with_transport(test_config(), Arc::new(transport.clone()));
 
         let t0 = Instant::now();
         let ack1 = sink.raise_at(intervention_event(), t0).await.unwrap();
@@ -322,8 +328,7 @@ mod tests {
     #[tokio::test]
     async fn coalesces_burst_into_digest() {
         let transport = CapturingTransport::default();
-        let sink =
-            EmailAlertSink::with_transport(test_config(), Arc::new(transport.clone()));
+        let sink = EmailAlertSink::with_transport(test_config(), Arc::new(transport.clone()));
 
         let t0 = Instant::now();
         // Config allows 2 immediate sends per burst window. Send 5 distinct ids.
@@ -354,8 +359,7 @@ mod tests {
     #[tokio::test]
     async fn raise_batch_sends_single_digest() {
         let transport = CapturingTransport::default();
-        let sink =
-            EmailAlertSink::with_transport(test_config(), Arc::new(transport.clone()));
+        let sink = EmailAlertSink::with_transport(test_config(), Arc::new(transport.clone()));
 
         let mut events = Vec::new();
         for i in 0..4 {
@@ -363,10 +367,7 @@ mod tests {
             e.alert_id = format!("batch-{i}");
             events.push(e);
         }
-        let acks = sink
-            .raise_batch(AlertBatch { events })
-            .await
-            .unwrap();
+        let acks = sink.raise_batch(AlertBatch { events }).await.unwrap();
         assert_eq!(acks.acks.len(), 4);
         // One digest email for the whole batch.
         assert_eq!(transport.sent().len(), 1);

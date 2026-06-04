@@ -23,11 +23,15 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use aegis_core::Result;
+use aegis_core::{Analyzer, Result};
 use aegis_flow::{AnalysisUnit, DefaultFlowClassifier, FlowClassifier};
+use aegis_net::{InterceptDecision, Interceptor};
 use aegis_policy::PolicyEngine; // trait providing Policy::decide / Policy::alert_for
-use aegis_net::{Interceptor, InterceptDecision};
-use aegis_proto::v1::{Action, AlertKind, Category, Evidence, InlineMedia, Severity, Verdict};
+use aegis_proto::v1::{
+    analysis_request::Media, Action, AlertKind, AnalysisRequest, Category, Evidence, InlineMedia,
+    MediaKind, Severity, Verdict,
+};
+pub use aegis_video::SegmentStore;
 use aegis_vision::Scorer;
 
 /// NSFW probability at/above which a still image is blocked. Matches the
@@ -67,6 +71,18 @@ impl Default for ClientConfig {
 /// (thumbnail/hash) is rebuilt cheaply per hit from the same bytes.
 type ImageDecision = (Action, Category, f32);
 
+/// A SAFE/Allow verdict for an un-analysed (or errored) heavy-media unit. We fail
+/// OPEN — an analyzer we can't run must never silently block legitimate traffic;
+/// the `rationale` records the gap for the coverage dashboard.
+fn fail_open_verdict(rationale: &str) -> Verdict {
+    Verdict {
+        category: Category::Safe as i32,
+        action: Action::Allow as i32,
+        rationale: rationale.to_string(),
+        ..Default::default()
+    }
+}
+
 /// Maps a policy `Action` onto the interceptor decision applied to the flow.
 fn action_to_decision(action: Action, rewritten: Option<Vec<u8>>) -> InterceptDecision {
     match action {
@@ -94,6 +110,12 @@ pub struct Pipeline {
     /// AND a model at `AEGIS_NSFW_MODEL`; otherwise the fail-OPEN stub (score 0.0
     /// → Allow), so the default build classifies images but never false-blocks.
     nsfw: Box<dyn Scorer>,
+    /// Buffered-video analyzer for `VideoSegment` units. `None` → video fails open
+    /// (default), matching the audio seam. When set (see [`Pipeline::with_segment_store`]
+    /// / [`Pipeline::with_video_analyzer`]) a blocked/borderline NON-CSAM segment is
+    /// retained locally and its `blob://` ref rides on the verdict's
+    /// `local_segment_uri` so the guardian app can replay the clip.
+    video: Option<Arc<dyn Analyzer>>,
     /// Process-wide CONTENT-HASH decision cache: sha256(image bytes) → the
     /// scored decision triple. The same image is never re-scored — a hit returns
     /// the cached verdict instantly (no model run), which makes repeated imagery
@@ -113,6 +135,7 @@ impl Pipeline {
             alert: None,
             store: None,
             nsfw: build_nsfw_scorer(),
+            video: None,
             image_cache: Mutex::new(HashMap::new()),
         }
     }
@@ -125,6 +148,58 @@ impl Pipeline {
     pub fn with_store(mut self, store: Arc<dyn aegis_store::Store>) -> Self {
         self.store = Some(store);
         self
+    }
+
+    /// Route `VideoSegment` units through `analyzer` (any [`aegis_core::Analyzer`]
+    /// handling `MediaKind::VIDEO`). Primarily for tests / custom dispatch; most
+    /// callers want [`Pipeline::with_segment_store`].
+    pub fn with_video_analyzer(mut self, analyzer: Arc<dyn Analyzer>) -> Self {
+        self.video = Some(analyzer);
+        self
+    }
+
+    /// Enable buffered-video analysis backed by a local [`SegmentStore`]: blocked
+    /// /borderline NON-CSAM segments are retained so the guardian app can replay
+    /// them (the `blob://` ref is propagated on `verdict.local_segment_uri`).
+    ///
+    /// Builds an [`aegis_video::VideoAnalyzer`] whose demuxer depends on features:
+    /// with `ffmpeg` it uses the real sidecar demuxer (frames sampled + scored, so
+    /// clips are actually stored); without it the `NullDemuxer` fails open and
+    /// nothing is decoded or stored. Real frame scoring also wants `onnx`.
+    pub fn with_segment_store(mut self, store: SegmentStore) -> Self {
+        // With the `ffmpeg` feature, decode with the real sidecar demuxer so frames
+        // are actually sampled + scored and blocked clips get retained (otherwise
+        // the NullDemuxer reports `decoded=false` and every segment fails open
+        // BEFORE `store_if_safe`, so `local_segment_uri` would never be set).
+        #[cfg(feature = "ffmpeg")]
+        let analyzer = aegis_video::VideoAnalyzer::with_demuxer(
+            aegis_video::VideoConfig::default(),
+            aegis_video::ffmpeg::FfmpegDemuxer::new(),
+        )
+        .with_segment_store(store);
+        #[cfg(not(feature = "ffmpeg"))]
+        let analyzer = aegis_video::VideoAnalyzer::new().with_segment_store(store);
+        self.video = Some(Arc::new(analyzer));
+        self
+    }
+
+    /// Enable video retention at the per-user default location
+    /// ([`SegmentStore::default_location`]) — what the runnable client binaries
+    /// use so blocked/borderline NON-CSAM clips land on THIS device, where the
+    /// guardian app resolves `blob://` refs. On failure (no writable data dir) it
+    /// logs and leaves retention OFF rather than failing the run. CSAM is never
+    /// stored (enforced in the store).
+    pub fn with_default_segment_store(self) -> Self {
+        match SegmentStore::default_location() {
+            Ok(store) => self.with_segment_store(store),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "segment store unavailable; blocked video clips will not be retained for review"
+                );
+                self
+            }
+        }
     }
 
     /// Override the local NSFW scorer. Primarily for tests (inject a deterministic
@@ -147,14 +222,53 @@ impl Pipeline {
             // round-trip, no raw media leaves the device). A high score blocks the
             // image and attaches a SAFE downscaled preview (non-CSAM only).
             AnalysisUnit::Image(media) => self.analyze_image(media),
-            // SEAM: route AUDIO/VIDEO to the cluster (aegis-infer OffloadRouter →
-            // Analysis.Analyze). Until the cluster client is wired, fail open.
-            _ => Verdict {
-                category: Category::Safe as i32,
-                action: Action::Allow as i32,
-                rationale: "heavy-media cluster path not yet wired".to_string(),
-                ..Default::default()
+            // A buffered video segment → the video analyzer (when configured via
+            // `with_segment_store`/`with_video_analyzer`): it samples frames/audio
+            // and, on a blocked/borderline NON-CSAM verdict, retains the clip and
+            // sets `local_segment_uri`. Unconfigured → fail open (audio seam below).
+            AnalysisUnit::VideoSegment {
+                media, segment_id, ..
+            } => match &self.video {
+                Some(analyzer) => {
+                    self.analyze_video(analyzer.as_ref(), media, *segment_id)
+                        .await
+                }
+                None => fail_open_verdict("video analyzer not configured (fail open)"),
             },
+            // SEAM: route AUDIO to the cluster (aegis-infer OffloadRouter →
+            // Analysis.Analyze). Until the cluster client is wired, fail open.
+            _ => fail_open_verdict("heavy-media cluster path not yet wired"),
+        }
+    }
+
+    /// Run a `VideoSegment` through `analyzer` and propagate its verdict. A failed
+    /// analysis fails OPEN (never blocks on an analyzer error) and logs the gap.
+    async fn analyze_video(
+        &self,
+        analyzer: &dyn Analyzer,
+        media: &InlineMedia,
+        segment_id: Option<u64>,
+    ) -> Verdict {
+        // Unique per segment so multiple blocked clips from one device don't
+        // collide on `alert_id` (build_alert keys it off request_id, and the alert
+        // layer dedupes by alert_id). Prefer the flow's buffer ticket; else a short
+        // content hash of the segment bytes.
+        let tag = match segment_id {
+            Some(id) => format!("seg{id}"),
+            None => short_hash_hex(&media.data),
+        };
+        let req = AnalysisRequest {
+            request_id: format!("{}-video-{}", self.cfg.device_id, tag),
+            media_kind: MediaKind::Video as i32,
+            media: Some(Media::InlineMedia(media.clone())),
+            ..Default::default()
+        };
+        match analyzer.analyze(req).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "aegis-client: video analysis failed; failing open");
+                fail_open_verdict("video analysis error (fail open)")
+            }
         }
     }
 
@@ -191,7 +305,11 @@ impl Pipeline {
         // Miss → score once, store the decision keyed by hash, then build it.
         let score = self.nsfw.score(bytes);
         let nsfw = score >= NSFW_BLOCK_THRESHOLD;
-        let category = if nsfw { Category::AdultImage } else { Category::Safe };
+        let category = if nsfw {
+            Category::AdultImage
+        } else {
+            Category::Safe
+        };
         let action = if nsfw { Action::Block } else { Action::Allow };
         let decision: ImageDecision = (action, category, score);
         self.cache_store(hash, decision);
@@ -211,7 +329,7 @@ impl Pipeline {
         };
         let evidence = build_image_evidence(category, bytes, self.nsfw.model_id());
         Verdict {
-            request_id: format!("{}-img", self.cfg.device_id),
+            request_id: format!("{}-img-{}", self.cfg.device_id, short_hash_hex(bytes)),
             category: category as i32,
             action: action as i32,
             severity: severity as i32,
@@ -266,7 +384,7 @@ impl Pipeline {
             let ctx = aegis_policy::PolicyContext {
                 device: self.cfg.device_id.clone().into(),
                 source_channel,
-                age_profile: self.age_profile.clone(),
+                age_profile: self.age_profile,
             };
             let action = self.policy.decide(&verdict, &ctx);
             let alert_kind = self.policy.alert_for(&verdict, action, &ctx);
@@ -274,6 +392,21 @@ impl Pipeline {
             interceptor
                 .apply(flow_id, action_to_decision(action, None))
                 .await?;
+
+            // A buffered video segment carries a DelayBuffer ticket; apply the
+            // verdict to it so the held bytes are forwarded/dropped AND the slot is
+            // freed. Without this, tickets pile up to max_segments/max_bytes and
+            // later segments hit BufferFull, degrading video filtering/review.
+            if let AnalysisUnit::VideoSegment {
+                segment_id: Some(sid),
+                ..
+            } = unit
+            {
+                if let Err(e) = self.classifier.apply(*sid, action, None) {
+                    tracing::warn!(error = %e, segment_id = sid,
+                        "failed to release buffered video segment");
+                }
+            }
 
             if action == Action::Block {
                 reports.push(BlockReport {
@@ -306,16 +439,11 @@ impl Pipeline {
     /// The main loop: pull flows from the interceptor and process them until
     /// shutdown. The interceptor must already be `start()`ed.
     pub async fn run(&self, interceptor: Arc<dyn Interceptor>) -> Result<()> {
-        loop {
-            match interceptor.next_flow().await? {
-                Some(flow) => {
-                    // net + flow now share aegis_core::flow::CapturedFlow, so the
-                    // interceptor's output feeds the classifier directly (no adapter).
-                    if let Err(e) = self.handle_flow(flow, interceptor.as_ref()).await {
-                        tracing::warn!(error = %e, "flow handling failed; failing open");
-                    }
-                }
-                None => break, // interceptor closed
+        // net + flow now share aegis_core::flow::CapturedFlow, so the
+        // interceptor's output feeds the classifier directly (no adapter).
+        while let Some(flow) = interceptor.next_flow().await? {
+            if let Err(e) = self.handle_flow(flow, interceptor.as_ref()).await {
+                tracing::warn!(error = %e, "flow handling failed; failing open");
             }
         }
         Ok(())
@@ -350,6 +478,12 @@ fn build_alert(
         // redacted summary only — never raw content (Evidence carries hashes/safe thumb).
         redacted_context: verdict.rationale.clone(),
         evidence: verdict.evidence.clone(),
+        // Carry the local video-segment ref (if the analyzer stored one) so the
+        // guardian app can replay the blocked clip from local storage.
+        local_segment_uri: verdict.local_segment_uri.clone(),
+        // child_id/family_id are resolved cluster-side from device_id (the client
+        // doesn't hold the family model); leave empty here.
+        ..Default::default()
     }
 }
 
@@ -466,6 +600,17 @@ fn sha256_array(bytes: &[u8]) -> [u8; 32] {
     digest.as_ref().try_into().unwrap_or([0u8; 32])
 }
 
+/// Short hex (8 bytes) of the content hash — a stable, per-content suffix for
+/// request/alert IDs so distinct blocked media never collide on `alert_id`.
+fn short_hash_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let h = sha256_array(bytes);
+    let mut s = String::with_capacity(16);
+    for b in &h[..8] {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
 
 #[cfg(test)]
 mod tests {
@@ -511,7 +656,8 @@ mod tests {
     }
     impl Scorer for CountingScorer {
         fn score(&self, _: &[u8]) -> f32 {
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.score
         }
         fn model_id(&self) -> &str {
@@ -551,7 +697,10 @@ mod tests {
         // A non-CSAM block carries a SAFE re-encoded preview.
         let ev = v.evidence.unwrap();
         assert_eq!(ev.sha256.len(), 32);
-        assert!(!ev.safe_thumbnail.is_empty(), "non-CSAM block must attach a preview");
+        assert!(
+            !ev.safe_thumbnail.is_empty(),
+            "non-CSAM block must attach a preview"
+        );
         // The preview is a fresh JPEG re-encode (SOI marker), not the PNG input.
         assert_eq!(&ev.safe_thumbnail[..3], &[0xFF, 0xD8, 0xFF]);
     }
@@ -615,6 +764,195 @@ mod tests {
         assert_eq!(v.action, Action::Allow as i32);
         // Nothing blocked → no preview re-encoded.
         assert!(v.evidence.unwrap().safe_thumbnail.is_empty());
+    }
+
+    /// A `VideoSegment` is routed to the configured video analyzer, and the
+    /// `blob://` segment ref it produces survives into the guardian `AlertEvent`
+    /// (the parent `SegmentPlayer` resolves it). Uses a deterministic stub for the
+    /// analyzer; the real store/CSAM-gating is covered in `aegis-video`.
+    #[tokio::test]
+    async fn video_segment_routes_to_analyzer_and_propagates_segment_uri() {
+        let uri = format!("blob://{}", "a".repeat(64));
+
+        struct StubVideo {
+            uri: String,
+        }
+        #[async_trait::async_trait]
+        impl Analyzer for StubVideo {
+            fn handles(&self) -> &[MediaKind] {
+                const K: [MediaKind; 1] = [MediaKind::Video];
+                &K
+            }
+            async fn analyze(&self, req: AnalysisRequest) -> Result<Verdict> {
+                assert_eq!(req.media_kind, MediaKind::Video as i32);
+                Ok(Verdict {
+                    request_id: req.request_id,
+                    category: Category::AdultImage as i32,
+                    action: Action::Block as i32,
+                    local_segment_uri: self.uri.clone(),
+                    ..Default::default()
+                })
+            }
+        }
+
+        let p = Pipeline::new(ClientConfig::default())
+            .with_video_analyzer(Arc::new(StubVideo { uri: uri.clone() }));
+        let unit = AnalysisUnit::VideoSegment {
+            media: InlineMedia {
+                data: vec![0u8; 8],
+                mime_type: "video/mp4".into(),
+                ..Default::default()
+            },
+            deadline_ms: 0,
+            segment_id: None,
+        };
+
+        let v = p.analyze(&unit).await;
+        assert_eq!(v.action, Action::Block as i32);
+        assert_eq!(v.local_segment_uri, uri);
+
+        // The ref must ride on the AlertEvent so the guardian app can replay it.
+        let alert = build_alert("kids-tablet", "example.com", &v, AlertKind::Unspecified);
+        assert_eq!(alert.local_segment_uri, uri);
+    }
+
+    /// With no video analyzer configured, a `VideoSegment` fails OPEN (allow, no
+    /// segment ref) — an un-runnable analyzer must never block legitimate traffic.
+    #[tokio::test]
+    async fn video_segment_without_analyzer_fails_open() {
+        let p = Pipeline::new(ClientConfig::default());
+        let unit = AnalysisUnit::VideoSegment {
+            media: InlineMedia {
+                data: vec![0u8; 8],
+                mime_type: "video/mp4".into(),
+                ..Default::default()
+            },
+            deadline_ms: 0,
+            segment_id: None,
+        };
+        let v = p.analyze(&unit).await;
+        assert_eq!(v.action, Action::Allow as i32);
+        assert!(v.local_segment_uri.is_empty());
+    }
+
+    /// Distinct blocked video segments must get distinct `request_id`s (and thus
+    /// distinct `alert_id`s) so the alert layer doesn't dedupe them into one — by
+    /// `segment_id` when present, else by segment content hash.
+    #[tokio::test]
+    async fn distinct_video_segments_get_distinct_alert_ids() {
+        // Echoes req.request_id into the verdict, like the real VideoAnalyzer.
+        struct EchoBlock;
+        #[async_trait::async_trait]
+        impl Analyzer for EchoBlock {
+            fn handles(&self) -> &[MediaKind] {
+                const K: [MediaKind; 1] = [MediaKind::Video];
+                &K
+            }
+            async fn analyze(&self, req: AnalysisRequest) -> Result<Verdict> {
+                Ok(Verdict {
+                    request_id: req.request_id,
+                    category: Category::AdultImage as i32,
+                    action: Action::Block as i32,
+                    local_segment_uri: "blob://x".into(),
+                    ..Default::default()
+                })
+            }
+        }
+        let p = Pipeline::new(ClientConfig::default()).with_video_analyzer(Arc::new(EchoBlock));
+        let seg = |id: Option<u64>, data: Vec<u8>| AnalysisUnit::VideoSegment {
+            media: InlineMedia {
+                data,
+                mime_type: "video/mp4".into(),
+                ..Default::default()
+            },
+            deadline_ms: 0,
+            segment_id: id,
+        };
+
+        // Different segment_id → different alert_id.
+        let v1 = p.analyze(&seg(Some(1), vec![1, 2, 3])).await;
+        let v2 = p.analyze(&seg(Some(2), vec![1, 2, 3])).await;
+        assert_ne!(v1.request_id, v2.request_id);
+        let a1 = build_alert("dev", "app", &v1, AlertKind::Unspecified);
+        let a2 = build_alert("dev", "app", &v2, AlertKind::Unspecified);
+        assert_ne!(a1.alert_id, a2.alert_id);
+
+        // No segment_id → falls back to content hash; different bytes differ.
+        let v3 = p.analyze(&seg(None, vec![9, 9, 9])).await;
+        let v4 = p.analyze(&seg(None, vec![7, 7, 7, 7])).await;
+        assert_ne!(v3.request_id, v4.request_id);
+    }
+
+    /// A buffered video segment's DelayBuffer ticket is released after
+    /// `handle_flow_reporting` applies the verdict — otherwise tickets accumulate
+    /// to BufferFull and later segments are rejected.
+    #[tokio::test]
+    async fn video_segment_buffer_ticket_is_released_after_analysis() {
+        use aegis_proto::v1::SourceChannel;
+
+        struct NoopInterceptor;
+        #[async_trait::async_trait]
+        impl Interceptor for NoopInterceptor {
+            async fn start(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn next_flow(&self) -> Result<Option<aegis_flow::CapturedFlow>> {
+                Ok(None)
+            }
+            async fn apply(&self, _flow_id: u64, _d: InterceptDecision) -> Result<()> {
+                Ok(())
+            }
+            fn is_pinned(&self, _host: &str) -> bool {
+                false
+            }
+            async fn shutdown(&self) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let mk_flow = || aegis_flow::CapturedFlow {
+            flow_id: 7,
+            source_channel: SourceChannel::Web,
+            app_or_host: "cdn.example.com".into(),
+            readable: true,
+            payload: aegis_flow::FlowPayload::Http(aegis_flow::HttpHead {
+                method: Some("GET".into()),
+                path: Some("/clip.mp4".into()),
+                status: Some(200),
+                headers: vec![aegis_flow::Header {
+                    name: "content-type".into(),
+                    value: "video/mp4".into(),
+                }],
+                body_peek: bytes::Bytes::from(vec![0u8; 64]),
+            }),
+        };
+
+        // Guard against a vacuous test: this flow really does buffer a segment
+        // (ticket present, pending == 1) on a probe pipeline.
+        let probe = Pipeline::new(ClientConfig::default());
+        let units = probe.classifier.classify(mk_flow()).await.unwrap();
+        assert!(
+            matches!(
+                units.as_slice(),
+                [AnalysisUnit::VideoSegment {
+                    segment_id: Some(_),
+                    ..
+                }]
+            ),
+            "test flow must classify as a buffered video segment"
+        );
+        assert_eq!(probe.classifier.buffer().pending(), 1);
+
+        // The real assertion: after analysis the ticket is released (pending == 0).
+        let p = Pipeline::new(ClientConfig::default());
+        p.handle_flow_reporting(mk_flow(), &NoopInterceptor)
+            .await
+            .unwrap();
+        assert_eq!(
+            p.classifier.buffer().pending(),
+            0,
+            "the buffered video segment ticket must be released after analysis"
+        );
     }
 
     #[test]

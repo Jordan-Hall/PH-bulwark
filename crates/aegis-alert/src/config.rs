@@ -29,19 +29,15 @@ pub const ENV_SMTP_PASSWORD: &str = "AEGIS_SMTP_PASSWORD";
 /// to a localhost relay in tests and is rejected for any non-loopback host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum TlsMode {
     /// Implicit TLS from connection start (SMTPS, typically port 465).
+    #[default]
     Tls,
     /// Plaintext connection upgraded with STARTTLS (typically port 587).
     StartTls,
     /// No transport security. Loopback-only; rejected otherwise.
     None,
-}
-
-impl Default for TlsMode {
-    fn default() -> Self {
-        TlsMode::Tls
-    }
 }
 
 /// SMTP credentials. Held in memory only; sourced from the environment / OS

@@ -95,9 +95,8 @@ impl CaManager {
         // Bounded validity (threat-model rotation requirement).
         let now = std::time::SystemTime::now();
         params.not_before = now.into();
-        params.not_after = (now
-            + std::time::Duration::from_secs(u64::from(validity_days) * 24 * 60 * 60))
-        .into();
+        params.not_after =
+            (now + std::time::Duration::from_secs(u64::from(validity_days) * 24 * 60 * 60)).into();
         // Mark as a CA that can sign certs.
         params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         params.key_usages = vec![
@@ -142,7 +141,7 @@ impl CaManager {
     /// trust-store match / fingerprint).
     pub fn load(keystore: Arc<dyn CaKeyStore>) -> Result<Self> {
         let key_der = keystore.load_key()?; // fail-CLOSED if absent
-        // Re-parse once to fail fast if the key is corrupt.
+                                            // Re-parse once to fail fast if the key is corrupt.
         let _ = reparse_keypair(&key_der)?;
 
         let cert_der = keystore.load_public_cert()?.ok_or_else(|| {
@@ -209,8 +208,7 @@ impl CaManager {
         let now = std::time::SystemTime::now();
         params.not_before = now.into();
         // Short-lived leaf (a few days is plenty for a live MITM session).
-        params.not_after =
-            (now + std::time::Duration::from_secs(7 * 24 * 60 * 60)).into();
+        params.not_after = (now + std::time::Duration::from_secs(7 * 24 * 60 * 60)).into();
 
         // Build the CA issuer directly from the stored root cert DER + key, so
         // the leaf's issuer DN matches the installed root exactly. Built fresh
@@ -299,8 +297,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// `rcgen::KeyPair` implements `TryFrom<&[u8]>` over PKCS#8 DER (the form
 /// `serialize_der` produces), inferring the signature algorithm from the key.
 fn reparse_keypair(key_der: &[u8]) -> Result<rcgen::KeyPair> {
-    rcgen::KeyPair::try_from(key_der)
-        .map_err(|e| NetError::ca(format!("reparse pkcs8 key: {e}")))
+    rcgen::KeyPair::try_from(key_der).map_err(|e| NetError::ca(format!("reparse pkcs8 key: {e}")))
 }
 
 /// Wrap a DER certificate into a PEM `CERTIFICATE` block (for `certutil` / file
@@ -500,8 +497,7 @@ mod tests {
 
     #[test]
     fn mints_a_leaf_for_a_host() {
-        let ca =
-            CaManager::generate(Arc::new(DevInMemoryKeyStore::new()), "Root", 365).unwrap();
+        let ca = CaManager::generate(Arc::new(DevInMemoryKeyStore::new()), "Root", 365).unwrap();
         let (leaf_der, leaf_key) = ca.mint_leaf("example.com").unwrap();
         assert!(!leaf_der.is_empty());
         assert!(!leaf_key.is_empty());

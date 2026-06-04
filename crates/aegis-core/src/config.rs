@@ -242,8 +242,7 @@ mod tests {
             jail.set_env("AEGIS_CLUSTER__BIND_ADDR", "0.0.0.0:9999");
             jail.set_env("AEGIS_SMTP__PASSWORD", "from-env");
 
-            let cfg = Config::load(Some(Path::new("aegis.toml")))
-                .expect("config should load");
+            let cfg = Config::load(Some(Path::new("aegis.toml"))).expect("config should load");
 
             assert_eq!(cfg.cluster.role, "worker");
             assert_eq!(cfg.cluster.bind_addr, "0.0.0.0:9999"); // env beat toml
@@ -262,8 +261,7 @@ mod tests {
 
     #[test]
     fn missing_required_file_errors() {
-        let err = Config::load_required(Path::new("definitely-not-here.toml"))
-            .unwrap_err();
+        let err = Config::load_required(Path::new("definitely-not-here.toml")).unwrap_err();
         assert!(matches!(err, crate::Error::ConfigNotFound(_)));
     }
 

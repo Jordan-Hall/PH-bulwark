@@ -75,23 +75,31 @@ impl QuicDowngrade {
             // then add the blocking rule.
             let _ = windows_delete_rule();
             windows_add_rule()?;
-            tracing::info!(rule = RULE_NAME, "QUIC downgrade: blocking outbound UDP/443 (netsh)");
-            return Ok(());
+            tracing::info!(
+                rule = RULE_NAME,
+                "QUIC downgrade: blocking outbound UDP/443 (netsh)"
+            );
+            Ok(())
         }
 
         #[cfg(target_os = "linux")]
         {
             let _ = linux_remove_rule(); // clean slate
             linux_add_rule()?;
-            tracing::info!(rule = RULE_NAME, "QUIC downgrade: dropping outbound UDP/443 (nft/iptables)");
-            return Ok(());
+            tracing::info!(
+                rule = RULE_NAME,
+                "QUIC downgrade: dropping outbound UDP/443 (nft/iptables)"
+            );
+            Ok(())
         }
 
         #[cfg(target_os = "android")]
         {
             // VpnService handles UDP/443 by simply not routing it; nothing to do.
-            tracing::debug!("QUIC downgrade: handled by VpnService routing (no host firewall rule)");
-            return Ok(());
+            tracing::debug!(
+                "QUIC downgrade: handled by VpnService routing (no host firewall rule)"
+            );
+            Ok(())
         }
 
         #[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
@@ -113,16 +121,19 @@ impl QuicDowngrade {
                 // A missing rule is fine on teardown; log at debug and succeed.
                 Err(e) => tracing::debug!("QUIC downgrade rule removal: {e} (treating as absent)"),
             }
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(target_os = "linux")]
         {
             match linux_remove_rule() {
-                Ok(()) => tracing::info!(rule = RULE_NAME, "QUIC downgrade rule removed (nft/iptables)"),
+                Ok(()) => tracing::info!(
+                    rule = RULE_NAME,
+                    "QUIC downgrade rule removed (nft/iptables)"
+                ),
                 Err(e) => tracing::debug!("QUIC downgrade rule removal: {e} (treating as absent)"),
             }
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(not(any(windows, target_os = "linux")))]
@@ -153,7 +164,11 @@ fn run(program: &str, args: &[&str]) -> Result<()> {
             args.join(" "),
             output.status,
             // netsh/iptables often write the useful message to stdout, not stderr.
-            if stderr.trim().is_empty() { stdout.trim() } else { stderr.trim() }
+            if stderr.trim().is_empty() {
+                stdout.trim()
+            } else {
+                stderr.trim()
+            }
         )))
     }
 }
@@ -219,15 +234,18 @@ fn linux_add_rule() -> Result<()> {
         run(
             "nft",
             &[
-                "add", "chain", "inet", RULE_NAME, "output",
+                "add",
+                "chain",
+                "inet",
+                RULE_NAME,
+                "output",
                 "{ type filter hook output priority 0 ; }",
             ],
         )?;
         run(
             "nft",
             &[
-                "add", "rule", "inet", RULE_NAME, "output",
-                "udp", "dport", "443", "drop",
+                "add", "rule", "inet", RULE_NAME, "output", "udp", "dport", "443", "drop",
             ],
         )
     } else {
@@ -235,9 +253,7 @@ fn linux_add_rule() -> Result<()> {
         // same rule spec.
         run(
             "iptables",
-            &[
-                "-A", "OUTPUT", "-p", "udp", "--dport", "443", "-j", "DROP",
-            ],
+            &["-A", "OUTPUT", "-p", "udp", "--dport", "443", "-j", "DROP"],
         )
     }
 }
@@ -250,9 +266,7 @@ fn linux_remove_rule() -> Result<()> {
     } else {
         run(
             "iptables",
-            &[
-                "-D", "OUTPUT", "-p", "udp", "--dport", "443", "-j", "DROP",
-            ],
+            &["-D", "OUTPUT", "-p", "udp", "--dport", "443", "-j", "DROP"],
         )
     }
 }
@@ -266,7 +280,7 @@ mod tests {
         let q = QuicDowngrade::new(true, vec![]);
         assert!(q.should_block_udp(443, "youtube.com"));
         assert!(!q.should_block_udp(53, "youtube.com")); // not 443 → leave alone
-        assert!(!q.should_block_udp(443, "")); // still 443 → block (no allowlist)
+        assert!(q.should_block_udp(443, "")); // still 443 → block (no allowlist)
     }
 
     #[test]

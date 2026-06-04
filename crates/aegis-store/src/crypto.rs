@@ -112,9 +112,10 @@ impl AgeExporter {
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
         use std::io::Write;
 
-        let encryptor =
-            age::Encryptor::with_recipients(std::iter::once(&self.recipient as &dyn age::Recipient))
-                .map_err(|e| StoreError::crypto(format!("age encryptor: {e}")))?;
+        let encryptor = age::Encryptor::with_recipients(std::iter::once(
+            &self.recipient as &dyn age::Recipient,
+        ))
+        .map_err(|e| StoreError::crypto(format!("age encryptor: {e}")))?;
 
         let mut out = Vec::new();
         let mut writer = encryptor

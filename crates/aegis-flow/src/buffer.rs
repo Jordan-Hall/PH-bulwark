@@ -255,7 +255,11 @@ impl DelayBuffer {
                 inner.held_bytes -= seg.bytes.len();
                 inner.recompute_delay(Instant::now());
                 let out = rewritten.unwrap_or(seg.bytes);
-                tracing::debug!(id, ?action, "segment released (rewritten) from delay buffer");
+                tracing::debug!(
+                    id,
+                    ?action,
+                    "segment released (rewritten) from delay buffer"
+                );
                 Ok(Released::Forward(out))
             }
             Action::Unspecified => {
@@ -422,7 +426,10 @@ mod tests {
             ));
         }
         // Fourth exceeds max_segments=3.
-        assert_eq!(buf.admit(Bytes::from_static(b"x"), true), Admission::BackPressure);
+        assert_eq!(
+            buf.admit(Bytes::from_static(b"x"), true),
+            Admission::BackPressure
+        );
     }
 
     #[test]
@@ -495,7 +502,10 @@ mod tests {
             Admission::Admitted(id) => id,
             other => panic!("{other:?}"),
         };
-        assert_eq!(buf.apply(id, Action::Unspecified, None).unwrap(), Released::StillHeld);
+        assert_eq!(
+            buf.apply(id, Action::Unspecified, None).unwrap(),
+            Released::StillHeld
+        );
         assert_eq!(buf.pending(), 1);
     }
 }

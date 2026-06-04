@@ -5,9 +5,10 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
+use aegis_proto::v1::accounts_server::AccountsServer;
+use aegis_proto::v1::alert_relay_server::{AlertRelay, AlertRelayServer};
 use aegis_proto::v1::analysis_server::{Analysis, AnalysisServer};
 use aegis_proto::v1::offload_server::{Offload, OffloadServer};
-use aegis_proto::v1::alert_relay_server::{AlertRelay, AlertRelayServer};
 use aegis_proto::v1::review_server::ReviewServer;
 use aegis_proto::v1::{
     Action, AlertAck, AlertAckBatch, AlertBatch, AlertEvent, AnalysisBatch, AnalysisRequest,
@@ -16,6 +17,7 @@ use aegis_proto::v1::{
 use futures_util::StreamExt;
 use tonic::{Request, Response, Status, Streaming};
 
+use crate::accounts::{AccountStore, AccountsService};
 use crate::relay::{AlertHub, ReviewService};
 use crate::{default_offload_policy, AnalyzerRegistry, ServerConfig, ServerRole};
 
@@ -37,6 +39,7 @@ fn inconclusive(request_id: String) -> Verdict {
         grooming: None,
         worker_id: String::new(),
         latency_ms: 0,
+        ..Default::default()
     }
 }
 
@@ -122,11 +125,12 @@ impl Offload for OffloadService {
         // Minimal: keep the same policy id, refresh the TTL. A richer impl would
         // re-derive from the fresh RTT/battery in the request.
         let r = req.into_inner();
-        let mut pol = OffloadPolicy::default();
-        pol.run_text_local = true;
-        pol.ttl_secs = 300;
-        pol.policy_id = r.policy_id;
-        Ok(Response::new(pol))
+        Ok(Response::new(OffloadPolicy {
+            run_text_local: true,
+            ttl_secs: 300,
+            policy_id: r.policy_id,
+            ..Default::default()
+        }))
     }
 }
 
@@ -257,9 +261,29 @@ pub async fn run(
             alert_sink,
         )));
 
-        // Review: guardian approve/deny + remote-push registration + the
-        // pending-review stream (subscribes to the same hub).
-        router = router.add_service(ReviewServer::new(ReviewService::new(hub)));
+        // Review (+ optional Accounts) depends on the deployment mode:
+        //   * accounts_enabled = false (DEFAULT, single-home/dev): device-scoped
+        //     Review only — a client connects with an EMPTY token and gets its
+        //     device's alerts/decisions. The Accounts service is NOT mounted, so
+        //     the token gate never rejects the default client.
+        //   * accounts_enabled = true (productised multi-tenant): Review is scoped
+        //     to a guardian session token and the Accounts service is mounted for
+        //     registration/login/child/guardian management. Enable only once
+        //     guardian sessions exist (else the gate rejects empty-token clients).
+        if cfg.accounts_enabled {
+            // Parent accounts + per-child guardians: the store scopes Review's
+            // pending stream/decisions AND backs the Accounts service.
+            let accounts = AccountStore::new();
+            router = router.add_service(ReviewServer::new(ReviewService::with_accounts(
+                hub,
+                accounts.clone(),
+            )));
+            router = router.add_service(AccountsServer::new(AccountsService::new(accounts)));
+            tracing::info!("accounts mode ENABLED — Review requires a guardian session token");
+        } else {
+            router = router.add_service(ReviewServer::new(ReviewService::new(hub)));
+            tracing::info!("accounts mode disabled — device-scoped Review (legacy/dev)");
+        }
 
         if let Some(c) = cluster {
             let svc = aegis_cluster::service::ClusterControlService::new(c);

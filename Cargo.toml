@@ -56,8 +56,26 @@ prost = "0.14"
 foca = "0.13"         # SWIM membership (fallback: chitchat 0.10)
 ginepro = "0.8"       # client-side gRPC load balancing
 
-# Inference (small dedicated models)
-ort = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
+# Inference (small dedicated models).
+# `download-binaries` (WITHOUT load-dynamic) fetches the onnxruntime that MATCHES
+# this ort version and links it directly — so we use the correct runtime instead
+# of the OS loader picking up an incompatible system DLL (Windows-ML's
+# onnxruntime.dll 1.17 in System32 ABI-mismatches ort 2.0-rc and HANGS session
+# creation). No ORT_DYLIB_PATH / system runtime needed. (`onnx` features are
+# opt-in per crate, so the default build never pulls ort.)
+ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
+
+# VPN data path — PERMISSIVE ONLY (productise + open-source; NO GPL).
+#   * smoltcp (0BSD): userspace TCP/IP netstack for TUN capture + redirect to the
+#     local MITM proxy, with full control of UDP/QUIC/WebRTC + raw sockets.
+#   * boringtun (BSD-3, Cloudflare): industry-standard userspace WireGuard for the
+#     secure device<->filter-node transport leg.
+# (Replaced `tun2proxy`, which pulled `socks5-impl` = GPL-3.0-or-later — copyleft,
+#  incompatible with the MIT/Apache product license.)
+# tokio-util's CancellationToken drives clean VPN shutdown / route teardown.
+smoltcp = "0.12"
+boringtun = "0.6"
+tokio-util = "0.7"
 
 # Media + OCR (conventional)
 ffmpeg-sidecar = "0.5"

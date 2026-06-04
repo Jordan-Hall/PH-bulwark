@@ -43,10 +43,10 @@ pub struct EventView {
 #[derive(Debug, Serialize)]
 pub struct CoverageRow {
     pub app: String,
-    pub web_mitm: bool,      // ordinary HTTPS we can decrypt
-    pub e2e: bool,           // end-to-end encrypted → on-device OCR only
-    pub pinned: bool,        // cert-pinned → on-device OCR only
-    pub ocr_agent: bool,     // on-device OCR active for this app
+    pub web_mitm: bool,  // ordinary HTTPS we can decrypt
+    pub e2e: bool,       // end-to-end encrypted → on-device OCR only
+    pub pinned: bool,    // cert-pinned → on-device OCR only
+    pub ocr_agent: bool, // on-device OCR active for this app
     pub note: String,
 }
 
@@ -80,10 +80,7 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
-async fn events(
-    State(st): State<AppState>,
-    Query(q): Query<EventsQuery>,
-) -> Json<Vec<EventView>> {
+async fn events(State(st): State<AppState>, Query(q): Query<EventsQuery>) -> Json<Vec<EventView>> {
     let device = q.device.into();
     let limit = q.limit.min(1000);
     let rows = st.store.recent(&device, limit).await.unwrap_or_default();
@@ -165,6 +162,9 @@ mod tests {
             ocr_agent: true,
             note: "x".into(),
         };
-        assert!(row.e2e && !row.web_mitm, "E2E apps are not network-readable");
+        assert!(
+            row.e2e && !row.web_mitm,
+            "E2E apps are not network-readable"
+        );
     }
 }

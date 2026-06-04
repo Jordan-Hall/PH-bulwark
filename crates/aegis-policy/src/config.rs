@@ -52,8 +52,11 @@ impl Default for AgeProfile {
 
 impl AgeProfile {
     /// All bands, youngest first.
-    pub const ALL: [AgeProfile; 3] =
-        [AgeProfile::YoungChild, AgeProfile::PreTeen, AgeProfile::Teen];
+    pub const ALL: [AgeProfile; 3] = [
+        AgeProfile::YoungChild,
+        AgeProfile::PreTeen,
+        AgeProfile::Teen,
+    ];
 
     fn key(self) -> &'static str {
         match self {
@@ -102,7 +105,11 @@ impl Default for Thresholds {
 
 impl Thresholds {
     fn validate(&self, ctx: &str) -> Result<()> {
-        for (name, v) in [("log", self.log), ("flag", self.flag), ("block", self.block)] {
+        for (name, v) in [
+            ("log", self.log),
+            ("flag", self.flag),
+            ("block", self.block),
+        ] {
             if !v.is_finite() || !(0.0..=1.0).contains(&v) {
                 return Err(PolicyError::Invalid(format!(
                     "{ctx}: threshold `{name}` must be a finite value in [0.0, 1.0], got {v}"
@@ -324,6 +331,7 @@ mod tests {
             cfg.band(AgeProfile::YoungChild),
             AgeBandThresholds::for_profile(AgeProfile::YoungChild)
         );
-        cfg.validate().expect("empty map still validates via fallback");
+        cfg.validate()
+            .expect("empty map still validates via fallback");
     }
 }

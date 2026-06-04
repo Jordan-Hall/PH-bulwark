@@ -44,13 +44,13 @@ mod test_util;
 
 // --- Public API re-exports ------------------------------------------------
 
+pub use aegis_core::Analyzer;
 pub use analyzer::TextAnalyzer;
 pub use classifier::{NoClassifier, TextClassifier};
 pub use engine::{weight, GroomingRuleEngine, RuleOutcome};
 pub use error::{Result, TextError};
 pub use lexicon::{LanguageLexicon, Lexicon};
 pub use state::{ThreadState, ESCALATION_WINDOW_MS};
-pub use aegis_core::Analyzer;
 pub use traits::GroomingRules;
 
 #[cfg(feature = "classifier")]
@@ -76,7 +76,10 @@ mod integration_tests {
         // threshold (weight 0.5 / 10 = 0.05), so it just records state.
         let v1 = a.analyze_span(
             "m1",
-            &text_span(thread, "hey this is our little secret ok, dont tell your parents"),
+            &text_span(
+                thread,
+                "hey this is our little secret ok, dont tell your parents",
+            ),
             0,
         );
         assert_eq!(v1.category, Category::Grooming as i32);
@@ -95,7 +98,10 @@ mod integration_tests {
         );
         assert_eq!(v2.category, Category::Grooming as i32);
         let g2 = v2.grooming.as_ref().unwrap();
-        assert!(g2.fired_categories.iter().any(|c| c == "platform_switching"));
+        assert!(g2
+            .fired_categories
+            .iter()
+            .any(|c| c == "platform_switching"));
         assert!(
             g2.score > g1.score,
             "escalation raises score: {} !> {}",

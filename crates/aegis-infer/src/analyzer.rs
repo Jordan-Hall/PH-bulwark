@@ -41,6 +41,7 @@ fn inconclusive_verdict(req: &AnalysisRequest) -> Verdict {
         grooming: None,
         worker_id: "local:null".into(),
         latency_ms: 0,
+        ..Default::default()
     }
 }
 
@@ -122,10 +123,8 @@ pub mod onnx {
 
     /// Map the device's advertised execution providers onto `ort`'s provider
     /// dispatch list, best-first, always ending at CPU.
-    fn providers_from_profile(
-        profile: &DeviceProfile,
-    ) -> Vec<ort::execution_providers::ExecutionProviderDispatch> {
-        use ort::execution_providers as ep;
+    fn providers_from_profile(profile: &DeviceProfile) -> Vec<ort::ep::ExecutionProviderDispatch> {
+        use ort::ep;
         let mut out: Vec<ep::ExecutionProviderDispatch> = Vec::new();
         for raw in &profile.exec_providers {
             let provider = ExecutionProvider::try_from(*raw).unwrap_or(ExecutionProvider::Cpu);

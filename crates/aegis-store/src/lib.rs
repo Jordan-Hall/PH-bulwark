@@ -64,7 +64,7 @@ pub use error::{Result as StoreResult, StoreError};
 pub use hashchain::Verify;
 pub use model::{AlertDedupe, AuditRow, EvidenceMeta, StoredEvent};
 pub use retention::{PurgeReport, RetentionPolicy};
-pub use schema::{Column, ColType, Table, ALL_TABLES};
+pub use schema::{ColType, Column, Table, ALL_TABLES};
 
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteStore;
@@ -89,7 +89,7 @@ pub fn open_in_memory() -> aegis_core::Result<std::sync::Arc<dyn Store>> {
     }
     #[cfg(all(not(feature = "sqlite"), feature = "portable"))]
     {
-        return portable::PortableStore::open_in_memory();
+        portable::PortableStore::open_in_memory()
     }
     #[cfg(all(not(feature = "sqlite"), not(feature = "portable")))]
     {
@@ -116,8 +116,7 @@ pub trait Store: Send + Sync {
     async fn record(&self, event: StoredEvent) -> aegis_core::Result<()>;
 
     /// Recent events for the dashboard / coverage matrix (newest first, paged).
-    async fn recent(&self, device: &DeviceId, limit: u32)
-        -> aegis_core::Result<Vec<StoredEvent>>;
+    async fn recent(&self, device: &DeviceId, limit: u32) -> aegis_core::Result<Vec<StoredEvent>>;
 
     /// Conversation state blob for the grooming state machine (thread-scoped).
     /// The blob is content-free by the `aegis-text` producer contract.
@@ -158,11 +157,7 @@ impl Store for SqliteStore {
         Ok(())
     }
 
-    async fn recent(
-        &self,
-        device: &DeviceId,
-        limit: u32,
-    ) -> aegis_core::Result<Vec<StoredEvent>> {
+    async fn recent(&self, device: &DeviceId, limit: u32) -> aegis_core::Result<Vec<StoredEvent>> {
         Ok(self.recent_sync(device.0.as_str(), limit)?)
     }
 
@@ -193,11 +188,7 @@ impl Store for PostgresStore {
         Ok(())
     }
 
-    async fn recent(
-        &self,
-        device: &DeviceId,
-        limit: u32,
-    ) -> aegis_core::Result<Vec<StoredEvent>> {
+    async fn recent(&self, device: &DeviceId, limit: u32) -> aegis_core::Result<Vec<StoredEvent>> {
         Ok(PostgresStore::recent(self, device.0.as_str(), limit).await?)
     }
 

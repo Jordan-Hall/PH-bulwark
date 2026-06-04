@@ -23,7 +23,10 @@ use async_trait::async_trait;
 use aegis_core::Analyzer;
 
 use aegis_audio::AudioAnalyzer;
-use aegis_vision::VisionAnalyzer;
+use aegis_vision::{Scorer, VisionAnalyzer, VisionConfig};
+
+pub mod store;
+pub use store::{SegmentStore, StoredSegment};
 
 #[derive(Debug, Clone)]
 pub struct VideoConfig {
@@ -60,8 +63,15 @@ impl Demuxer for NullDemuxer {
 pub struct VideoAnalyzer<D: Demuxer = NullDemuxer> {
     cfg: VideoConfig,
     demux: D,
-    vision: VisionAnalyzer,
+    /// Per-frame NSFW scorer. Built via [`VisionAnalyzer::from_env`] so a
+    /// `--features onnx` build with `AEGIS_NSFW_MODEL` set scores frames with the
+    /// real model; otherwise it is the fail-open stub. (`VisionAnalyzer::new()`
+    /// would pin the stub even under onnx, leaving sampled frames unscored.)
+    vision: VisionAnalyzer<Box<dyn Scorer>>,
     audio: AudioAnalyzer,
+    /// Optional local store for blocked/borderline segments (guardian review).
+    /// `None` = don't retain clips (default). CSAM is never stored regardless.
+    segment_store: Option<SegmentStore>,
 }
 
 impl VideoAnalyzer<NullDemuxer> {
@@ -69,8 +79,9 @@ impl VideoAnalyzer<NullDemuxer> {
         Self {
             cfg: VideoConfig::default(),
             demux: NullDemuxer,
-            vision: VisionAnalyzer::new(),
+            vision: VisionAnalyzer::from_env(VisionConfig::default()),
             audio: AudioAnalyzer::new(),
+            segment_store: None,
         }
     }
 }
@@ -84,9 +95,25 @@ impl<D: Demuxer> VideoAnalyzer<D> {
         Self {
             cfg,
             demux,
-            vision: VisionAnalyzer::new(),
+            vision: VisionAnalyzer::from_env(VisionConfig::default()),
             audio: AudioAnalyzer::new(),
+            segment_store: None,
         }
+    }
+
+    /// Attach a [`SegmentStore`]: blocked/borderline non-CSAM segments are
+    /// written locally for guardian review (CSAM is never stored).
+    pub fn with_segment_store(mut self, store: SegmentStore) -> Self {
+        self.segment_store = Some(store);
+        self
+    }
+
+    /// Override the per-frame NSFW scorer. Production uses the env/ONNX scorer from
+    /// [`VisionAnalyzer::from_env`]; this injects a specific scorer (tests, or a
+    /// custom model).
+    pub fn with_vision_scorer(mut self, scorer: Box<dyn Scorer>) -> Self {
+        self.vision = VisionAnalyzer::with_scorer(VisionConfig::default(), scorer);
+        self
     }
 }
 
@@ -144,10 +171,7 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
 
         let mut worst: Option<Verdict> = None;
         let mut take = |v: Verdict| {
-            let better = worst
-                .as_ref()
-                .map(|w| v.score > w.score)
-                .unwrap_or(true);
+            let better = worst.as_ref().map(|w| v.score > w.score).unwrap_or(true);
             if better {
                 worst = Some(v);
             }
@@ -156,7 +180,10 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
         for (i, frame) in decoded.frames.iter().enumerate() {
             let v = self
                 .vision
-                .analyze(image_req(&format!("{}-f{i}", req.request_id), frame.clone()))
+                .analyze(image_req(
+                    &format!("{}-f{i}", req.request_id),
+                    frame.clone(),
+                ))
                 .await?;
             if v.category == Category::AdultImage as i32 {
                 take(v);
@@ -172,14 +199,31 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
             }
         }
 
-        Ok(worst.unwrap_or(Verdict {
+        let mut verdict = worst.unwrap_or(Verdict {
             request_id: req.request_id,
             category: Category::Safe as i32,
             action: Action::Allow as i32,
             severity: Severity::Info as i32,
             rationale: "no flagged frames/audio in segment".into(),
             ..Default::default()
-        }))
+        });
+
+        // Retain the segment for guardian review when it was blocked/borderline.
+        // `store_if_safe` enforces the CSAM-never-stored boundary and skips benign
+        // ALLOW, so this is a no-op for safe traffic.
+        if let Some(store) = &self.segment_store {
+            match store.store_if_safe(verdict.category(), verdict.action(), &segment) {
+                Ok(Some(stored)) => {
+                    tracing::info!(uri = %stored.uri, "aegis-video: stored segment for review");
+                    // Propagate the local ref so the guardian alert can find the clip.
+                    verdict.local_segment_uri = stored.uri;
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!(error = %e, "aegis-video: segment store write failed"),
+            }
+        }
+
+        Ok(verdict)
     }
 }
 
@@ -294,7 +338,11 @@ pub mod ffmpeg {
         /// Decode an in-memory segment by staging it to a temp file (the segment
         /// API is byte-oriented; piping arbitrary container bytes through stdin
         /// is format-fragile, so a temp file is the robust path).
-        fn decode_segment_frames(&self, segment: &[u8], sample_fps: f32) -> Option<Vec<SampledFrame>> {
+        fn decode_segment_frames(
+            &self,
+            segment: &[u8],
+            sample_fps: f32,
+        ) -> Option<Vec<SampledFrame>> {
             if segment.is_empty() {
                 return Some(Vec::new());
             }
@@ -400,5 +448,51 @@ mod tests {
         };
         let v = a.analyze(req).await.unwrap();
         assert_eq!(v.category, Category::Safe as i32);
+    }
+
+    /// Always-NSFW scorer (stands in for the real ONNX model wired via
+    /// `from_env`/`with_vision_scorer`).
+    struct HotScorer;
+    impl Scorer for HotScorer {
+        fn score(&self, _b: &[u8]) -> f32 {
+            1.0
+        }
+        fn model_id(&self) -> &str {
+            "test-hot"
+        }
+    }
+
+    #[tokio::test]
+    async fn flagged_frame_blocks_and_retains_segment() {
+        // End-to-end: real-ish scorer flags the decoded frame → segment verdict is
+        // AdultImage and the clip is retained, so `local_segment_uri` is set. This
+        // is the path that was dead while video used the stub scorer.
+        let dir = std::env::temp_dir().join(format!(
+            "aegis-vid-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let store = SegmentStore::new(&dir).expect("create store");
+        let a = VideoAnalyzer::with_demuxer(VideoConfig::default(), OneNsfwFrame)
+            .with_vision_scorer(Box::new(HotScorer))
+            .with_segment_store(store);
+        let req = AnalysisRequest {
+            request_id: "v3".into(),
+            media_kind: MediaKind::Video as i32,
+            media: Some(Media::InlineMedia(InlineMedia {
+                data: vec![5, 6, 7, 8],
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let v = a.analyze(req).await.unwrap();
+        assert_eq!(v.category, Category::AdultImage as i32);
+        assert!(
+            v.local_segment_uri.starts_with("blob://"),
+            "a flagged clip must be retained for review"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

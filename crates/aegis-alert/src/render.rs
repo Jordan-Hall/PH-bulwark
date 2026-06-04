@@ -131,7 +131,7 @@ pub fn render_event(event: &AlertEvent, subject_prefix: &str) -> Result<Rendered
     );
 
     let mut body = String::new();
-    body.push_str(&intro_for(kind));
+    body.push_str(intro_for(kind));
     body.push_str("\n\n");
 
     push_field(&mut body, "Alert type", headline);
@@ -243,7 +243,10 @@ fn render_evidence(body: &mut String, evidence: Option<&Evidence>) {
         body.push_str(&format!("  Content hash (sha256): {}\n", hex(&ev.sha256)));
     }
     if !ev.perceptual_hash.is_empty() {
-        body.push_str(&format!("  Perceptual hash: {}\n", hex(&ev.perceptual_hash)));
+        body.push_str(&format!(
+            "  Perceptual hash: {}\n",
+            hex(&ev.perceptual_hash)
+        ));
     }
     if !ev.safe_thumbnail.is_empty() {
         // We intentionally do NOT inline the bytes — only note availability.

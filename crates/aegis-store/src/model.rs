@@ -83,9 +83,7 @@ impl AuditRow {
     pub fn from_event(id: i64, ev: &StoredEvent) -> Self {
         let v = &ev.verdict;
         let evidence = v.evidence.as_ref();
-        let content_sha256 = evidence
-            .map(|e| hex_encode(&e.sha256))
-            .unwrap_or_default();
+        let content_sha256 = evidence.map(|e| hex_encode(&e.sha256)).unwrap_or_default();
         let model_id = evidence.map(|e| e.model_id.clone()).unwrap_or_default();
 
         // Reason codes: the grooming indicator categories that fired, if present.
@@ -146,6 +144,7 @@ impl AuditRow {
             grooming,
             worker_id: String::new(),
             latency_ms: 0,
+            ..Default::default()
         };
         StoredEvent {
             device: aegis_core::DeviceId(self.device_id.clone()),
@@ -252,7 +251,7 @@ pub fn hex_encode(bytes: &[u8]) -> String {
 /// input yields an empty vec rather than erroring — this is a read-back path).
 pub fn hex_decode(s: &str) -> Vec<u8> {
     let bytes = s.as_bytes();
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Vec::new();
     }
     let mut out = Vec::with_capacity(bytes.len() / 2);
@@ -302,6 +301,7 @@ mod tests {
             }),
             worker_id: "w1".into(),
             latency_ms: 12,
+            ..Default::default()
         };
         StoredEvent {
             device: aegis_core::DeviceId("dev-1".into()),

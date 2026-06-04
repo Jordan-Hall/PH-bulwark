@@ -85,11 +85,8 @@ impl NetInterceptor {
     pub fn new(config: NetConfig) -> crate::Result<Self> {
         config.validate()?;
         let keystore = select_keystore(config.ca_store_dir.clone())?;
-        let ca = CaManager::load_or_generate(
-            keystore,
-            &config.ca_common_name,
-            config.ca_validity_days,
-        )?;
+        let ca =
+            CaManager::load_or_generate(keystore, &config.ca_common_name, config.ca_validity_days)?;
         Self::assemble(config, ca)
     }
 
@@ -101,11 +98,8 @@ impl NetInterceptor {
         keystore: Arc<dyn crate::ca::CaKeyStore>,
     ) -> crate::Result<Self> {
         config.validate()?;
-        let ca = CaManager::load_or_generate(
-            keystore,
-            &config.ca_common_name,
-            config.ca_validity_days,
-        )?;
+        let ca =
+            CaManager::load_or_generate(keystore, &config.ca_common_name, config.ca_validity_days)?;
         Self::assemble(config, ca)
     }
 
@@ -345,7 +339,10 @@ impl Interceptor for NetInterceptor {
         // proxy. If the proxy isn't up yet (or the flow already forwarded/timed
         // out), this resolves to `false` — a no-op, never an error.
         if let Some(proxy) = self.proxy.lock().await.as_ref() {
-            let _ = proxy.apply(flow_id, decision).await.map_err(aegis_core::Error::from)?;
+            let _ = proxy
+                .apply(flow_id, decision)
+                .await
+                .map_err(aegis_core::Error::from)?;
         }
         Ok(())
     }

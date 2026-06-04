@@ -95,13 +95,12 @@ impl PostgresStore {
     pub async fn record(&self, event: &StoredEvent) -> Result<i64> {
         let mut tx = self.pool.begin().await.map_err(StoreError::backend)?;
 
-        let head: Option<(i64, String)> = sqlx::query(
-            "SELECT id, row_hash FROM audit_log ORDER BY id DESC LIMIT 1 FOR UPDATE",
-        )
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(StoreError::backend)?
-        .map(|r| (r.get::<i64, _>("id"), r.get::<String, _>("row_hash")));
+        let head: Option<(i64, String)> =
+            sqlx::query("SELECT id, row_hash FROM audit_log ORDER BY id DESC LIMIT 1 FOR UPDATE")
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(StoreError::backend)?
+                .map(|r| (r.get::<i64, _>("id"), r.get::<String, _>("row_hash")));
 
         let (next_id, prev_hash) = match head {
             Some((id, hex)) => {

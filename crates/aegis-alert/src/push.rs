@@ -471,6 +471,7 @@ mod tests {
                 model_id: "rules".to_string(),
                 model_version: "1.0".to_string(),
             }),
+            ..Default::default()
         }
     }
 
@@ -515,7 +516,10 @@ mod tests {
         let event = event_with_secret_thumb();
         assert_eq!(event.category, Category::CsamSuspected as i32);
         let data = FcmPushSink::redacted_data(&event);
-        assert_eq!(data["category"], (Category::CsamSuspected as i32).to_string());
+        assert_eq!(
+            data["category"],
+            (Category::CsamSuspected as i32).to_string()
+        );
         assert_eq!(data["redacted_context"], "Flagged content was blocked.");
         // And the no-media guard accepts this redacted event.
         assert_no_media(&event).unwrap();

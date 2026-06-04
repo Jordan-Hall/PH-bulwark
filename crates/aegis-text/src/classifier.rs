@@ -128,10 +128,10 @@ mod ort_impl {
             let id_arr = ([1_usize, len], ids);
             let mask_arr = ([1_usize, len], mask);
 
-            let input_ids = Value::from_array(id_arr)
-                .map_err(|e| TextError::Classifier(e.to_string()))?;
-            let attention_mask = Value::from_array(mask_arr)
-                .map_err(|e| TextError::Classifier(e.to_string()))?;
+            let input_ids =
+                Value::from_array(id_arr).map_err(|e| TextError::Classifier(e.to_string()))?;
+            let attention_mask =
+                Value::from_array(mask_arr).map_err(|e| TextError::Classifier(e.to_string()))?;
 
             let mut session = self
                 .session
