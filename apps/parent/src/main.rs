@@ -105,12 +105,27 @@ fn nsfw_model_display() -> String {
 // Connection layer
 // ---------------------------------------------------------------------------
 
-/// "PH Bulwark Cloud" — the default hosted server, used unless the user picks
-/// self-hosted in Settings. Point this at the real cloud gateway when it launches.
-const CLOUD_ENDPOINT: &str = "https://cloud.phbulwark.app";
+/// PH Bulwark Cloud regions: `(id, label, endpoint)`. A user picks ONE — their data
+/// routes only through that country's server (no cross-region). A UK/London server
+/// is offered for UK data residency. Point these at the real regional gateways when
+/// the cloud launches; self-hosters use their own URL instead.
+const CLOUD_REGIONS: &[(&str, &str, &str)] = &[
+    (
+        "uk",
+        "PH Bulwark Cloud — UK (London)",
+        "https://uk.cloud.phbulwark.app",
+    ),
+    (
+        "us",
+        "PH Bulwark Cloud — US",
+        "https://us.cloud.phbulwark.app",
+    ),
+];
+/// Default region when nothing is saved — UK first (UK data residency).
+const DEFAULT_REGION_ID: &str = "uk";
 
-/// Where the chosen server is persisted (one line: `cloud`, or a self-hosted URL).
-/// Sits in the per-user config dir (Windows `%LOCALAPPDATA%\Aegis`, else
+/// Where the chosen server is persisted (one line: a region id, or a self-hosted
+/// URL). Per-user config dir (Windows `%LOCALAPPDATA%\Aegis`, else
 /// `$XDG_CONFIG_HOME`/`$HOME/.config`, else temp).
 fn server_config_path() -> std::path::PathBuf {
     use std::path::PathBuf;
@@ -126,37 +141,56 @@ fn server_config_path() -> std::path::PathBuf {
     base.join("server.txt")
 }
 
-/// The saved self-hosted URL, or `None` when the user is on PH Bulwark Cloud
-/// (`cloud`/empty/missing file). Drives the Settings UI's initial state.
-fn saved_self_hosted_url() -> Option<String> {
+/// The raw saved choice: a region id (e.g. `uk`), a self-hosted URL, or empty.
+fn saved_choice() -> String {
     std::fs::read_to_string(server_config_path())
         .ok()
         .map(|s| s.trim().to_string())
-        .filter(|t| !t.is_empty() && !t.eq_ignore_ascii_case("cloud"))
+        .unwrap_or_default()
 }
 
-/// Persist the server choice: `None` → PH Bulwark Cloud; `Some(url)` → self-hosted.
-fn save_server_choice(url: Option<&str>) -> std::io::Result<()> {
+/// Persist the chosen server: a region id (`uk`/`us`) or a self-hosted URL.
+fn save_server_choice(value: &str) -> std::io::Result<()> {
     let path = server_config_path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let body = match url {
-        Some(u) if !u.trim().is_empty() => u.trim().to_string(),
-        _ => "cloud".to_string(),
-    };
-    std::fs::write(path, body)
+    let v = value.trim();
+    std::fs::write(path, if v.is_empty() { DEFAULT_REGION_ID } else { v })
 }
 
-/// The cluster endpoint to dial: the `AEGIS_CLUSTER_ENDPOINT` env (advanced/ops
-/// override) wins; otherwise the user's saved choice — **PH Bulwark Cloud by
-/// default**, or their self-hosted server (Bitwarden-style). This is the single
-/// source of truth for both the console's review channel AND the filter it spawns.
+/// Resolve a saved choice to an endpoint URL: a `http(s)://` value is a self-hosted
+/// URL used as-is; otherwise it's a region id (or empty / legacy `cloud` / unknown)
+/// → that region's URL, defaulting to UK.
+fn resolve_endpoint(saved: &str) -> String {
+    let s = saved.trim();
+    if s.starts_with("http://") || s.starts_with("https://") {
+        return s.to_string();
+    }
+    let id = if s.is_empty() || s.eq_ignore_ascii_case("cloud") {
+        DEFAULT_REGION_ID
+    } else {
+        s
+    };
+    CLOUD_REGIONS
+        .iter()
+        .find(|r| r.0 == id)
+        .or_else(|| CLOUD_REGIONS.iter().find(|r| r.0 == DEFAULT_REGION_ID))
+        .map(|r| r.2.to_string())
+        .unwrap_or_default()
+}
+
+/// The cluster endpoint to dial: `AEGIS_CLUSTER_ENDPOINT` (advanced/ops override)
+/// wins; otherwise the user's saved country / self-hosted choice (default UK). The
+/// single source of truth for the console's review channel AND the filter it spawns.
 fn cluster_endpoint() -> String {
-    std::env::var("AEGIS_CLUSTER_ENDPOINT")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| saved_self_hosted_url().unwrap_or_else(|| CLOUD_ENDPOINT.to_string()))
+    if let Ok(env) = std::env::var("AEGIS_CLUSTER_ENDPOINT") {
+        let env = env.trim().to_string();
+        if !env.is_empty() {
+            return env;
+        }
+    }
+    resolve_endpoint(&saved_choice())
 }
 
 /// Build a tonic [`Channel`] to the cluster.
@@ -955,43 +989,55 @@ fn ProtectionPanel() -> Element {
     }
 }
 
-/// Bitwarden-style server picker: PH Bulwark Cloud (default) or a self-hosted URL.
-/// Persists the choice (used by the console's review channel AND the filter it
-/// spawns). `AEGIS_CLUSTER_ENDPOINT` still overrides for advanced/ops use.
+/// Server / country picker: choose which PH Bulwark Cloud region (your data routes
+/// only through that country) or self-host. Persisted; drives the console's review
+/// channel AND the filter it spawns. `AEGIS_CLUSTER_ENDPOINT` overrides for ops use.
 #[component]
 fn ServerSettings() -> Element {
-    let initial = saved_self_hosted_url();
-    let mut self_hosted = use_signal(|| initial.is_some());
-    let mut url = use_signal(|| initial.unwrap_or_default());
+    let saved = saved_choice();
+    let is_url = saved.starts_with("http://") || saved.starts_with("https://");
+    let init_selected = if is_url {
+        "selfhosted".to_string()
+    } else if saved.is_empty() || saved.eq_ignore_ascii_case("cloud") {
+        DEFAULT_REGION_ID.to_string()
+    } else {
+        saved.clone()
+    };
+    let mut selected = use_signal(|| init_selected);
+    let mut url = use_signal(|| if is_url { saved.clone() } else { String::new() });
     let mut note = use_signal(|| Option::<String>::None);
 
     rsx! {
         section {
-            h2 { "Server" }
+            h2 { "Server / country" }
             p { class: "sub",
-                "Use PH Bulwark Cloud, or point at your own self-hosted server."
+                "Pick the country your data routes through, or self-host. Your data only ever goes to the one server you choose."
+            }
+            for region in CLOUD_REGIONS.iter() {
+                div { class: "row", key: "{region.0}",
+                    label {
+                        input {
+                            r#type: "radio",
+                            name: "srv",
+                            checked: selected() == region.0,
+                            onclick: move |_| selected.set(region.0.to_string()),
+                        }
+                        " {region.1}"
+                    }
+                }
             }
             div { class: "row",
                 label {
                     input {
                         r#type: "radio",
                         name: "srv",
-                        checked: !self_hosted(),
-                        onclick: move |_| self_hosted.set(false),
-                    }
-                    " PH Bulwark Cloud"
-                }
-                label {
-                    input {
-                        r#type: "radio",
-                        name: "srv",
-                        checked: self_hosted(),
-                        onclick: move |_| self_hosted.set(true),
+                        checked: selected() == "selfhosted",
+                        onclick: move |_| selected.set("selfhosted".to_string()),
                     }
                     " Self-hosted"
                 }
             }
-            if self_hosted() {
+            if selected() == "selfhosted" {
                 input {
                     class: "url",
                     r#type: "text",
@@ -1003,8 +1049,8 @@ fn ServerSettings() -> Element {
             button {
                 class: "approve",
                 onclick: move |_| {
-                    let choice = if self_hosted() { Some(url()) } else { None };
-                    match save_server_choice(choice.as_deref()) {
+                    let choice = if selected() == "selfhosted" { url() } else { selected() };
+                    match save_server_choice(&choice) {
                         Ok(()) => note.set(Some("Saved — reconnect or restart to apply.".to_string())),
                         Err(e) => note.set(Some(format!("Couldn't save: {e}"))),
                     }
