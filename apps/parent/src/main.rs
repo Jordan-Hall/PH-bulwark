@@ -53,26 +53,69 @@ const PROXY_HOST: &str = "127.0.0.1";
 const PROXY_PORT: u16 = 8080;
 const PROXY_ADDR: &str = "127.0.0.1:8080";
 
-/// Prebuilt proxy binary (preferred). If absent we fall back to `cargo run`.
-const PROXY_EXE: &str = r"C:\Users\Jordan\child-safety\target\debug\aegis_proxy.exe";
-/// Repo root — cwd for the `cargo run` fallback.
-const REPO_ROOT: &str = r"C:\Users\Jordan\child-safety";
-/// NSFW model handed to the proxy via `AEGIS_NSFW_MODEL`.
-const NSFW_MODEL: &str = r"C:\Users\Jordan\child-safety\models\nsfw.onnx";
-/// Cluster endpoint handed to the proxy via `AEGIS_CLUSTER_ENDPOINT`.
-const PROXY_CLUSTER_ENDPOINT: &str = "http://127.0.0.1:8443";
-/// Prebuilt transparent-VPN binary. VPN mode captures ALL traffic via a TUN and
-/// needs Administrator; `aegis_vpn` self-checks elevation and exits immediately
-/// if not elevated. Unlike proxy mode it does NOT touch the system proxy.
-const VPN_EXE: &str = r"C:\Users\Jordan\child-safety\target\debug\aegis_vpn.exe";
+/// Locate a bundled filter binary `name` (e.g. `aegis_proxy.exe`): an explicit
+/// `env_key` override first, else next to THIS executable (where a packaged
+/// release ships the filter binaries beside the console). `None` → the caller
+/// falls back to a dev `cargo run`. No machine-specific path is ever hard-coded.
+fn sibling_exe(env_key: &str, name: &str) -> Option<std::path::PathBuf> {
+    if let Some(p) = std::env::var_os(env_key).filter(|s| !s.is_empty()) {
+        let p = std::path::PathBuf::from(p);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    let beside = std::env::current_exe().ok()?.parent()?.join(name);
+    beside.exists().then_some(beside)
+}
+
+/// The bundled content-filtering proxy (`AEGIS_PROXY_EXE` override, else beside us).
+fn proxy_exe() -> Option<std::path::PathBuf> {
+    sibling_exe("AEGIS_PROXY_EXE", "aegis_proxy.exe")
+}
+
+/// The bundled transparent-VPN binary (`AEGIS_VPN_EXE` override, else beside us).
+/// VPN mode captures ALL traffic via a TUN and needs Administrator; `aegis_vpn`
+/// self-checks elevation and exits immediately if not elevated.
+fn vpn_exe() -> Option<std::path::PathBuf> {
+    sibling_exe("AEGIS_VPN_EXE", "aegis_vpn.exe")
+}
+
+/// Repo root for the dev `cargo run` fallback only: `AEGIS_REPO_ROOT` or the cwd.
+fn repo_root() -> std::path::PathBuf {
+    std::env::var_os("AEGIS_REPO_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()))
+}
+
+/// The NSFW model path to hand the filter, from `AEGIS_NSFW_MODEL` (unset → the
+/// filter runs its fail-open stub; we never invent a model path).
+fn nsfw_model() -> Option<String> {
+    std::env::var("AEGIS_NSFW_MODEL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// Human-readable model status for the diagnostics panel.
+fn nsfw_model_display() -> String {
+    nsfw_model()
+        .unwrap_or_else(|| "(unset — set AEGIS_NSFW_MODEL; filter runs fail-open)".to_string())
+}
 
 // ---------------------------------------------------------------------------
 // Connection layer
 // ---------------------------------------------------------------------------
 
-/// Cluster endpoint, from `AEGIS_CLUSTER_ENDPOINT` (default dev gateway).
+/// Cluster endpoint, from `AEGIS_CLUSTER_ENDPOINT` — the SINGLE source of truth
+/// for both the console's own review channel AND the filter the console spawns
+/// (previously these disagreed http vs https). Default is the plaintext dev
+/// gateway so a local all-in-one node works out of the box; production sets this
+/// to `https://…` (and `AEGIS_CLUSTER_CA`) for the TLS review channel + mTLS
+/// offload.
 fn cluster_endpoint() -> String {
-    std::env::var("AEGIS_CLUSTER_ENDPOINT").unwrap_or_else(|_| "https://127.0.0.1:8443".to_string())
+    std::env::var("AEGIS_CLUSTER_ENDPOINT")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:8443".to_string())
 }
 
 /// Build a tonic [`Channel`] to the cluster.
@@ -486,31 +529,37 @@ fn ca_trust_command() -> String {
 ///
 /// Blocking (it touches the filesystem and spawns a process) — call from an
 /// event handler, never the render path.
-fn spawn_proxy() -> std::io::Result<Child> {
+/// Build the spawn `Command` for a filter binary: the bundled exe if present
+/// (`exe`), else a dev `cargo run` of `bin` from the repo root. Both inherit the
+/// unified cluster endpoint and — only when configured — the NSFW model path.
+fn filter_command(exe: Option<std::path::PathBuf>, bin: &str) -> std::process::Command {
     use std::process::Command;
-    if std::path::Path::new(PROXY_EXE).exists() {
-        Command::new(PROXY_EXE)
-            .env("AEGIS_NSFW_MODEL", NSFW_MODEL)
-            .env("AEGIS_CLUSTER_ENDPOINT", PROXY_CLUSTER_ENDPOINT)
-            .spawn()
-    } else {
-        // Dev fallback: build+run from source. cwd = repo root so cargo finds
-        // the workspace.
-        Command::new("cargo")
-            .args([
+    let mut cmd = match exe {
+        Some(path) => Command::new(path),
+        None => {
+            let mut c = Command::new("cargo");
+            c.args([
                 "run",
                 "-p",
                 "aegis-client",
                 "--features",
                 "onnx",
                 "--bin",
-                "aegis_proxy",
+                bin,
             ])
-            .current_dir(REPO_ROOT)
-            .env("AEGIS_NSFW_MODEL", NSFW_MODEL)
-            .env("AEGIS_CLUSTER_ENDPOINT", PROXY_CLUSTER_ENDPOINT)
-            .spawn()
+            .current_dir(repo_root());
+            c
+        }
+    };
+    cmd.env("AEGIS_CLUSTER_ENDPOINT", cluster_endpoint());
+    if let Some(model) = nsfw_model() {
+        cmd.env("AEGIS_NSFW_MODEL", model);
     }
+    cmd
+}
+
+fn spawn_proxy() -> std::io::Result<Child> {
+    filter_command(proxy_exe(), "aegis_proxy").spawn()
 }
 
 /// Spawn the transparent-VPN binary (`aegis_vpn.exe`). Like [`spawn_proxy`] it
@@ -519,29 +568,7 @@ fn spawn_proxy() -> std::io::Result<Child> {
 /// self-checks elevation and exits immediately if not elevated — the Connect
 /// handler detects that fast exit and surfaces a "run as Administrator" hint.
 fn spawn_vpn() -> std::io::Result<Child> {
-    use std::process::Command;
-    if std::path::Path::new(VPN_EXE).exists() {
-        Command::new(VPN_EXE)
-            .env("AEGIS_NSFW_MODEL", NSFW_MODEL)
-            .env("AEGIS_CLUSTER_ENDPOINT", PROXY_CLUSTER_ENDPOINT)
-            .spawn()
-    } else {
-        // Dev fallback: build+run from source (will need an elevated shell).
-        Command::new("cargo")
-            .args([
-                "run",
-                "-p",
-                "aegis-client",
-                "--features",
-                "onnx",
-                "--bin",
-                "aegis_vpn",
-            ])
-            .current_dir(REPO_ROOT)
-            .env("AEGIS_NSFW_MODEL", NSFW_MODEL)
-            .env("AEGIS_CLUSTER_ENDPOINT", PROXY_CLUSTER_ENDPOINT)
-            .spawn()
-    }
+    filter_command(vpn_exe(), "aegis_vpn").spawn()
 }
 
 /// Is the proxy actually accepting connections right now? This is the source of
@@ -871,7 +898,7 @@ fn ProtectionPanel() -> Element {
                 }
                 div { class: "pg-row",
                     span { class: "pg-k", "NSFW model" }
-                    span { class: "pg-v mono", "{NSFW_MODEL}" }
+                    span { class: "pg-v mono", {nsfw_model_display()} }
                 }
             }
 
@@ -963,7 +990,11 @@ fn SegmentPlayer(uri: String) -> Element {
                     // HLS .ts, or WebM; a hard-coded MP4 MIME breaks playback when
                     // the bytes are something else.
                     let mime = sniff_video_mime(&bytes);
-                    data_uri.set(Some(format!("data:{};base64,{}", mime, base64_encode(&bytes))));
+                    data_uri.set(Some(format!(
+                        "data:{};base64,{}",
+                        mime,
+                        base64_encode(&bytes)
+                    )));
                 }
                 Ok(None) => load_err.set(Some(
                     "not found (expired, purged, or never stored)".to_string(),
