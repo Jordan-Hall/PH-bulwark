@@ -60,9 +60,12 @@ async fn main() -> anyhow::Result<()> {
         });
     let registry = AnalyzerRegistry::with_text_and_video(segment_store);
 
+    // Cluster config from the environment (AEGIS_NODE_ID / _CLUSTER_ADDRESS /
+    // _CLUSTER_SEEDS / _QUORUM_DSN / …) so a multi-node deployment (e.g. the Ansible
+    // cluster playbook) can point workers at the LB's address without code changes.
     let cluster = matches!(role, ServerRole::AllInOne | ServerRole::Lb).then(|| {
         Arc::new(aegis_cluster::Cluster::new(
-            aegis_cluster::ClusterConfig::default(),
+            aegis_cluster::ClusterConfig::from_env(),
         ))
     });
 
