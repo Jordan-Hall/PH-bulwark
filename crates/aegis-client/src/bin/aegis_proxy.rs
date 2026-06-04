@@ -77,11 +77,15 @@ async fn main() -> anyhow::Result<()> {
     // --- 3. Build the pipeline (text rules + local NSFW image scoring). -------
     // The AlertRelay sink forwards each redacted AlertEvent to the cluster.
     let relay = Arc::new(RelaySink::new(&cluster_endpoint));
+    // Retain blocked/borderline NON-CSAM video clips locally (default store
+    // location) so the guardian app can replay them; video analysis runs on this
+    // device (offload is a seam), so this is where local_segment_uri is set.
     let pipeline = Pipeline::new(ClientConfig {
         device_id: "aegis-proxy-local".to_string(),
         cluster_endpoint: Some(cluster_endpoint.clone()),
     })
-    .with_alert(relay);
+    .with_alert(relay)
+    .with_default_segment_store();
 
     tracing::info!("aegis_proxy running — point your browser at {PROXY_LISTEN}");
 

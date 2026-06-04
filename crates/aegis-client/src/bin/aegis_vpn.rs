@@ -100,11 +100,14 @@ async fn main() -> anyhow::Result<()> {
 
     // --- 2. Pipeline (text rules + local NSFW image scoring). -----------------
     let relay = Arc::new(RelaySink::new(&cluster_endpoint));
+    // Retain blocked/borderline NON-CSAM video clips locally for guardian replay
+    // (see aegis_proxy for the rationale).
     let pipeline = Pipeline::new(ClientConfig {
         device_id: "aegis-vpn-local".to_string(),
         cluster_endpoint: Some(cluster_endpoint.clone()),
     })
-    .with_alert(relay);
+    .with_alert(relay)
+    .with_default_segment_store();
 
     // --- 3. Bring up the TUN data path (permissive smoltcp + WireGuard). ------
     let shutdown = aegis_net::CancellationToken::new();

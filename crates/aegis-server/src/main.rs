@@ -31,7 +31,18 @@ async fn main() -> anyhow::Result<()> {
 
     // Text + buffered-video dispatch (image/audio stay on the device fast path /
     // future worker wiring). Video fails open without aegis-video's `ffmpeg`.
-    let registry = AnalyzerRegistry::with_text_and_video();
+    //
+    // Retain blocked video clips for guardian replay ONLY on an all-in-one node,
+    // where the parent app reads `blob://` from the same disk. A distributed
+    // worker's local store is unreachable by a remote parent, so it keeps no store
+    // (the child device's client pipeline retains clips there instead).
+    let segment_store = matches!(role, ServerRole::AllInOne)
+        .then(aegis_video::SegmentStore::default_location)
+        .and_then(|r| {
+            r.map_err(|e| tracing::warn!(error = %e, "segment store unavailable; video review clips not retained server-side"))
+                .ok()
+        });
+    let registry = AnalyzerRegistry::with_text_and_video(segment_store);
 
     let cluster = matches!(role, ServerRole::AllInOne | ServerRole::Lb).then(|| {
         Arc::new(aegis_cluster::Cluster::new(

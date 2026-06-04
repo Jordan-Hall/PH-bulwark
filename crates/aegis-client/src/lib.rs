@@ -170,6 +170,25 @@ impl Pipeline {
         self
     }
 
+    /// Enable video retention at the per-user default location
+    /// ([`SegmentStore::default_location`]) — what the runnable client binaries
+    /// use so blocked/borderline NON-CSAM clips land on THIS device, where the
+    /// guardian app resolves `blob://` refs. On failure (no writable data dir) it
+    /// logs and leaves retention OFF rather than failing the run. CSAM is never
+    /// stored (enforced in the store).
+    pub fn with_default_segment_store(self) -> Self {
+        match SegmentStore::default_location() {
+            Ok(store) => self.with_segment_store(store),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "segment store unavailable; blocked video clips will not be retained for review"
+                );
+                self
+            }
+        }
+    }
+
     /// Override the local NSFW scorer. Primarily for tests (inject a deterministic
     /// scorer); production uses the env-selected scorer from [`Pipeline::new`].
     pub fn with_nsfw_scorer(mut self, scorer: Box<dyn Scorer>) -> Self {

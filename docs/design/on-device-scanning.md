@@ -74,3 +74,21 @@ double-check the decision. Constraints enforced at the storage boundary:
   hash/thumbnail-only. The parent app loads the bytes from the local store.
 - **Retention/TTL** — confirmed blocks kept ~7 days, borderline ~2 days, then
   `purge_expired()` deletes them.
+
+**End-to-end wiring.** The client `Pipeline` routes `VideoSegment` units to a
+configured video analyzer (`Pipeline::with_segment_store` / `with_video_analyzer`);
+the runnable client binaries (`aegis_proxy`, `aegis_vpn`, `aegis-client`) call
+`with_default_segment_store()`, so a blocked clip is retained on the child device
+and its `blob://` ref flows into the `AlertEvent`. The cluster dispatch is wired
+too (`AnalyzerRegistry::with_text_and_video`, used by `aegis-server`); an
+**all-in-one** node also passes a `SegmentStore` so the co-located parent app can
+read the clip. Real frame/audio sampling is behind aegis-video's `ffmpeg` feature
+(the default `NullDemuxer` fails open, storing nothing).
+
+**Distributed limitation (honest).** `blob://` is a *local* reference. In a
+distributed deployment the analysis cluster is a different host than the guardian's
+parent app, so a clip stored cluster-side is not reachable by a remote parent —
+which is why a distributed worker keeps **no** store (segment retention stays the
+child device's job, on the client pipeline). Remote video review (parent on a
+different machine than the child) needs a clip-fetch API over the existing gRPC
+channel; that is a tracked follow-up, not yet implemented.

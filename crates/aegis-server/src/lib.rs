@@ -103,12 +103,22 @@ impl AnalyzerRegistry {
     /// Default wiring plus buffered-video dispatch (`MediaKind::VIDEO` →
     /// [`aegis_video::VideoAnalyzer`]). Without aegis-video's `ffmpeg` feature the
     /// analyzer fails open, so registering it is safe; it makes the worker dispatch
-    /// VIDEO units instead of returning "no analyzer". Segment retention for the
-    /// guardian replay is the device-side responsibility (the client's
-    /// `Pipeline::with_segment_store`), so the cluster analyzer carries no store.
-    pub fn with_text_and_video() -> Self {
+    /// VIDEO units instead of returning "no analyzer".
+    ///
+    /// `store`: where blocked/borderline NON-CSAM clips are retained so a verdict
+    /// can carry `local_segment_uri`. Pass `Some` ONLY when the reviewer (guardian
+    /// app) can read that location — i.e. an **all-in-one** node where the parent
+    /// app resolves `blob://` from the same disk. For a distributed worker the
+    /// parent is remote and a local `blob://` is unreachable, so pass `None`
+    /// (segment retention then stays the device-side client's job; remote video
+    /// review needs a clip-fetch API — tracked as a follow-up).
+    pub fn with_text_and_video(store: Option<aegis_video::SegmentStore>) -> Self {
         let mut r = Self::with_text();
-        r.register(Arc::new(aegis_video::VideoAnalyzer::new()));
+        let mut video = aegis_video::VideoAnalyzer::new();
+        if let Some(store) = store {
+            video = video.with_segment_store(store);
+        }
+        r.register(Arc::new(video));
         r
     }
 }
@@ -203,7 +213,7 @@ mod tests {
 
     #[tokio::test]
     async fn registry_with_video_dispatches_text_and_video() {
-        let reg = AnalyzerRegistry::with_text_and_video();
+        let reg = AnalyzerRegistry::with_text_and_video(None);
         assert!(reg.analyzer_for(MediaKind::Text as i32).is_some());
         assert!(
             reg.analyzer_for(MediaKind::Video as i32).is_some(),
