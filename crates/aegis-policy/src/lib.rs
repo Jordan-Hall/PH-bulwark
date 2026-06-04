@@ -497,6 +497,7 @@ mod tests {
             grooming: None,
             worker_id: String::new(),
             latency_ms: 0,
+            ..Default::default()
         }
     }
 

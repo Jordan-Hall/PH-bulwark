@@ -213,6 +213,7 @@ impl<C: TextClassifier> TextAnalyzer<C> {
             grooming: Some(grooming),
             worker_id: String::new(),
             latency_ms: 0,
+            ..Default::default()
         }
     }
 }
@@ -285,6 +286,7 @@ fn adult_text_verdict(request_id: &str, span: &TextSpan) -> Verdict {
         grooming: None,
         worker_id: String::new(),
         latency_ms: 0,
+        ..Default::default()
     }
 }
 
@@ -301,6 +303,7 @@ fn safe_verdict(request_id: &str) -> Verdict {
         grooming: None,
         worker_id: String::new(),
         latency_ms: 0,
+        ..Default::default()
     }
 }
 

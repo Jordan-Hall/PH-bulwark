@@ -349,6 +349,9 @@ fn build_alert(
         // redacted summary only — never raw content (Evidence carries hashes/safe thumb).
         redacted_context: verdict.rationale.clone(),
         evidence: verdict.evidence.clone(),
+        // Carry the local video-segment ref (if the analyzer stored one) so the
+        // guardian app can replay the blocked clip from local storage.
+        local_segment_uri: verdict.local_segment_uri.clone(),
         // child_id/family_id are resolved cluster-side from device_id (the client
         // doesn't hold the family model); leave empty here.
         ..Default::default()

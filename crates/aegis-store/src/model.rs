@@ -144,6 +144,7 @@ impl AuditRow {
             grooming,
             worker_id: String::new(),
             latency_ms: 0,
+            ..Default::default()
         };
         StoredEvent {
             device: aegis_core::DeviceId(self.device_id.clone()),
@@ -300,6 +301,7 @@ mod tests {
             }),
             worker_id: "w1".into(),
             latency_ms: 12,
+            ..Default::default()
         };
         StoredEvent {
             device: aegis_core::DeviceId("dev-1".into()),

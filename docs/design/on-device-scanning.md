@@ -34,8 +34,27 @@ console's coverage matrix.
 
 ## Status
 
-Not built this wave. It is powerful + dual-use, so it ships only behind explicit,
-visible consent and platform permission prompts — never silently enabled.
+**Cross-platform orchestration is implemented** in `aegis-agent`
+(`OcrAgent` capture → `OnScreenClassifier` → `ScreenGuard` → guardian alert +
+`Overlay`):
+
+- `ScreenGuard::scan_once` drains captured text, classifies it (the composition
+  root injects `aegis-text` for text + `aegis-vision` for screenshots), and on a
+  flag raises a guardian alert **and** drives an `Overlay`.
+- `Overlay` renders an `Intervention` over the offending app:
+  `Cover { reason }` (block from view, for BLOCK/BLUR incl. CSAM), `Warn { reason }`
+  (banner, for WARN), or `AlertOnly`. `StubOverlay` (alert-only) is used where no
+  overlay is possible.
+
+What remains is the **platform-native capture + overlay rendering** (the parts that
+need a real device to build/test): Android `AccessibilityService` + `MediaProjection`
++ `SYSTEM_ALERT_WINDOW`; Windows UIA/screenshot + a top-most window; macOS/Linux
+equivalents. iOS/ChromeOS stay `StubOverlay` (the OS forbids it).
+
+It is powerful + dual-use, so it ships only behind **explicit, visible consent** and
+platform permission prompts on the child's own managed device — never silently
+enabled, never covert, safety-classification only (no raw-content exfiltration;
+CSAM covered + alerted but never stored).
 
 ---
 

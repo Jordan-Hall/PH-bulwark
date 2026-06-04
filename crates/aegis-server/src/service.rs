@@ -39,6 +39,7 @@ fn inconclusive(request_id: String) -> Verdict {
         grooming: None,
         worker_id: String::new(),
         latency_ms: 0,
+        ..Default::default()
     }
 }
 

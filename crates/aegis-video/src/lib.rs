@@ -187,7 +187,7 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
             }
         }
 
-        let verdict = worst.unwrap_or(Verdict {
+        let mut verdict = worst.unwrap_or(Verdict {
             request_id: req.request_id,
             category: Category::Safe as i32,
             action: Action::Allow as i32,
@@ -202,7 +202,9 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
         if let Some(store) = &self.segment_store {
             match store.store_if_safe(verdict.category(), verdict.action(), &segment) {
                 Ok(Some(stored)) => {
-                    tracing::info!(uri = %stored.uri, "aegis-video: stored segment for review")
+                    tracing::info!(uri = %stored.uri, "aegis-video: stored segment for review");
+                    // Propagate the local ref so the guardian alert can find the clip.
+                    verdict.local_segment_uri = stored.uri;
                 }
                 Ok(None) => {}
                 Err(e) => tracing::warn!(error = %e, "aegis-video: segment store write failed"),

@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use aegis_core::ids::DeviceId;
 use aegis_core::Result;
-use aegis_proto::v1::{SourceChannel, TextSpan};
+use aegis_proto::v1::{Action, Category, SourceChannel, TextSpan};
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
@@ -97,6 +97,172 @@ impl OcrSource for OcrAgent {
     }
 }
 
+// ---------------------------------------------------------------------------
+// On-device screen guard: classify captured content → ALERT + OVERLAY.
+//
+// This is how the child app handles E2E / cert-pinned apps (WhatsApp, Signal,
+// WebRTC) the network filter can't read: the OS renders the decrypted content,
+// the [`OcrAgent`] captures it (accessibility text / OCR'd screenshots), we
+// classify it on-device, and on a flag we (a) raise a guardian alert and (b)
+// drive an on-screen [`Overlay`] to COVER or WARN over the offending app.
+//
+// TRANSPARENT + CONSENTED only: the child's device shows Aegis is active and the
+// capture permissions are granted visibly. Safety classification only — no raw
+// content is exfiltrated, and suspected CSAM is covered + alerted (redacted) but
+// NEVER screenshotted, stored, or sent.
+// ---------------------------------------------------------------------------
+
+/// What to render over flagged on-screen content — the "place something over it".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Intervention {
+    /// Opaque cover that blocks the flagged content from view, with a notice.
+    Cover { reason: String },
+    /// Non-blocking warning banner (content stays visible).
+    Warn { reason: String },
+    /// No on-screen surface — raise the guardian alert only.
+    AlertOnly,
+}
+
+/// A platform surface that can draw an [`Intervention`] over other apps.
+///
+/// Feasible: **Android** (`SYSTEM_ALERT_WINDOW` + `AccessibilityService`),
+/// **Windows / macOS / Linux-X11** (a top-most always-on-top window). **iOS and
+/// ChromeOS forbid third-party system overlays** — they use [`StubOverlay`]
+/// (alert-only). The real impls live in the platform shells; this trait keeps the
+/// guard cross-platform.
+#[async_trait]
+pub trait Overlay: Send + Sync {
+    /// Show the intervention over the current foreground content.
+    async fn show(&self, intervention: &Intervention) -> Result<()>;
+    /// Remove any active overlay (content approved / no longer on screen).
+    async fn clear(&self) -> Result<()>;
+    /// Platform/mechanism label (diagnostics + the coverage matrix).
+    fn platform(&self) -> &'static str;
+}
+
+/// Overlay for platforms that forbid third-party overlays (iOS/ChromeOS) or for
+/// headless use: logs the intervention; the guardian alert still fires.
+pub struct StubOverlay;
+
+#[async_trait]
+impl Overlay for StubOverlay {
+    async fn show(&self, intervention: &Intervention) -> Result<()> {
+        tracing::info!(
+            ?intervention,
+            "overlay not available on this platform; alert-only"
+        );
+        Ok(())
+    }
+    async fn clear(&self) -> Result<()> {
+        Ok(())
+    }
+    fn platform(&self) -> &'static str {
+        "stub (alert-only)"
+    }
+}
+
+/// Safety verdict for a piece of captured on-screen content.
+#[derive(Debug, Clone)]
+pub struct ScreenVerdict {
+    pub category: Category,
+    pub action: Action,
+    /// Redacted reason for the alert/overlay — NEVER raw suspected-CSAM content.
+    pub redacted: String,
+    /// Raise a guardian alert (vs log-only / overlay-only).
+    pub raise_alert: bool,
+}
+
+/// Classifies captured on-screen content. Injected by the composition root so
+/// `aegis-agent` stays decoupled from the model crates — `aegis-client` wires
+/// `aegis-text` (OCR'd / accessibility text) and `aegis-vision` (screenshots).
+#[async_trait]
+pub trait OnScreenClassifier: Send + Sync {
+    /// Classify captured text. `None` = safe / no action.
+    async fn classify_text(&self, span: &TextSpan) -> Option<ScreenVerdict>;
+    /// Classify a captured screenshot/frame (JPEG/PNG). `None` = safe.
+    async fn classify_image(&self, _bytes: &[u8]) -> Option<ScreenVerdict> {
+        None
+    }
+}
+
+/// Sink for an on-screen flag → the guardian relay (redacted; no raw content).
+#[async_trait]
+pub trait ScreenAlertSink: Send + Sync {
+    async fn on_flagged(&self, device_id: &str, app: &str, verdict: &ScreenVerdict);
+}
+
+/// The on-device screen guard. Pulls captured content from the [`OcrAgent`],
+/// classifies it, and on a flag drives the [`Overlay`] + raises a guardian alert.
+pub struct ScreenGuard<C: OnScreenClassifier> {
+    device_id: DeviceId,
+    ocr: OcrAgent,
+    classifier: C,
+    overlay: Arc<dyn Overlay>,
+    alert: Option<Arc<dyn ScreenAlertSink>>,
+}
+
+impl<C: OnScreenClassifier> ScreenGuard<C> {
+    pub fn new(
+        device_id: DeviceId,
+        ocr: OcrAgent,
+        classifier: C,
+        overlay: Arc<dyn Overlay>,
+    ) -> Self {
+        Self {
+            device_id,
+            ocr,
+            classifier,
+            overlay,
+            alert: None,
+        }
+    }
+
+    /// Attach a guardian alert sink (a flagged item also raises an alert).
+    pub fn with_alert(mut self, sink: Arc<dyn ScreenAlertSink>) -> Self {
+        self.alert = Some(sink);
+        self
+    }
+
+    /// Map a verdict to the on-screen intervention. BLOCK/BLUR (incl. CSAM) →
+    /// cover; WARN → warn banner; otherwise alert-only.
+    fn intervention_for(v: &ScreenVerdict) -> Intervention {
+        match v.action {
+            Action::Block | Action::Blur => Intervention::Cover {
+                reason: v.redacted.clone(),
+            },
+            Action::Warn => Intervention::Warn {
+                reason: v.redacted.clone(),
+            },
+            _ => Intervention::AlertOnly,
+        }
+    }
+
+    /// Process one captured text span (if any): classify → cover/warn + alert on a
+    /// flag. Returns the verdict it acted on (for the run loop / tests).
+    pub async fn scan_once(&self) -> Result<Option<ScreenVerdict>> {
+        let Some(span) = self.ocr.next_text().await? else {
+            return Ok(None);
+        };
+        let app = span.app.clone();
+        let Some(verdict) = self.classifier.classify_text(&span).await else {
+            return Ok(None);
+        };
+        let action = Self::intervention_for(&verdict);
+        if !matches!(action, Intervention::AlertOnly) {
+            if let Err(e) = self.overlay.show(&action).await {
+                tracing::warn!(error = %e, "on-screen overlay failed");
+            }
+        }
+        if verdict.raise_alert {
+            if let Some(sink) = &self.alert {
+                sink.on_flagged(&self.device_id.to_string(), &app, &verdict)
+                    .await;
+            }
+        }
+        Ok(Some(verdict))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,5 +290,75 @@ mod tests {
         assert_eq!(first.thread_id, "t1");
         assert!(a.next_text().await.unwrap().is_some());
         assert!(a.next_text().await.unwrap().is_none());
+    }
+
+    struct AlwaysGrooming;
+    #[async_trait]
+    impl OnScreenClassifier for AlwaysGrooming {
+        async fn classify_text(&self, _s: &TextSpan) -> Option<ScreenVerdict> {
+            Some(ScreenVerdict {
+                category: Category::Grooming,
+                action: Action::Warn,
+                redacted: "[redacted] grooming-suspicion".into(),
+                raise_alert: true,
+            })
+        }
+    }
+
+    struct RecOverlay(Arc<Mutex<Vec<Intervention>>>);
+    #[async_trait]
+    impl Overlay for RecOverlay {
+        async fn show(&self, i: &Intervention) -> Result<()> {
+            self.0.lock().await.push(i.clone());
+            Ok(())
+        }
+        async fn clear(&self) -> Result<()> {
+            Ok(())
+        }
+        fn platform(&self) -> &'static str {
+            "test"
+        }
+    }
+
+    struct RecAlert(Arc<Mutex<u32>>);
+    #[async_trait]
+    impl ScreenAlertSink for RecAlert {
+        async fn on_flagged(&self, _device: &str, _app: &str, _v: &ScreenVerdict) {
+            *self.0.lock().await += 1;
+        }
+    }
+
+    #[tokio::test]
+    async fn screen_guard_covers_and_alerts_on_flagged_text() {
+        let shown = Arc::new(Mutex::new(Vec::new()));
+        let alerts = Arc::new(Mutex::new(0u32));
+        let ocr = OcrAgent::new();
+        ocr.push(
+            "whatsapp",
+            "t1",
+            "send me a pic of you".into(),
+            SourceChannel::OcrOnscreen,
+        )
+        .await;
+
+        let guard = ScreenGuard::new(
+            DeviceId::from("kids-phone"),
+            ocr,
+            AlwaysGrooming,
+            Arc::new(RecOverlay(shown.clone())),
+        )
+        .with_alert(Arc::new(RecAlert(alerts.clone())));
+
+        let v = guard.scan_once().await.unwrap().expect("flagged span");
+        assert_eq!(v.category, Category::Grooming);
+        // A WARN verdict → an on-screen overlay is shown AND the guardian alerted.
+        {
+            let s = shown.lock().await;
+            assert_eq!(s.len(), 1);
+            assert!(matches!(s[0], Intervention::Warn { .. }));
+        }
+        assert_eq!(*alerts.lock().await, 1);
+        // Queue drained → next scan is a no-op.
+        assert!(guard.scan_once().await.unwrap().is_none());
     }
 }

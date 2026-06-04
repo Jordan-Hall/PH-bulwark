@@ -175,6 +175,10 @@ message Verdict {
   GroomingSignal grooming = 8; // present when category == GROOMING / CSAM_SUSPECTED
   string   worker_id    = 9; // which node served it (observability)
   uint32   latency_ms   = 10; // server-side processing time
+  // LOCAL-ONLY `blob://<sha256>` ref to a blocked/borderline VIDEO segment the
+  // analyzer retained for guardian review (aegis-video::SegmentStore). Copied into
+  // AlertEvent.local_segment_uri. Empty for non-video / benign / CSAM (never stored).
+  string   local_segment_uri = 11;
 }
 
 // Output of the deterministic grooming rule engine (model-research §grooming).

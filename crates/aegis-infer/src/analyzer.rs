@@ -41,6 +41,7 @@ fn inconclusive_verdict(req: &AnalysisRequest) -> Verdict {
         grooming: None,
         worker_id: "local:null".into(),
         latency_ms: 0,
+        ..Default::default()
     }
 }
 

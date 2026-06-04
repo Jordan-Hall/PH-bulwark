@@ -283,11 +283,13 @@ fn App() -> Element {
 
         let mut client = ReviewClient::new(channel);
 
-        // Empty device_id == all supervised devices; empty token == legacy
-        // (no per-guardian scoping — the desktop console has no login flow yet).
+        // A guardian session token (from Accounts.Login) scopes the stream to this
+        // guardian's children and is REQUIRED by an accounts-wired server. The
+        // desktop console has no login UI yet, so we read a pre-obtained token from
+        // AEGIS_GUARDIAN_TOKEN; empty = legacy (no-accounts) server. (Login UI TODO.)
         let filter = DeviceFilter {
             device_id: String::new(),
-            ..Default::default()
+            token: std::env::var("AEGIS_GUARDIAN_TOKEN").unwrap_or_default(),
         };
 
         let mut stream = match client.stream_pending_reviews(filter).await {
@@ -807,10 +809,15 @@ fn ProtectionPanel() -> Element {
                     "Proxy (no admin)"
                 }
                 button {
-                    class: if mode() == Mode::Vpn { "mode-opt mode-on" } else { "mode-opt" },
-                    disabled: busy() || connected(),
+                    // DISABLED until the permissive smoltcp/WireGuard data path lands
+                    // — `run_vpn` currently fails closed, so offering VPN mode would
+                    // only produce an error. The onclick is retained (keeps the
+                    // `Mode::Vpn` variant constructed) but the button can't be clicked.
+                    class: "mode-opt",
+                    disabled: true,
+                    title: "Transparent VPN is being rebuilt on a permissive netstack — use Proxy for now",
                     onclick: move |_| { let mut mode = mode; mode.set(Mode::Vpn); },
-                    "VPN (system-wide, admin)"
+                    "VPN (coming soon)"
                 }
             }
             div { class: "mode-explain", "{mode().explain()}" }
