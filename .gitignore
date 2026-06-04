@@ -25,7 +25,8 @@ platform/android/local.properties
 .env
 secrets/
 
-# Local Claude Code settings (personal overrides)
+# Local Claude Code settings (personal overrides) — never commit
+.claude/
 .claude/settings.local.json
 
 # OS / editor
