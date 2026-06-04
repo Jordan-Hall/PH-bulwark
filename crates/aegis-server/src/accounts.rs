@@ -42,6 +42,26 @@ const SALT_LEN: usize = 16;
 /// Session/id token entropy in bytes (→ hex string of 2× this length).
 const TOKEN_BYTES: usize = 32;
 const ID_BYTES: usize = 16;
+/// Default guardian-session lifetime; override with `AEGIS_SESSION_TTL_SECS`
+/// (positive integer seconds). A leaked token is valid at most this long; sessions
+/// are also dropped on restart (never persisted).
+const DEFAULT_SESSION_TTL_SECS: i64 = 12 * 3600;
+
+/// The configured session TTL in milliseconds (env override, else the default).
+fn session_ttl_ms() -> i64 {
+    std::env::var("AEGIS_SESSION_TTL_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_SESSION_TTL_SECS)
+        .saturating_mul(1000)
+}
+
+/// Is a session issued at `issued_ms` still valid at `now_ms` for `ttl_ms`? Pure
+/// (unit-tested): rejects future-dated and past-TTL tokens.
+fn session_live(issued_ms: i64, now_ms: i64, ttl_ms: i64) -> bool {
+    now_ms >= issued_ms && now_ms.saturating_sub(issued_ms) < ttl_ms
+}
 
 // ---------------------------------------------------------------------------
 // Errors + public value types
@@ -134,14 +154,22 @@ impl ChildRec {
     }
 }
 
+/// A live guardian session: which account, and when it was minted (for expiry).
+#[derive(Clone)]
+struct SessionEntry {
+    account_id: String,
+    issued_ms: i64,
+}
+
 #[derive(Default)]
 struct Inner {
     /// email (lowercased) → account.
     by_email: HashMap<String, Account>,
     /// account_id → email (reverse lookup).
     email_by_id: HashMap<String, String>,
-    /// session token → account_id.
-    sessions: HashMap<String, String>,
+    /// session token → (account_id, issued time). Expired tokens are rejected
+    /// (see [`session_live`]). Never persisted — dropped on restart.
+    sessions: HashMap<String, SessionEntry>,
     /// child_id → child record.
     children: HashMap<String, ChildRec>,
     /// device_id → child_id (for routing alerts by device to a child).
@@ -291,17 +319,28 @@ impl AccountStore {
         .map_err(|_| AccountError::BadCredentials)?;
         let account_id = account.account_id.clone();
         let token = self.rand_hex(TOKEN_BYTES);
-        inner.sessions.insert(token.clone(), account_id.clone());
-        Ok((token, account_id, Self::now_ms()))
+        let issued_ms = Self::now_ms();
+        inner.sessions.insert(
+            token.clone(),
+            SessionEntry {
+                account_id: account_id.clone(),
+                issued_ms,
+            },
+        );
+        Ok((token, account_id, issued_ms))
     }
 
-    /// Resolve a session token to its account_id, or `Unauthorized`.
+    /// Resolve a session token to its account_id, or `Unauthorized` (unknown OR
+    /// expired — a token past its TTL is treated as if it were never issued).
     fn account_for_token(inner: &Inner, token: &str) -> Result<String, AccountError> {
-        inner
+        let entry = inner
             .sessions
             .get(token.trim())
-            .cloned()
-            .ok_or(AccountError::Unauthorized)
+            .ok_or(AccountError::Unauthorized)?;
+        if !session_live(entry.issued_ms, Self::now_ms(), session_ttl_ms()) {
+            return Err(AccountError::Unauthorized);
+        }
+        Ok(entry.account_id.clone())
     }
 
     /// Add a child to the caller's family; the caller becomes its first guardian.
@@ -393,10 +432,14 @@ impl AccountStore {
     }
 
     /// Resolve a token to the set of child_ids + device_ids it may see. Returns
-    /// `None` for an unknown token (caller treats that as "deny / unauthenticated").
+    /// `None` for an unknown OR expired token (caller treats that as "deny").
     pub fn guardian_scope(&self, token: &str) -> Option<GuardianScope> {
         let inner = self.inner.lock().expect("account mutex poisoned");
-        let account_id = inner.sessions.get(token.trim())?.clone();
+        let entry = inner.sessions.get(token.trim())?;
+        if !session_live(entry.issued_ms, Self::now_ms(), session_ttl_ms()) {
+            return None;
+        }
+        let account_id = entry.account_id.clone();
         let mut scope = GuardianScope::default();
         for c in inner.children.values() {
             if c.guardians.contains(&account_id) {
@@ -711,6 +754,37 @@ mod tests {
         let s = AccountStore::with_state_dir(&dir).unwrap(); // must not panic
         assert!(s.create_account("c@x.com", "passwordthree", "C").unwrap().1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_live_window() {
+        assert!(session_live(0, 0, 1000)); // issued == now
+        assert!(session_live(0, 999, 1000)); // within ttl
+        assert!(!session_live(0, 1000, 1000)); // at ttl boundary → expired
+        assert!(!session_live(0, 5000, 1000)); // past ttl
+        assert!(!session_live(100, 50, 1000)); // future-dated → rejected
+    }
+
+    #[test]
+    fn expired_session_is_rejected() {
+        let s = AccountStore::new();
+        s.create_account("a@x.com", "passwordone", "A").unwrap();
+        let (tok, _, _) = s.login("a@x.com", "passwordone").unwrap();
+        // Fresh token works.
+        assert!(s.guardian_scope(&tok).is_some());
+        assert!(s.list_children(&tok).is_ok());
+        // Age the session past the TTL (in-module access to the private field).
+        {
+            let mut inner = s.inner.lock().unwrap();
+            inner.sessions.get_mut(tok.trim()).unwrap().issued_ms -= session_ttl_ms() + 1000;
+        }
+        // Now treated as unauthenticated everywhere a token is checked.
+        assert!(s.guardian_scope(&tok).is_none());
+        assert_eq!(s.list_children(&tok), Err(AccountError::Unauthorized));
+        assert_eq!(
+            s.add_child(&tok, "Kid", "dev-1"),
+            Err(AccountError::Unauthorized)
+        );
     }
 
     #[test]
