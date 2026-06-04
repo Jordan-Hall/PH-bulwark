@@ -59,6 +59,8 @@ child device                              home cluster                guardian
   aegis_admin list-children   <token>
   ```
   The `login` token is what you put in `AEGIS_GUARDIAN_TOKEN` for the parent app.
+  Tokens expire after `AEGIS_SESSION_TTL_SECS` (default 12h) and are dropped on
+  restart, so a leaked token is short-lived — re-`login` to refresh.
 - **Durable now:** set `AEGIS_STATE_DIR=/var/lib/aegis` and accounts/children/
   guardian assignments are persisted (JSON) and reload on restart (session tokens
   are intentionally dropped — guardians re-login). Unset ⇒ in-memory.
@@ -142,6 +144,7 @@ defeats software-only prevention short of zero-touch/ABM — detection still fir
 | `AEGIS_ROLE` | server | role (lb\|worker\|all-in-one) | all-in-one | never (flag/default) |
 | `AEGIS_BIND` | server | gRPC listen host:port | 127.0.0.1:8443 | non-loopback bind |
 | `AEGIS_ACCOUNTS` | server | enable guardian accounts | off | provisioning guardians |
+| `AEGIS_SESSION_TTL_SECS` | server | guardian session-token lifetime (seconds) | 43200 (12h) | tune session expiry |
 | `AEGIS_STATE_DIR` | server | persist guardian state — accounts/push/pending/allowlist (JSON) | unset (in-memory) | durable state |
 | `AEGIS_ADMIN_ENDPOINT` | aegis_admin | Accounts service endpoint for the CLI | `http://127.0.0.1:8443` | remote/TLS provisioning |
 | `AEGIS_UI_BIND` | aegis-ui | dashboard host:port | 127.0.0.1:8080 | non-loopback UI |
