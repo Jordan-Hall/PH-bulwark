@@ -305,8 +305,12 @@ pub async fn run(
         //     guardian sessions exist (else the gate rejects empty-token clients).
         if cfg.accounts_enabled {
             // Parent accounts + per-child guardians: the store scopes Review's
-            // pending stream/decisions AND backs the Accounts service.
-            let accounts = AccountStore::new();
+            // pending stream/decisions AND backs the Accounts service. Persisted to
+            // disk when a state dir is configured (else in-memory).
+            let accounts = match &cfg.state_dir {
+                Some(dir) => AccountStore::with_state_dir(dir)?,
+                None => AccountStore::new(),
+            };
             router = router.add_service(ReviewServer::new(ReviewService::with_accounts(
                 hub,
                 accounts.clone(),

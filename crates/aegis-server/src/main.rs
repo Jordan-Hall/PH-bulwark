@@ -29,10 +29,17 @@ async fn main() -> anyhow::Result<()> {
         Some("1") | Some("true") | Some("yes")
     );
 
+    // Durable guardian state: when AEGIS_STATE_DIR is set, accounts are persisted
+    // there and reloaded on restart; unset = in-memory (dev default).
+    let state_dir = std::env::var_os("AEGIS_STATE_DIR")
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from);
+
     let cfg = ServerConfig {
         role,
         bind,
         accounts_enabled,
+        state_dir,
         // mTLS material is loaded from aegis-core Config in a full deployment;
         // left None here so a local single-node run works out of the box (dev).
         ..ServerConfig::default()
