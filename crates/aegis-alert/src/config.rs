@@ -20,6 +20,18 @@ use crate::error::{AlertError, Result};
 pub const ENV_SMTP_USERNAME: &str = "AEGIS_SMTP_USERNAME";
 /// Default environment variable holding the SMTP password / app-password.
 pub const ENV_SMTP_PASSWORD: &str = "AEGIS_SMTP_PASSWORD";
+/// SMTP host — presence of this is the on-switch for the email alert sink.
+pub const ENV_SMTP_HOST: &str = "AEGIS_SMTP_HOST";
+/// SMTP port (optional; defaults by TLS mode).
+pub const ENV_SMTP_PORT: &str = "AEGIS_SMTP_PORT";
+/// TLS mode: `tls` | `starttls` | `none` (optional; default `tls`).
+pub const ENV_SMTP_TLS: &str = "AEGIS_SMTP_TLS";
+/// `From:` address shown to the guardian.
+pub const ENV_ALERT_FROM: &str = "AEGIS_ALERT_FROM";
+/// Comma-separated guardian recipient address(es).
+pub const ENV_ALERT_RECIPIENTS: &str = "AEGIS_ALERT_RECIPIENTS";
+/// Optional subject prefix (default `[Aegis]`).
+pub const ENV_ALERT_SUBJECT_PREFIX: &str = "AEGIS_ALERT_SUBJECT_PREFIX";
 
 /// How TLS is negotiated with the SMTP server.
 ///
@@ -225,6 +237,71 @@ impl AlertConfig {
         }
         Ok(())
     }
+
+    /// Build an [`AlertConfig`] from the environment, or `None` when the email
+    /// sink is not configured. Returns `Err` only when partially/invalidly set, so
+    /// a misconfiguration fails at startup rather than on the first alert.
+    ///
+    /// On-switch: `AEGIS_SMTP_HOST` + `AEGIS_ALERT_FROM` + `AEGIS_ALERT_RECIPIENTS`
+    /// must ALL be present (or none of them). Optional: `AEGIS_SMTP_PORT`,
+    /// `AEGIS_SMTP_TLS` (`tls`|`starttls`|`none`), `AEGIS_SMTP_USERNAME` /
+    /// `AEGIS_SMTP_PASSWORD` (auth), `AEGIS_ALERT_SUBJECT_PREFIX`.
+    pub fn from_env() -> Result<Option<Self>> {
+        let var = |k: &str| std::env::var(k).ok().filter(|s| !s.trim().is_empty());
+        match (
+            var(ENV_SMTP_HOST),
+            var(ENV_ALERT_FROM),
+            var(ENV_ALERT_RECIPIENTS),
+        ) {
+            (None, None, None) => Ok(None), // not configured — keep the sink off.
+            (Some(host), Some(from), Some(recipients_raw)) => {
+                let recipients: Vec<String> = recipients_raw
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+
+                let tls = match var(ENV_SMTP_TLS).as_deref() {
+                    Some("starttls") => TlsMode::StartTls,
+                    Some("none") => TlsMode::None,
+                    None | Some("tls") => TlsMode::Tls,
+                    Some(other) => {
+                        return Err(AlertError::Config(format!(
+                            "{ENV_SMTP_TLS}={other:?} (want tls|starttls|none)"
+                        )))
+                    }
+                };
+                let default_port = if tls == TlsMode::StartTls { 587 } else { 465 };
+                let port = match var(ENV_SMTP_PORT) {
+                    Some(p) => p
+                        .parse::<u16>()
+                        .map_err(|e| AlertError::Config(format!("{ENV_SMTP_PORT}={p:?}: {e}")))?,
+                    None => default_port,
+                };
+
+                let mut smtp = SmtpConfig::new(host, port);
+                smtp.tls = tls;
+                if let Some(auth) = SmtpAuth::from_env() {
+                    smtp = smtp.with_auth(auth);
+                }
+
+                let cfg = Self {
+                    smtp,
+                    from,
+                    recipients,
+                    subject_prefix: var(ENV_ALERT_SUBJECT_PREFIX)
+                        .unwrap_or_else(Self::default_subject_prefix),
+                    rate_limit: RateLimitConfig::default(),
+                };
+                cfg.validate()?;
+                Ok(Some(cfg))
+            }
+            _ => Err(AlertError::Config(format!(
+                "incomplete email-alert config: set ALL of {ENV_SMTP_HOST}, \
+                 {ENV_ALERT_FROM}, {ENV_ALERT_RECIPIENTS} or none of them"
+            ))),
+        }
+    }
 }
 
 /// Serde helper: represent a `Duration` as whole seconds in config files
@@ -241,5 +318,53 @@ mod humanish_secs {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
         let secs = u64::deserialize(d)?;
         Ok(Duration::from_secs(secs))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // These env vars are unique to the email-sink config; only this test mutates
+    // them. All cases run in one test (std::env is process-global) to avoid races.
+    #[test]
+    fn from_env_off_on_and_invalid() {
+        let all = [
+            ENV_SMTP_HOST,
+            ENV_ALERT_FROM,
+            ENV_ALERT_RECIPIENTS,
+            ENV_SMTP_PORT,
+            ENV_SMTP_TLS,
+            ENV_ALERT_SUBJECT_PREFIX,
+        ];
+        for k in all {
+            std::env::remove_var(k);
+        }
+
+        // Unset → sink off.
+        assert!(matches!(AlertConfig::from_env(), Ok(None)));
+
+        // Full trio → Some, with parsed recipients + default TLS/port.
+        std::env::set_var(ENV_SMTP_HOST, "smtp.example.com");
+        std::env::set_var(ENV_ALERT_FROM, "Aegis <aegis@home.example>");
+        std::env::set_var(ENV_ALERT_RECIPIENTS, "a@home.example, b@home.example");
+        let cfg = AlertConfig::from_env().expect("ok").expect("configured");
+        assert_eq!(cfg.smtp.host, "smtp.example.com");
+        assert_eq!(cfg.recipients, vec!["a@home.example", "b@home.example"]);
+        assert_eq!(cfg.smtp.tls, TlsMode::Tls);
+        assert_eq!(cfg.smtp.port, 465);
+
+        // starttls → default port 587.
+        std::env::set_var(ENV_SMTP_TLS, "starttls");
+        assert_eq!(AlertConfig::from_env().unwrap().unwrap().smtp.port, 587);
+        std::env::remove_var(ENV_SMTP_TLS);
+
+        // Partial config (host+from but no recipients) → hard error at startup.
+        std::env::remove_var(ENV_ALERT_RECIPIENTS);
+        assert!(AlertConfig::from_env().is_err());
+
+        for k in all {
+            std::env::remove_var(k);
+        }
     }
 }

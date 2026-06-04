@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex};
 
 use aegis_core::{Analyzer, Result};
 use aegis_flow::{AnalysisUnit, DefaultFlowClassifier, FlowClassifier};
+use aegis_infer::OffloadRouter;
 use aegis_net::{InterceptDecision, Interceptor};
 use aegis_policy::PolicyEngine; // trait providing Policy::decide / Policy::alert_for
 use aegis_proto::v1::{
@@ -119,6 +120,13 @@ pub struct Pipeline {
     /// retained locally and its `blob://` ref rides on the verdict's
     /// `local_segment_uri` so the guardian app can replay the clip.
     video: Option<Arc<dyn Analyzer>>,
+    /// Cluster-offload router for heavy media NOT scored locally (audio today;
+    /// image when local scoring is deferred). `None` → the historical fail-OPEN
+    /// behaviour (the default no-cluster build is unchanged). Injected via
+    /// [`Pipeline::with_offload`]; the concrete `aegis-infer` `DefaultOffloadRouter`
+    /// (which owns the mTLS `OffloadClient`) is built by the composition root, as
+    /// it needs TLS material `ClientConfig` does not carry.
+    offload: Option<Arc<dyn OffloadRouter>>,
     /// Process-wide CONTENT-HASH decision cache: sha256(image bytes) → the
     /// scored decision triple. The same image is never re-scored — a hit returns
     /// the cached verdict instantly (no model run), which makes repeated imagery
@@ -139,6 +147,7 @@ impl Pipeline {
             store: None,
             nsfw: build_nsfw_scorer(),
             video: None,
+            offload: None,
             image_cache: Mutex::new(HashMap::new()),
         }
     }
@@ -205,6 +214,18 @@ impl Pipeline {
         }
     }
 
+    /// Route AUDIO (and, later, image when local scoring is deferred) through
+    /// `router` — the `aegis-infer` [`OffloadRouter`] door to the cluster's
+    /// `Analysis` service. The composition root builds the concrete
+    /// [`aegis_infer::DefaultOffloadRouter`] (which owns the mTLS `OffloadClient`)
+    /// and injects it here, because the client cert/key/CA it needs are not on
+    /// [`ClientConfig`]. Unset → heavy non-local media fails OPEN, as the default
+    /// build does.
+    pub fn with_offload(mut self, router: Arc<dyn OffloadRouter>) -> Self {
+        self.offload = Some(router);
+        self
+    }
+
     /// Override the local NSFW scorer. Primarily for tests (inject a deterministic
     /// scorer); production uses the env-selected scorer from [`Pipeline::new`].
     pub fn with_nsfw_scorer(mut self, scorer: Box<dyn Scorer>) -> Self {
@@ -238,9 +259,51 @@ impl Pipeline {
                 }
                 None => fail_open_verdict("video analyzer not configured (fail open)"),
             },
-            // SEAM: route AUDIO to the cluster (aegis-infer OffloadRouter →
-            // Analysis.Analyze). Until the cluster client is wired, fail open.
-            _ => fail_open_verdict("heavy-media cluster path not yet wired"),
+            // AUDIO → offload to the cluster's Analysis service via aegis-infer's
+            // OffloadRouter when configured (see `with_offload`); otherwise fail
+            // OPEN, exactly as the default no-cluster build does. An offload error
+            // also fails OPEN — never block on a remote hop.
+            AnalysisUnit::Audio(media) => match &self.offload {
+                Some(router) => {
+                    self.analyze_offload(router.as_ref(), media, MediaKind::Audio)
+                        .await
+                }
+                None => fail_open_verdict("audio offload not configured (fail open)"),
+            },
+        }
+    }
+
+    /// Send a heavy-media unit to the cluster via the offload `router` and
+    /// propagate its verdict. Mirrors [`Self::analyze_video`]: a unique
+    /// content-hashed `request_id` (so distinct media never collide on
+    /// `alert_id`), and any error fails OPEN — an offload hop we can't complete
+    /// must never block legitimate traffic.
+    async fn analyze_offload(
+        &self,
+        router: &dyn OffloadRouter,
+        media: &InlineMedia,
+        kind: MediaKind,
+    ) -> Verdict {
+        let req = AnalysisRequest {
+            request_id: format!(
+                "{}-{}-{}",
+                self.cfg.device_id,
+                kind_tag(kind),
+                short_hash_hex(&media.data)
+            ),
+            media_kind: kind as i32,
+            device_id: self.cfg.device_id.clone(),
+            ts: span_now(),
+            media: Some(Media::InlineMedia(media.clone())),
+            ..Default::default()
+        };
+        match router.analyze(req).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, kind = ?kind,
+                    "aegis-client: offload analysis failed; failing open");
+                fail_open_verdict("offload analysis error (fail open)")
+            }
         }
     }
 
@@ -603,6 +666,16 @@ fn sha256_array(bytes: &[u8]) -> [u8; 32] {
     digest.as_ref().try_into().unwrap_or([0u8; 32])
 }
 
+/// Short, stable kind tag for offload request ids (audio/image/video).
+fn kind_tag(kind: MediaKind) -> &'static str {
+    match kind {
+        MediaKind::Audio => "audio",
+        MediaKind::Image => "img",
+        MediaKind::Video => "video",
+        _ => "media",
+    }
+}
+
 /// Short hex (8 bytes) of the content hash — a stable, per-content suffix for
 /// request/alert IDs so distinct blocked media never collide on `alert_id`.
 fn short_hash_hex(bytes: &[u8]) -> String {
@@ -955,6 +1028,116 @@ mod tests {
             p.classifier.buffer().pending(),
             0,
             "the buffered video segment ticket must be released after analysis"
+        );
+    }
+
+    /// A deterministic stub `OffloadRouter`: records the request + returns a canned
+    /// verdict. No network — proves `analyze()` builds the request and propagates
+    /// the cluster verdict for AUDIO.
+    struct StubOffload {
+        verdict: Verdict,
+        seen_kind: std::sync::Mutex<Option<i32>>,
+        seen_request_id: std::sync::Mutex<Option<String>>,
+    }
+    #[async_trait::async_trait]
+    impl OffloadRouter for StubOffload {
+        async fn negotiate(
+            &self,
+            _p: aegis_proto::v1::DeviceProfile,
+        ) -> aegis_infer::Result<aegis_proto::v1::OffloadPolicy> {
+            unreachable!("not used in analyze() tests")
+        }
+        fn route(&self, _k: MediaKind, _rtt: u32, _q: u32) -> aegis_infer::Route {
+            aegis_infer::Route::Cluster
+        }
+        async fn analyze(&self, req: AnalysisRequest) -> aegis_infer::Result<Verdict> {
+            *self.seen_kind.lock().unwrap() = Some(req.media_kind);
+            *self.seen_request_id.lock().unwrap() = Some(req.request_id.clone());
+            let mut v = self.verdict.clone();
+            v.request_id = req.request_id;
+            Ok(v)
+        }
+        async fn refresh(
+            &self,
+            _r: aegis_proto::v1::RefreshOffloadRequest,
+        ) -> aegis_infer::Result<aegis_proto::v1::OffloadPolicy> {
+            unreachable!("not used in analyze() tests")
+        }
+    }
+
+    fn audio_unit() -> AnalysisUnit {
+        AnalysisUnit::Audio(InlineMedia {
+            data: vec![1, 2, 3, 4],
+            mime_type: "audio/L16".into(),
+            ..Default::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn audio_without_offload_fails_open() {
+        // Default build: no offload injected → AUDIO fails OPEN, unchanged.
+        let p = Pipeline::new(ClientConfig::default());
+        let v = p.analyze(&audio_unit()).await;
+        assert_eq!(v.action, Action::Allow as i32);
+        assert_eq!(v.category, Category::Safe as i32);
+    }
+
+    #[tokio::test]
+    async fn audio_with_offload_routes_to_cluster_and_propagates_verdict() {
+        let stub = Arc::new(StubOffload {
+            verdict: Verdict {
+                category: Category::AdultAudio as i32,
+                action: Action::Mute as i32,
+                ..Default::default()
+            },
+            seen_kind: std::sync::Mutex::new(None),
+            seen_request_id: std::sync::Mutex::new(None),
+        });
+        let p = Pipeline::new(ClientConfig::default()).with_offload(stub.clone());
+        let v = p.analyze(&audio_unit()).await;
+
+        // The cluster verdict is propagated; the request was built for AUDIO with a
+        // device-scoped, content-hashed id.
+        assert_eq!(v.action, Action::Mute as i32);
+        assert_eq!(
+            *stub.seen_kind.lock().unwrap(),
+            Some(MediaKind::Audio as i32)
+        );
+        let rid = stub.seen_request_id.lock().unwrap().clone().unwrap();
+        assert!(rid.starts_with("device-local-audio-"), "got {rid}");
+    }
+
+    /// An offload ERROR must fail OPEN — never block on a remote hop.
+    #[tokio::test]
+    async fn audio_offload_error_fails_open() {
+        struct ErrOffload;
+        #[async_trait::async_trait]
+        impl OffloadRouter for ErrOffload {
+            async fn negotiate(
+                &self,
+                _p: aegis_proto::v1::DeviceProfile,
+            ) -> aegis_infer::Result<aegis_proto::v1::OffloadPolicy> {
+                unreachable!()
+            }
+            fn route(&self, _k: MediaKind, _r: u32, _q: u32) -> aegis_infer::Route {
+                aegis_infer::Route::Cluster
+            }
+            async fn analyze(&self, _req: AnalysisRequest) -> aegis_infer::Result<Verdict> {
+                Err(aegis_core::Error::Ipc("cluster down".into()))
+            }
+            async fn refresh(
+                &self,
+                _r: aegis_proto::v1::RefreshOffloadRequest,
+            ) -> aegis_infer::Result<aegis_proto::v1::OffloadPolicy> {
+                unreachable!()
+            }
+        }
+        let p = Pipeline::new(ClientConfig::default()).with_offload(Arc::new(ErrOffload));
+        let v = p.analyze(&audio_unit()).await;
+        assert_eq!(
+            v.action,
+            Action::Allow as i32,
+            "offload failure must fail OPEN"
         );
     }
 

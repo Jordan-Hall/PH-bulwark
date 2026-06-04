@@ -59,9 +59,23 @@ async fn main() -> anyhow::Result<()> {
         ))
     });
 
-    // Alert relay is wired when SMTP is configured (aegis-alert). For a bare
-    // local run we serve without it; the all-in-one client raises alerts itself.
-    let alert_sink: Option<Arc<dyn aegis_alert::AlertSink>> = None;
+    // Alert relay e-mails the guardian when SMTP is configured via env
+    // (AEGIS_SMTP_HOST + AEGIS_ALERT_FROM + AEGIS_ALERT_RECIPIENTS, see
+    // aegis_alert::AlertConfig::from_env). Unset → no sink (default local run:
+    // the broadcast fan-out / all-in-one client is the delivery path). A partial/
+    // invalid config fails at startup rather than silently dropping alerts.
+    let alert_sink: Option<Arc<dyn aegis_alert::AlertSink>> =
+        match aegis_alert::AlertConfig::from_env().map_err(|e| anyhow::anyhow!(e))? {
+            Some(cfg) => {
+                let sink = aegis_alert::EmailAlertSink::new(cfg).map_err(|e| anyhow::anyhow!(e))?;
+                tracing::info!("email alert sink configured (SMTP)");
+                Some(Arc::new(sink))
+            }
+            None => {
+                tracing::info!("no email alert sink (AEGIS_SMTP_HOST unset); fan-out only");
+                None
+            }
+        };
 
     tracing::info!(?role, "starting aegis-server");
     service::run(cfg, registry, alert_sink, cluster).await

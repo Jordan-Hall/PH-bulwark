@@ -32,6 +32,14 @@ on:
       - ".github/workflows/android.yml"
   workflow_dispatch: {}
 
+# Harden cargo against the recurring transient crates.io download flake on the
+# runner ("curl failed [16] Error in the HTTP2 framing layer" while installing
+# cargo-ndk / fetching deps): retry downloads, and force HTTP/1.1 which avoids the
+# HTTP/2 multiplexing framing bug. Applies to every cargo invocation in the job.
+env:
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_MULTIPLEXING: "false"
+
 jobs:
   child-apk:
     runs-on: ubuntu-latest
