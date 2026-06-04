@@ -160,13 +160,26 @@ impl Pipeline {
 
     /// Enable buffered-video analysis backed by a local [`SegmentStore`]: blocked
     /// /borderline NON-CSAM segments are retained so the guardian app can replay
-    /// them (the `blob://` ref is propagated on `verdict.local_segment_uri`). Uses
-    /// the default [`aegis_video::VideoAnalyzer`]; real frame/audio sampling needs
-    /// the `ffmpeg`/`onnx` features (otherwise the segment fails open, unstored).
+    /// them (the `blob://` ref is propagated on `verdict.local_segment_uri`).
+    ///
+    /// Builds an [`aegis_video::VideoAnalyzer`] whose demuxer depends on features:
+    /// with `ffmpeg` it uses the real sidecar demuxer (frames sampled + scored, so
+    /// clips are actually stored); without it the `NullDemuxer` fails open and
+    /// nothing is decoded or stored. Real frame scoring also wants `onnx`.
     pub fn with_segment_store(mut self, store: SegmentStore) -> Self {
-        self.video = Some(Arc::new(
-            aegis_video::VideoAnalyzer::new().with_segment_store(store),
-        ));
+        // With the `ffmpeg` feature, decode with the real sidecar demuxer so frames
+        // are actually sampled + scored and blocked clips get retained (otherwise
+        // the NullDemuxer reports `decoded=false` and every segment fails open
+        // BEFORE `store_if_safe`, so `local_segment_uri` would never be set).
+        #[cfg(feature = "ffmpeg")]
+        let analyzer = aegis_video::VideoAnalyzer::with_demuxer(
+            aegis_video::VideoConfig::default(),
+            aegis_video::ffmpeg::FfmpegDemuxer::new(),
+        )
+        .with_segment_store(store);
+        #[cfg(not(feature = "ffmpeg"))]
+        let analyzer = aegis_video::VideoAnalyzer::new().with_segment_store(store);
+        self.video = Some(Arc::new(analyzer));
         self
     }
 

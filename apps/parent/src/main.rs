@@ -956,10 +956,13 @@ fn SegmentPlayer(uri: String) -> Element {
         let uri = uri.clone();
         spawn(async move {
             match load_segment_from_disk(&uri) {
-                Ok(Some(bytes)) => data_uri.set(Some(format!(
-                    "data:video/mp4;base64,{}",
-                    base64_encode(&bytes)
-                ))),
+                Ok(Some(bytes)) => {
+                    // Sniff the container — stored clips may be MP4/fMP4, DASH .m4s,
+                    // HLS .ts, or WebM; a hard-coded MP4 MIME breaks playback when
+                    // the bytes are something else.
+                    let mime = sniff_video_mime(&bytes);
+                    data_uri.set(Some(format!("data:{};base64,{}", mime, base64_encode(&bytes))));
+                }
                 Ok(None) => load_err.set(Some(
                     "not found (expired, purged, or never stored)".to_string(),
                 )),
@@ -1042,6 +1045,26 @@ fn sniff_image_mime(bytes: &[u8]) -> &'static str {
     } else {
         // JPEG (FF D8 FF) and everything else default to jpeg.
         "image/jpeg"
+    }
+}
+
+/// Best-effort video-container MIME sniff for a stored review clip. The segment
+/// store keeps bytes as-is, so a clip may be MP4/fMP4, DASH `.m4s`, HLS `.ts`, or
+/// WebM. Defaults to `video/mp4` (the common case) when nothing matches.
+fn sniff_video_mime(bytes: &[u8]) -> &'static str {
+    if bytes.len() >= 8 && (&bytes[4..8] == b"ftyp" || &bytes[4..8] == b"styp") {
+        // ISO-BMFF: MP4, fragmented MP4, and DASH `.m4s` all carry a ftyp/styp box.
+        "video/mp4"
+    } else if bytes.len() >= 4 && bytes[..4] == [0x1A, 0x45, 0xDF, 0xA3] {
+        // EBML header → WebM / Matroska.
+        "video/webm"
+    } else if bytes.len() >= 4 && &bytes[..4] == b"OggS" {
+        "video/ogg"
+    } else if bytes.len() > 188 && bytes[0] == 0x47 && bytes[188] == 0x47 {
+        // MPEG-TS (HLS `.ts`): 188-byte packets, each starting with the 0x47 sync.
+        "video/mp2t"
+    } else {
+        "video/mp4"
     }
 }
 
