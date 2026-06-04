@@ -40,7 +40,7 @@ class AegisVpnService : VpnService() {
     private fun establish() {
         RustBridge.ensureLoaded()
         val pfd = Builder()
-            .setSession("Aegis")
+            .setSession("PH Bulwark")
             .setMtu(1500)
             .addAddress("10.0.0.2", 32)
             .addDnsServer("10.0.0.1")
@@ -94,10 +94,10 @@ class AegisVpnService : VpnService() {
     private fun buildNotification(): Notification {
         val mgr = getSystemService(NotificationManager::class.java)
         mgr.createNotificationChannel(
-            NotificationChannel(CHANNEL, "Aegis filtering", NotificationManager.IMPORTANCE_LOW)
+            NotificationChannel(CHANNEL, "PH Bulwark filtering", NotificationManager.IMPORTANCE_LOW)
         )
         return Notification.Builder(this, CHANNEL)
-            .setContentTitle("Aegis is protecting this device")
+            .setContentTitle("PH Bulwark is protecting this device")
             .setContentText("Filtering content and watching for grooming signals.")
             .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
             .setOngoing(true)

@@ -1,9 +1,20 @@
 package co.libertyware.aegis.accessibility
 
 import android.accessibilityservice.AccessibilityService
+import android.content.Context
+import android.graphics.Color
+import android.graphics.PixelFormat
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.FrameLayout
+import android.widget.TextView
 import co.libertyware.aegis.core.RustBridge
 import co.libertyware.aegis.tamper.TamperReporter
 
@@ -58,13 +69,66 @@ class AegisAccessibilityService : AccessibilityService() {
     }
 
     private fun submit(pkg: String, thread: String, text: String) {
-        // Hand to the Rust grooming engine. A flagged Verdict raises a guardian
-        // alert via the same aegis-alert path the network loop uses.
         val verdictJson = runCatching { RustBridge.analyzeText(pkg, thread, text) }
             .getOrDefault("{\"error\":\"bridge unavailable\"}")
-        if (verdictJson.contains("\"GROOMING") || verdictJson.contains("\"CSAM")) {
-            Log.w(TAG, "flagged text in $pkg")
+        if (isHarmful(verdictJson)) {
+            Log.w(TAG, "harmful content flagged in $pkg — blocking")
+            blockContent()
         }
+    }
+
+    /** A non-SAFE verdict from the on-device analyzer (grooming/adult/CSAM/etc.). */
+    private fun isHarmful(json: String): Boolean =
+        HARMFUL_MARKERS.any { json.contains("\"$it") } || json.contains("\"Block")
+
+    /**
+     * ENFORCE on the device: bounce off the harmful screen, cover it with a PH
+     * Bulwark block notice, and sound an audible alert so it's unmistakable.
+     * (Remote guardian alerting is wired with account linking.)
+     */
+    private fun blockContent() {
+        Handler(Looper.getMainLooper()).post {
+            performGlobalAction(GLOBAL_ACTION_HOME)
+            playAlert()
+            showBlockOverlay()
+        }
+    }
+
+    private fun playAlert() {
+        runCatching {
+            val uri = android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_NOTIFICATION)
+            android.media.RingtoneManager.getRingtone(applicationContext, uri)?.play()
+        }
+    }
+
+    private var overlay: View? = null
+
+    private fun showBlockOverlay() {
+        if (overlay != null) return
+        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        val root = FrameLayout(this).apply { setBackgroundColor(0xFF0F3D5C.toInt()) }
+        root.addView(
+            TextView(this).apply {
+                text = "🛡️\n\nBlocked by PH Bulwark\nThis content was flagged as unsafe."
+                setTextColor(Color.WHITE); textSize = 22f; gravity = Gravity.CENTER
+                setPadding(48, 48, 48, 48)
+            },
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+                .apply { gravity = Gravity.CENTER },
+        )
+        val lp = WindowManager.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.OPAQUE,
+        )
+        runCatching { wm.addView(root, lp); overlay = root }
+        Handler(Looper.getMainLooper()).postDelayed({ removeOverlay() }, 3000)
+    }
+
+    private fun removeOverlay() {
+        overlay?.let { v -> runCatching { (getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(v) } }
+        overlay = null
     }
 
     /**
@@ -77,10 +141,11 @@ class AegisAccessibilityService : AccessibilityService() {
     private fun guardAgainstUninstall() {
         val root = rootInActiveWindow ?: return
         val screen = collectText(root).lowercase()
-        val mentionsAegis = screen.contains("aegis")
+        // The app's user-facing label is "PH Bulwark"; the package id is ...aegis.
+        val mentionsApp = screen.contains("bulwark") || screen.contains("aegis")
         val isUninstall = screen.contains("uninstall") || screen.contains("do you want to uninstall")
-        if (mentionsAegis && isUninstall) {
-            Log.w(TAG, "uninstall attempt detected on Aegis — alerting guardian")
+        if (mentionsApp && isUninstall) {
+            Log.w(TAG, "uninstall attempt detected on PH Bulwark — alerting guardian")
             TamperReporter.report(this, TamperReporter.APP_UNINSTALL_ATTEMPT)
             performGlobalAction(GLOBAL_ACTION_HOME)
         }
@@ -104,6 +169,8 @@ class AegisAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "AegisA11y"
+        // Verdict markers that mean "do not show this to the child" — block on any.
+        private val HARMFUL_MARKERS = listOf("GROOMING", "CSAM", "SEXTORTION", "ADULT", "SEXUAL", "NSFW")
         // Apps the network can't read (E2E / cert-pinned) → on-device capture path.
         private val MONITORED = setOf(
             "com.whatsapp",

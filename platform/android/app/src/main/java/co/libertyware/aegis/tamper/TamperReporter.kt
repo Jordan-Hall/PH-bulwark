@@ -44,10 +44,10 @@ object TamperReporter {
     }
 
     fun message(kind: Int): String = when (kind) {
-        APP_UNINSTALL_ATTEMPT -> "Someone tried to remove the Aegis app on this device."
-        DEVICE_ADMIN_REMOVED -> "Aegis device management was turned off on this device."
-        ACCESSIBILITY_DISABLED -> "Aegis on-device monitoring was turned off on this device."
-        VPN_DISABLED -> "The Aegis filtering VPN was turned off on this device."
+        APP_UNINSTALL_ATTEMPT -> "Someone tried to remove the PH Bulwark app on this device."
+        DEVICE_ADMIN_REMOVED -> "PH Bulwark device management was turned off on this device."
+        ACCESSIBILITY_DISABLED -> "PH Bulwark on-device monitoring was turned off on this device."
+        VPN_DISABLED -> "The PH Bulwark filtering VPN was turned off on this device."
         SAFE_MODE_OR_FACTORY_RESET -> "This device entered safe mode or was reset."
         else -> "Aegis protection changed on this device."
     }
