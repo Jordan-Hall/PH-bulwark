@@ -1,4 +1,5 @@
-//! Aegis parent console — all-Rust Dioxus UI.
+//! PH Bulwark Manager — the guardian console (all-Rust Dioxus UI). "aegis" is
+//! the internal engineering codename; the product is Predator Hunters Bulwark.
 //!
 //! LEGITIMATE features only: review guardian alerts, **approve / keep-blocked**
 //! flagged items, and see the honest coverage matrix. It talks to the home
@@ -322,7 +323,7 @@ fn App() -> Element {
     rsx! {
         style { {CSS} }
         div { class: "wrap",
-            h1 { "Aegis — Parent Console" }
+            h1 { "PH Bulwark Manager" }
             p { class: "sub",
                 "Transparent content-safety: alerts, approve/deny, and an honest coverage view. "
                 "No device control, screen capture, or hidden monitoring."
@@ -638,7 +639,7 @@ impl Mode {
     fn explain(self) -> &'static str {
         match self {
             Mode::Proxy => "Routes traffic through the local filter via the per-user system proxy. No admin needed; covers browsers + apps that honour the system proxy.",
-            Mode::Vpn => "Captures ALL traffic system-wide through a TUN adapter — no proxy settings. Needs Aegis run as Administrator.",
+            Mode::Vpn => "Captures ALL traffic system-wide through a TUN adapter — no proxy settings. Needs PH Bulwark run as Administrator.",
         }
     }
 }
@@ -781,7 +782,7 @@ fn ProtectionPanel() -> Element {
                                         if exited {
                                             kill_proxy(&probe);
                                             probe_err.set(Some(
-                                                "VPN mode needs Aegis run as Administrator. \
+                                                "VPN mode needs PH Bulwark run as Administrator. \
                                                  Re-launch as admin, then Connect again."
                                                     .to_string(),
                                             ));
