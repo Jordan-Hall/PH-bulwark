@@ -63,8 +63,11 @@ pub use aegis_proto::v1::{
 pub use config::{AlertConfig, RateLimitConfig, SmtpAuth, SmtpConfig, TlsMode};
 pub use error::{AlertError, Result};
 #[cfg(feature = "push")]
-pub use push::{FcmConfig, FcmPushSink, ServiceAccount};
-pub use sink::EmailAlertSink;
+pub use push::{
+    FcmConfig, FcmFanoutSink, FcmHttpTransport, FcmPushSink, PushTransport, ServiceAccount,
+    TokenRegistry,
+};
+pub use sink::{CompositeSink, EmailAlertSink};
 pub use transport::{MailTransport, OutgoingMail, SmtpTransport};
 
 /// Raises guardian alerts with **redacted context only**, rate-limited /

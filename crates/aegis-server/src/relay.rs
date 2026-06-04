@@ -210,6 +210,39 @@ impl AlertHub {
             .expect("push-target mutex poisoned");
         guard.insert(target.device_id.clone(), target);
     }
+
+    /// Snapshot of every registered guardian FCM token (empties dropped). Read at
+    /// raise time by the push fan-out sink; empty when nobody has registered yet.
+    pub fn push_tokens(&self) -> Vec<String> {
+        self.push_targets
+            .lock()
+            .expect("push-target mutex poisoned")
+            .values()
+            .map(|t| t.fcm_token.clone())
+            .filter(|t| !t.trim().is_empty())
+            .collect()
+    }
+}
+
+/// Adapts an [`AlertHub`] to `aegis_alert::TokenRegistry` so the FCM fan-out sink
+/// reads the live guardian tokens at raise time. Push-feature only.
+#[cfg(feature = "push")]
+pub struct HubTokenRegistry {
+    hub: AlertHub,
+}
+
+#[cfg(feature = "push")]
+impl HubTokenRegistry {
+    pub fn new(hub: AlertHub) -> Self {
+        Self { hub }
+    }
+}
+
+#[cfg(feature = "push")]
+impl aegis_alert::TokenRegistry for HubTokenRegistry {
+    fn tokens(&self) -> Vec<String> {
+        self.hub.push_tokens()
+    }
 }
 
 /// The response-stream type tonic expects for `Review::StreamPendingReviews`.

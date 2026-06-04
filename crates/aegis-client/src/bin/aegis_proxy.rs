@@ -80,12 +80,21 @@ async fn main() -> anyhow::Result<()> {
     // Retain blocked/borderline NON-CSAM video clips locally (default store
     // location) so the guardian app can replay them; video analysis runs on this
     // device (offload is a seam), so this is where local_segment_uri is set.
-    let pipeline = Pipeline::new(ClientConfig {
+    let cfg = ClientConfig {
         device_id: "aegis-proxy-local".to_string(),
         cluster_endpoint: Some(cluster_endpoint.clone()),
-    })
-    .with_alert(relay)
-    .with_default_segment_store();
+        // Cluster mTLS for offload, from operator-provisioned PEMs (AEGIS_CLIENT_*).
+        // Absent → no offload; audio fails open. Needs an https:// endpoint.
+        tls: aegis_client::load_cluster_tls_from_env(),
+    };
+    let mut pipeline = Pipeline::new(cfg.clone())
+        .with_alert(relay)
+        .with_default_segment_store();
+    // Offload heavy media (audio) to the cluster when an endpoint + mTLS material
+    // are provisioned AND the connect succeeds; otherwise audio fails open.
+    if let Some(router) = aegis_client::build_offload_router(&cfg).await {
+        pipeline = pipeline.with_offload(router);
+    }
 
     tracing::info!("aegis_proxy running — point your browser at {PROXY_LISTEN}");
 

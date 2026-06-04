@@ -228,6 +228,7 @@ dependencies = [
  "futures-util",
  "prost 0.14.3",
  "ring",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",

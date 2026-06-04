@@ -102,12 +102,18 @@ async fn main() -> anyhow::Result<()> {
     let relay = Arc::new(RelaySink::new(&cluster_endpoint));
     // Retain blocked/borderline NON-CSAM video clips locally for guardian replay
     // (see aegis_proxy for the rationale).
-    let pipeline = Pipeline::new(ClientConfig {
+    let cfg = ClientConfig {
         device_id: "aegis-vpn-local".to_string(),
         cluster_endpoint: Some(cluster_endpoint.clone()),
-    })
-    .with_alert(relay)
-    .with_default_segment_store();
+        // Cluster mTLS for offload, from operator-provisioned PEMs (AEGIS_CLIENT_*).
+        tls: aegis_client::load_cluster_tls_from_env(),
+    };
+    let mut pipeline = Pipeline::new(cfg.clone())
+        .with_alert(relay)
+        .with_default_segment_store();
+    if let Some(router) = aegis_client::build_offload_router(&cfg).await {
+        pipeline = pipeline.with_offload(router);
+    }
 
     // Tamper heartbeat: liveness + protection status to the cluster; if this is
     // killed/removed the missed-heartbeat sweep raises a guardian alert.

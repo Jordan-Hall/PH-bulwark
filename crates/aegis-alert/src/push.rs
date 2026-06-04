@@ -39,6 +39,7 @@
 //! choice; the email path remains the system of record.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -65,6 +66,11 @@ const JWT_BEARER_GRANT: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
 const TOKEN_SKEW_SECS: u64 = 60;
 /// Service-account JWTs are valid for one hour (Google's maximum).
 const JWT_TTL_SECS: u64 = 3600;
+
+/// FCM project id — presence of BOTH this and the SA path is the push on-switch.
+pub const ENV_FCM_PROJECT_ID: &str = "AEGIS_FCM_PROJECT_ID";
+/// Path to the Google service-account JSON key file.
+pub const ENV_FCM_SERVICE_ACCOUNT: &str = "AEGIS_FCM_SERVICE_ACCOUNT";
 
 /// Configuration for the FCM push sink.
 ///
@@ -100,6 +106,30 @@ impl FcmConfig {
             )));
         }
         Ok(())
+    }
+
+    /// Build an [`FcmConfig`] from the environment, or `None` when push is not
+    /// configured. `Err` only on a partial/invalid config — same fail-at-startup
+    /// contract as `AlertConfig::from_env`. On-switch: BOTH
+    /// `AEGIS_FCM_PROJECT_ID` and `AEGIS_FCM_SERVICE_ACCOUNT` set (or neither);
+    /// the SA file's existence is checked by [`FcmConfig::validate`].
+    pub fn from_env() -> Result<Option<Self>> {
+        let var = |k: &str| std::env::var(k).ok().filter(|s| !s.trim().is_empty());
+        match (var(ENV_FCM_PROJECT_ID), var(ENV_FCM_SERVICE_ACCOUNT)) {
+            (None, None) => Ok(None),
+            (Some(project_id), Some(path)) => {
+                let cfg = Self {
+                    project_id,
+                    service_account_path: PathBuf::from(path),
+                };
+                cfg.validate()?;
+                Ok(Some(cfg))
+            }
+            _ => Err(AlertError::Config(format!(
+                "incomplete FCM config: set BOTH {ENV_FCM_PROJECT_ID} and \
+                 {ENV_FCM_SERVICE_ACCOUNT} or neither"
+            ))),
+        }
     }
 }
 
@@ -184,67 +214,47 @@ struct CachedToken {
     refresh_at: u64,
 }
 
-/// FCM HTTP v1 push [`AlertSink`].
-///
-/// Construct with [`FcmPushSink::new`]. Holds the service-account key in memory
-/// and a cached OAuth2 token; both are loaded/minted lazily and never written
-/// to disk.
-pub struct FcmPushSink {
-    cfg: FcmConfig,
+/// Transport seam: send ONE redacted FCM data payload to ONE registration token.
+/// Mirrors the email path's `MailTransport` — the OAuth2 + HTTP concern lives
+/// behind this trait so the sinks can be unit-tested with a capturing mock (no
+/// Google credentials, no network).
+#[async_trait]
+pub trait PushTransport: Send + Sync {
+    /// Send the already-redacted `data` map to `token`. The `data` is the output
+    /// of the no-media redactor — the transport MUST NOT add media.
+    async fn send(&self, token: &str, data: &serde_json::Value) -> Result<()>;
+}
+
+/// Production [`PushTransport`]: mints/caches the OAuth2 service-account token and
+/// POSTs a data-only message to FCM HTTP v1.
+pub struct FcmHttpTransport {
     service_account: ServiceAccount,
-    /// Where to send the redacted notification. In a real deployment this is
-    /// the guardian device's rotating FCM registration token (see proto
-    /// `PushTarget.fcm_token`); supplied at construction so this crate stays
-    /// free of any device registry.
-    target_token: String,
     http: reqwest::Client,
     token: Mutex<Option<CachedToken>>,
     /// Send endpoint, derived once from `project_id`.
     send_url: String,
 }
 
-impl FcmPushSink {
-    /// Build a sink for `cfg`, delivering to the guardian `target_token` (an
-    /// FCM registration token). Validates config and loads the service-account
-    /// key up front so a misconfiguration fails at startup, not on first alert.
-    pub fn new(cfg: FcmConfig, target_token: impl Into<String>) -> Result<Self> {
+impl FcmHttpTransport {
+    /// Build the transport for `cfg`: validates config + loads the SA key up front
+    /// so a misconfiguration fails at construction, not on first alert.
+    pub fn new(cfg: &FcmConfig) -> Result<Self> {
         cfg.validate()?;
         let service_account = ServiceAccount::load(&cfg.service_account_path)?;
-
-        let target_token = target_token.into();
-        if target_token.trim().is_empty() {
-            return Err(AlertError::Config(
-                "FCM target registration token is empty".into(),
-            ));
-        }
-
         let http = reqwest::Client::builder()
             .https_only(true)
             .build()
             .map_err(|e| AlertError::Push(format!("building HTTP client: {e}")))?;
-
         let send_url = format!(
             "https://fcm.googleapis.com/v1/projects/{}/messages:send",
             cfg.project_id
         );
-
         Ok(Self {
-            cfg,
             service_account,
-            target_token,
             http,
             token: Mutex::new(None),
             send_url,
         })
-    }
-
-    fn ack(alert_id: &str, delivered: bool, detail: &str) -> AlertAck {
-        AlertAck {
-            alert_id: alert_id.to_string(),
-            delivered,
-            deduped: false,
-            detail: detail.to_string(),
-        }
     }
 
     fn now_unix() -> u64 {
@@ -266,9 +276,6 @@ impl FcmPushSink {
                 }
             }
         }
-
-        // Mint outside the fast path. A small race (two concurrent mints) is
-        // harmless — both tokens are valid; the last write wins the cache.
         let minted = self.mint_token(now).await?;
         let mut guard = self.token.lock().await;
         *guard = Some(minted.clone());
@@ -284,12 +291,10 @@ impl FcmPushSink {
             iat: now,
             exp: now + JWT_TTL_SECS,
         };
-
         let key = EncodingKey::from_rsa_pem(self.service_account.private_key.as_bytes())
             .map_err(|e| AlertError::Push(format!("loading RS256 signing key: {e}")))?;
         let assertion = jsonwebtoken::encode(&Header::new(Algorithm::RS256), &claims, &key)
             .map_err(|e| AlertError::Push(format!("signing service-account JWT: {e}")))?;
-
         let resp = self
             .http
             .post(self.service_account.token_uri())
@@ -300,7 +305,6 @@ impl FcmPushSink {
             .send()
             .await
             .map_err(|e| AlertError::Push(format!("token request failed: {e}")))?;
-
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -309,19 +313,97 @@ impl FcmPushSink {
                 truncate(&body, 256)
             )));
         }
-
         let token: TokenResponse = resp
             .json()
             .await
             .map_err(|e| AlertError::Push(format!("decoding token response: {e}")))?;
-
-        // Refresh `TOKEN_SKEW_SECS` early; saturate so a tiny `expires_in` can't
-        // underflow into a "never refresh" value.
         let refresh_at = now + token.expires_in.saturating_sub(TOKEN_SKEW_SECS);
         Ok(CachedToken {
             access_token: token.access_token,
             refresh_at,
         })
+    }
+}
+
+#[async_trait]
+impl PushTransport for FcmHttpTransport {
+    async fn send(&self, token: &str, data: &serde_json::Value) -> Result<()> {
+        let bearer = self.access_token().await?;
+        // A data-only message (no `notification` block) so the phone app builds
+        // the UI from redacted fields and we never put text in a system banner.
+        let message = serde_json::json!({ "message": { "token": token, "data": data } });
+        let resp = self
+            .http
+            .post(&self.send_url)
+            .bearer_auth(&bearer)
+            .json(&message)
+            .send()
+            .await
+            .map_err(|e| AlertError::Push(format!("FCM send request failed: {e}")))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(AlertError::Push(format!(
+                "FCM send returned {status}: {}",
+                truncate(&body, 256)
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// FCM HTTP v1 push [`AlertSink`] for a SINGLE guardian token.
+///
+/// Construct with [`FcmPushSink::new`]. Delegates the network/OAuth concern to a
+/// [`PushTransport`]; [`FcmPushSink::with_transport`] injects a mock in tests.
+pub struct FcmPushSink {
+    cfg: FcmConfig,
+    /// Where to send the redacted notification — the guardian device's rotating
+    /// FCM registration token (proto `PushTarget.fcm_token`), supplied at
+    /// construction so this crate stays free of any device registry.
+    target_token: String,
+    transport: Arc<dyn PushTransport>,
+}
+
+impl FcmPushSink {
+    /// Build a sink for `cfg`, delivering to the guardian `target_token`. Builds
+    /// the real FCM transport (validates config + loads the SA key up front).
+    pub fn new(cfg: FcmConfig, target_token: impl Into<String>) -> Result<Self> {
+        let target_token = target_token.into();
+        if target_token.trim().is_empty() {
+            return Err(AlertError::Config(
+                "FCM target registration token is empty".into(),
+            ));
+        }
+        let transport = Arc::new(FcmHttpTransport::new(&cfg)?);
+        Ok(Self {
+            cfg,
+            target_token,
+            transport,
+        })
+    }
+
+    /// Test/seam constructor over any [`PushTransport`] (no Google creds, no
+    /// network). Does not load a service-account key.
+    pub fn with_transport(
+        cfg: FcmConfig,
+        target_token: impl Into<String>,
+        transport: Arc<dyn PushTransport>,
+    ) -> Self {
+        Self {
+            cfg,
+            target_token: target_token.into(),
+            transport,
+        }
+    }
+
+    fn ack(alert_id: &str, delivered: bool, detail: &str) -> AlertAck {
+        AlertAck {
+            alert_id: alert_id.to_string(),
+            delivered,
+            deduped: false,
+            detail: detail.to_string(),
+        }
     }
 
     /// Build the FCM **data** payload — redacted scalar fields ONLY. No media,
@@ -349,41 +431,105 @@ impl FcmPushSink {
         // Belt-and-braces: the same hard invariant the email path enforces.
         assert_no_media(event)?;
 
-        let token = self.access_token().await?;
-
-        // A data-only message (no `notification` block) so the phone app builds
-        // the UI from redacted fields and we never put text in a system banner.
-        let message = serde_json::json!({
-            "message": {
-                "token": self.target_token,
-                "data": Self::redacted_data(event),
-            }
-        });
-
-        let resp = self
-            .http
-            .post(&self.send_url)
-            .bearer_auth(&token)
-            .json(&message)
-            .send()
-            .await
-            .map_err(|e| AlertError::Push(format!("FCM send request failed: {e}")))?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(AlertError::Push(format!(
-                "FCM send returned {status}: {}",
-                truncate(&body, 256)
-            )));
-        }
-
+        let data = Self::redacted_data(event);
+        self.transport.send(&self.target_token, &data).await?;
         tracing::info!(
             alert_id = %event.alert_id,
             device_id = %event.device_id,
             "guardian alert pushed via FCM (redacted)"
         );
         Ok(())
+    }
+}
+
+/// Source of the guardian FCM tokens to fan an alert out to, read AT RAISE TIME
+/// (so a token registered after the sink was built still gets alerts). The
+/// relay's `AlertHub` implements this over its in-memory `push_targets`.
+pub trait TokenRegistry: Send + Sync {
+    /// A snapshot of every registered guardian FCM token right now (may be empty).
+    fn tokens(&self) -> Vec<String>;
+}
+
+/// An [`AlertSink`] that pushes the redacted event to EVERY currently-registered
+/// guardian token (read from a [`TokenRegistry`] at raise time) — unlike
+/// [`FcmPushSink`], which binds one token at construction. Best-effort: one
+/// token's failure never aborts the others; an empty registry is a successful
+/// no-op acked `delivered = false`.
+pub struct FcmFanoutSink {
+    transport: Arc<dyn PushTransport>,
+    registry: Arc<dyn TokenRegistry>,
+}
+
+impl FcmFanoutSink {
+    /// Build over the real FCM transport for `cfg`, reading tokens from `registry`.
+    pub fn new(cfg: &FcmConfig, registry: Arc<dyn TokenRegistry>) -> Result<Self> {
+        let transport = Arc::new(FcmHttpTransport::new(cfg)?);
+        Ok(Self {
+            transport,
+            registry,
+        })
+    }
+
+    /// Test/seam constructor over any transport + registry (no Google creds).
+    pub fn with_transport(
+        transport: Arc<dyn PushTransport>,
+        registry: Arc<dyn TokenRegistry>,
+    ) -> Self {
+        Self {
+            transport,
+            registry,
+        }
+    }
+
+    /// Fan one event out to every current token. Returns (delivered, attempted).
+    async fn fan_one(&self, event: &AlertEvent) -> Result<(usize, usize)> {
+        assert_no_media(event)?; // hard privacy invariant, before any send
+        let tokens = self.registry.tokens();
+        let attempted = tokens.len();
+        if attempted == 0 {
+            return Ok((0, 0));
+        }
+        let data = FcmPushSink::redacted_data(event);
+        let mut delivered = 0usize;
+        for token in &tokens {
+            match self.transport.send(token, &data).await {
+                Ok(()) => delivered += 1,
+                Err(e) => tracing::warn!(alert_id = %event.alert_id, error = %e,
+                    "FCM fan-out failed for one guardian token"),
+            }
+        }
+        Ok((delivered, attempted))
+    }
+}
+
+#[async_trait]
+impl AlertSink for FcmFanoutSink {
+    async fn raise(&self, event: AlertEvent) -> Result<AlertAck> {
+        let (delivered, attempted) = self.fan_one(&event).await?;
+        Ok(FcmPushSink::ack(
+            &event.alert_id,
+            delivered > 0,
+            &format!("pushed to {delivered}/{attempted} guardian device(s)"),
+        ))
+    }
+
+    async fn raise_batch(&self, batch: AlertBatch) -> Result<AlertAckBatch> {
+        let mut acks = Vec::with_capacity(batch.events.len());
+        for event in &batch.events {
+            match self.fan_one(event).await {
+                Ok((delivered, attempted)) => acks.push(FcmPushSink::ack(
+                    &event.alert_id,
+                    delivered > 0,
+                    &format!("pushed to {delivered}/{attempted} guardian device(s)"),
+                )),
+                Err(e) => acks.push(FcmPushSink::ack(
+                    &event.alert_id,
+                    false,
+                    &format!("push failed: {e}"),
+                )),
+            }
+        }
+        Ok(AlertAckBatch { acks })
     }
 }
 
@@ -545,5 +691,103 @@ mod tests {
         let shown = format!("{sa:?}");
         assert!(!shown.contains("SECRET"));
         assert!(shown.contains("<redacted>"));
+    }
+
+    // --- Fan-out: mock transport + registry (no Google creds, no network) ------
+
+    #[derive(Clone, Default)]
+    struct CapturingPush {
+        sent: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>,
+        fail: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    }
+    #[async_trait]
+    impl PushTransport for CapturingPush {
+        async fn send(&self, token: &str, data: &serde_json::Value) -> Result<()> {
+            if self.fail.lock().unwrap().contains(token) {
+                return Err(AlertError::Push(format!("forced fail for {token}")));
+            }
+            self.sent
+                .lock()
+                .unwrap()
+                .push((token.to_string(), data.clone()));
+            Ok(())
+        }
+    }
+
+    struct StaticRegistry(Vec<String>);
+    impl TokenRegistry for StaticRegistry {
+        fn tokens(&self) -> Vec<String> {
+            self.0.clone()
+        }
+    }
+
+    fn safe_event(id: &str) -> AlertEvent {
+        AlertEvent {
+            alert_id: id.into(),
+            kind: AlertKind::Intervention as i32,
+            category: Category::AdultImage as i32,
+            severity: Severity::High as i32,
+            device_id: "kids-phone".into(),
+            redacted_context: "blocked".into(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn fanout_sends_to_every_registered_token() {
+        let cap = CapturingPush::default();
+        let reg = Arc::new(StaticRegistry(vec!["t1".into(), "t2".into(), "t3".into()]));
+        let sink = FcmFanoutSink::with_transport(Arc::new(cap.clone()), reg);
+        let ack = sink.raise(safe_event("a1")).await.unwrap();
+        assert!(ack.delivered);
+        assert_eq!(cap.sent.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn fanout_is_best_effort_one_failure_doesnt_abort() {
+        let cap = CapturingPush::default();
+        cap.fail.lock().unwrap().insert("t2".into());
+        let reg = Arc::new(StaticRegistry(vec!["t1".into(), "t2".into(), "t3".into()]));
+        let sink = FcmFanoutSink::with_transport(Arc::new(cap.clone()), reg);
+        let ack = sink.raise(safe_event("a2")).await.unwrap();
+        assert!(ack.delivered, "2/3 still delivered");
+        assert_eq!(cap.sent.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn fanout_empty_registry_acks_not_delivered() {
+        let cap = CapturingPush::default();
+        let reg = Arc::new(StaticRegistry(vec![]));
+        let sink = FcmFanoutSink::with_transport(Arc::new(cap.clone()), reg);
+        let ack = sink.raise(safe_event("a3")).await.unwrap();
+        assert!(!ack.delivered);
+        assert!(cap.sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn fanout_rejects_media_before_any_send() {
+        let cap = CapturingPush::default();
+        let reg = Arc::new(StaticRegistry(vec!["t1".into()]));
+        let sink = FcmFanoutSink::with_transport(Arc::new(cap.clone()), reg);
+        // An oversized "sha256" (raw bytes masquerading as a hash) trips
+        // assert_no_media — the fan-out must reject it BEFORE contacting any token.
+        let mut bad = safe_event("bad");
+        bad.evidence = Some(Evidence {
+            sha256: vec![0u8; 200],
+            ..Default::default()
+        });
+        assert!(sink.raise(bad).await.is_err());
+        assert!(cap.sent.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn fcm_config_from_env_off_and_partial() {
+        for v in [ENV_FCM_PROJECT_ID, ENV_FCM_SERVICE_ACCOUNT] {
+            std::env::remove_var(v);
+        }
+        assert!(matches!(FcmConfig::from_env(), Ok(None)));
+        std::env::set_var(ENV_FCM_PROJECT_ID, "proj"); // only one → partial → Err
+        assert!(FcmConfig::from_env().is_err());
+        std::env::remove_var(ENV_FCM_PROJECT_ID);
     }
 }

@@ -35,6 +35,9 @@ ring.workspace = true
 default = []
 # Enable the small text classifier backstop in aegis-text on worker nodes.
 classifier = ["aegis-text/classifier"]
+# Enable the FCM push fan-out sink (forwards to aegis-alert's push feature). OFF
+# by default so the default server build + host CI stay byte-identical.
+push = ["aegis-alert/push"]
 
 [dev-dependencies]
 # In-process end-to-end guardian approve/deny test (tests/e2e_review.rs):
@@ -46,3 +49,6 @@ aegis-proto = { path = "../aegis-proto" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
 tonic = { version = "0.14", features = ["transport"] }
 tokio-stream = { version = "0.1", features = ["net"] }
+# The push e2e test (cfg(feature="push")) builds a mock PushTransport over a
+# serde_json::Value payload; dev-only, so the default build is unaffected.
+serde_json = { workspace = true }
