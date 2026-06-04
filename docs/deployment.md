@@ -50,10 +50,12 @@ child device                              home cluster                guardian
   scoped by session token.
 - **Provision with the `aegis_admin` CLI** (talks to the running server's `Accounts`
   service at `AEGIS_ADMIN_ENDPOINT`, default `http://127.0.0.1:8443`; pins
-  `AEGIS_CLUSTER_CA` if set):
+  `AEGIS_CLUSTER_CA` if set). The account password is read from
+  `$AEGIS_ADMIN_PASSWORD` — never passed on the command line (argv leaks into `ps`
+  output and shell history):
   ```text
-  aegis_admin create-account  guardian@home.example <password> "Guardian"
-  aegis_admin login           guardian@home.example <password>   # -> session token
+  AEGIS_ADMIN_PASSWORD='…' aegis_admin create-account guardian@home.example "Guardian"
+  AEGIS_ADMIN_PASSWORD='…' aegis_admin login          guardian@home.example  # -> token
   aegis_admin add-child       <token> "Kid" kids-tablet-01
   aegis_admin assign-guardian <token> <child_id> <other_account_id>
   aegis_admin list-children   <token>
@@ -64,9 +66,6 @@ child device                              home cluster                guardian
 - **Brute-force lockout:** after `AEGIS_LOGIN_MAX_FAILS` (default 5) failed logins
   for one email within `AEGIS_LOGIN_WINDOW_SECS` (default 15m), that email is locked
   out until the window elapses; a successful login clears the counter.
-- **Durable now:** set `AEGIS_STATE_DIR=/var/lib/aegis` and accounts/children/
-  guardian assignments are persisted (JSON) and reload on restart (session tokens
-  are intentionally dropped — guardians re-login). Unset ⇒ in-memory.
 - **Durable:** with `AEGIS_STATE_DIR` set, accounts + push targets + pending
   reviews + the approve-allowlist all persist and reload on restart (atomic JSON).
   **Not-yet-wired:** no web admin UI (the `aegis_admin` CLI covers provisioning);
