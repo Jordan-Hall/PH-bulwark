@@ -61,7 +61,12 @@ resource "aws_instance" "aegis" {
   key_name               = var.key_name
   vpc_security_group_ids = [aws_security_group.aegis.id]
 
-  user_data = templatefile("${path.module}/user_data.sh.tftpl", {
+  # Pull a pre-built image (default), or build it on the instance from the repo
+  # (no registry needed — set build_on_instance = true).
+  user_data = var.build_on_instance ? templatefile("${path.module}/user_data_build.sh.tftpl", {
+    repo_url   = var.repo_url
+    aegis_port = var.aegis_port
+    }) : templatefile("${path.module}/user_data.sh.tftpl", {
     aegis_image = var.aegis_image
     aegis_port  = var.aegis_port
   })

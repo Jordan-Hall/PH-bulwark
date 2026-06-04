@@ -8,8 +8,13 @@ AWS credentials — nothing here touches your account. The server auto-starts on
 - AWS credentials configured locally (`aws configure`, or `AWS_ACCESS_KEY_ID` /
   `AWS_SECRET_ACCESS_KEY` env), and Terraform ≥ 1.3.
 - An **EC2 key pair** that already exists *in each region* you deploy to (for SSH).
-- The server **image** pushed to a registry your instance can pull (public GHCR is
-  easiest): `docker build -f deploy/docker/Dockerfile -t <registry>/aegis-server:latest . && docker push …`
+- The server **image** — either:
+  - **(a)** push a pre-built image to a registry your instance can pull (public GHCR
+    is easiest): `docker build -f deploy/docker/Dockerfile -t <registry>/aegis-server:latest . && docker push …`, then `-var aegis_image=<registry>/aegis-server:latest`; **or**
+  - **(b) no registry** — `-var build_on_instance=true` builds the image **on the
+    instance** from source (`-var repo_url=…`, defaults to the public repo). Slower
+    first boot (~10 min); use `-var instance_type=t3.medium` so the build doesn't OOM
+    (a 4 GB swapfile is added regardless).
 
 ## Deploy one country
 ```sh
