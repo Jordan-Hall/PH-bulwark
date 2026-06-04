@@ -1,0 +1,35 @@
+name: terraform
+
+# Validate the AWS single-EC2 deploy config (no AWS credentials needed — init runs
+# with -backend=false; validate checks the config + provider schema). Runs only when
+# the Terraform changes.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - deploy/aws/**
+      - .github/workflows/terraform.yml
+  pull_request:
+    paths:
+      - deploy/aws/**
+      - .github/workflows/terraform.yml
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: terraform validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: deploy/aws
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: fmt (advisory)
+        run: terraform fmt -check -recursive
+        continue-on-error: true
+      - name: init (no backend)
+        run: terraform init -backend=false
+      - name: validate (gate)
+        run: terraform validate
