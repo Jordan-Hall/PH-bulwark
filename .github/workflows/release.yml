@@ -1,8 +1,11 @@
 name: release
 
-# Build the Linux server binaries and attach them to the GitHub Release on a
-# version tag (or manual dispatch). Android signed APK + desktop signing are
-# documented in docs/release.md (they need keystores/certs as secrets).
+# Build the app binaries and attach them to the GitHub Release on a version tag
+# (or manual dispatch → artifacts): the Linux server, plus the Windows desktop
+# apps — the ADULT console (aegis-parent) and the CHILD filter (aegis_proxy /
+# aegis_vpn / aegis_svc). The CHILD Android APK is produced by android.yml.
+# Code-signing (Windows/macOS/Android) is documented in docs/release.md (it needs
+# keystores/certs as secrets); these artifacts are unsigned for testing.
 
 on:
   push:
@@ -37,4 +40,36 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: aegis-server-linux
+          path: dist/*
+
+  windows-apps:
+    name: windows apps (adult console + child filter)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build child filter (aegis_proxy / aegis_vpn / aegis_svc)
+        run: cargo build --release -p aegis-client
+      - name: Build adult console (aegis-parent)
+        run: cargo build --release --manifest-path apps/parent/Cargo.toml
+      - name: Stage artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          for b in aegis_proxy aegis_vpn aegis_svc; do
+            if [ -f "target/release/$b.exe" ]; then cp "target/release/$b.exe" dist/; fi
+          done
+          cp apps/parent/target/release/*.exe dist/ 2>/dev/null || true
+          ls -la dist/
+      - name: Attach to the GitHub Release (tag builds)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+      - name: Upload as a workflow artifact (manual dispatch)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ph-bulwark-windows-apps
           path: dist/*
