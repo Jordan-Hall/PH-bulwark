@@ -60,6 +60,10 @@ resource "aws_instance" "aegis" {
   instance_type          = var.instance_type
   key_name               = var.key_name
   vpc_security_group_ids = [aws_security_group.aegis.id]
+  # SSM-managed: lets GitHub deploy via `aws ssm send-command` with NO inbound SSH.
+  # The role/profile is created out-of-band (one-time admin step, see docs/release.md
+  # §5); declared here so a later apply doesn't strip it. Pre-existing = no-op on apply.
+  iam_instance_profile = var.ssm_instance_profile != "" ? var.ssm_instance_profile : null
 
   # Pull a pre-built image (default), or build it on the instance from the repo
   # (no registry needed — set build_on_instance = true).
