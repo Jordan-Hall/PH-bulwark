@@ -71,6 +71,36 @@ pub trait TunDevice: Send + Sync {
 
     /// Short backend name for logs/diagnostics ("wintun", "tun-rs", "vpnservice").
     fn backend(&self) -> &'static str;
+
+    // --- Part-0a foundation hooks (see docs/design/vpn-data-path-plan.md) -------
+    // These have default impls so Windows (`tun/windows.rs`) is UNCHANGED — wintun
+    // owns its own route + ring buffer. Linux/macOS will override the routing hooks
+    // (nftables / pf); Android leaves them no-ops (routing is declarative in the
+    // Kotlin VpnService). NOTE: scaffolding only — the netstack bridge + per-platform
+    // packet loops that consume these are not yet implemented (need device testing).
+
+    /// Install host routing that redirects local traffic INTO this TUN, called after
+    /// [`up`](Self::up) and before the packet loop. Default no-op (Windows + the
+    /// smoltcp default route handle it). Linux overrides with nftables/TPROXY +
+    /// fwmark, macOS with a `pf` anchor — **for v4 AND v6** or the LAN blackholes.
+    fn install_routing(&mut self, _config: &TunConfig) -> Result<()> {
+        Ok(())
+    }
+
+    /// Reverse exactly what [`install_routing`](Self::install_routing) added. Default
+    /// no-op. **MUST be idempotent** — it runs on the crash/`ExecStop` path too, so
+    /// it has to tolerate "nothing was installed" without erroring.
+    fn teardown_routing(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Raw pollable fd for async-reactor integration on Unix/Android, so the netstack
+    /// can register the device with the runtime instead of burning a blocking thread.
+    /// `None` (default) on Windows/wintun, which is driven on `spawn_blocking`.
+    #[cfg(unix)]
+    fn as_raw_fd(&self) -> Option<std::os::fd::RawFd> {
+        None
+    }
 }
 
 /// Open the platform-appropriate TUN backend (not yet `up()`).
