@@ -425,7 +425,23 @@ async fn submit_decision(alert_id: &str, device_id: &str, approve: bool) -> anyh
         ts,
     };
 
-    let ack = client.submit_decision(req).await?.into_inner();
+    // In accounts mode the server requires a guardian session token on the
+    // decision RPC (it scopes the approve/deny to the guardian's assigned
+    // children). Attach the SAME `AEGIS_GUARDIAN_TOKEN` the alert stream uses, as
+    // `authorization: Bearer <token>` metadata. A single-home / no-accounts
+    // server ignores it, so an unset token still works there.
+    let mut request = tonic::Request::new(req);
+    if let Some(token) = std::env::var("AEGIS_GUARDIAN_TOKEN")
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+    {
+        if let Ok(val) = tonic::metadata::MetadataValue::try_from(format!("Bearer {token}")) {
+            request.metadata_mut().insert("authorization", val);
+        }
+    }
+
+    let ack = client.submit_decision(request).await?.into_inner();
     if !ack.applied {
         anyhow::bail!("the cluster did not apply the decision");
     }

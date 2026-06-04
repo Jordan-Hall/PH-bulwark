@@ -29,7 +29,9 @@ async fn main() -> anyhow::Result<()> {
         ..ServerConfig::default()
     };
 
-    let registry = AnalyzerRegistry::with_text();
+    // Text + buffered-video dispatch (image/audio stay on the device fast path /
+    // future worker wiring). Video fails open without aegis-video's `ffmpeg`.
+    let registry = AnalyzerRegistry::with_text_and_video();
 
     let cluster = matches!(role, ServerRole::AllInOne | ServerRole::Lb).then(|| {
         Arc::new(aegis_cluster::Cluster::new(

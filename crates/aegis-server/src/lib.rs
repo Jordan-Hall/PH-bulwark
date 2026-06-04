@@ -99,6 +99,18 @@ impl AnalyzerRegistry {
         r.register(Arc::new(TextAnalyzerAdapter::new()));
         r
     }
+
+    /// Default wiring plus buffered-video dispatch (`MediaKind::VIDEO` →
+    /// [`aegis_video::VideoAnalyzer`]). Without aegis-video's `ffmpeg` feature the
+    /// analyzer fails open, so registering it is safe; it makes the worker dispatch
+    /// VIDEO units instead of returning "no analyzer". Segment retention for the
+    /// guardian replay is the device-side responsibility (the client's
+    /// `Pipeline::with_segment_store`), so the cluster analyzer carries no store.
+    pub fn with_text_and_video() -> Self {
+        let mut r = Self::with_text();
+        r.register(Arc::new(aegis_video::VideoAnalyzer::new()));
+        r
+    }
 }
 
 /// Adapts `aegis-text` to the server [`Analyzer`] trait. TEXT only.
@@ -187,5 +199,15 @@ mod tests {
         let reg = AnalyzerRegistry::with_text();
         assert!(reg.analyzer_for(MediaKind::Text as i32).is_some());
         assert!(reg.analyzer_for(MediaKind::Video as i32).is_none());
+    }
+
+    #[tokio::test]
+    async fn registry_with_video_dispatches_text_and_video() {
+        let reg = AnalyzerRegistry::with_text_and_video();
+        assert!(reg.analyzer_for(MediaKind::Text as i32).is_some());
+        assert!(
+            reg.analyzer_for(MediaKind::Video as i32).is_some(),
+            "video units must dispatch to the video analyzer, not fall through"
+        );
     }
 }
