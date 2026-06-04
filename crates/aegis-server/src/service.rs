@@ -230,7 +230,7 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     use tonic::transport::Server;
 
-    let addr = cfg.bind.parse()?;
+    let addr = parse_bind(&cfg.bind)?;
     let mut builder = Server::builder();
 
     if let (Some(cert), Some(key), Some(ca)) =
@@ -335,6 +335,60 @@ pub async fn run(
     }
 
     tracing::info!(role = ?cfg.role, %cfg.bind, "aegis-server listening");
-    router.serve(addr).await?;
+    // Serve until a shutdown signal so in-flight gRPC calls drain cleanly on a
+    // systemd/SCM/Docker stop, instead of being cut off mid-response.
+    router.serve_with_shutdown(addr, shutdown_signal()).await?;
+    tracing::info!("aegis-server stopped");
     Ok(())
+}
+
+/// Parse the bind address with a clear, operator-facing error (the raw
+/// `AddrParseError` doesn't say which value was wrong).
+fn parse_bind(bind: &str) -> anyhow::Result<std::net::SocketAddr> {
+    bind.parse()
+        .map_err(|e| anyhow::anyhow!("invalid bind address {bind:?} (AEGIS_BIND): {e}"))
+}
+
+/// Resolves when the process is asked to stop: Ctrl-C on any platform, plus
+/// SIGTERM on Unix (systemd/Docker/k8s send SIGTERM). Drives graceful shutdown.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "SIGTERM handler unavailable; Ctrl-C only");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+    tracing::info!("shutdown signal received; draining in-flight requests");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_bind;
+
+    #[test]
+    fn parse_bind_accepts_valid_and_rejects_garbage() {
+        assert!(parse_bind("127.0.0.1:8443").is_ok());
+        assert!(parse_bind("0.0.0.0:8443").is_ok());
+        assert!(parse_bind("[::1]:8443").is_ok());
+        // A clear, value-bearing error — not a bare AddrParseError.
+        let err = parse_bind("not-an-addr").unwrap_err().to_string();
+        assert!(err.contains("not-an-addr") && err.contains("AEGIS_BIND"));
+        assert!(parse_bind("127.0.0.1").is_err()); // missing port
+    }
 }
