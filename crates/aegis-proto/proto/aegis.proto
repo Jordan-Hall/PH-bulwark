@@ -271,6 +271,7 @@ enum AlertKind {
   ALERT_KIND_UNSPECIFIED = 0;
   INTERVENTION           = 1; // a blocker acted (block/blur/mute)
   GROOMING_SUSPECTED     = 2; // grooming engine crossed alert threshold
+  PROTECTION_DISABLED    = 3; // tamper: filtering/admin/accessibility off, app-removal attempt, or missed heartbeat
 }
 
 // A guardian-facing alert. Carries redacted context ONLY — never explicit media.
@@ -383,6 +384,62 @@ service Review {
   rpc SubmitDecision(ReviewRequest) returns (ReviewAck);
   rpc RegisterPushTarget(PushTarget) returns (PushAck);
   rpc StreamPendingReviews(DeviceFilter) returns (stream AlertEvent);
+}
+
+// ---------------------------------------------------------------------------
+// Tamper service — child-device protection liveness + uninstall/disable alerts.
+// The supervised child app sends periodic Heartbeats carrying its
+// ProtectionStatus. A self-detected downgrade (accessibility/VPN/device-admin
+// turned off, or an app-removal attempt) OR a MISSED heartbeat (app killed or
+// uninstalled — detected server-side) raises a guardian
+// AlertEvent(kind = PROTECTION_DISABLED). This is the cross-platform safety net:
+// even where removal can't be PREVENTED, it is DETECTED and reported.
+// Transparent + consented (managed child device); carries NO content, ever.
+// ---------------------------------------------------------------------------
+
+// What protection degraded (drives the PROTECTION_DISABLED alert text). No raw
+// content — these are status signals only.
+enum TamperKind {
+  TAMPER_KIND_UNSPECIFIED    = 0;
+  APP_UNINSTALL_ATTEMPT      = 1; // child opened the app's uninstall / app-info flow
+  DEVICE_ADMIN_REMOVED       = 2; // device-admin / Device-Owner DPC deactivated
+  ACCESSIBILITY_DISABLED     = 3; // capture / uninstall-guard accessibility turned off
+  VPN_DISABLED               = 4; // filtering VPN / proxy stopped or bypassed
+  HEARTBEAT_MISSED           = 5; // server-side: no heartbeat within the grace window
+  SAFE_MODE_OR_FACTORY_RESET = 6; // safe-mode boot or factory-reset signal
+}
+
+// Snapshot of which protections are currently active on the child device.
+message ProtectionStatus {
+  string device_id           = 1;
+  string child_id            = 2; // optional; resolved cluster-side from device_id if empty
+  bool   vpn_active          = 3; // filtering VPN / proxy is up
+  bool   device_admin_active = 4; // device-admin / DPC active
+  bool   accessibility_active = 5; // capture / uninstall-guard service enabled
+  bool   always_on_lockdown  = 6; // always-on VPN lockdown engaged (fail-closed)
+  string platform            = 7; // "android" | "windows" | "macos" | ...
+  string app_version         = 8;
+  int64  ts                  = 9; // unix epoch millis
+}
+
+// Child → cluster liveness + protection report.
+message Heartbeat {
+  ProtectionStatus status = 1;
+  // Tamper events observed locally since the last heartbeat (empty on a normal
+  // liveness ping). Each becomes a PROTECTION_DISABLED guardian alert.
+  repeated TamperKind tamper_events = 2;
+}
+
+message HeartbeatAck {
+  uint32 next_interval_secs = 1; // server-tuned cadence (0 = keep current)
+  bool   ok                 = 2;
+}
+
+service Tamper {
+  // Periodic child liveness + protection status. A self-reported downgrade or a
+  // missed heartbeat (detected server-side by the liveness sweeper) raises a
+  // PROTECTION_DISABLED guardian alert via the same relay fan-out.
+  rpc Heartbeat(Heartbeat) returns (HeartbeatAck);
 }
 
 // ---------------------------------------------------------------------------

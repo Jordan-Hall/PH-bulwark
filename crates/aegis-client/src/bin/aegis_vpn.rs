@@ -109,6 +109,20 @@ async fn main() -> anyhow::Result<()> {
     .with_alert(relay)
     .with_default_segment_store();
 
+    // Tamper heartbeat: liveness + protection status to the cluster; if this is
+    // killed/removed the missed-heartbeat sweep raises a guardian alert.
+    {
+        let probe: Box<dyn aegis_client::ProtectionProbe> = Box::new(aegis_client::DesktopProbe {
+            device_id: "aegis-vpn-local".to_string(),
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+        });
+        tokio::spawn(aegis_client::tamper::run_heartbeats(
+            cluster_endpoint.clone(),
+            probe,
+            std::time::Duration::from_secs(120),
+        ));
+    }
+
     // --- 3. Bring up the TUN data path (permissive smoltcp + WireGuard). ------
     let shutdown = aegis_net::CancellationToken::new();
     let vpn_token = shutdown.clone();

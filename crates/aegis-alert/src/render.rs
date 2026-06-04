@@ -269,6 +269,7 @@ fn headline_for(kind: AlertKind) -> &'static str {
     match kind {
         AlertKind::Intervention => "Aegis blocked something",
         AlertKind::GroomingSuspected => "Possible grooming detected",
+        AlertKind::ProtectionDisabled => "Aegis protection was changed",
         AlertKind::Unspecified => "Aegis alert",
     }
 }
@@ -283,6 +284,11 @@ fn intro_for(kind: AlertKind) -> &'static str {
         AlertKind::GroomingSuspected => {
             "Aegis detected conversation patterns that may indicate grooming \
              on a supervised device. Please review this carefully."
+        }
+        AlertKind::ProtectionDisabled => {
+            "Aegis protection on a supervised device was turned off, removed, or \
+             stopped checking in. The child's device may no longer be filtered — \
+             please check it."
         }
         AlertKind::Unspecified => "Aegis raised an alert on a supervised device.",
     }

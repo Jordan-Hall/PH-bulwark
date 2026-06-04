@@ -10,6 +10,7 @@ use aegis_proto::v1::alert_relay_server::{AlertRelay, AlertRelayServer};
 use aegis_proto::v1::analysis_server::{Analysis, AnalysisServer};
 use aegis_proto::v1::offload_server::{Offload, OffloadServer};
 use aegis_proto::v1::review_server::ReviewServer;
+use aegis_proto::v1::tamper_server::TamperServer;
 use aegis_proto::v1::{
     Action, AlertAck, AlertAckBatch, AlertBatch, AlertEvent, AnalysisBatch, AnalysisRequest,
     Category, DeviceProfile, OffloadPolicy, RefreshOffloadRequest, Severity, Verdict, VerdictBatch,
@@ -19,6 +20,7 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::accounts::{AccountStore, AccountsService};
 use crate::relay::{AlertHub, ReviewService};
+use crate::tamper::{self, TamperService};
 use crate::{default_offload_policy, AnalyzerRegistry, ServerConfig, ServerRole};
 
 fn to_status(e: aegis_core::Error) -> Status {
@@ -260,6 +262,32 @@ pub async fn run(
             hub.clone(),
             alert_sink,
         )));
+
+        // Tamper: child-device protection liveness + uninstall/disable alerts,
+        // fanned out through the SAME hub (so they reach guardian Review streams,
+        // scoped per child/device). A background task sweeps for devices that have
+        // gone silent past the grace window and raises a missed-heartbeat alert.
+        let tamper = TamperService::new(hub.clone());
+        {
+            let sweeper = tamper.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(
+                    tamper::DEFAULT_HEARTBEAT_SECS as u64,
+                ));
+                loop {
+                    tick.tick().await;
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0);
+                    let fired = sweeper.sweep(now_ms);
+                    if fired > 0 {
+                        tracing::warn!(devices = fired, "tamper: missed-heartbeat alert(s) raised");
+                    }
+                }
+            });
+        }
+        router = router.add_service(TamperServer::new(tamper));
 
         // Review (+ optional Accounts) depends on the deployment mode:
         //   * accounts_enabled = false (DEFAULT, single-home/dev): device-scoped

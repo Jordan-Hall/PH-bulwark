@@ -34,6 +34,9 @@ use aegis_proto::v1::{
 pub use aegis_video::SegmentStore;
 use aegis_vision::Scorer;
 
+pub mod tamper;
+pub use tamper::{DesktopProbe, ProtectionProbe};
+
 /// NSFW probability at/above which a still image is blocked. Matches the
 /// `aegis-vision` default threshold so the device-side fast path and any cluster
 /// path band identically.
