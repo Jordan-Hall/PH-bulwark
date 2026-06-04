@@ -14,14 +14,21 @@ on:
     paths:
       - "platform/android/**"
       - "crates/**"
+      # the root crates resolve workspace dep versions/features from the root
+      # manifest+lockfile, so a change there can break the JNI/APK build too.
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/android.yml"
   pull_request:
     paths:
       - "platform/android/**"
       # aegis-android depends on the root crates via ../../../../crates/...,
-      # so a PR that only touches a crate (aegis-text/policy/core/proto) can
+      # so a PR that only touches a crate (aegis-text/policy/core/proto) — or the
+      # root manifest/lockfile those crates inherit workspace deps from — can
       # break the JNI/APK build; mirror the push filter to catch it pre-merge.
       - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/android.yml"
   workflow_dispatch: {}
 
