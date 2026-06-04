@@ -9,7 +9,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [master, main]
   pull_request:
   workflow_dispatch:
 
@@ -59,6 +59,12 @@ jobs:
       - run: cargo build -p aegis-video --features ffmpeg
       - run: cargo build -p aegis-ui --features llm-explain
       - run: cargo build -p aegis-cluster --features gossip,quorum
+      # FCM push fan-out (guardian alerts to a phone) — keep this path compiling
+      # + tested so it can't rot; it's off by default in the server build.
+      - run: cargo build -p aegis-alert --features push
+      - run: cargo test  -p aegis-alert --features push
+      - run: cargo build -p aegis-server --features push
+      - run: cargo build -p aegis-server --features classifier
 
   windows-build:
     name: windows-gated crates (windows)
