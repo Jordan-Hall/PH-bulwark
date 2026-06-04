@@ -250,6 +250,15 @@ pub async fn run(
     let analysis = AnalysisServer::new(AnalysisService::new(registry));
     let mut router = builder.add_service(analysis);
 
+    // Standard gRPC health service (`grpc.health.v1.Health`) for LB / systemd /
+    // k8s / `grpc_health_probe` readiness checks. The overall ("") status is
+    // SERVING once we've built the router and are about to listen.
+    let (health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_service_status("", tonic_health::ServingStatus::Serving)
+        .await;
+    router = router.add_service(health_service);
+
     if matches!(cfg.role, ServerRole::AllInOne | ServerRole::Lb) {
         router = router.add_service(OffloadServer::new(OffloadService));
 

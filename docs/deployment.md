@@ -43,6 +43,9 @@ child device                              home cluster                guardian
   stop) or `Ctrl-C`, draining in-flight gRPC calls before exit — so service
   restarts don't cut off alert delivery mid-flight. A malformed `AEGIS_BIND` fails
   fast at startup with a clear error.
+- **Health probe:** the server exposes the standard gRPC health service
+  (`grpc.health.v1.Health`, status SERVING) on the same port — point a load
+  balancer / systemd / k8s / `grpc_health_probe` at it for readiness.
 - **Not-yet-wired:** multi-node gossip/quorum/Postgres is unverified on the Windows
   dev host (`rusqlite`/`aegis-store` fails, env error 4551).
 
