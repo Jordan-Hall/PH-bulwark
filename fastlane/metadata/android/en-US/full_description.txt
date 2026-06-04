@@ -1,0 +1,13 @@
+Predator Hunters Bulwark (PH Bulwark) is a free, open-source, non-profit child-safety system built by the Predator Hunters community after four years of prototyping.
+
+It runs on the child's own device, with the child's and guardian's knowledge — a transparent safety tool, not hidden spyware. It:
+
+- Blocks adult and unsafe content in real time (web, images, video) using on-device analysis, not crude whole-site blocklists.
+- Detects signs of grooming in on-device messages, even in apps that encrypt in transit.
+- Alerts a guardian the moment it steps in — by email and push — with the context to decide, and one-tap Approve / Keep-blocked.
+- Resists tampering: it raises an alert if protection is turned off or removed.
+- Respects privacy by design. Analysis happens on the device; only redacted summaries leave it. Suspected illegal child-sexual-abuse material is blocked and reported-by-hash only — never viewed, stored, or transmitted.
+
+Free and non-profit. No subscriptions, no data sold. Open source — anyone can verify exactly what it does. Use PH Bulwark Cloud, or self-host on your own server.
+
+This is testing software for consenting, guardian-managed devices. It is a safeguarding aid, not a replacement for supervision, and not a law-enforcement tool.
