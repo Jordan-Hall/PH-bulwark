@@ -316,6 +316,18 @@ pub async fn run(
         //     to a guardian session token and the Accounts service is mounted for
         //     registration/login/child/guardian management. Enable only once
         //     guardian sessions exist (else the gate rejects empty-token clients).
+        //
+        // Retained-clip store for FetchSegment (remote video review): all-in-one
+        // re-opens the default segment store as a read handle (the registry writes
+        // clips to the same location), so a guardian on a DIFFERENT device than the
+        // server can pull a blocked clip. A distributed worker keeps no store.
+        let review_store = matches!(cfg.role, ServerRole::AllInOne)
+            .then(aegis_video::SegmentStore::default_location)
+            .and_then(|r| {
+                r.map_err(|e| tracing::warn!(error = %e, "segment store unavailable; remote video review disabled"))
+                    .ok()
+            })
+            .map(Arc::new);
         if cfg.accounts_enabled {
             // Parent accounts + per-child guardians: the store scopes Review's
             // pending stream/decisions AND backs the Accounts service. Persisted to
@@ -324,14 +336,16 @@ pub async fn run(
                 Some(dir) => AccountStore::with_state_dir(dir)?,
                 None => AccountStore::new(),
             };
-            router = router.add_service(ReviewServer::new(ReviewService::with_accounts(
-                hub,
-                accounts.clone(),
-            )));
+            router = router.add_service(ReviewServer::new(
+                ReviewService::with_accounts(hub, accounts.clone())
+                    .with_segment_store(review_store.clone()),
+            ));
             router = router.add_service(AccountsServer::new(AccountsService::new(accounts)));
             tracing::info!("accounts mode ENABLED — Review requires a guardian session token");
         } else {
-            router = router.add_service(ReviewServer::new(ReviewService::new(hub)));
+            router = router.add_service(ReviewServer::new(
+                ReviewService::new(hub).with_segment_store(review_store),
+            ));
             tracing::info!("accounts mode disabled — device-scoped Review (legacy/dev)");
         }
 

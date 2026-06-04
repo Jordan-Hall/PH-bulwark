@@ -105,6 +105,11 @@ child device                              home cluster                guardian
   (unset → the filter's fail-open stub). It locates the filter binaries via
   `AEGIS_PROXY_EXE`/`AEGIS_VPN_EXE`, else beside its own exe (packaged release),
   else a dev `cargo run`.
+- **Remote video review:** an all-in-one server retains blocked/borderline clips and
+  serves them over `Review.FetchSegment` (streamed, auth-gated in accounts mode), so a
+  guardian on a **different device** than the server can pull a clip — not just a
+  co-located parent reading `blob://` off local disk. CSAM is never retained, so it is
+  never fetchable. (The parent-app *playback* of fetched clips is the remaining wiring.)
 
 ## 6. Email (SMTP) alerts
 - On-switch **triple** (all or none, else startup error): `AEGIS_SMTP_HOST` +
@@ -198,7 +203,8 @@ defeats software-only prevention short of zero-touch/ABM — detection still fir
 - Provisioning is via the `aegis_admin` CLI (§3); no web admin UI yet.
 - Multi-node gossip/quorum/Postgres unverified on the Windows host (rusqlite 4551).
 - Android release keystore + QR/zero-touch unverified in CI (debug APK only).
-- Distributed (remote-parent) video review unimplemented — `blob://` is local-only.
+- Remote-parent video review: server-side `Review.FetchSegment` is implemented; the
+  parent-app playback of fetched clips is the remaining wiring.
 - Desktop transparent VPN data path (smoltcp/boringtun) is fail-closed; proxy mode
   is the shipping path.
 - No real NSFW model artifact, FCM creds, SMTP creds, or code-signing keys ship in

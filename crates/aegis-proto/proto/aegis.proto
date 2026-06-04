@@ -384,6 +384,24 @@ service Review {
   rpc SubmitDecision(ReviewRequest) returns (ReviewAck);
   rpc RegisterPushTarget(PushTarget) returns (PushAck);
   rpc StreamPendingReviews(DeviceFilter) returns (stream AlertEvent);
+  // Fetch a retained blocked/borderline VIDEO clip for review, streamed in chunks,
+  // so a guardian on a DIFFERENT device than the server can play it (not just a
+  // co-located parent reading blob:// off local disk). CSAM is never retained, so
+  // it can never be fetched here.
+  rpc FetchSegment(SegmentRequest) returns (stream SegmentChunk);
+}
+
+// Request to fetch a retained video segment by its blob:// URI
+// (AlertEvent.local_segment_uri). `token` authenticates the guardian in accounts
+// mode (may also be supplied via the authorization Bearer metadata header).
+message SegmentRequest {
+  string local_segment_uri = 1;
+  string token = 2;
+}
+
+// One server-streamed chunk of segment bytes.
+message SegmentChunk {
+  bytes data = 1;
 }
 
 // ---------------------------------------------------------------------------
