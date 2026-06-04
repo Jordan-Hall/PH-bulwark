@@ -46,6 +46,10 @@ child device                              home cluster                guardian
 - **Health probe:** the server exposes the standard gRPC health service
   (`grpc.health.v1.Health`, status SERVING) on the same port — point a load
   balancer / systemd / k8s / `grpc_health_probe` at it for readiness.
+- **Containerized (VPS / home server):** `docker compose -f deploy/docker/docker-compose.yml
+  up -d --build` runs the server tier with durable state on a volume; provision
+  guardians via `... exec ... aegis_admin`. See `deploy/docker/README.md`. A CI job
+  builds the image so the Dockerfile can't rot.
 - **Not-yet-wired:** multi-node gossip/quorum/Postgres is unverified on the Windows
   dev host (`rusqlite`/`aegis-store` fails, env error 4551).
 

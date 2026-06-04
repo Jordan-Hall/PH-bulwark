@@ -1,0 +1,38 @@
+# Single-node aegis-server (cluster tier) for a VPS / home server. Run from here:
+#
+#   docker compose -f deploy/docker/docker-compose.yml up -d --build
+#
+# Accounts mode is ON here; provision guardians with the bundled aegis_admin:
+#   docker compose exec -e AEGIS_ADMIN_PASSWORD='…' aegis-server \
+#       aegis_admin create-account guardian@home.example "Guardian"
+#
+# For production: terminate mTLS (mount certs + set tls in aegis-core config),
+# set the SMTP/FCM env below, and put this behind a TLS-terminating reverse proxy
+# or supply the server's own cert material.
+services:
+  aegis-server:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      # args: { FEATURES: push }   # uncomment to bake in the FCM push sink
+    image: aegis-server:latest
+    command: ["--role", "all-in-one"]
+    ports:
+      - "8443:8443"
+    environment:
+      AEGIS_BIND: "0.0.0.0:8443"
+      AEGIS_ACCOUNTS: "1"
+      AEGIS_STATE_DIR: "/var/lib/aegis"
+      # --- email alerts (all three or none) ---
+      # AEGIS_SMTP_HOST: "smtp.example.com"
+      # AEGIS_ALERT_FROM: "Predator Hunters Bulwark <bulwark@home.example>"
+      # AEGIS_ALERT_RECIPIENTS: "guardian@home.example"
+      # --- FCM push (needs FEATURES=push + a mounted service-account key) ---
+      # AEGIS_FCM_PROJECT_ID: "your-gcp-project"
+      # AEGIS_FCM_SERVICE_ACCOUNT: "/run/secrets/fcm-sa.json"
+    volumes:
+      - aegis-state:/var/lib/aegis
+    restart: unless-stopped
+
+volumes:
+  aegis-state:

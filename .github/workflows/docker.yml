@@ -1,0 +1,41 @@
+name: docker
+
+# Verify the aegis-server container image builds (the cluster-tier deployment
+# artifact). Runs only when the image or the server's build inputs change.
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - deploy/docker/**
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - .dockerignore
+      - .github/workflows/docker.yml
+  pull_request:
+    paths:
+      - deploy/docker/**
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - .dockerignore
+      - .github/workflows/docker.yml
+  workflow_dispatch:
+
+jobs:
+  build-image:
+    name: build aegis-server image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          push: false
+          tags: aegis-server:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
