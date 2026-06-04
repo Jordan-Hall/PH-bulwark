@@ -393,6 +393,21 @@ impl Pipeline {
                 .apply(flow_id, action_to_decision(action, None))
                 .await?;
 
+            // A buffered video segment carries a DelayBuffer ticket; apply the
+            // verdict to it so the held bytes are forwarded/dropped AND the slot is
+            // freed. Without this, tickets pile up to max_segments/max_bytes and
+            // later segments hit BufferFull, degrading video filtering/review.
+            if let AnalysisUnit::VideoSegment {
+                segment_id: Some(sid),
+                ..
+            } = unit
+            {
+                if let Err(e) = self.classifier.apply(*sid, action, None) {
+                    tracing::warn!(error = %e, segment_id = sid,
+                        "failed to release buffered video segment");
+                }
+            }
+
             if action == Action::Block {
                 reports.push(BlockReport {
                     host: host.clone(),
@@ -866,6 +881,78 @@ mod tests {
         let v3 = p.analyze(&seg(None, vec![9, 9, 9])).await;
         let v4 = p.analyze(&seg(None, vec![7, 7, 7, 7])).await;
         assert_ne!(v3.request_id, v4.request_id);
+    }
+
+    /// A buffered video segment's DelayBuffer ticket is released after
+    /// `handle_flow_reporting` applies the verdict — otherwise tickets accumulate
+    /// to BufferFull and later segments are rejected.
+    #[tokio::test]
+    async fn video_segment_buffer_ticket_is_released_after_analysis() {
+        use aegis_proto::v1::SourceChannel;
+
+        struct NoopInterceptor;
+        #[async_trait::async_trait]
+        impl Interceptor for NoopInterceptor {
+            async fn start(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn next_flow(&self) -> Result<Option<aegis_flow::CapturedFlow>> {
+                Ok(None)
+            }
+            async fn apply(&self, _flow_id: u64, _d: InterceptDecision) -> Result<()> {
+                Ok(())
+            }
+            fn is_pinned(&self, _host: &str) -> bool {
+                false
+            }
+            async fn shutdown(&self) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let mk_flow = || aegis_flow::CapturedFlow {
+            flow_id: 7,
+            source_channel: SourceChannel::Web,
+            app_or_host: "cdn.example.com".into(),
+            readable: true,
+            payload: aegis_flow::FlowPayload::Http(aegis_flow::HttpHead {
+                method: Some("GET".into()),
+                path: Some("/clip.mp4".into()),
+                status: Some(200),
+                headers: vec![aegis_flow::Header {
+                    name: "content-type".into(),
+                    value: "video/mp4".into(),
+                }],
+                body_peek: bytes::Bytes::from(vec![0u8; 64]),
+            }),
+        };
+
+        // Guard against a vacuous test: this flow really does buffer a segment
+        // (ticket present, pending == 1) on a probe pipeline.
+        let probe = Pipeline::new(ClientConfig::default());
+        let units = probe.classifier.classify(mk_flow()).await.unwrap();
+        assert!(
+            matches!(
+                units.as_slice(),
+                [AnalysisUnit::VideoSegment {
+                    segment_id: Some(_),
+                    ..
+                }]
+            ),
+            "test flow must classify as a buffered video segment"
+        );
+        assert_eq!(probe.classifier.buffer().pending(), 1);
+
+        // The real assertion: after analysis the ticket is released (pending == 0).
+        let p = Pipeline::new(ClientConfig::default());
+        p.handle_flow_reporting(mk_flow(), &NoopInterceptor)
+            .await
+            .unwrap();
+        assert_eq!(
+            p.classifier.buffer().pending(),
+            0,
+            "the buffered video segment ticket must be released after analysis"
+        );
     }
 
     #[test]

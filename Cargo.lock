@@ -82,6 +82,7 @@ dependencies = [
  "aegis-vision",
  "anyhow",
  "async-trait",
+ "bytes",
  "image",
  "ring",
  "thiserror 2.0.18",

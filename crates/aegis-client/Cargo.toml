@@ -35,6 +35,10 @@ tonic.workspace = true
 # SHA-256 for Evidence.sha256 (hash-only audit of analysed media).
 ring.workspace = true
 
+[dev-dependencies]
+# Construct CapturedFlow payloads (HttpHead.body_peek: Bytes) in tests.
+bytes.workspace = true
+
 [features]
 default = []
 # Real local NSFW scoring via ONNX Runtime. Forwards to aegis-vision's `onnx`
