@@ -226,8 +226,13 @@ impl Pipeline {
             // `with_segment_store`/`with_video_analyzer`): it samples frames/audio
             // and, on a blocked/borderline NON-CSAM verdict, retains the clip and
             // sets `local_segment_uri`. Unconfigured → fail open (audio seam below).
-            AnalysisUnit::VideoSegment { media, .. } => match &self.video {
-                Some(analyzer) => self.analyze_video(analyzer.as_ref(), media).await,
+            AnalysisUnit::VideoSegment {
+                media, segment_id, ..
+            } => match &self.video {
+                Some(analyzer) => {
+                    self.analyze_video(analyzer.as_ref(), media, *segment_id)
+                        .await
+                }
                 None => fail_open_verdict("video analyzer not configured (fail open)"),
             },
             // SEAM: route AUDIO to the cluster (aegis-infer OffloadRouter →
@@ -238,9 +243,22 @@ impl Pipeline {
 
     /// Run a `VideoSegment` through `analyzer` and propagate its verdict. A failed
     /// analysis fails OPEN (never blocks on an analyzer error) and logs the gap.
-    async fn analyze_video(&self, analyzer: &dyn Analyzer, media: &InlineMedia) -> Verdict {
+    async fn analyze_video(
+        &self,
+        analyzer: &dyn Analyzer,
+        media: &InlineMedia,
+        segment_id: Option<u64>,
+    ) -> Verdict {
+        // Unique per segment so multiple blocked clips from one device don't
+        // collide on `alert_id` (build_alert keys it off request_id, and the alert
+        // layer dedupes by alert_id). Prefer the flow's buffer ticket; else a short
+        // content hash of the segment bytes.
+        let tag = match segment_id {
+            Some(id) => format!("seg{id}"),
+            None => short_hash_hex(&media.data),
+        };
         let req = AnalysisRequest {
-            request_id: format!("{}-video", self.cfg.device_id),
+            request_id: format!("{}-video-{}", self.cfg.device_id, tag),
             media_kind: MediaKind::Video as i32,
             media: Some(Media::InlineMedia(media.clone())),
             ..Default::default()
@@ -311,7 +329,7 @@ impl Pipeline {
         };
         let evidence = build_image_evidence(category, bytes, self.nsfw.model_id());
         Verdict {
-            request_id: format!("{}-img", self.cfg.device_id),
+            request_id: format!("{}-img-{}", self.cfg.device_id, short_hash_hex(bytes)),
             category: category as i32,
             action: action as i32,
             severity: severity as i32,
@@ -567,6 +585,18 @@ fn sha256_array(bytes: &[u8]) -> [u8; 32] {
     digest.as_ref().try_into().unwrap_or([0u8; 32])
 }
 
+/// Short hex (8 bytes) of the content hash — a stable, per-content suffix for
+/// request/alert IDs so distinct blocked media never collide on `alert_id`.
+fn short_hash_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let h = sha256_array(bytes);
+    let mut s = String::with_capacity(16);
+    for b in &h[..8] {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -788,6 +818,54 @@ mod tests {
         let v = p.analyze(&unit).await;
         assert_eq!(v.action, Action::Allow as i32);
         assert!(v.local_segment_uri.is_empty());
+    }
+
+    /// Distinct blocked video segments must get distinct `request_id`s (and thus
+    /// distinct `alert_id`s) so the alert layer doesn't dedupe them into one — by
+    /// `segment_id` when present, else by segment content hash.
+    #[tokio::test]
+    async fn distinct_video_segments_get_distinct_alert_ids() {
+        // Echoes req.request_id into the verdict, like the real VideoAnalyzer.
+        struct EchoBlock;
+        #[async_trait::async_trait]
+        impl Analyzer for EchoBlock {
+            fn handles(&self) -> &[MediaKind] {
+                const K: [MediaKind; 1] = [MediaKind::Video];
+                &K
+            }
+            async fn analyze(&self, req: AnalysisRequest) -> Result<Verdict> {
+                Ok(Verdict {
+                    request_id: req.request_id,
+                    category: Category::AdultImage as i32,
+                    action: Action::Block as i32,
+                    local_segment_uri: "blob://x".into(),
+                    ..Default::default()
+                })
+            }
+        }
+        let p = Pipeline::new(ClientConfig::default()).with_video_analyzer(Arc::new(EchoBlock));
+        let seg = |id: Option<u64>, data: Vec<u8>| AnalysisUnit::VideoSegment {
+            media: InlineMedia {
+                data,
+                mime_type: "video/mp4".into(),
+                ..Default::default()
+            },
+            deadline_ms: 0,
+            segment_id: id,
+        };
+
+        // Different segment_id → different alert_id.
+        let v1 = p.analyze(&seg(Some(1), vec![1, 2, 3])).await;
+        let v2 = p.analyze(&seg(Some(2), vec![1, 2, 3])).await;
+        assert_ne!(v1.request_id, v2.request_id);
+        let a1 = build_alert("dev", "app", &v1, AlertKind::Unspecified);
+        let a2 = build_alert("dev", "app", &v2, AlertKind::Unspecified);
+        assert_ne!(a1.alert_id, a2.alert_id);
+
+        // No segment_id → falls back to content hash; different bytes differ.
+        let v3 = p.analyze(&seg(None, vec![9, 9, 9])).await;
+        let v4 = p.analyze(&seg(None, vec![7, 7, 7, 7])).await;
+        assert_ne!(v3.request_id, v4.request_id);
     }
 
     #[test]
