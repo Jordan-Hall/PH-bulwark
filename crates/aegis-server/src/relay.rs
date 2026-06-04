@@ -34,7 +34,7 @@ use crate::persist::JsonFile;
 use aegis_policy::{Allowlist, ApplyOutcome, ReviewItem};
 use aegis_proto::v1::{
     AlertEvent, Category, DeviceFilter, PushAck, PushTarget, ReviewAck, ReviewDecision,
-    ReviewRequest, ReviewScope,
+    ReviewRequest, ReviewScope, SegmentChunk, SegmentRequest,
 };
 use aegis_proto::DeviceId;
 use futures_core::Stream;
@@ -392,6 +392,13 @@ fn from_hex_bytes(s: &str) -> Vec<u8> {
 pub type AlertEventStream =
     Pin<Box<dyn Stream<Item = Result<AlertEvent, Status>> + Send + 'static>>;
 
+/// The response-stream type tonic expects for `Review::FetchSegment`.
+pub type SegmentChunkStream =
+    Pin<Box<dyn Stream<Item = Result<SegmentChunk, Status>> + Send + 'static>>;
+
+/// Server-stream a clip's bytes in ~64 KiB chunks (the clip is already in memory).
+const SEGMENT_CHUNK_BYTES: usize = 64 * 1024;
+
 /// Turn a broadcast receiver into the boxed response stream tonic wants.
 ///
 /// A lagged receiver (slow guardian client) skips the dropped events rather
@@ -431,6 +438,10 @@ pub struct ReviewService {
     /// token) to ONLY the children they're assigned to. `None` = legacy
     /// device-only filtering (every subscriber sees every alert).
     accounts: Option<crate::accounts::AccountStore>,
+    /// When set, `FetchSegment` streams retained video clips from this store to a
+    /// remote guardian. `None` = no server-side video review on this node (a
+    /// distributed worker keeps no store; the co-located parent reads disk).
+    segment_store: Option<Arc<aegis_video::SegmentStore>>,
 }
 
 impl ReviewService {
@@ -439,6 +450,7 @@ impl ReviewService {
         Self {
             hub,
             accounts: None,
+            segment_store: None,
         }
     }
 
@@ -448,7 +460,14 @@ impl ReviewService {
         Self {
             hub,
             accounts: Some(store),
+            segment_store: None,
         }
+    }
+
+    /// Enable `FetchSegment` against a retained-clip store (all-in-one node).
+    pub fn with_segment_store(mut self, store: Option<Arc<aegis_video::SegmentStore>>) -> Self {
+        self.segment_store = store;
+        self
     }
 }
 
@@ -619,6 +638,47 @@ impl aegis_proto::v1::review_server::Review for ReviewService {
 
         Ok(Response::new(stream))
     }
+
+    type FetchSegmentStream = SegmentChunkStream;
+
+    async fn fetch_segment(
+        &self,
+        req: Request<SegmentRequest>,
+    ) -> Result<Response<Self::FetchSegmentStream>, Status> {
+        let meta_token = crate::accounts::bearer_token(&req);
+        let r = req.into_inner();
+
+        // In accounts mode a valid guardian session is required (same gate as the
+        // review stream). CSAM clips are never retained, so they can't be fetched.
+        if let Some(store) = &self.accounts {
+            let token = if !r.token.trim().is_empty() {
+                r.token.trim().to_string()
+            } else {
+                meta_token.unwrap_or_default()
+            };
+            if token.is_empty() || store.guardian_scope(&token).is_none() {
+                return Err(Status::unauthenticated(
+                    "a valid session token is required (Accounts.Login) to fetch a clip",
+                ));
+            }
+        }
+
+        let segments = self.segment_store.as_ref().ok_or_else(|| {
+            Status::unavailable("video review storage is not enabled on this node")
+        })?;
+        let bytes = segments
+            .load(&r.local_segment_uri)
+            .map_err(|e| Status::internal(format!("reading segment: {e}")))?
+            .ok_or_else(|| Status::not_found("segment not found or expired"))?;
+
+        // Chunk the in-memory clip into the response stream.
+        let chunks: Vec<Result<SegmentChunk, Status>> = bytes
+            .chunks(SEGMENT_CHUNK_BYTES)
+            .map(|c| Ok(SegmentChunk { data: c.to_vec() }))
+            .collect();
+        let stream: Self::FetchSegmentStream = Box::pin(futures_util::stream::iter(chunks));
+        Ok(Response::new(stream))
+    }
 }
 
 #[cfg(test)]
@@ -653,6 +713,52 @@ mod tests {
         ));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[tokio::test]
+    async fn fetch_segment_streams_a_stored_clip() {
+        use aegis_proto::v1::review_server::Review;
+        use aegis_proto::v1::{Action, Category};
+        use futures_util::StreamExt;
+
+        let dir = tmp_dir("segments");
+        let store = aegis_video::SegmentStore::new(dir.clone()).unwrap();
+        let clip = vec![7u8; 200_000]; // spans multiple 64 KiB chunks
+        let stored = store
+            .store_if_safe(Category::AdultImage, Action::Block, &clip)
+            .unwrap()
+            .expect("a safe blocked clip is retained");
+
+        let svc = ReviewService::new(AlertHub::new()).with_segment_store(Some(Arc::new(store)));
+
+        // Fetch + reassemble the streamed chunks.
+        let resp = svc
+            .fetch_segment(Request::new(SegmentRequest {
+                local_segment_uri: stored.uri.clone(),
+                token: String::new(),
+            }))
+            .await
+            .unwrap();
+        let mut stream = resp.into_inner();
+        let mut got = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            got.extend_from_slice(&chunk.unwrap().data);
+        }
+        assert_eq!(got, clip);
+        assert!(
+            got.len() > SEGMENT_CHUNK_BYTES,
+            "exercised multi-chunk streaming"
+        );
+
+        // Unknown uri → NotFound (and CSAM is never stored, so never fetchable).
+        let miss = svc
+            .fetch_segment(Request::new(SegmentRequest {
+                local_segment_uri: "blob://deadbeef".into(),
+                token: String::new(),
+            }))
+            .await;
+        assert_eq!(miss.err().map(|s| s.code()), Some(tonic::Code::NotFound));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
