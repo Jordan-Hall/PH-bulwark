@@ -78,3 +78,19 @@ These can't live in the repo — provide them out-of-band / as CI secrets:
   Play track is possible; F-Droid + direct APK keep testing unblocked meanwhile.
 - **Versioning**: bump `versionCode` every upload (Play requires monotonic codes).
 - Nothing here ships secrets; signing happens only in CI with the secrets set.
+
+## 5. Continuous deployment to the servers
+`.github/workflows/deploy.yml` redeploys a running server (the build-on-instance
+EC2) on a **published Release** or manual dispatch: it SSHes in, `git pull`s,
+rebuilds the image, and restarts the container. It's gated on a GitHub
+**Environment** named `production` — create it (Settings → Environments) and add:
+
+| kind | name | value |
+|---|---|---|
+| secret | `AEGIS_SSH_KEY` | the private key (contents of `ph-bulwark-london.pem`) |
+| var | `AEGIS_SERVER_HOST` | the server's public DNS/IP (e.g. the Terraform `endpoint` host) |
+| var | `AEGIS_SSH_USER` | optional, default `ubuntu` |
+
+Add **required reviewers** on the Environment for a manual approve-before-deploy
+gate. For multiple servers (UK + US), add more Environments (`production-us`, …)
+and duplicate the job with `environment: production-us`.

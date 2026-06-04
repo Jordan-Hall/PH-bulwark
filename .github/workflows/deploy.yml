@@ -1,0 +1,50 @@
+name: deploy
+
+# Redeploy / update a running PH Bulwark server (the build-on-instance EC2) from
+# CI: SSH in, pull the latest code, rebuild the image, restart the container.
+#
+# Gated on the GitHub Environment named `production` — create it under
+# Settings → Environments and add (optionally with required reviewers for a manual
+# approval gate before each deploy):
+#   secret  AEGIS_SSH_KEY      the private key (contents of e.g. ph-bulwark-london.pem)
+#   var     AEGIS_SERVER_HOST  the server's public DNS or IP
+#   var     AEGIS_SSH_USER     login user (optional; defaults to "ubuntu")
+#
+# Triggers: a published Release (auto-update the server to the released code), or a
+# manual run. For multiple servers (UK + US) add more Environments and duplicate the
+# job with `environment: production-us` etc.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      host:
+        description: "Override server host (else the environment's AEGIS_SERVER_HOST)"
+        required: false
+
+jobs:
+  deploy-server:
+    name: redeploy server over SSH
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Pull + rebuild + restart on the server
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ github.event.inputs.host || vars.AEGIS_SERVER_HOST }}
+          username: ${{ vars.AEGIS_SSH_USER || 'ubuntu' }}
+          key: ${{ secrets.AEGIS_SSH_KEY }}
+          script: |
+            set -euxo pipefail
+            cd /opt/aegis-src
+            sudo git pull --ff-only
+            sudo docker build -f deploy/docker/Dockerfile -t aegis-server:local .
+            sudo docker rm -f aegis-server || true
+            sudo docker run -d --name aegis-server --restart unless-stopped \
+              -p 8443:8443 \
+              -v /var/lib/aegis:/var/lib/aegis \
+              -e AEGIS_BIND=0.0.0.0:8443 \
+              -e AEGIS_ACCOUNTS=1 \
+              -e AEGIS_STATE_DIR=/var/lib/aegis \
+              aegis-server:local --role all-in-one
