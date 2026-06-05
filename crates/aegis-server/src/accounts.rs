@@ -906,7 +906,10 @@ impl Accounts for AccountsService {
         // Unauthenticated by design — the pairing code is the credential.
         let r = req.into_inner();
         let (child_id, family_id) = self.store.redeem_pair_code(&r.code, &r.device_id)?;
-        Ok(Response::new(PairResult { child_id, family_id }))
+        Ok(Response::new(PairResult {
+            child_id,
+            family_id,
+        }))
     }
 }
 
