@@ -28,7 +28,8 @@ use crate::persist::JsonFile;
 use aegis_proto::v1::accounts_server::Accounts;
 use aegis_proto::v1::{
     AccountAck, AddChildRequest, AssignGuardianRequest, Child, Children, CreateAccountRequest,
-    GuardianAck, ListChildrenRequest, LoginRequest, Session,
+    CreatePairCodeRequest, GuardianAck, ListChildrenRequest, LoginRequest, PairCode, PairResult,
+    RedeemPairCodeRequest, Session,
 };
 use ring::pbkdf2;
 use ring::rand::{SecureRandom, SystemRandom};
@@ -42,6 +43,12 @@ const SALT_LEN: usize = 16;
 /// Session/id token entropy in bytes (→ hex string of 2× this length).
 const TOKEN_BYTES: usize = 32;
 const ID_BYTES: usize = 16;
+
+/// Pairing codes are a short-lived, single-use linking credential.
+const PAIR_CODE_TTL_SECS: i64 = 15 * 60;
+const PAIR_CODE_LEN: usize = 8;
+/// Unambiguous alphabet for human-typed pair codes (no 0/O/1/I).
+const PAIR_CODE_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 /// Default guardian-session lifetime; override with `AEGIS_SESSION_TTL_SECS`
 /// (positive integer seconds). A leaked token is valid at most this long; sessions
 /// are also dropped on restart (never persisted).
@@ -132,6 +139,8 @@ pub enum AccountError {
     Validation(&'static str),
     /// Too many failed logins for this email within the window — locked out.
     TooManyAttempts,
+    /// The pairing code is unknown, expired, or already used.
+    PairCodeInvalid,
 }
 
 impl From<AccountError> for Status {
@@ -154,6 +163,9 @@ impl From<AccountError> for Status {
             AccountError::Validation(m) => Status::invalid_argument(m),
             AccountError::TooManyAttempts => {
                 Status::resource_exhausted("too many login attempts; try again later")
+            }
+            AccountError::PairCodeInvalid => {
+                Status::not_found("pairing code is invalid, expired, or already used")
             }
         }
     }
@@ -211,6 +223,16 @@ struct SessionEntry {
     issued_ms: i64,
 }
 
+/// A pending pairing code: who minted it + the child it will create on redeem.
+/// Short-lived, single-use, NEVER persisted (like sessions).
+#[derive(Clone)]
+struct PairCodeRec {
+    account_id: String,
+    family_id: String,
+    child_name: String,
+    issued_ms: i64,
+}
+
 #[derive(Default)]
 struct Inner {
     /// email (lowercased) → account.
@@ -227,6 +249,8 @@ struct Inner {
     children: HashMap<String, ChildRec>,
     /// device_id → child_id (for routing alerts by device to a child).
     device_to_child: HashMap<String, String>,
+    /// pairing code → pending child record. Short-lived, single-use, not persisted.
+    pair_codes: HashMap<String, PairCodeRec>,
 }
 
 /// Cloneable handle to the in-memory account/guardian state. Every clone shares
@@ -475,6 +499,93 @@ impl AccountStore {
         inner.children.insert(child_id, rec);
         self.persist_locked(&inner);
         Ok(proto)
+    }
+
+    /// Mint a short-lived, single-use pairing code bound to the caller's family.
+    /// The child record is created later, when the device redeems the code.
+    pub fn create_pair_code(
+        &self,
+        token: &str,
+        child_name: &str,
+    ) -> Result<(String, i64), AccountError> {
+        let mut inner = self.inner.lock().expect("account mutex poisoned");
+        let account_id = Self::account_for_token(&inner, token)?;
+        let family_id = inner
+            .by_email
+            .values()
+            .find(|a| a.account_id == account_id)
+            .map(|a| a.family_id.clone())
+            .ok_or(AccountError::Unauthorized)?;
+        if child_name.trim().is_empty() {
+            return Err(AccountError::Validation("child_name is required"));
+        }
+        let issued_ms = Self::now_ms();
+        let code = self.gen_pair_code();
+        inner.pair_codes.insert(
+            code.clone(),
+            PairCodeRec {
+                account_id,
+                family_id,
+                child_name: child_name.trim().to_string(),
+                issued_ms,
+            },
+        );
+        Ok((code, issued_ms + PAIR_CODE_TTL_SECS * 1000))
+    }
+
+    /// Redeem a pairing code from a child device: creates the child (with this
+    /// `device_id`) under the code's family, assigns the minting parent as the
+    /// first guardian, and consumes the code. Unauthenticated — the code IS the
+    /// credential, so the not-yet-enrolled child can call it.
+    pub fn redeem_pair_code(
+        &self,
+        code: &str,
+        device_id: &str,
+    ) -> Result<(String, String), AccountError> {
+        let mut inner = self.inner.lock().expect("account mutex poisoned");
+        let key = code.trim().to_uppercase();
+        let device_id = device_id.trim();
+        if device_id.is_empty() {
+            return Err(AccountError::Validation("device_id is required"));
+        }
+        let rec = inner
+            .pair_codes
+            .get(&key)
+            .cloned()
+            .ok_or(AccountError::PairCodeInvalid)?;
+        if !session_live(rec.issued_ms, Self::now_ms(), PAIR_CODE_TTL_SECS * 1000) {
+            inner.pair_codes.remove(&key);
+            return Err(AccountError::PairCodeInvalid);
+        }
+        if inner.device_to_child.contains_key(device_id) {
+            return Err(AccountError::DeviceInUse);
+        }
+        let child_id = self.rand_hex(ID_BYTES);
+        let mut guardians = HashSet::new();
+        guardians.insert(rec.account_id.clone());
+        let child_rec = ChildRec {
+            child_id: child_id.clone(),
+            family_id: rec.family_id.clone(),
+            name: rec.child_name.clone(),
+            device_id: device_id.to_string(),
+            guardians,
+        };
+        inner
+            .device_to_child
+            .insert(device_id.to_string(), child_id.clone());
+        inner.children.insert(child_id.clone(), child_rec);
+        inner.pair_codes.remove(&key); // single-use
+        self.persist_locked(&inner);
+        Ok((child_id, rec.family_id))
+    }
+
+    /// Generate a short, human-typeable, unambiguous pairing code.
+    fn gen_pair_code(&self) -> String {
+        let mut buf = vec![0u8; PAIR_CODE_LEN];
+        self.rng.fill(&mut buf).expect("rng fill");
+        buf.iter()
+            .map(|b| PAIR_CODE_ALPHABET[(*b as usize) % PAIR_CODE_ALPHABET.len()] as char)
+            .collect()
     }
 
     /// Assign another account as a guardian of a child. The caller must already
@@ -777,11 +888,57 @@ impl Accounts for AccountsService {
         let children = self.store.list_children(&token)?;
         Ok(Response::new(Children { children }))
     }
+
+    async fn create_pair_code(
+        &self,
+        req: Request<CreatePairCodeRequest>,
+    ) -> Result<Response<PairCode>, Status> {
+        let token = Self::token_or_meta(&req, &req.get_ref().token);
+        let r = req.into_inner();
+        let (code, expires_ts) = self.store.create_pair_code(&token, &r.child_name)?;
+        Ok(Response::new(PairCode { code, expires_ts }))
+    }
+
+    async fn redeem_pair_code(
+        &self,
+        req: Request<RedeemPairCodeRequest>,
+    ) -> Result<Response<PairResult>, Status> {
+        // Unauthenticated by design — the pairing code is the credential.
+        let r = req.into_inner();
+        let (child_id, family_id) = self.store.redeem_pair_code(&r.code, &r.device_id)?;
+        Ok(Response::new(PairResult {
+            child_id,
+            family_id,
+        }))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pair_code_round_trip_creates_and_links_child() {
+        let store = AccountStore::new();
+        store
+            .create_account("parent@example.com", "password123", "Parent")
+            .unwrap();
+        let (token, _aid, _) = store.login("parent@example.com", "password123").unwrap();
+
+        let (code, _expires) = store.create_pair_code(&token, "Kiddo").unwrap();
+        let (child_id, _family) = store.redeem_pair_code(&code, "device-xyz").unwrap();
+
+        // The parent now sees the linked child, routed by its device id.
+        let kids = store.list_children(&token).unwrap();
+        assert!(kids
+            .iter()
+            .any(|c| c.child_id == child_id && c.device_id == "device-xyz"));
+
+        // Single-use: a second redeem of the same code fails.
+        assert!(store.redeem_pair_code(&code, "device-2").is_err());
+        // Unknown code fails.
+        assert!(store.redeem_pair_code("NOTACODE", "device-3").is_err());
+    }
 
     fn tmp_dir(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!(
