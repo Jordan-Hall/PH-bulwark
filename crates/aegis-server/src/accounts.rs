@@ -436,6 +436,9 @@ impl AccountStore {
                 issued_ms,
             },
         );
+        // Persist the new session so a redeploy/restart doesn't invalidate the
+        // login (the testing-phase continuous deploy restarts the server often).
+        self.persist_locked(&inner);
         Ok((token, account_id, issued_ms))
     }
 
@@ -687,6 +690,17 @@ fn from_hex_array<const N: usize>(s: &str) -> Option<[u8; N]> {
 struct AccountSnapshot {
     accounts: Vec<AccountRow>,
     children: Vec<ChildRow>,
+    /// Persisted so a logged-in guardian survives a server restart/redeploy
+    /// (sessions still expire via TTL). `#[serde(default)]` keeps old files loadable.
+    #[serde(default)]
+    sessions: Vec<SessionRow>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SessionRow {
+    token: String,
+    account_id: String,
+    issued_ms: i64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -708,7 +722,8 @@ struct ChildRow {
 }
 
 impl Inner {
-    /// Build a stable (sorted) serde snapshot. Omits `sessions`.
+    /// Build a stable (sorted) serde snapshot. Sessions ARE persisted so a
+    /// logged-in guardian survives a restart/redeploy (they still TTL-expire).
     fn snapshot(&self) -> AccountSnapshot {
         let mut accounts: Vec<AccountRow> = self
             .by_email
@@ -740,7 +755,22 @@ impl Inner {
             .collect();
         children.sort_by(|a, b| a.child_id.cmp(&b.child_id));
 
-        AccountSnapshot { accounts, children }
+        let mut sessions: Vec<SessionRow> = self
+            .sessions
+            .iter()
+            .map(|(token, e)| SessionRow {
+                token: token.clone(),
+                account_id: e.account_id.clone(),
+                issued_ms: e.issued_ms,
+            })
+            .collect();
+        sessions.sort_by(|a, b| a.token.cmp(&b.token));
+
+        AccountSnapshot {
+            accounts,
+            children,
+            sessions,
+        }
     }
 
     /// Rebuild from a snapshot, deriving the reverse maps; `sessions` starts empty
@@ -786,6 +816,15 @@ impl Inner {
                     name: row.name,
                     device_id: row.device_id,
                     guardians,
+                },
+            );
+        }
+        for row in snap.sessions {
+            inner.sessions.insert(
+                row.token,
+                SessionEntry {
+                    account_id: row.account_id,
+                    issued_ms: row.issued_ms,
                 },
             );
         }
@@ -984,8 +1023,9 @@ mod tests {
             s2.add_child(&a_tok2, "Kid2", "kids-tablet"),
             Err(AccountError::DeviceInUse)
         );
-        // Sessions are NOT persisted: the OLD token is invalid after restart.
-        assert!(s2.guardian_scope(&a_tok).is_none());
+        // Sessions ARE persisted now: the OLD token survives a restart (login survives a
+        // redeploy); it still TTL-expires.
+        assert!(s2.guardian_scope(&a_tok).is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
