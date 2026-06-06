@@ -71,15 +71,36 @@ class AegisAccessibilityService : AccessibilityService() {
     private fun submit(pkg: String, thread: String, text: String) {
         val verdictJson = runCatching { RustBridge.analyzeText(pkg, thread, text) }
             .getOrDefault("{\"error\":\"bridge unavailable\"}")
-        if (isHarmful(verdictJson)) {
-            Log.w(TAG, "harmful content flagged in $pkg — blocking")
-            blockContent()
+        when {
+            // HIGH-confidence / illegal -> disruptive on-screen block (+ alert).
+            shouldBlock(verdictJson) -> {
+                Log.w(TAG, "high-confidence harmful content in $pkg — blocking + alerting")
+                blockContent()
+                notifyGuardian(pkg, verdictJson)
+            }
+            // Borderline non-SAFE -> alert the guardian, but DON'T slam the screen.
+            // The deterministic detector still fired and the parent is still told;
+            // this just stops over-blocking benign-looking chat (the false-positive fix).
+            isFlagged(verdictJson) -> {
+                Log.w(TAG, "borderline content in $pkg — alerting guardian (no block)")
+                notifyGuardian(pkg, verdictJson)
+            }
         }
     }
 
-    /** A non-SAFE verdict from the on-device analyzer (grooming/adult/CSAM/etc.). */
-    private fun isHarmful(json: String): Boolean =
-        HARMFUL_MARKERS.any { json.contains("\"$it") } || json.contains("\"Block")
+    /**
+     * The disruptive on-screen block is reserved for HIGH-CONFIDENCE content: the
+     * POLICY engine decided BLOCK, or it's suspected CSAM (illegal — always block).
+     * Borderline grooming/adult verdicts are alerted, not blocked. The detector is
+     * untouched (it still fired); only the *enforcement* is gated on confidence —
+     * the deliberate fix for benign chat being slammed off the screen.
+     */
+    private fun shouldBlock(json: String): Boolean =
+        json.contains("\"action\":\"BLOCK\"") || json.contains("\"CSAM")
+
+    /** Any non-SAFE verdict — worth telling the guardian even if we don't block. */
+    private fun isFlagged(json: String): Boolean =
+        !json.contains("\"category\":\"SAFE\"") && !json.contains("\"error\"")
 
     /**
      * ENFORCE on the device: bounce off the harmful screen, cover it with a PH
@@ -98,6 +119,43 @@ class AegisAccessibilityService : AccessibilityService() {
         runCatching {
             val uri = android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_NOTIFICATION)
             android.media.RingtoneManager.getRingtone(applicationContext, uri)?.play()
+        }
+    }
+
+    /**
+     * Quietly alert the guardian about a flagged detection: a status-bar
+     * notification carrying the policy's CONTENT-FREE reason (never the message
+     * text). Best-effort + non-disruptive — the remote/parent-app alert rides the
+     * account-linked path; this is the local signal so a borderline detection
+     * isn't silent just because we chose not to block the screen.
+     */
+    private fun notifyGuardian(pkg: String, json: String) {
+        runCatching {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+            val channelId = "ph_bulwark_alerts"
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                nm.createNotificationChannel(
+                    android.app.NotificationChannel(
+                        channelId, "PH Bulwark alerts",
+                        android.app.NotificationManager.IMPORTANCE_HIGH,
+                    ),
+                )
+            }
+            val reason = Regex("\"reason\":\"([^\"]*)\"").find(json)?.groupValues?.get(1)
+                ?: "Flagged content detected"
+            val builder = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                android.app.Notification.Builder(this, channelId)
+            } else {
+                @Suppress("DEPRECATION")
+                android.app.Notification.Builder(this)
+            }
+            val notification = builder
+                .setSmallIcon(android.R.drawable.ic_dialog_alert)
+                .setContentTitle("PH Bulwark — content flagged")
+                .setContentText(reason)
+                .setAutoCancel(true)
+                .build()
+            nm.notify(pkg.hashCode(), notification)
         }
     }
 
@@ -169,8 +227,6 @@ class AegisAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "AegisA11y"
-        // Verdict markers that mean "do not show this to the child" — block on any.
-        private val HARMFUL_MARKERS = listOf("GROOMING", "CSAM", "SEXTORTION", "ADULT", "SEXUAL", "NSFW")
         // Apps the network can't read (E2E / cert-pinned) → on-device capture path.
         private val MONITORED = setOf(
             "com.whatsapp",
