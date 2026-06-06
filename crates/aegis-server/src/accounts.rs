@@ -1023,8 +1023,9 @@ mod tests {
             s2.add_child(&a_tok2, "Kid2", "kids-tablet"),
             Err(AccountError::DeviceInUse)
         );
-        // Sessions are NOT persisted: the OLD token is invalid after restart.
-        assert!(s2.guardian_scope(&a_tok).is_none());
+        // Sessions ARE persisted now: the OLD token survives a restart (login survives a
+        // redeploy); it still TTL-expires.
+        assert!(s2.guardian_scope(&a_tok).is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
