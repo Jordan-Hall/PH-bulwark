@@ -116,11 +116,10 @@ impl OnnxScorer {
 
     /// Construct from `AEGIS_NSFW_MODEL`, picking the model class
     /// (`AEGIS_NSFW_MODEL_CLASS`), normalization (`AEGIS_NSFW_NORM` override), and
-    /// execution provider (`AEGIS_NSFW_EP`) from the environment.
+    /// execution provider (`AEGIS_NSFW_EP`) from the environment. If the env var
+    /// is unset, falls back to the per-install `nsfw_model.txt` config file.
     pub fn from_env(input_size: u32) -> anyhow::Result<Self> {
-        let path = std::env::var(crate::MODEL_PATH_ENV)
-            .ok()
-            .filter(|s| !s.is_empty())
+        let path = crate::model_path_from_env_or_config()
             .ok_or_else(|| anyhow::anyhow!("{} is not set", crate::MODEL_PATH_ENV))?;
         Self::from_path_env(&path, input_size)
     }

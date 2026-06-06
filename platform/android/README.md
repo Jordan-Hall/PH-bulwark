@@ -1,13 +1,15 @@
-# Aegis — Android app (parent + filtering VPN client)
+# Aegis — Android child app
 
-A single Android app that is both the **parent dashboard** and the **filtering
-VPN client**, plus the **on-device OCR** path for end-to-end-encrypted chats.
+The Android child shell pairs the device to a guardian account, runs the
+transparent child-safety surfaces Android allows, and hosts the Rust bridge used
+by the on-device analysis/VPN paths.
 
 ## What's here
 - `app/src/main/java/co/libertyware/aegis/`
-  - `MainActivity.kt` — parent dashboard (enable VPN, grant accessibility).
+  - `MainActivity.kt` — child setup: choose UK/US/self-hosted server, redeem a
+    parent-generated pair code, show local enrollment/protection state.
   - `vpn/AegisVpnService.kt` — the `VpnService`: builds the TUN and hands its fd
-    to the Rust core for the real-time filtering loop.
+    plus the saved enrollment config to the Rust core for the filtering loop.
   - `accessibility/AegisAccessibilityService.kt` — reads rendered chat text +
     notifications for E2E / cert-pinned apps (the network can't read those) and
     feeds the **same** grooming pipeline. Conventional capture, **not** a vision-LLM.
@@ -15,46 +17,52 @@ VPN client**, plus the **on-device OCR** path for end-to-end-encrypted chats.
 - `app/src/main/AndroidManifest.xml` — VpnService + AccessibilityService + perms.
 - `app/src/main/res/xml/accessibility_service_config.xml` — capture config.
 
-## The Rust core (the missing native piece)
-The app loads `libaegis_client.so`, built from `crates/aegis-client` as a C-ABI
-`cdylib`. That requires a small **`android` cargo feature on `aegis-client`** that
-exports the JNI functions declared in `RustBridge.kt`:
+## The Rust bridge
+The app loads `libaegis_client.so`, built from
+`platform/android/rust/aegis-android` as a C-ABI `cdylib`. It exports the JNI
+functions declared in `RustBridge.kt`:
 
 ```
-Java_co_libertyware_aegis_core_RustBridge_startVpn(env, _, tunFd: jint, configJson: jstring) -> jlong
+Java_co_libertyware_aegis_core_RustBridge_startVpn(env, _, vpnService, tunFd: jint, configJson: jstring) -> jlong
 Java_co_libertyware_aegis_core_RustBridge_stopVpn(env, _, handle: jlong)
 Java_co_libertyware_aegis_core_RustBridge_analyzeText(env, _, app, threadId, text) -> jstring
+Java_co_libertyware_aegis_core_RustBridge_redeemPairCode(env, _, endpoint, code, deviceId) -> jstring
 Java_co_libertyware_aegis_core_RustBridge_nextAlert(env, _) -> jstring
 ```
 
-`startVpn` takes the VpnService TUN fd and runs the `aegis-client` pipeline
-(`Interceptor` over an Android TUN backend — the `aegis-net::tun` Android stub is
-filled in here, using the fd Android already opened, so no extra TUN permission
-is needed). `analyzeText` runs the `aegis-text` grooming engine and routes
-flagged verdicts to `aegis-alert`. This native bridge is the remaining Rust work
-(tracked in `docs/integration-todo.md`).
+`redeemPairCode` calls the shared `Accounts.RedeemPairCode` gRPC service used by
+the parent app and E2E workflow harness. `analyzeText` runs the deterministic
+`aegis-text` grooming engine locally and returns content-free/redacted verdict
+JSON. `startVpn` currently receives the Android TUN fd and serialized child
+config; the full forwarding data path is still tracked separately.
 
 ## Build
-1. **Build the Rust core for Android** with [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk):
+1. **Build the Rust bridge for Android** with
+   [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk):
    ```bash
    cargo install cargo-ndk
    rustup target add aarch64-linux-android armv7-linux-androideabi
+   cd platform/android/rust/aegis-android
    cargo ndk -t arm64-v8a -t armeabi-v7a \
-     -o platform/android/app/src/main/jniLibs \
-     build -p aegis-client --release --features android
+     -o ../../app/src/main/jniLibs \
+     build --release
    ```
    (produces `app/src/main/jniLibs/<abi>/libaegis_client.so`)
-2. **Build the app** in Android Studio (open `platform/android/`) or:
+2. **Build the app** in Android Studio (open `platform/android/`) or with Gradle:
    ```bash
-   cd platform/android && ./gradlew assembleDebug
+   cd platform/android
+   gradle :app:assembleDebug
    ```
    Requires Android SDK 34, NDK, JDK 17.
 
 ## Setup on the child's device (guardian)
-1. Install the APK, open Aegis, tap **Enable filtering VPN** → accept the system VPN consent.
-2. Tap **Grant accessibility (on-device OCR)** → enable Aegis in Settings ▸ Accessibility
-   (this is what lets it check E2E chats on-device).
-3. Pair with your home cluster endpoint (config) so heavy media offloads there.
+1. In the parent app, choose the server (UK/London, US, or self-hosted), log in,
+   and create a pair code for the child.
+2. Install the APK on the child device, choose the same server, and enter the
+   pair code. The app stores `device_id`, `child_id`, `family_id`, and endpoint.
+3. Tap **Turn on protection** and enable Aegis in Android Accessibility settings.
+4. Device Owner provisioning remains the stronger managed-device path for
+   anti-removal lockdown; pairing alone does not claim that state.
 
 ## Honest limits (same as PLAN §0a)
 - The VPN filters ordinary web/video and non-pinned HTTPS. **E2E / cert-pinned

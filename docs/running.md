@@ -134,5 +134,30 @@ that loses its lease stops accepting work). Every link is **mTLS** with per-node
 | A messaging app shows nothing filtered | it's E2E/pinned — network can't read it | enable `aegis-agent` (OCR) for that app |
 | `aegis-video` passes everything | built without `--features ffmpeg`, or ffmpeg not on PATH | install ffmpeg + rebuild with the feature |
 | NSFW never triggers | built without `--features onnx` or no model artifact | add the model + SHA-256 pin + rebuild |
+
+## Media Runtime Provisioning
+
+Use the provisioning scripts to persist media paths for double-clicked parent app
+launches and service starts:
+
+```powershell
+.\deploy\windows\provision-media-runtime.ps1 -InstallFfmpeg `
+  -ModelUrl "https://example.invalid/nsfw.onnx" `
+  -ModelSha256 "<sha256>"
+```
+
+```bash
+./deploy/provision-media-runtime.sh --install-ffmpeg \
+  --model-url "https://example.invalid/nsfw.onnx" \
+  --model-sha256 "<sha256>"
+```
+
+They write `nsfw_model.txt` and `ffmpeg_binary.txt` under the Aegis config dir
+(`%LOCALAPPDATA%\Aegis` on Windows, `${XDG_CONFIG_HOME:-$HOME/.config}/aegis` on
+Unix). The parent app reads those files and passes `AEGIS_NSFW_MODEL` and
+`FFMPEG_BINARY` to the spawned filter. The filter crates also read those files
+directly, so direct `aegis_proxy` / `aegis_vpn` launches use the same model and
+ffmpeg paths when the env vars are absent.
+
 | Browser warns the CA isn't trusted | CA not installed / wrong store | re-run setup elevated; confirm install |
 ```

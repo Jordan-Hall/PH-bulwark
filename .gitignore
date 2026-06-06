@@ -32,3 +32,10 @@ secrets/
 # OS / editor
 .DS_Store
 Thumbs.db
+
+# terraform local state (never commit)
+deploy/aws/.terraform/
+deploy/aws/.terraform.lock.hcl
+deploy/aws/*.tfstate
+deploy/aws/*.tfstate.backup
+deploy/aws/tfplan

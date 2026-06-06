@@ -28,12 +28,15 @@ use aegis_proto::v1::{
     Verdict,
 };
 use async_trait::async_trait;
+use std::path::PathBuf;
 
 pub mod preprocess;
 
 /// Environment variable holding the filesystem path to the ONNX NSFW model.
 /// Consulted by [`VisionAnalyzer::from_env`] (and [`onnx::OnnxScorer::from_env`]).
 pub const MODEL_PATH_ENV: &str = "AEGIS_NSFW_MODEL";
+/// Optional per-install config file used when [`MODEL_PATH_ENV`] is unset.
+pub const MODEL_PATH_CONFIG_FILE: &str = "nsfw_model.txt";
 
 /// Scores image bytes → NSFW probability in `[0, 1]`.
 pub trait Scorer: Send + Sync {
@@ -123,10 +126,49 @@ impl VisionAnalyzer<Box<dyn Scorer>> {
     /// safe stub rather than failing the analyzer construction.
     pub fn from_env(mut cfg: VisionConfig) -> Self {
         if cfg.model_path.is_none() {
-            cfg.model_path = std::env::var(MODEL_PATH_ENV).ok().filter(|s| !s.is_empty());
+            cfg.model_path = model_path_from_env_or_config();
         }
         let scorer = build_scorer(&cfg);
         Self { cfg, scorer }
+    }
+}
+
+/// Resolve the configured NSFW model path from env or the per-install config.
+pub fn model_path_from_env_or_config() -> Option<String> {
+    std::env::var(MODEL_PATH_ENV)
+        .ok()
+        .and_then(non_empty)
+        .or_else(|| read_config_value(MODEL_PATH_CONFIG_FILE))
+}
+
+fn non_empty(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn read_config_value(file_name: &str) -> Option<String> {
+    let path = aegis_config_dir()?.join(file_name);
+    let value = std::fs::read_to_string(path).ok()?;
+    non_empty(value)
+}
+
+fn aegis_config_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .map(|base| base.join("Aegis"))
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .map(|base| base.join("aegis"))
     }
 }
 
@@ -152,7 +194,7 @@ fn build_scorer(cfg: &VisionConfig) -> Box<dyn Scorer> {
             }
         }
         log_fallback_once(&format!(
-            "no NSFW model configured ({MODEL_PATH_ENV} unset / model_path None); failing OPEN (stub)"
+            "no NSFW model configured ({MODEL_PATH_ENV} unset and {MODEL_PATH_CONFIG_FILE} missing / model_path None); failing OPEN (stub)"
         ));
     }
     #[cfg(not(feature = "onnx"))]

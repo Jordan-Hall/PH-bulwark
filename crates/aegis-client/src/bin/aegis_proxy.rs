@@ -17,8 +17,8 @@
 //! carries a small SAFE preview of what was blocked (NEVER for suspected CSAM).
 //!
 //! NSFW scoring is real only when built `--features onnx` with `AEGIS_NSFW_MODEL`
-//! pointing at an ONNX model; otherwise it fails OPEN (allows) so the default
-//! build is runnable end-to-end without a model.
+//! or the per-install `nsfw_model.txt` pointing at an ONNX model; otherwise it
+//! fails OPEN (allows) so the default build is runnable end-to-end without a model.
 #![forbid(unsafe_code)]
 
 use std::sync::Arc;

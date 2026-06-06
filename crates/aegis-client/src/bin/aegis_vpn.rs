@@ -20,7 +20,8 @@
 //! this binary.
 //!
 //! NSFW scoring is real only when built `--features onnx` with `AEGIS_NSFW_MODEL`
-//! set; otherwise it fails OPEN so the default build runs end-to-end without a model.
+//! or the per-install `nsfw_model.txt` set; otherwise it fails OPEN so the
+//! default build runs end-to-end without a model.
 #![forbid(unsafe_code)]
 
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]

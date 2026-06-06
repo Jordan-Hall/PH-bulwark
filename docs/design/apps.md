@@ -23,6 +23,9 @@ Two apps over one shared Rust core, native on **Android / iOS / Windows / macOS*
   webview) at 0.7/0.8.
 - Scope: review alerts, **approve / keep-blocked**, honest coverage matrix. **No**
   device-control / screen / location / remote-command surface (that's out — see below).
+- Server/account plan: choose UK/London, US, or self-hosted server; log in as a
+  guardian; create short-lived pairing codes for child devices. See
+  [`app-pairing-and-regions.md`](app-pairing-and-regions.md).
 
 ## Child app — native per OS, same core
 The on-device filter must be native because traffic capture is a kernel/OS feature:
@@ -36,6 +39,8 @@ The on-device filter must be native because traffic capture is a kernel/OS featu
 
 Each is a thin native shell (Kotlin / Swift / Rust) hosting the **same** Rust core
 (`cargo-ndk` for Android, a static lib + Swift for Apple, native on Windows).
+The child shell has enrollment UI only: choose the same server as the guardian,
+redeem a pair code, persist `device_id`/`child_id`/`family_id`, then run filtering.
 
 ## Honest platform limits
 - **iOS/macOS**: Apple's Network Extension content filter is the sanctioned path

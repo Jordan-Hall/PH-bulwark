@@ -18,12 +18,15 @@
 //! AEGIS_GUARDIAN_TOKEN=… aegis_admin add-child       <child_name> <device_id>
 //! AEGIS_GUARDIAN_TOKEN=… aegis_admin assign-guardian <child_id> <guardian_account_id>
 //! AEGIS_GUARDIAN_TOKEN=… aegis_admin list-children
+//! AEGIS_GUARDIAN_TOKEN=… aegis_admin create-pair-code <child_name>
+//!                         aegis_admin redeem-pair-code <code> <device_id>
 //! ```
 #![forbid(unsafe_code)]
 
 use aegis_proto::v1::accounts_client::AccountsClient;
 use aegis_proto::v1::{
-    AddChildRequest, AssignGuardianRequest, CreateAccountRequest, ListChildrenRequest, LoginRequest,
+    AddChildRequest, AssignGuardianRequest, CreateAccountRequest, CreatePairCodeRequest,
+    ListChildrenRequest, LoginRequest, RedeemPairCodeRequest,
 };
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 
@@ -45,6 +48,13 @@ enum Cmd {
         guardian_account_id: String,
     },
     ListChildren,
+    CreatePairCode {
+        child_name: String,
+    },
+    RedeemPairCode {
+        code: String,
+        device_id: String,
+    },
 }
 
 fn usage() -> String {
@@ -53,7 +63,9 @@ fn usage() -> String {
      login           <email>                  (password from $AEGIS_ADMIN_PASSWORD)\n  \
      add-child       <child_name> <device_id>           (token from $AEGIS_GUARDIAN_TOKEN)\n  \
      assign-guardian <child_id> <guardian_account_id>   (token from $AEGIS_GUARDIAN_TOKEN)\n  \
-     list-children                                      (token from $AEGIS_GUARDIAN_TOKEN)"
+     list-children                                      (token from $AEGIS_GUARDIAN_TOKEN)\n  \
+     create-pair-code <child_name>                      (token from $AEGIS_GUARDIAN_TOKEN)\n  \
+     redeem-pair-code <code> <device_id>                (code is the short-lived credential)"
         .to_string()
 }
 
@@ -128,6 +140,19 @@ fn parse(args: &[String]) -> Result<Cmd, String> {
             })
         }
         "list-children" => Ok(Cmd::ListChildren),
+        "create-pair-code" => {
+            need(1)?;
+            Ok(Cmd::CreatePairCode {
+                child_name: rest[0].clone(),
+            })
+        }
+        "redeem-pair-code" => {
+            need(2)?;
+            Ok(Cmd::RedeemPairCode {
+                code: rest[0].clone(),
+                device_id: rest[1].clone(),
+            })
+        }
         other => Err(format!("unknown subcommand `{other}`\n{}", usage())),
     }
 }
@@ -175,6 +200,11 @@ async fn main() -> anyhow::Result<()> {
             require_token(std::env::var("AEGIS_GUARDIAN_TOKEN").ok())
                 .map_err(|e| anyhow::anyhow!(e))?,
         ),
+        Cmd::CreatePairCode { .. } => Some(
+            require_token(std::env::var("AEGIS_GUARDIAN_TOKEN").ok())
+                .map_err(|e| anyhow::anyhow!(e))?,
+        ),
+        Cmd::RedeemPairCode { .. } => None,
         _ => None,
     };
 
@@ -261,6 +291,25 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         }
+        Cmd::CreatePairCode { child_name } => {
+            let pair = client
+                .create_pair_code(CreatePairCodeRequest {
+                    token: token.expect("token resolved for create-pair-code"),
+                    child_name,
+                })
+                .await?
+                .into_inner();
+            println!("code={}", pair.code);
+            println!("expires_ts={}", pair.expires_ts);
+        }
+        Cmd::RedeemPairCode { code, device_id } => {
+            let result = client
+                .redeem_pair_code(RedeemPairCodeRequest { code, device_id })
+                .await?
+                .into_inner();
+            println!("child_id={}", result.child_id);
+            println!("family_id={}", result.family_id);
+        }
     }
     Ok(())
 }
@@ -299,6 +348,8 @@ mod tests {
         assert!(parse(&v(&["assign-guardian", "only-child"])).is_err()); // needs 2
         assert!(parse(&v(&["create-account"])).is_err()); // needs an email
         assert!(parse(&v(&["login"])).is_err()); // needs an email
+        assert!(parse(&v(&["create-pair-code"])).is_err()); // needs child name
+        assert!(parse(&v(&["redeem-pair-code", "ABCD1234"])).is_err()); // needs code + device
         assert!(parse(&v(&["bogus"])).is_err());
         assert!(parse(&v(&[])).is_err());
     }
@@ -334,5 +385,18 @@ mod tests {
             Cmd::AssignGuardian { .. }
         ));
         assert_eq!(parse(&v(&["list-children"])).unwrap(), Cmd::ListChildren);
+        assert_eq!(
+            parse(&v(&["create-pair-code", "Kid"])).unwrap(),
+            Cmd::CreatePairCode {
+                child_name: "Kid".into(),
+            }
+        );
+        assert_eq!(
+            parse(&v(&["redeem-pair-code", "ABCD2345", "device-1"])).unwrap(),
+            Cmd::RedeemPairCode {
+                code: "ABCD2345".into(),
+                device_id: "device-1".into(),
+            }
+        );
     }
 }

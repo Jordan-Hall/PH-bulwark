@@ -32,12 +32,17 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use dioxus::prelude::*;
+use serde::{Deserialize, Serialize};
 
+use aegis_proto::v1::accounts_client::AccountsClient;
 use aegis_proto::v1::review_client::ReviewClient;
 use aegis_proto::v1::{
-    AlertEvent, AlertKind, Category, DeviceFilter, ReviewDecision, ReviewRequest, ReviewScope,
+    AccountAck, AlertEvent, AlertKind, Category, Child as ProtoChild, CreateAccountRequest,
+    CreatePairCodeRequest, DeviceFilter, ListChildrenRequest, LoginRequest, PairCode,
+    ReviewDecision, ReviewRequest, ReviewScope, Session,
 };
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
+use tonic::Streaming;
 
 fn main() {
     dioxus::launch(App);
@@ -87,12 +92,38 @@ fn repo_root() -> std::path::PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()))
 }
 
-/// The NSFW model path to hand the filter, from `AEGIS_NSFW_MODEL` (unset → the
-/// filter runs its fail-open stub; we never invent a model path).
-fn nsfw_model() -> Option<String> {
-    std::env::var("AEGIS_NSFW_MODEL")
+fn app_config_dir() -> std::path::PathBuf {
+    use std::path::PathBuf;
+    if let Some(local) = std::env::var_os("LOCALAPPDATA").filter(|s| !s.is_empty()) {
+        PathBuf::from(local).join("Aegis")
+    } else if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|s| !s.is_empty()) {
+        PathBuf::from(xdg).join("aegis")
+    } else if let Some(home) = std::env::var_os("HOME").filter(|s| !s.is_empty()) {
+        PathBuf::from(home).join(".config/aegis")
+    } else {
+        std::env::temp_dir().join("aegis")
+    }
+}
+
+fn config_value(name: &str) -> Option<String> {
+    std::fs::read_to_string(app_config_dir().join(name))
         .ok()
-        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn env_or_config(env: &str, file: &str) -> Option<String> {
+    std::env::var(env)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| config_value(file))
+}
+
+/// The NSFW model path to hand the filter. Unset means the filter runs its
+/// fail-open stub; we never invent a model path.
+fn nsfw_model() -> Option<String> {
+    env_or_config("AEGIS_NSFW_MODEL", "nsfw_model.txt")
 }
 
 /// Human-readable model status for the diagnostics panel.
@@ -101,19 +132,28 @@ fn nsfw_model_display() -> String {
         .unwrap_or_else(|| "(unset — set AEGIS_NSFW_MODEL; filter runs fail-open)".to_string())
 }
 
+/// Optional pinned ffmpeg binary to hand the video pipeline.
+fn ffmpeg_binary() -> Option<String> {
+    env_or_config("FFMPEG_BINARY", "ffmpeg_binary.txt")
+        .or_else(|| env_or_config("AEGIS_FFMPEG_BINARY", "ffmpeg_binary.txt"))
+}
+
+fn ffmpeg_display() -> String {
+    ffmpeg_binary().unwrap_or_else(|| "(PATH lookup — set FFMPEG_BINARY if needed)".to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Connection layer
 // ---------------------------------------------------------------------------
 
 /// PH Bulwark Cloud regions: `(id, label, endpoint)`. A user picks ONE — their data
 /// routes only through that country's server (no cross-region). A UK/London server
-/// is offered for UK data residency. Point these at the real regional gateways when
-/// the cloud launches; self-hosters use their own URL instead.
+/// is offered for UK data residency; this build targets the deployed London gateway.
 const CLOUD_REGIONS: &[(&str, &str, &str)] = &[
     (
         "uk",
         "PH Bulwark Cloud — UK (London)",
-        "https://uk.cloud.phbulwark.app",
+        "http://ec2-35-179-110-106.eu-west-2.compute.amazonaws.com:8443",
     ),
     (
         "us",
@@ -128,17 +168,99 @@ const DEFAULT_REGION_ID: &str = "uk";
 /// URL). Per-user config dir (Windows `%LOCALAPPDATA%\Aegis`, else
 /// `$XDG_CONFIG_HOME`/`$HOME/.config`, else temp).
 fn server_config_path() -> std::path::PathBuf {
-    use std::path::PathBuf;
-    let base = if let Some(local) = std::env::var_os("LOCALAPPDATA").filter(|s| !s.is_empty()) {
-        PathBuf::from(local).join("Aegis")
-    } else if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|s| !s.is_empty()) {
-        PathBuf::from(xdg).join("aegis")
-    } else if let Some(home) = std::env::var_os("HOME").filter(|s| !s.is_empty()) {
-        PathBuf::from(home).join(".config/aegis")
-    } else {
-        std::env::temp_dir().join("aegis")
-    };
-    base.join("server.txt")
+    app_config_dir().join("server.txt")
+}
+
+fn server_inventory_path() -> std::path::PathBuf {
+    app_config_dir().join("servers.json")
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct SavedServer {
+    id: String,
+    label: String,
+    endpoint: String,
+    #[serde(default)]
+    builtin: bool,
+}
+
+impl SavedServer {
+    fn new(id: impl Into<String>, label: impl Into<String>, endpoint: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            endpoint: endpoint.into(),
+            builtin: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct ServerInventoryFile {
+    #[serde(default)]
+    servers: Vec<SavedServer>,
+}
+
+fn guardian_token_path() -> std::path::PathBuf {
+    guardian_token_path_for_endpoint(&cluster_endpoint())
+}
+
+fn guardian_token_path_for_endpoint(endpoint: &str) -> std::path::PathBuf {
+    session_dir_for_endpoint(endpoint).join("guardian_token.txt")
+}
+
+fn cluster_ca_path_for_endpoint(endpoint: &str) -> std::path::PathBuf {
+    session_dir_for_endpoint(endpoint).join("cluster_ca.pem")
+}
+
+fn saved_token_for_endpoint(endpoint: &str) -> String {
+    std::fs::read_to_string(guardian_token_path_for_endpoint(endpoint))
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_default()
+}
+
+fn guardian_token() -> String {
+    std::env::var("AEGIS_GUARDIAN_TOKEN")
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .or_else(|| Some(saved_token_for_endpoint(&cluster_endpoint())).filter(|t| !t.is_empty()))
+        .unwrap_or_default()
+}
+
+fn save_guardian_token(token: &str) -> std::io::Result<()> {
+    let path = guardian_token_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, token.trim())
+}
+
+fn clear_guardian_token() -> std::io::Result<()> {
+    let path = guardian_token_path();
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+fn session_dir_for_endpoint(endpoint: &str) -> std::path::PathBuf {
+    app_config_dir()
+        .join("sessions")
+        .join(server_session_key(endpoint))
+}
+
+fn server_session_key(endpoint: &str) -> String {
+    // FNV-1a: small deterministic key for local filenames; not security-sensitive.
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in endpoint.trim().as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 /// The raw saved choice: a region id (e.g. `uk`), a self-hosted URL, or empty.
@@ -159,25 +281,175 @@ fn save_server_choice(value: &str) -> std::io::Result<()> {
     std::fs::write(path, if v.is_empty() { DEFAULT_REGION_ID } else { v })
 }
 
+fn builtin_servers() -> Vec<SavedServer> {
+    CLOUD_REGIONS
+        .iter()
+        .map(|(id, label, endpoint)| SavedServer {
+            id: (*id).to_string(),
+            label: (*label).to_string(),
+            endpoint: (*endpoint).to_string(),
+            builtin: true,
+        })
+        .collect()
+}
+
+fn load_custom_servers() -> Vec<SavedServer> {
+    std::fs::read_to_string(server_inventory_path())
+        .ok()
+        .and_then(|json| serde_json::from_str::<ServerInventoryFile>(&json).ok())
+        .map(|file| normalize_custom_servers(file.servers))
+        .unwrap_or_default()
+}
+
+fn normalize_custom_servers(servers: Vec<SavedServer>) -> Vec<SavedServer> {
+    let mut out = Vec::new();
+    for mut server in servers {
+        server.id = server.id.trim().to_string();
+        server.label = server.label.trim().to_string();
+        server.endpoint = server.endpoint.trim().to_string();
+        server.builtin = false;
+        if server.id.is_empty() || !is_endpoint_url(&server.endpoint) {
+            continue;
+        }
+        if out
+            .iter()
+            .any(|s: &SavedServer| s.id == server.id || s.endpoint == server.endpoint)
+        {
+            continue;
+        }
+        out.push(server);
+    }
+    out
+}
+
+fn save_custom_servers(servers: Vec<SavedServer>) -> std::io::Result<()> {
+    let path = server_inventory_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let file = ServerInventoryFile {
+        servers: normalize_custom_servers(servers),
+    };
+    let json = serde_json::to_string_pretty(&file).unwrap_or_else(|_| "{\"servers\":[]}".into());
+    std::fs::write(path, json)
+}
+
+fn custom_server_id(endpoint: &str) -> String {
+    format!("self-{}", server_session_key(endpoint))
+}
+
+fn is_endpoint_url(s: &str) -> bool {
+    let s = s.trim();
+    s.starts_with("http://") || s.starts_with("https://")
+}
+
+fn upsert_custom_server(label: &str, endpoint: &str) -> anyhow::Result<SavedServer> {
+    let endpoint = endpoint.trim();
+    if !is_endpoint_url(endpoint) {
+        anyhow::bail!("self-hosted endpoint must start with http:// or https://");
+    }
+    let id = custom_server_id(endpoint);
+    let label = label.trim();
+    let server = SavedServer::new(
+        id.clone(),
+        if label.is_empty() {
+            "Self-hosted"
+        } else {
+            label
+        },
+        endpoint,
+    );
+    let mut servers = load_custom_servers();
+    servers.retain(|s| s.id != id && s.endpoint != endpoint);
+    servers.push(server.clone());
+    save_custom_servers(servers)?;
+    Ok(server)
+}
+
+fn remove_custom_server(id: &str) -> std::io::Result<()> {
+    let mut servers = load_custom_servers();
+    servers.retain(|s| s.id != id);
+    save_custom_servers(servers)?;
+    if saved_choice().trim() == id {
+        save_server_choice(DEFAULT_REGION_ID)?;
+    }
+    Ok(())
+}
+
+fn server_inventory_for_choice(saved: &str, custom: Vec<SavedServer>) -> Vec<SavedServer> {
+    let mut servers = builtin_servers();
+    let mut custom = normalize_custom_servers(custom);
+    let saved = saved.trim();
+    if is_endpoint_url(saved) && !custom.iter().any(|s| s.endpoint == saved) {
+        custom.push(SavedServer::new(
+            custom_server_id(saved),
+            "Self-hosted",
+            saved,
+        ));
+    }
+    servers.extend(custom);
+    servers
+}
+
+fn server_inventory() -> Vec<SavedServer> {
+    server_inventory_for_choice(&saved_choice(), load_custom_servers())
+}
+
+fn server_for_choice_from(saved: &str, inventory: &[SavedServer]) -> SavedServer {
+    let saved = saved.trim();
+    if is_endpoint_url(saved) {
+        return inventory
+            .iter()
+            .find(|s| s.endpoint == saved)
+            .cloned()
+            .unwrap_or_else(|| SavedServer::new(custom_server_id(saved), "Self-hosted", saved));
+    }
+    let id = if saved.is_empty() || saved.eq_ignore_ascii_case("cloud") {
+        DEFAULT_REGION_ID
+    } else {
+        saved
+    };
+    inventory
+        .iter()
+        .find(|s| s.id == id)
+        .cloned()
+        .or_else(|| {
+            inventory
+                .iter()
+                .find(|s| s.id == DEFAULT_REGION_ID)
+                .cloned()
+        })
+        .unwrap_or_else(|| SavedServer::new(DEFAULT_REGION_ID, "PH Bulwark Cloud", ""))
+}
+
+fn selected_server_id(saved: &str) -> String {
+    server_for_choice_from(saved, &server_inventory()).id
+}
+
 /// Resolve a saved choice to an endpoint URL: a `http(s)://` value is a self-hosted
 /// URL used as-is; otherwise it's a region id (or empty / legacy `cloud` / unknown)
 /// → that region's URL, defaulting to UK.
 fn resolve_endpoint(saved: &str) -> String {
-    let s = saved.trim();
-    if s.starts_with("http://") || s.starts_with("https://") {
-        return s.to_string();
-    }
-    let id = if s.is_empty() || s.eq_ignore_ascii_case("cloud") {
-        DEFAULT_REGION_ID
+    server_for_choice_from(saved, &server_inventory()).endpoint
+}
+
+#[cfg(test)]
+fn server_settings_initial_state(saved: &str) -> (String, String) {
+    let saved = saved.trim();
+    let is_url = is_endpoint_url(saved);
+    let selected = if is_url {
+        "selfhosted".to_string()
+    } else if saved.is_empty() || saved.eq_ignore_ascii_case("cloud") {
+        DEFAULT_REGION_ID.to_string()
     } else {
-        s
+        saved.to_string()
     };
-    CLOUD_REGIONS
-        .iter()
-        .find(|r| r.0 == id)
-        .or_else(|| CLOUD_REGIONS.iter().find(|r| r.0 == DEFAULT_REGION_ID))
-        .map(|r| r.2.to_string())
-        .unwrap_or_default()
+    let url = if is_url {
+        saved.to_string()
+    } else {
+        String::new()
+    };
+    (selected, url)
 }
 
 /// The cluster endpoint to dial: `AEGIS_CLUSTER_ENDPOINT` (advanced/ops override)
@@ -193,6 +465,64 @@ fn cluster_endpoint() -> String {
     resolve_endpoint(&saved_choice())
 }
 
+fn active_server_label() -> String {
+    if std::env::var("AEGIS_CLUSTER_ENDPOINT")
+        .ok()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return "Ops override".to_string();
+    }
+    let saved = saved_choice();
+    let choice = if saved.trim().is_empty() {
+        DEFAULT_REGION_ID
+    } else {
+        saved.trim()
+    };
+    server_label(choice)
+}
+
+fn server_label(choice: &str) -> String {
+    server_for_choice_from(choice, &server_inventory()).label
+}
+
+#[derive(Clone, PartialEq)]
+struct AppStatus {
+    server_label: String,
+    endpoint: String,
+    session_key: String,
+    logged_in: bool,
+}
+
+impl AppStatus {
+    fn load() -> Self {
+        let endpoint = cluster_endpoint();
+        Self {
+            server_label: active_server_label(),
+            session_key: server_session_key(&endpoint),
+            logged_in: !guardian_token().is_empty(),
+            endpoint,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActiveView {
+    Setup,
+    Alerts,
+    Children,
+    Protection,
+    Server,
+    Coverage,
+}
+
+#[derive(Clone, PartialEq)]
+struct PairCodeUi {
+    child_name: String,
+    code: String,
+    expires_ts: i64,
+}
+
 /// Build a tonic [`Channel`] to the cluster.
 ///
 /// * If `AEGIS_CLUSTER_CA` is set (path to a PEM CA cert), pin it via
@@ -204,17 +534,112 @@ fn cluster_endpoint() -> String {
 /// caller falls back to OFFLINE sample data.
 async fn connect_channel() -> anyhow::Result<Channel> {
     let endpoint = cluster_endpoint();
-    let mut builder = Endpoint::from_shared(endpoint.clone())?;
+    let ca_path = std::env::var("AEGIS_CLUSTER_CA")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+        .or_else(|| {
+            let path = cluster_ca_path_for_endpoint(&endpoint);
+            path.exists().then(|| path.to_string_lossy().to_string())
+        });
+    connect_channel_to(&endpoint, ca_path.as_deref()).await
+}
 
-    if let Ok(ca_path) = std::env::var("AEGIS_CLUSTER_CA") {
-        if !ca_path.is_empty() {
-            let ca_pem = std::fs::read(&ca_path)?;
-            let tls = ClientTlsConfig::new().ca_certificate(Certificate::from_pem(&ca_pem));
-            builder = builder.tls_config(tls)?;
-        }
+async fn connect_channel_to(endpoint: &str, ca_path: Option<&str>) -> anyhow::Result<Channel> {
+    let mut builder = Endpoint::from_shared(endpoint.to_string())?;
+
+    if let Some(ca_path) = ca_path.filter(|p| !p.trim().is_empty()) {
+        let ca_pem = std::fs::read(ca_path)?;
+        let tls = ClientTlsConfig::new().ca_certificate(Certificate::from_pem(&ca_pem));
+        builder = builder.tls_config(tls)?;
     }
 
     Ok(builder.connect().await?)
+}
+
+async fn accounts_client() -> anyhow::Result<AccountsClient<Channel>> {
+    Ok(AccountsClient::new(connect_channel().await?))
+}
+
+async fn create_guardian_account(
+    email: &str,
+    password: &str,
+    display_name: &str,
+) -> anyhow::Result<AccountAck> {
+    let mut client = accounts_client().await?;
+    Ok(client
+        .create_account(CreateAccountRequest {
+            email: email.trim().to_string(),
+            password: password.to_string(),
+            display_name: display_name.trim().to_string(),
+        })
+        .await?
+        .into_inner())
+}
+
+async fn login_guardian(email: &str, password: &str) -> anyhow::Result<Session> {
+    let mut client = accounts_client().await?;
+    Ok(client
+        .login(LoginRequest {
+            email: email.trim().to_string(),
+            password: password.to_string(),
+        })
+        .await?
+        .into_inner())
+}
+
+async fn load_children() -> anyhow::Result<Vec<ProtoChild>> {
+    let token = guardian_token();
+    if token.is_empty() {
+        anyhow::bail!("login required for this server");
+    }
+    let mut client = accounts_client().await?;
+    Ok(client
+        .list_children(ListChildrenRequest { token })
+        .await?
+        .into_inner()
+        .children)
+}
+
+async fn create_pair_code_for_child(child_name: &str) -> anyhow::Result<PairCode> {
+    let token = guardian_token();
+    if token.is_empty() {
+        anyhow::bail!("login required for this server");
+    }
+    let mut client = accounts_client().await?;
+    Ok(client
+        .create_pair_code(CreatePairCodeRequest {
+            token,
+            child_name: child_name.trim().to_string(),
+        })
+        .await?
+        .into_inner())
+}
+
+async fn open_pending_review_stream() -> anyhow::Result<Streaming<AlertEvent>> {
+    let channel = connect_channel().await?;
+    let token = guardian_token();
+    open_pending_review_stream_on(channel, &token).await
+}
+
+#[cfg(test)]
+async fn open_pending_review_stream_from(
+    endpoint: &str,
+    token: &str,
+) -> anyhow::Result<Streaming<AlertEvent>> {
+    let channel = connect_channel_to(endpoint, None).await?;
+    open_pending_review_stream_on(channel, token).await
+}
+
+async fn open_pending_review_stream_on(
+    channel: Channel,
+    token: &str,
+) -> anyhow::Result<Streaming<AlertEvent>> {
+    let mut client = ReviewClient::new(channel);
+    let filter = DeviceFilter {
+        device_id: String::new(),
+        token: token.trim().to_string(),
+    };
+    Ok(client.stream_pending_reviews(filter).await?.into_inner())
 }
 
 /// A guardian-facing alert row.
@@ -353,7 +778,7 @@ fn seed() -> Vec<Alert> {
             detail: "On a web page.".into(),
             device: "Kids tablet".into(),
             when: "2m ago".into(),
-            actionable: true,
+            actionable: false,
             category: Category::AdultImage,
             // Offline sample: no real bytes to preview.
             thumbnail: Vec::new(),
@@ -366,7 +791,7 @@ fn seed() -> Vec<Alert> {
             detail: "Secrecy + \u{201c}move to another app\u{201d} patterns in a chat.".into(),
             device: "Kids phone".into(),
             when: "18m ago".into(),
-            actionable: true,
+            actionable: false,
             category: Category::Grooming,
             thumbnail: Vec::new(),
             snippet:
@@ -377,142 +802,454 @@ fn seed() -> Vec<Alert> {
     ]
 }
 
+fn nav_class(active: ActiveView, target: ActiveView) -> &'static str {
+    if active == target {
+        "nav-btn nav-on"
+    } else {
+        "nav-btn"
+    }
+}
+
+fn session_status_text(status: &AppStatus) -> &'static str {
+    if status.logged_in {
+        "Logged in"
+    } else {
+        "Login needed"
+    }
+}
+
+fn pair_expiry_text(ts_millis: i64) -> String {
+    if ts_millis <= 0 {
+        return "unknown expiry".to_string();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(ts_millis);
+    let secs = (ts_millis - now).max(0) / 1000;
+    if secs < 60 {
+        format!("expires in {}s", secs.max(1))
+    } else {
+        format!("expires in {}m", secs / 60)
+    }
+}
+
 #[component]
 fn App() -> Element {
-    // Start with the OFFLINE sample so the console is never blank; the live
-    // stream replaces it on first connect.
     let mut alerts = use_signal(seed);
-    // Banner shown while we're on sample data (no live cluster connection yet).
     let mut offline = use_signal(|| true);
-    // Inline, transient error surfaced by a failed approve/deny RPC.
     let action_error = use_signal(|| Option::<String>::None);
+    let mut active = use_signal(|| ActiveView::Setup);
+    let mut status = use_signal(AppStatus::load);
+    let setup_note = use_signal(|| Option::<String>::None);
+    let setup_error = use_signal(|| Option::<String>::None);
+    let setup_busy = use_signal(|| false);
+    let mut create_account = use_signal(|| true);
+    let mut email = use_signal(String::new);
+    let mut password = use_signal(String::new);
+    let mut display_name = use_signal(String::new);
+    let mut child_name = use_signal(String::new);
+    let pair_code = use_signal(|| Option::<PairCodeUi>::None);
+    let children = use_signal(Vec::<ProtoChild>::new);
+    let children_error = use_signal(|| Option::<String>::None);
+    let children_busy = use_signal(|| false);
 
-    // Live feed: connect to the family's own cluster over the shared gRPC
-    // contract and stream redacted pending reviews into `alerts`. On any failure
-    // we keep the seed() sample and leave the offline banner up — never crash.
-    //
-    // The desktop feature provides a tokio runtime, so tonic async runs here.
     use_coroutine(move |_rx: UnboundedReceiver<()>| async move {
-        let channel = match connect_channel().await {
-            Ok(ch) => ch,
-            Err(_e) => {
-                // Stay offline with sample data.
-                return;
+        loop {
+            let mut stream = match open_pending_review_stream().await {
+                Ok(stream) => stream,
+                Err(_e) => {
+                    offline.set(true);
+                    if alerts.read().is_empty() {
+                        alerts.set(seed());
+                    }
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
+
+            offline.set(false);
+            alerts.write().clear();
+
+            while let Ok(Some(event)) = stream.message().await {
+                let alert = Alert::from_event(event);
+                let mut list = alerts.write();
+                if !list.iter().any(|a| a.id == alert.id) {
+                    list.insert(0, alert);
+                }
             }
-        };
 
-        let mut client = ReviewClient::new(channel);
-
-        // A guardian session token (from Accounts.Login) scopes the stream to this
-        // guardian's children and is REQUIRED by an accounts-wired server. The
-        // desktop console has no login UI yet, so we read a pre-obtained token from
-        // AEGIS_GUARDIAN_TOKEN; empty = legacy (no-accounts) server. (Login UI TODO.)
-        let filter = DeviceFilter {
-            device_id: String::new(),
-            token: std::env::var("AEGIS_GUARDIAN_TOKEN").unwrap_or_default(),
-        };
-
-        let mut stream = match client.stream_pending_reviews(filter).await {
-            Ok(resp) => resp.into_inner(),
-            Err(_status) => return,
-        };
-
-        // First successful item flips us out of OFFLINE mode and clears the
-        // sample rows so we only ever show real, redacted alerts.
-        let mut went_live = false;
-
-        // A `None`/`Err` (stream ended cleanly or errored) ends the loop; we keep
-        // what we already showed and never crash or clear the list.
-        while let Ok(Some(event)) = stream.message().await {
-            if !went_live {
-                went_live = true;
-                offline.set(false);
-                alerts.write().clear();
-            }
-            let alert = Alert::from_event(event);
-            let mut list = alerts.write();
-            // Dedupe by alert_id (idempotency key) across retries.
-            if !list.iter().any(|a| a.id == alert.id) {
-                list.insert(0, alert);
-            }
+            offline.set(true);
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
     });
 
     rsx! {
         style { {CSS} }
-        div { class: "wrap",
-            h1 { "PH Bulwark Manager" }
-            p { class: "sub",
-                "Transparent content-safety: alerts, approve/deny, and an honest coverage view. "
-                "No device control, screen capture, or hidden monitoring."
+        div { class: "app",
+            header { class: "topbar",
+                div {
+                    h1 { "PH Bulwark Manager" }
+                    p { class: "sub",
+                        "Transparent content-safety for managed child devices. No device control, screen capture, or hidden monitoring."
+                    }
+                }
+                button {
+                    class: "ghost",
+                    onclick: move |_| status.set(AppStatus::load()),
+                    "Refresh"
+                }
             }
 
-            ProtectionPanel {}
+            div { class: "status-grid",
+                div { class: "status-tile",
+                    span { class: "status-k", "Server" }
+                    span { class: "status-v", "{status().server_label}" }
+                    span { class: "status-sub mono", "{status().endpoint}" }
+                }
+                div { class: "status-tile",
+                    span { class: "status-k", "Guardian" }
+                    span {
+                        class: if status().logged_in { "status-v ok" } else { "status-v warn" },
+                        "{session_status_text(&status())}"
+                    }
+                    span { class: "status-sub mono", "session {status().session_key}" }
+                }
+                div { class: "status-tile",
+                    span { class: "status-k", "Alerts" }
+                    span { class: "status-v", "{alerts.read().len()}" }
+                    span { class: "status-sub",
+                        if offline() { "Demo/disconnected" } else { "Live stream" }
+                    }
+                }
+            }
 
-            ServerSettings {}
+            nav { class: "tabs",
+                button { class: "{nav_class(active(), ActiveView::Setup)}", onclick: move |_| active.set(ActiveView::Setup), "Setup" }
+                button { class: "{nav_class(active(), ActiveView::Alerts)}", onclick: move |_| active.set(ActiveView::Alerts), "Alerts" }
+                button { class: "{nav_class(active(), ActiveView::Children)}", onclick: move |_| active.set(ActiveView::Children), "Children" }
+                button { class: "{nav_class(active(), ActiveView::Protection)}", onclick: move |_| active.set(ActiveView::Protection), "Protection" }
+                button { class: "{nav_class(active(), ActiveView::Server)}", onclick: move |_| active.set(ActiveView::Server), "Server" }
+                button { class: "{nav_class(active(), ActiveView::Coverage)}", onclick: move |_| active.set(ActiveView::Coverage), "Coverage" }
+            }
 
             if offline() {
-                div { class: "banner", "Offline — showing sample data. Not connected to your home cluster." }
+                div { class: "banner", "Demo mode — sample alerts are shown until a live guardian session connects." }
             }
 
             if let Some(err) = action_error() {
                 div { class: "err", "Couldn't send your decision: {err}" }
             }
 
-            section {
-                h2 { "Recent alerts" }
-                if alerts.read().is_empty() {
-                    p { class: "empty", "All clear — no alerts right now." }
-                }
-                for a in alerts.read().clone().into_iter() {
-                    AlertCard {
-                        key: "{a.id}",
-                        alert: a.clone(),
-                        // Pre-clone (inside a block) the fields the callback needs so
-                        // the `move` closure captures THOSE, not `a` — the release
-                        // rsx expansion otherwise moves `a` while key/alert still use
-                        // it (compiles in debug via hot-reload, fails E0382 in release).
-                        on_decide: {
-                            let cb_id = a.id.clone();
-                            let cb_device = a.device.clone();
-                            move |approve: bool| {
-                                let id = cb_id.clone();
-                                let device = cb_device.clone();
-                                let mut alerts = alerts;
-                                let mut action_error = action_error;
+            match active() {
+                ActiveView::Setup => rsx! {
+                    section { class: "panel",
+                        div { class: "panel-head",
+                            h2 { "Family setup" }
+                            p { class: "sub", "Choose the backend, sign in on that backend, then create a child pairing code." }
+                        }
+                        div { class: "steps",
+                            div { class: "step done",
+                                span { class: "step-no", "1" }
+                                div {
+                                    div { class: "ttl", "Server selected" }
+                                    div { class: "meta mono", "{status().endpoint}" }
+                                }
+                            }
+                            div { class: if status().logged_in { "step done" } else { "step" },
+                                span { class: "step-no", "2" }
+                                div {
+                                    div { class: "ttl", "Guardian account" }
+                                    div { class: "meta", "{session_status_text(&status())} for {status().server_label}" }
+                                }
+                            }
+                            div { class: if pair_code().is_some() { "step done" } else { "step" },
+                                span { class: "step-no", "3" }
+                                div {
+                                    div { class: "ttl", "Child pairing" }
+                                    div { class: "meta", "Generate a short code, then enter it on the child device." }
+                                }
+                            }
+                        }
 
-                                // Optimistically clear the row, then send the real
-                                // ReviewRequest (APPROVE/DENY) to the cluster. A
-                                // failed RPC restores the row and shows an inline
-                                // error — never a panic.
-                                let removed: Option<Alert> = {
-                                    let mut list = alerts.write();
-                                    let idx = list.iter().position(|x| x.id == id);
-                                    idx.map(|i| list.remove(i))
-                                };
-                                action_error.set(None);
-
-                                spawn(async move {
-                                    if let Err(e) = submit_decision(&id, &device, approve).await {
-                                        // Restore the optimistically-removed row.
-                                        if let Some(row) = removed {
-                                            let mut list = alerts.write();
-                                            if !list.iter().any(|x| x.id == row.id) {
-                                                list.insert(0, row);
-                                            }
-                                        }
-                                        action_error.set(Some(e.to_string()));
+                        div { class: "two-col",
+                            div { class: "box",
+                                h3 { "Guardian sign-in" }
+                                div { class: "seg",
+                                    button {
+                                        class: if create_account() { "seg-btn seg-on" } else { "seg-btn" },
+                                        onclick: move |_| create_account.set(true),
+                                        "Create"
                                     }
-                                });
+                                    button {
+                                        class: if !create_account() { "seg-btn seg-on" } else { "seg-btn" },
+                                        onclick: move |_| create_account.set(false),
+                                        "Login"
+                                    }
+                                }
+                                label { class: "field",
+                                    span { "Email" }
+                                    input {
+                                        r#type: "email",
+                                        placeholder: "guardian@example.com",
+                                        value: "{email}",
+                                        oninput: move |e| email.set(e.value()),
+                                    }
+                                }
+                                if create_account() {
+                                    label { class: "field",
+                                        span { "Display name" }
+                                        input {
+                                            r#type: "text",
+                                            placeholder: "Guardian",
+                                            value: "{display_name}",
+                                            oninput: move |e| display_name.set(e.value()),
+                                        }
+                                    }
+                                }
+                                label { class: "field",
+                                    span { "Password" }
+                                    input {
+                                        r#type: "password",
+                                        placeholder: "Password",
+                                        value: "{password}",
+                                        oninput: move |e| password.set(e.value()),
+                                    }
+                                }
+                                button {
+                                    class: "primary",
+                                    disabled: setup_busy(),
+                                    onclick: move |_| {
+                                        let email_value = email().trim().to_string();
+                                        let password_value = password();
+                                        let display_value = display_name().trim().to_string();
+                                        let should_create = create_account();
+                                        let mut setup_busy = setup_busy;
+                                        let mut setup_error = setup_error;
+                                        let mut setup_note = setup_note;
+                                        let mut status = status;
+                                        setup_busy.set(true);
+                                        setup_error.set(None);
+                                        setup_note.set(None);
+                                        spawn(async move {
+                                            let result: anyhow::Result<String> = async {
+                                                if email_value.is_empty() || password_value.is_empty() {
+                                                    anyhow::bail!("email and password are required");
+                                                }
+                                                if should_create {
+                                                    let _ = create_guardian_account(&email_value, &password_value, &display_value).await?;
+                                                }
+                                                let session = login_guardian(&email_value, &password_value).await?;
+                                                save_guardian_token(&session.token)?;
+                                                Ok(session.account_id)
+                                            }.await;
+                                            match result {
+                                                Ok(account_id) => {
+                                                    status.set(AppStatus::load());
+                                                    setup_note.set(Some(format!("Signed in as account {account_id}.")));
+                                                }
+                                                Err(e) => setup_error.set(Some(e.to_string())),
+                                            }
+                                            setup_busy.set(false);
+                                        });
+                                    },
+                                    if setup_busy() { "Working..." } else if create_account() { "Create and login" } else { "Login" }
+                                }
+                                if status().logged_in {
+                                    button {
+                                        class: "ghost danger-link",
+                                        onclick: move |_| {
+                                            let mut status = status;
+                                            let mut setup_note = setup_note;
+                                            let mut setup_error = setup_error;
+                                            match clear_guardian_token() {
+                                                Ok(()) => {
+                                                    status.set(AppStatus::load());
+                                                    setup_note.set(Some("Signed out for this server.".to_string()));
+                                                }
+                                                Err(e) => setup_error.set(Some(format!("Couldn't sign out: {e}"))),
+                                            }
+                                        },
+                                        "Sign out on this server"
+                                    }
+                                }
+                            }
+
+                            div { class: "box",
+                                h3 { "Add child" }
+                                label { class: "field",
+                                    span { "Child display name" }
+                                    input {
+                                        r#type: "text",
+                                        placeholder: "Kid",
+                                        value: "{child_name}",
+                                        oninput: move |e| child_name.set(e.value()),
+                                    }
+                                }
+                                button {
+                                    class: "primary",
+                                    disabled: setup_busy() || !status().logged_in,
+                                    onclick: move |_| {
+                                        let name = child_name().trim().to_string();
+                                        let mut setup_busy = setup_busy;
+                                        let mut setup_error = setup_error;
+                                        let mut setup_note = setup_note;
+                                        let mut pair_code = pair_code;
+                                        setup_busy.set(true);
+                                        setup_error.set(None);
+                                        setup_note.set(None);
+                                        spawn(async move {
+                                            let result: anyhow::Result<PairCodeUi> = async {
+                                                if name.is_empty() {
+                                                    anyhow::bail!("child name is required");
+                                                }
+                                                let pair = create_pair_code_for_child(&name).await?;
+                                                Ok(PairCodeUi {
+                                                    child_name: name,
+                                                    code: pair.code,
+                                                    expires_ts: pair.expires_ts,
+                                                })
+                                            }.await;
+                                            match result {
+                                                Ok(pair) => {
+                                                    setup_note.set(Some("Pair code created. Enter it on the child device using the same server.".to_string()));
+                                                    pair_code.set(Some(pair));
+                                                }
+                                                Err(e) => setup_error.set(Some(e.to_string())),
+                                            }
+                                            setup_busy.set(false);
+                                        });
+                                    },
+                                    "Generate pair code"
+                                }
+                                if !status().logged_in {
+                                    div { class: "hint", "Login first; sessions are separate for each server." }
+                                }
+                                if let Some(pair) = pair_code() {
+                                    div { class: "pair-code",
+                                        div { class: "meta", "Pair code for {pair.child_name}" }
+                                        div { class: "code mono", "{pair.code}" }
+                                        div { class: "meta", "{pair_expiry_text(pair.expires_ts)}" }
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(note) = setup_note() {
+                            div { class: "ok-note", "{note}" }
+                        }
+                        if let Some(err) = setup_error() {
+                            div { class: "err", "{err}" }
+                        }
+                    }
+                },
+                ActiveView::Alerts => rsx! {
+                    section { class: "panel",
+                        div { class: "panel-head",
+                            h2 { "Alert inbox" }
+                            p { class: "sub",
+                                if offline() { "Demo alerts are non-actionable samples." } else { "Live alerts from children assigned to this guardian." }
+                            }
+                        }
+                        if alerts.read().is_empty() {
+                            p { class: "empty", "All clear — no alerts right now." }
+                        }
+                        for a in alerts.read().clone().into_iter() {
+                            AlertCard {
+                                key: "{a.id}",
+                                alert: a.clone(),
+                                on_decide: {
+                                    let cb_id = a.id.clone();
+                                    let cb_device = a.device.clone();
+                                    move |approve: bool| {
+                                        let id = cb_id.clone();
+                                        let device = cb_device.clone();
+                                        let mut alerts = alerts;
+                                        let mut action_error = action_error;
+                                        let removed: Option<Alert> = {
+                                            let mut list = alerts.write();
+                                            let idx = list.iter().position(|x| x.id == id);
+                                            idx.map(|i| list.remove(i))
+                                        };
+                                        action_error.set(None);
+                                        spawn(async move {
+                                            if let Err(e) = submit_decision(&id, &device, approve).await {
+                                                if let Some(row) = removed {
+                                                    let mut list = alerts.write();
+                                                    if !list.iter().any(|x| x.id == row.id) {
+                                                        list.insert(0, row);
+                                                    }
+                                                }
+                                                action_error.set(Some(e.to_string()));
+                                            }
+                                        });
+                                    }
+                                }
                             }
                         }
                     }
-                }
-            }
-
-            section {
-                h2 { "Coverage (honest)" }
-                CoverageMatrix {}
+                },
+                ActiveView::Children => rsx! {
+                    section { class: "panel",
+                        div { class: "panel-head split",
+                            div {
+                                h2 { "Children" }
+                                p { class: "sub", "Children assigned to the logged-in guardian on this server." }
+                            }
+                            button {
+                                class: "primary",
+                                disabled: children_busy() || !status().logged_in,
+                                onclick: move |_| {
+                                    let mut children = children;
+                                    let mut children_busy = children_busy;
+                                    let mut children_error = children_error;
+                                    children_busy.set(true);
+                                    children_error.set(None);
+                                    spawn(async move {
+                                        match load_children().await {
+                                            Ok(rows) => children.set(rows),
+                                            Err(e) => children_error.set(Some(e.to_string())),
+                                        }
+                                        children_busy.set(false);
+                                    });
+                                },
+                                if children_busy() { "Loading..." } else { "Load children" }
+                            }
+                        }
+                        if !status().logged_in {
+                            div { class: "banner", "Login on this server to see children and create pair codes." }
+                        }
+                        if let Some(err) = children_error() {
+                            div { class: "err", "{err}" }
+                        }
+                        if children.read().is_empty() {
+                            p { class: "empty", "No children loaded yet." }
+                        }
+                        for child in children.read().clone().into_iter() {
+                            div { class: "child-row", key: "{child.child_id}",
+                                div {
+                                    div { class: "ttl", "{child.child_name}" }
+                                    div { class: "meta mono", "device {child.device_id}" }
+                                }
+                                div { class: "meta mono", "guardians {child.guardian_account_ids.len()}" }
+                            }
+                        }
+                    }
+                },
+                ActiveView::Protection => rsx! {
+                    ProtectionPanel {}
+                },
+                ActiveView::Server => rsx! {
+                    ServerSettingsPanel {
+                        on_saved: move |_| status.set(AppStatus::load())
+                    }
+                },
+                ActiveView::Coverage => rsx! {
+                    section { class: "panel",
+                        h2 { "Coverage" }
+                        CoverageMatrix {}
+                    }
+                },
             }
         }
     }
@@ -526,48 +1263,75 @@ fn App() -> Element {
 /// independent of one-shot RPCs.
 async fn submit_decision(alert_id: &str, device_id: &str, approve: bool) -> anyhow::Result<()> {
     let channel = connect_channel().await?;
-    let mut client = ReviewClient::new(channel);
+    let token = guardian_token();
+    submit_decision_on(channel, &token, alert_id, device_id, approve).await
+}
 
-    let decision = if approve {
-        ReviewDecision::Approve
-    } else {
-        ReviewDecision::Deny
-    };
+#[cfg(test)]
+async fn submit_decision_to(
+    endpoint: &str,
+    token: &str,
+    alert_id: &str,
+    device_id: &str,
+    approve: bool,
+) -> anyhow::Result<()> {
+    let channel = connect_channel_to(endpoint, None).await?;
+    submit_decision_on(channel, token, alert_id, device_id, approve).await
+}
+
+async fn submit_decision_on(
+    channel: Channel,
+    token: &str,
+    alert_id: &str,
+    device_id: &str,
+    approve: bool,
+) -> anyhow::Result<()> {
+    let mut client = ReviewClient::new(channel);
 
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
-
-    let req = ReviewRequest {
-        alert_id: alert_id.to_string(),
-        decision: decision as i32,
-        device_id: device_id.to_string(),
-        scope: ReviewScope::ThisHost as i32,
-        ts,
-    };
-
-    // In accounts mode the server requires a guardian session token on the
-    // decision RPC (it scopes the approve/deny to the guardian's assigned
-    // children). Attach the SAME `AEGIS_GUARDIAN_TOKEN` the alert stream uses, as
-    // `authorization: Bearer <token>` metadata. A single-home / no-accounts
-    // server ignores it, so an unset token still works there.
-    let mut request = tonic::Request::new(req);
-    if let Some(token) = std::env::var("AEGIS_GUARDIAN_TOKEN")
-        .ok()
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
-    {
-        if let Ok(val) = tonic::metadata::MetadataValue::try_from(format!("Bearer {token}")) {
-            request.metadata_mut().insert("authorization", val);
-        }
-    }
+    let req = review_request_at(alert_id, device_id, approve, ts);
+    let request = request_with_bearer(req, token);
 
     let ack = client.submit_decision(request).await?.into_inner();
     if !ack.applied {
         anyhow::bail!("the cluster did not apply the decision");
     }
     Ok(())
+}
+
+fn review_request_at(alert_id: &str, device_id: &str, approve: bool, ts: i64) -> ReviewRequest {
+    let decision = if approve {
+        ReviewDecision::Approve
+    } else {
+        ReviewDecision::Deny
+    };
+
+    ReviewRequest {
+        alert_id: alert_id.to_string(),
+        decision: decision as i32,
+        device_id: device_id.to_string(),
+        scope: ReviewScope::ThisHost as i32,
+        ts,
+    }
+}
+
+fn request_with_bearer(req: ReviewRequest, token: &str) -> tonic::Request<ReviewRequest> {
+    // In accounts mode the server requires a guardian session token on the
+    // decision RPC (it scopes the approve/deny to the guardian's assigned
+    // children). Attach the SAME guardian token the alert stream uses, as
+    // `authorization: Bearer <token>` metadata. A single-home / no-accounts server
+    // ignores it, so an unset token still works there.
+    let mut request = tonic::Request::new(req);
+    let token = token.trim();
+    if !token.is_empty() {
+        if let Ok(val) = tonic::metadata::MetadataValue::try_from(format!("Bearer {token}")) {
+            request.metadata_mut().insert("authorization", val);
+        }
+    }
+    request
 }
 
 // ---------------------------------------------------------------------------
@@ -608,7 +1372,7 @@ fn ca_trust_command() -> String {
 /// event handler, never the render path.
 /// Build the spawn `Command` for a filter binary: the bundled exe if present
 /// (`exe`), else a dev `cargo run` of `bin` from the repo root. Both inherit the
-/// unified cluster endpoint and — only when configured — the NSFW model path.
+/// unified cluster endpoint and — only when configured — media provisioning paths.
 fn filter_command(exe: Option<std::path::PathBuf>, bin: &str) -> std::process::Command {
     use std::process::Command;
     let mut cmd = match exe {
@@ -620,7 +1384,7 @@ fn filter_command(exe: Option<std::path::PathBuf>, bin: &str) -> std::process::C
                 "-p",
                 "aegis-client",
                 "--features",
-                "onnx",
+                "onnx,ffmpeg",
                 "--bin",
                 bin,
             ])
@@ -632,6 +1396,9 @@ fn filter_command(exe: Option<std::path::PathBuf>, bin: &str) -> std::process::C
     if let Some(model) = nsfw_model() {
         cmd.env("AEGIS_NSFW_MODEL", model);
     }
+    if let Some(ffmpeg) = ffmpeg_binary() {
+        cmd.env("FFMPEG_BINARY", ffmpeg);
+    }
     cmd
 }
 
@@ -640,10 +1407,8 @@ fn spawn_proxy() -> std::io::Result<Child> {
 }
 
 /// Spawn the transparent-VPN binary (`aegis_vpn.exe`). Like [`spawn_proxy`] it
-/// passes the model + cluster endpoint, but VPN mode needs Administrator and does
-/// NOT touch the system proxy (the TUN captures everything). `aegis_vpn`
-/// self-checks elevation and exits immediately if not elevated — the Connect
-/// handler detects that fast exit and surfaces a "run as Administrator" hint.
+/// passes the model + cluster endpoint, but VPN mode is currently disabled by
+/// the VPN binary while the transparent data path is being rebuilt.
 fn spawn_vpn() -> std::io::Result<Child> {
     filter_command(vpn_exe(), "aegis_vpn").spawn()
 }
@@ -743,7 +1508,7 @@ impl Mode {
     fn explain(self) -> &'static str {
         match self {
             Mode::Proxy => "Routes traffic through the local filter via the per-user system proxy. No admin needed; covers browsers + apps that honour the system proxy.",
-            Mode::Vpn => "Captures ALL traffic system-wide through a TUN adapter — no proxy settings. Needs PH Bulwark run as Administrator.",
+            Mode::Vpn => "Transparent VPN mode is being rebuilt and is disabled in this build. Use Proxy mode for now.",
         }
     }
 }
@@ -886,8 +1651,8 @@ fn ProtectionPanel() -> Element {
                                         if exited {
                                             kill_proxy(&probe);
                                             probe_err.set(Some(
-                                                "VPN mode needs PH Bulwark run as Administrator. \
-                                                 Re-launch as admin, then Connect again."
+                                                "VPN mode is disabled in this build while the transparent data path is being rebuilt. \
+                                                 Use Proxy mode, or connect the London WireGuard tunnel outside PH Bulwark."
                                                     .to_string(),
                                             ));
                                             probe_connected.set(false);
@@ -977,6 +1742,10 @@ fn ProtectionPanel() -> Element {
                     span { class: "pg-k", "NSFW model" }
                     span { class: "pg-v mono", {nsfw_model_display()} }
                 }
+                div { class: "pg-row",
+                    span { class: "pg-k", "ffmpeg" }
+                    span { class: "pg-v mono", {ffmpeg_display()} }
+                }
             }
 
             if !ca_trusted() {
@@ -994,74 +1763,163 @@ fn ProtectionPanel() -> Element {
 /// channel AND the filter it spawns. `AEGIS_CLUSTER_ENDPOINT` overrides for ops use.
 #[component]
 fn ServerSettings() -> Element {
+    rsx! {
+        ServerSettingsPanel { on_saved: move |_| {} }
+    }
+}
+
+#[component]
+fn ServerSettingsPanel(on_saved: EventHandler<()>) -> Element {
     let saved = saved_choice();
-    let is_url = saved.starts_with("http://") || saved.starts_with("https://");
-    let init_selected = if is_url {
-        "selfhosted".to_string()
-    } else if saved.is_empty() || saved.eq_ignore_ascii_case("cloud") {
-        DEFAULT_REGION_ID.to_string()
-    } else {
-        saved.clone()
-    };
-    let mut selected = use_signal(|| init_selected);
-    let mut url = use_signal(|| if is_url { saved.clone() } else { String::new() });
+    let mut inventory = use_signal(server_inventory);
+    let mut selected = use_signal(|| selected_server_id(&saved));
+    let mut custom_label = use_signal(String::new);
+    let mut custom_url = use_signal(String::new);
     let mut note = use_signal(|| Option::<String>::None);
+    let rows = inventory.read().clone();
 
     rsx! {
         section {
             h2 { "Server / country" }
             p { class: "sub",
-                "Pick the country your data routes through, or self-host. Your data only ever goes to the one server you choose."
+                "Pick the one backend this guardian session should use. Each server keeps its own saved login token."
             }
-            for region in CLOUD_REGIONS.iter() {
-                div { class: "row", key: "{region.0}",
-                    label {
-                        input {
-                            r#type: "radio",
-                            name: "srv",
-                            checked: selected() == region.0,
-                            onclick: move |_| selected.set(region.0.to_string()),
+
+            div { class: "server-list",
+                for server in rows.into_iter() {
+                    div {
+                        class: if selected() == server.id { "server-row server-active" } else { "server-row" },
+                        key: "{server.id}",
+                        label { class: "server-main",
+                            input {
+                                r#type: "radio",
+                                name: "srv",
+                                checked: selected() == server.id,
+                                onclick: {
+                                    let id = server.id.clone();
+                                    move |_| selected.set(id.clone())
+                                },
+                            }
+                            div {
+                                div { class: "ttl", "{server.label}" }
+                                div { class: "meta mono", "{server.endpoint}" }
+                                div { class: "server-badges",
+                                    span { class: "badge", if server.builtin { "Cloud" } else { "Self-hosted" } }
+                                    span {
+                                        class: if saved_token_for_endpoint(&server.endpoint).is_empty() { "badge badge-warn" } else { "badge badge-ok" },
+                                        if saved_token_for_endpoint(&server.endpoint).is_empty() { "No session" } else { "Session saved" }
+                                    }
+                                    span {
+                                        class: if cluster_ca_path_for_endpoint(&server.endpoint).exists() { "badge badge-ok" } else { "badge" },
+                                        if cluster_ca_path_for_endpoint(&server.endpoint).exists() { "CA pinned" } else { "Default trust" }
+                                    }
+                                }
+                            }
                         }
-                        " {region.1}"
+                        if !server.builtin {
+                            button {
+                                class: "ghost danger-link small-btn",
+                                onclick: {
+                                    let id = server.id.clone();
+                                    move |_| {
+                                        match remove_custom_server(&id) {
+                                            Ok(()) => {
+                                                if selected() == id {
+                                                    selected.set(DEFAULT_REGION_ID.to_string());
+                                                }
+                                                inventory.set(server_inventory());
+                                                on_saved.call(());
+                                                note.set(Some("Removed self-hosted server.".to_string()));
+                                            }
+                                            Err(e) => note.set(Some(format!("Couldn't remove server: {e}"))),
+                                        }
+                                    }
+                                },
+                                "Remove"
+                            }
+                        }
                     }
                 }
             }
-            div { class: "row",
-                label {
-                    input {
-                        r#type: "radio",
-                        name: "srv",
-                        checked: selected() == "selfhosted",
-                        onclick: move |_| selected.set("selfhosted".to_string()),
-                    }
-                    " Self-hosted"
-                }
-            }
-            if selected() == "selfhosted" {
-                input {
-                    class: "url",
-                    r#type: "text",
-                    placeholder: "https://your-server:8443",
-                    value: "{url}",
-                    oninput: move |e| url.set(e.value()),
-                }
-            }
+
             button {
                 class: "approve",
                 onclick: move |_| {
-                    let choice = if selected() == "selfhosted" { url() } else { selected() };
+                    let choice = selected();
                     match save_server_choice(&choice) {
-                        Ok(()) => note.set(Some("Saved — reconnect or restart to apply.".to_string())),
+                        Ok(()) => {
+                            on_saved.call(());
+                            note.set(Some("Saved — this server now has its own guardian session.".to_string()));
+                        }
                         Err(e) => note.set(Some(format!("Couldn't save: {e}"))),
                     }
                 },
                 "Save server"
             }
+
+            div { class: "box add-server",
+                h3 { "Add self-hosted server" }
+                label { class: "field",
+                    span { "Name" }
+                    input {
+                        r#type: "text",
+                        placeholder: "Home server",
+                        value: "{custom_label}",
+                        oninput: move |e| custom_label.set(e.value()),
+                    }
+                }
+                label { class: "field",
+                    span { "Endpoint" }
+                    input {
+                        r#type: "text",
+                        placeholder: "https://your-server:8443",
+                        value: "{custom_url}",
+                        oninput: move |e| custom_url.set(e.value()),
+                    }
+                }
+                button {
+                    class: "primary",
+                    onclick: move |_| {
+                        match upsert_custom_server(&custom_label(), &custom_url()) {
+                            Ok(server) => {
+                                if let Err(e) = save_server_choice(&server.id) {
+                                    note.set(Some(format!("Saved server, but couldn't make it active: {e}")));
+                                } else {
+                                    selected.set(server.id.clone());
+                                    on_saved.call(());
+                                    note.set(Some(format!("Added {} and made it active.", server.label)));
+                                }
+                                inventory.set(server_inventory());
+                            }
+                            Err(e) => note.set(Some(e.to_string())),
+                        }
+                    },
+                    "Add and use"
+                }
+                div { class: "hint",
+                    "For a private CA, place it at "
+                    span { class: "mono", "sessions/<server-session>/cluster_ca.pem" }
+                    " after adding the server."
+                }
+            }
+
             if let Some(n) = note() {
                 div { class: "seg-note", "{n}" }
             }
         }
     }
+}
+
+fn can_show_evidence(category: Category) -> bool {
+    category != Category::CsamSuspected
+}
+
+fn should_show_thumbnail(alert: &Alert) -> bool {
+    can_show_evidence(alert.category) && !alert.thumbnail.is_empty()
+}
+
+fn should_show_snippet(alert: &Alert) -> bool {
+    can_show_evidence(alert.category) && !alert.snippet.is_empty()
 }
 
 #[component]
@@ -1074,14 +1932,14 @@ fn AlertCard(alert: Alert, on_decide: EventHandler<bool>) -> Element {
 
     // Build the inline image data URI only for non-CSAM items that actually
     // carried preview bytes. `image_data_uri` sniffs the format and base64s it.
-    let preview_uri: Option<String> = if !is_csam && !alert.thumbnail.is_empty() {
+    let preview_uri: Option<String> = if should_show_thumbnail(&alert) {
         Some(image_data_uri(&alert.thumbnail))
     } else {
         None
     };
 
     // The actual flagged text — shown in full to the guardian, except for CSAM.
-    let show_snippet = !is_csam && !alert.snippet.is_empty();
+    let show_snippet = should_show_snippet(&alert);
 
     rsx! {
         div { class: "card",
@@ -1195,13 +2053,13 @@ fn load_segment_from_disk(uri: &str) -> Result<Option<Vec<u8>>, String> {
 
 /// Pull a retained clip from the cluster over `Review.FetchSegment` (for a guardian
 /// on a DIFFERENT device than the server — the clip isn't on local disk). Streams
-/// the chunks and reassembles. Authenticated via `$AEGIS_GUARDIAN_TOKEN` in accounts
-/// mode (CSAM is never retained, so it can never be fetched).
+/// the chunks and reassembles. Authenticated via the guardian token in accounts mode
+/// (CSAM is never retained, so it can never be fetched).
 async fn fetch_segment_remote(uri: &str) -> Result<Vec<u8>, String> {
     use aegis_proto::v1::SegmentRequest;
     let channel = connect_channel().await.map_err(|e| e.to_string())?;
     let mut client = ReviewClient::new(channel);
-    let token = std::env::var("AEGIS_GUARDIAN_TOKEN").unwrap_or_default();
+    let token = guardian_token();
     let mut stream = client
         .fetch_segment(SegmentRequest {
             local_segment_uri: uri.to_string(),
@@ -1353,14 +2211,59 @@ fn CoverageMatrix() -> Element {
 }
 
 const CSS: &str = r#"
-    body { margin: 0; font-family: system-ui, sans-serif; background: #0f1115; color: #e6e8ee; }
-    .wrap { max-width: 760px; margin: 0 auto; padding: 24px; }
+    body { margin: 0; font-family: system-ui, sans-serif; background: #10110f; color: #eceee8; }
+    .app, .wrap { max-width: 1120px; margin: 0 auto; padding: 24px; }
+    .topbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 18px; }
     h1 { font-size: 22px; margin: 0 0 4px; }
     .sub { color: #9aa0ad; margin: 0 0 20px; font-size: 13px; }
-    h2 { font-size: 15px; margin: 24px 0 10px; color: #c8ccd6; }
+    h2 { font-size: 16px; margin: 0 0 8px; color: #d9ddd2; }
+    h3 { font-size: 14px; margin: 0 0 12px; color: #d9ddd2; }
+    .status-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+    .status-tile { background: #171912; border: 1px solid #2a2e22; border-radius: 8px; padding: 12px; min-width: 0; }
+    .status-k { display: block; color: #9aa0ad; font-size: 11px; text-transform: uppercase; margin-bottom: 4px; }
+    .status-v { display: block; font-weight: 700; font-size: 16px; }
+    .status-sub { display: block; color: #8b917f; margin-top: 4px; font-size: 12px; overflow-wrap: anywhere; }
+    .warn { color: #e8c36b; }
+    .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0 16px; border-bottom: 1px solid #292d24; padding-bottom: 8px; }
+    .nav-btn { background: transparent; color: #aeb5a6; border: 1px solid transparent; border-radius: 8px; padding: 8px 11px; }
+    .nav-on { background: #1f2b21; color: #e8f3df; border-color: #38533a; }
+    .panel { margin: 0 0 18px; }
+    .panel-head { margin-bottom: 12px; }
+    .panel-head.split { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 0 0 14px; }
+    .step { display: flex; gap: 10px; align-items: flex-start; border: 1px solid #2a2e22; border-radius: 8px; padding: 10px; background: #151711; }
+    .step.done { border-color: #3d5c3f; background: #172018; }
+    .step-no { display: inline-grid; place-items: center; flex: 0 0 auto; width: 22px; height: 22px; border-radius: 999px; background: #2f6f3e; color: #eaffea; font-weight: 700; font-size: 12px; }
+    .two-col { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .box, .status-card { background: #171912; border: 1px solid #2a2e22; border-radius: 8px; padding: 14px; }
+    .seg { display: inline-flex; gap: 4px; background: #11140f; border: 1px solid #292d24; border-radius: 8px; padding: 3px; margin-bottom: 12px; }
+    .seg-btn { background: transparent; color: #aeb5a6; padding: 6px 10px; }
+    .seg-on { background: #2a3b2b; color: #e8f3df; }
+    .field { display: grid; gap: 5px; margin-bottom: 10px; color: #aeb5a6; font-size: 12px; }
+    input.url, .field input { width: 100%; box-sizing: border-box; background: #0e100d; border: 1px solid #30362b; color: #eceee8; border-radius: 8px; padding: 9px 10px; font: inherit; }
+    .primary, .ghost { font-weight: 600; }
+    .primary { background: #2f6f3e; color: #eaffea; }
+    .ghost { background: #20241d; color: #d9ddd2; border: 1px solid #343b30; }
+    .danger-link { color: #ffd7d7; margin-top: 8px; }
+    .hint { color: #9aa0ad; font-size: 12px; margin-top: 8px; }
+    .pair-code { margin-top: 12px; background: #11140f; border: 1px dashed #566347; border-radius: 8px; padding: 12px; }
+    .code { color: #e8f3df; font-size: 28px; font-weight: 800; letter-spacing: 0; margin: 4px 0; }
+    .ok-note { background: #162318; border: 1px solid #36583a; color: #cdefd0; border-radius: 8px; padding: 9px 12px; font-size: 12px; margin-top: 12px; }
+    .child-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; border: 1px solid #2a2e22; border-radius: 8px; padding: 12px; margin-bottom: 8px; background: #151711; }
+    .server-list { display: grid; gap: 8px; margin-bottom: 12px; }
+    .server-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; border: 1px solid #2a2e22; border-radius: 8px; padding: 12px; background: #151711; }
+    .server-active { border-color: #3d5c3f; background: #172018; }
+    .server-main { display: flex; align-items: flex-start; gap: 10px; flex: 1; min-width: 0; margin: 0; }
+    .server-main input { margin-top: 3px; flex: 0 0 auto; }
+    .server-badges { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+    .badge { display: inline-flex; align-items: center; border: 1px solid #343b30; color: #aeb5a6; border-radius: 999px; padding: 2px 8px; font-size: 11px; }
+    .badge-ok { border-color: #36583a; color: #cdefd0; background: #162318; }
+    .badge-warn { border-color: #4a3f17; color: #e8d9a0; background: #2a2410; }
+    .add-server { margin-top: 12px; }
+    .small-btn { padding: 5px 10px; font-size: 12px; flex: 0 0 auto; }
     .banner { background: #2a2410; border: 1px solid #4a3f17; color: #e8d9a0; border-radius: 8px; padding: 8px 12px; font-size: 12px; margin-bottom: 14px; }
     .err { background: #3a1c1c; border: 1px solid #5a2a2a; color: #ffd7d7; border-radius: 8px; padding: 8px 12px; font-size: 12px; margin-bottom: 14px; }
-    .card { background: #171a21; border: 1px solid #232733; border-radius: 10px; padding: 14px; margin-bottom: 10px; }
+    .card { background: #171912; border: 1px solid #2a2e22; border-radius: 8px; padding: 14px; margin-bottom: 10px; }
     .ttl { font-weight: 600; }
     .meta { color: #8b91a0; font-size: 12px; margin: 2px 0 8px; }
     .detail { margin: 0 0 10px; font-size: 14px; }
@@ -1405,3 +2308,443 @@ const CSS: &str = r#"
     .ca-hint { margin-top: 12px; background: #12151c; border: 1px solid #232733; border-radius: 8px; padding: 10px 12px; font-size: 12px; color: #c8ccd6; }
     .ca-cmd { margin-top: 6px; padding: 8px; background: #0c0e13; border-radius: 6px; word-break: break-all; user-select: all; }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use aegis_proto::v1::review_server::{Review, ReviewServer};
+    use aegis_proto::v1::{
+        Evidence, PushAck, PushTarget, ReviewAck, SegmentChunk, SegmentRequest, Severity,
+    };
+    use futures_util::Stream;
+    use tokio::net::TcpListener;
+    use tonic::transport::{Endpoint, Server};
+    use tonic::{Request, Response, Status};
+
+    type AlertStream = Pin<Box<dyn Stream<Item = Result<AlertEvent, Status>> + Send + 'static>>;
+    type SegmentStream = Pin<Box<dyn Stream<Item = Result<SegmentChunk, Status>> + Send + 'static>>;
+
+    #[derive(Clone, Debug)]
+    struct CapturedDecision {
+        auth: Option<String>,
+        request: ReviewRequest,
+    }
+
+    #[derive(Clone, Debug)]
+    struct CapturedFilter {
+        auth: Option<String>,
+        filter: DeviceFilter,
+    }
+
+    #[derive(Clone)]
+    struct FakeReview {
+        events: Arc<Vec<AlertEvent>>,
+        decisions: Arc<Mutex<Vec<CapturedDecision>>>,
+        filters: Arc<Mutex<Vec<CapturedFilter>>>,
+        ack_applied: bool,
+    }
+
+    impl FakeReview {
+        fn with_events(events: Vec<AlertEvent>) -> Self {
+            Self {
+                events: Arc::new(events),
+                decisions: Arc::new(Mutex::new(Vec::new())),
+                filters: Arc::new(Mutex::new(Vec::new())),
+                ack_applied: true,
+            }
+        }
+
+        fn with_unapplied_ack() -> Self {
+            Self {
+                ack_applied: false,
+                ..Self::with_events(Vec::new())
+            }
+        }
+    }
+
+    #[tonic::async_trait]
+    impl Review for FakeReview {
+        async fn submit_decision(
+            &self,
+            req: Request<ReviewRequest>,
+        ) -> Result<Response<ReviewAck>, Status> {
+            let auth = auth_header(&req);
+            let request = req.into_inner();
+            self.decisions
+                .lock()
+                .expect("decisions lock")
+                .push(CapturedDecision {
+                    auth,
+                    request: request.clone(),
+                });
+            Ok(Response::new(ReviewAck {
+                alert_id: request.alert_id,
+                applied: self.ack_applied,
+            }))
+        }
+
+        async fn register_push_target(
+            &self,
+            _req: Request<PushTarget>,
+        ) -> Result<Response<PushAck>, Status> {
+            Ok(Response::new(PushAck { ok: true }))
+        }
+
+        type StreamPendingReviewsStream = AlertStream;
+
+        async fn stream_pending_reviews(
+            &self,
+            req: Request<DeviceFilter>,
+        ) -> Result<Response<Self::StreamPendingReviewsStream>, Status> {
+            let auth = auth_header(&req);
+            let filter = req.into_inner();
+            self.filters
+                .lock()
+                .expect("filters lock")
+                .push(CapturedFilter { auth, filter });
+            let events = self.events.as_ref().clone();
+            Ok(Response::new(Box::pin(futures_util::stream::iter(
+                events.into_iter().map(Ok),
+            ))))
+        }
+
+        type FetchSegmentStream = SegmentStream;
+
+        async fn fetch_segment(
+            &self,
+            _req: Request<SegmentRequest>,
+        ) -> Result<Response<Self::FetchSegmentStream>, Status> {
+            Ok(Response::new(Box::pin(futures_util::stream::iter([Ok(
+                SegmentChunk {
+                    data: b"fake clip".to_vec(),
+                },
+            )]))))
+        }
+    }
+
+    struct TestReviewServer {
+        endpoint: String,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl TestReviewServer {
+        async fn spawn(review: FakeReview) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind fake review server");
+            let addr = listener.local_addr().expect("fake review addr");
+            let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+            let task = tokio::spawn(async move {
+                Server::builder()
+                    .add_service(ReviewServer::new(review))
+                    .serve_with_incoming(incoming)
+                    .await
+                    .expect("fake review server serves");
+            });
+            Self {
+                endpoint: format!("http://{addr}"),
+                task,
+            }
+        }
+    }
+
+    impl Drop for TestReviewServer {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    #[test]
+    fn server_choice_resolves_regions_and_self_hosted() {
+        assert!(resolve_endpoint("").contains("eu-west-2"));
+        assert!(resolve_endpoint("cloud").contains("eu-west-2"));
+        assert!(resolve_endpoint("unknown").contains("eu-west-2"));
+        assert_eq!(resolve_endpoint("us"), "https://us.cloud.phbulwark.app");
+        assert_eq!(
+            resolve_endpoint("https://family.example.test:8443"),
+            "https://family.example.test:8443"
+        );
+
+        assert_eq!(
+            server_settings_initial_state(""),
+            ("uk".to_string(), String::new())
+        );
+        assert_eq!(
+            server_settings_initial_state("https://family.example.test:8443"),
+            (
+                "selfhosted".to_string(),
+                "https://family.example.test:8443".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn server_inventory_merges_builtins_custom_and_legacy_url() {
+        let custom = SavedServer::new("self-home", "Home server", "https://home.example.test:8443");
+        let rows =
+            server_inventory_for_choice("https://legacy.example.test:8443", vec![custom.clone()]);
+
+        assert!(rows.iter().any(|s| s.id == "uk" && s.builtin));
+        assert!(rows.iter().any(|s| s.id == "us" && s.builtin));
+        assert!(rows.iter().any(|s| s == &custom));
+        assert!(rows.iter().any(|s| {
+            s.endpoint == "https://legacy.example.test:8443" && s.label == "Self-hosted"
+        }));
+    }
+
+    #[test]
+    fn custom_server_inventory_normalizes_invalid_and_duplicates() {
+        let rows = normalize_custom_servers(vec![
+            SavedServer::new("self-a", "A", "https://a.example.test:8443"),
+            SavedServer::new("self-a", "Duplicate id", "https://b.example.test:8443"),
+            SavedServer::new(
+                "self-c",
+                "Duplicate endpoint",
+                "https://a.example.test:8443",
+            ),
+            SavedServer::new("bad", "Bad", "ftp://bad.example.test"),
+            SavedServer::new("", "Empty", "https://empty.example.test"),
+        ]);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "self-a");
+        assert_eq!(rows[0].label, "A");
+        assert!(!rows[0].builtin);
+    }
+
+    #[test]
+    fn custom_server_choice_resolves_by_id() {
+        let server = SavedServer::new("self-home", "Home server", "https://home.example.test:8443");
+        let rows = server_inventory_for_choice("", vec![server.clone()]);
+        assert_eq!(server_for_choice_from("self-home", &rows), server);
+        assert_eq!(
+            custom_server_id(" https://home.example.test:8443 "),
+            custom_server_id("https://home.example.test:8443")
+        );
+    }
+
+    #[test]
+    fn server_session_keys_are_endpoint_scoped() {
+        let london = server_session_key("http://london.example:8443");
+        let us = server_session_key("http://us.example:8443");
+        let london_again = server_session_key(" http://london.example:8443 ");
+
+        assert_eq!(london, london_again);
+        assert_ne!(london, us);
+        assert_eq!(london.len(), 16);
+        assert!(london.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn pair_expiry_text_is_human_readable() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        assert!(pair_expiry_text(now + 30_000).contains("expires in"));
+        assert_eq!(pair_expiry_text(0), "unknown expiry");
+    }
+
+    #[test]
+    fn offline_seed_is_fake_safe_and_non_actionable() {
+        let rows = seed();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|a| !a.actionable));
+        assert!(rows.iter().all(|a| a.thumbnail.is_empty()));
+        assert!(rows.iter().all(|a| a.segment_uri.is_none()));
+        assert!(rows.iter().any(|a| a.id == "a-1001"));
+        assert!(rows.iter().any(|a| a.title.contains("Possible grooming")));
+    }
+
+    #[test]
+    fn fake_alert_mapping_shows_allowed_evidence_but_never_csam() {
+        let adult = Alert::from_event(fake_alert(
+            "fake-adult",
+            "kids-tablet",
+            Category::AdultImage,
+            tiny_png(),
+            "blocked text snippet",
+        ));
+        assert_eq!(adult.title, "Blocked an adult image");
+        assert!(should_show_thumbnail(&adult));
+        assert!(should_show_snippet(&adult));
+
+        let csam = Alert::from_event(fake_alert(
+            "fake-csam",
+            "kids-tablet",
+            Category::CsamSuspected,
+            tiny_png(),
+            "must not render",
+        ));
+        assert_eq!(csam.title, "Blocked suspected illegal content");
+        assert!(!can_show_evidence(csam.category));
+        assert!(!should_show_thumbnail(&csam));
+        assert!(!should_show_snippet(&csam));
+    }
+
+    #[test]
+    fn decision_request_and_bearer_metadata_are_stable() {
+        let req = review_request_at("alert-1", "device-1", true, 123);
+        assert_eq!(req.alert_id, "alert-1");
+        assert_eq!(req.device_id, "device-1");
+        assert_eq!(req.decision, ReviewDecision::Approve as i32);
+        assert_eq!(req.scope, ReviewScope::ThisHost as i32);
+        assert_eq!(req.ts, 123);
+
+        let request = request_with_bearer(req, " token-123 ");
+        assert_eq!(
+            request
+                .metadata()
+                .get("authorization")
+                .expect("authorization metadata")
+                .to_str()
+                .expect("metadata string"),
+            "Bearer token-123"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parent_opens_live_stream_and_maps_fake_alert() {
+        let fake = FakeReview::with_events(vec![fake_alert(
+            "stream-alert-1",
+            "kids-phone",
+            Category::Grooming,
+            Vec::new(),
+            "move this chat elsewhere",
+        )]);
+        let server = TestReviewServer::spawn(fake.clone()).await;
+        wait_for_server(&server.endpoint).await;
+
+        let mut stream = open_pending_review_stream_from(&server.endpoint, "guardian-token")
+            .await
+            .expect("open fake review stream");
+        let event = stream
+            .message()
+            .await
+            .expect("stream message result")
+            .expect("one fake alert");
+        let alert = Alert::from_event(event);
+        assert_eq!(alert.id, "stream-alert-1");
+        assert_eq!(alert.device, "kids-phone");
+        assert_eq!(alert.title, "Possible grooming detected");
+        assert!(should_show_snippet(&alert));
+
+        let filters = fake.filters.lock().expect("filters lock");
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0].filter.token, "guardian-token");
+        assert!(filters[0].auth.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parent_submit_decision_hits_fake_review_with_bearer_token() {
+        let fake = FakeReview::with_events(Vec::new());
+        let server = TestReviewServer::spawn(fake.clone()).await;
+        wait_for_server(&server.endpoint).await;
+
+        submit_decision_to(
+            &server.endpoint,
+            "guardian-token",
+            "decision-alert-1",
+            "kids-device",
+            true,
+        )
+        .await
+        .expect("submit fake decision");
+
+        let decisions = fake.decisions.lock().expect("decisions lock");
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].auth.as_deref(), Some("Bearer guardian-token"));
+        assert_eq!(decisions[0].request.alert_id, "decision-alert-1");
+        assert_eq!(decisions[0].request.device_id, "kids-device");
+        assert_eq!(
+            decisions[0].request.decision,
+            ReviewDecision::Approve as i32
+        );
+        assert!(decisions[0].request.ts > 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parent_submit_decision_surfaces_unapplied_ack() {
+        let fake = FakeReview::with_unapplied_ack();
+        let server = TestReviewServer::spawn(fake).await;
+        wait_for_server(&server.endpoint).await;
+
+        let err = submit_decision_to(
+            &server.endpoint,
+            "guardian-token",
+            "decision-alert-2",
+            "kids-device",
+            false,
+        )
+        .await
+        .expect_err("unapplied ack should surface as an error");
+        assert!(err.to_string().contains("did not apply"));
+    }
+
+    fn fake_alert(
+        alert_id: &str,
+        device_id: &str,
+        category: Category,
+        thumbnail: Vec<u8>,
+        snippet: &str,
+    ) -> AlertEvent {
+        AlertEvent {
+            alert_id: alert_id.to_string(),
+            kind: if category == Category::Grooming {
+                AlertKind::GroomingSuspected
+            } else {
+                AlertKind::Intervention
+            } as i32,
+            category: category as i32,
+            severity: Severity::High as i32,
+            app: "fake-chat".to_string(),
+            device_id: device_id.to_string(),
+            child_id: "child-1".to_string(),
+            ts: 1_700_000_000_000,
+            redacted_context: "Fake alert for parent e2e.".to_string(),
+            evidence: Some(Evidence {
+                sha256: vec![1, 2, 3, 4],
+                perceptual_hash: Vec::new(),
+                safe_thumbnail: thumbnail,
+                text_snippet: snippet.to_string(),
+                model_id: "fake-model".to_string(),
+                model_version: "0".to_string(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn tiny_png() -> Vec<u8> {
+        vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]
+    }
+
+    fn auth_header<T>(req: &Request<T>) -> Option<String> {
+        req.metadata()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    }
+
+    async fn wait_for_server(endpoint: &str) {
+        let ep = Endpoint::from_shared(endpoint.to_string())
+            .expect("valid endpoint")
+            .connect_timeout(Duration::from_millis(500));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match ep.connect().await {
+                Ok(_) => return,
+                Err(e) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        panic!("fake review server never came up at {endpoint}: {e}");
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        }
+    }
+}

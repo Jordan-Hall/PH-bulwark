@@ -1,16 +1,14 @@
-//! VPN mode — transparent, system-wide traffic capture (Windows).
+//! VPN mode — transparent, system-wide traffic capture.
 //!
 //! Unlike the explicit-proxy path ([`NetInterceptor::start_proxy_only`]) — which
 //! needs each app/browser pointed at `127.0.0.1:8080` — VPN mode captures **all**
 //! traffic at layer 3 via a TUN, so every app is filtered with no per-app config.
 //!
-//! We do NOT hand-roll a userspace TCP/IP stack: the [`tun2proxy`] crate owns the
-//! wintun TUN + a smoltcp netstack and **redirects captured TCP to the local MITM
-//! proxy** (`http://127.0.0.1:8080`, which speaks HTTP CONNECT) while **NATing
-//! UDP/other traffic** straight out so the device keeps working. `setup(true)`
-//! installs the default route and **restores host routing on teardown** (the
-//! no-blackhole contract). We additionally block QUIC/UDP-443 so HTTP/3 can't slip
-//! past the TCP MITM.
+//! The current permissive replacement path uses a first-party TUN abstraction plus
+//! a `smoltcp` bridge scaffold. The setup/teardown and packet parser are wired,
+//! but the full TCP socket pump remains fail-closed until Linux/macOS/Android
+//! device testing proves it will not blackhole a supervised device. We also block
+//! QUIC/UDP-443 so HTTP/3 can't slip past the TCP MITM once the bridge is enabled.
 //!
 //! ## Requirements (honest)
 //! * **Admin** — creating the TUN adapter + owning the default route needs
@@ -29,7 +27,10 @@
 
 pub use tokio_util::sync::CancellationToken;
 
-use crate::{NetError, Result};
+mod netstack;
+
+use crate::tun::{open_tun, TunConfig};
+use crate::Result;
 
 /// The local MITM proxy captured TCP is redirected to. It speaks HTTP CONNECT, so
 /// the scheme MUST be `http` (tun2proxy's `ProxyType::Http`).
@@ -140,27 +141,31 @@ pub fn elevation_command() -> String {
 
 /// Run VPN mode until `shutdown` is cancelled.
 ///
-/// ## Status: data path being rebuilt on a PERMISSIVE stack
-/// The transparent data path is being re-implemented on **`smoltcp`** (0BSD) —
-/// capture the TUN at L3, redirect TCP to the local MITM proxy ([`VpnConfig::
-/// proxy_url`], HTTP CONNECT), and route/observe UDP/QUIC/WebRTC — plus
-/// **`boringtun`/WireGuard** (BSD-3) for the secure device↔filter-node transport
-/// leg. The previous `tun2proxy` backend was removed because it linked
-/// `socks5-impl` = **GPL-3.0-or-later** (copyleft), incompatible with the
-/// MIT/Apache product license.
-///
-/// Until that permissive data path lands, VPN mode **fails closed**: it does NOT
-/// bring up a TUN (an un-redirected TUN would black-hole the device's
-/// connectivity), and returns an error so the caller falls back to explicit
-/// **proxy mode** (`aegis_proxy` + the per-user system proxy) — fully functional
-/// and MIT-clean. Requires admin + `wintun.dll` once the data path is wired
-/// (check [`is_elevated`] / [`wintun_available`] first).
-pub async fn run_vpn(_cfg: VpnConfig, _shutdown: CancellationToken) -> Result<()> {
-    Err(NetError::tun(
-        "transparent VPN is being rebuilt on the permissive smoltcp + WireGuard \
-         (boringtun) stack after removing the GPL tun2proxy backend; use proxy \
-         mode (aegis_proxy + system proxy) meanwhile",
-    ))
+/// Status: the setup/teardown path and smoltcp packet parser are wired, but the
+/// full TCP socket bridge still fails closed inside [`netstack`]. That is
+/// intentional until loopback and real-device tests prove it will not blackhole a
+/// supervised device.
+pub async fn run_vpn(cfg: VpnConfig, shutdown: CancellationToken) -> Result<()> {
+    let bridge = netstack::BridgeConfig::from_vpn(&cfg)?;
+    let mut tun = open_tun()?;
+    let tun_cfg = TunConfig {
+        name: cfg.tun_name.clone(),
+        ..TunConfig::default()
+    };
+
+    let result = async {
+        tun.up(&tun_cfg)?;
+        tun.install_routing(&tun_cfg)?;
+        netstack::run_netstack(tun.as_ref(), bridge, shutdown).await
+    }
+    .await;
+
+    let teardown = tun.teardown_routing();
+    let close = tun.close();
+
+    result?;
+    teardown?;
+    close
 }
 
 #[cfg(test)]

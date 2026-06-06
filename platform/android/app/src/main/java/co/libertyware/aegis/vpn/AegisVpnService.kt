@@ -7,8 +7,10 @@ import android.content.Intent
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import co.libertyware.aegis.admin.Enrollment
 import co.libertyware.aegis.core.RustBridge
 import co.libertyware.aegis.notify.AlertNotifier
+import org.json.JSONObject
 
 /**
  * The Aegis filtering VPN client.
@@ -57,9 +59,21 @@ class AegisVpnService : VpnService() {
         }
         tun = pfd
         // Rust owns the read/write loop on the raw fd from here.
-        rustHandle = RustBridge.startVpn(pfd.fd, CONFIG_JSON)
+        rustHandle = RustBridge.startVpn(this, pfd.fd, deviceConfigJson())
         Log.i(TAG, "Aegis VPN established (rustHandle=$rustHandle)")
         startAlertPoller()
+    }
+
+    private fun deviceConfigJson(): String {
+        val enrollment = Enrollment.record(this)
+        val json = JSONObject()
+            .put("device_id", Enrollment.stableDeviceId(this))
+        if (enrollment != null) {
+            json.put("cluster_endpoint", enrollment.clusterEndpoint)
+                .put("child_id", enrollment.childId)
+                .put("family_id", enrollment.familyId)
+        }
+        return json.toString()
     }
 
     /**
@@ -108,8 +122,5 @@ class AegisVpnService : VpnService() {
         private const val TAG = "AegisVpn"
         private const val CHANNEL = "aegis_vpn"
         private const val NOTIF_ID = 1001
-        // The device client config (cluster endpoint, device id, age profile) is
-        // loaded by the parent app and persisted; passed to Rust at start.
-        private const val CONFIG_JSON = "{}"
     }
 }

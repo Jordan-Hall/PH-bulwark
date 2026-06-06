@@ -76,6 +76,8 @@ child device                              home cluster                guardian
   AEGIS_GUARDIAN_TOKEN='…' aegis_admin add-child       "Kid" kids-tablet-01
   AEGIS_GUARDIAN_TOKEN='…' aegis_admin assign-guardian <child_id> <other_account_id>
   AEGIS_GUARDIAN_TOKEN='…' aegis_admin list-children
+  AEGIS_GUARDIAN_TOKEN='…' aegis_admin create-pair-code "Kid"   # -> code
+  aegis_admin redeem-pair-code <code> kids-tablet-01             # child-side flow
   ```
   The `login` token is what you put in `AEGIS_GUARDIAN_TOKEN` (for both this CLI and
   the parent app).

@@ -44,15 +44,20 @@
 
 use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
-use jni::objects::{JClass, JString};
+use jni::objects::{GlobalRef, JClass, JObject, JString};
 use jni::sys::{jboolean, jint, jlong, jstring};
 use jni::JNIEnv;
 
 use aegis_policy::{AgeProfile, Policy, PolicyContext, PolicyDecision};
-use aegis_proto::v1::{Category, SourceChannel, TextSpan, Verdict};
+use aegis_proto::v1::accounts_client::AccountsClient;
+use aegis_proto::v1::{
+    Category, PairResult, RedeemPairCodeRequest, SourceChannel, TextSpan, Verdict,
+};
 use aegis_proto::DeviceId;
 use aegis_text::TextAnalyzer;
+use tonic::transport::Endpoint;
 
 // ---------------------------------------------------------------------------
 // The on-device engine: deterministic analyzer + policy. Built once per process.
@@ -138,6 +143,10 @@ struct VpnSession {
     tun_fd: i32,
     /// The serialized client config string (cluster endpoint, device id, …).
     config_json: String,
+    /// Global reference to the VpnService. The future network bridge must call
+    /// `service.protect(socket_fd)` before every upstream connect so sockets do
+    /// not route back into this VPN.
+    vpn_service: Option<GlobalRef>,
 }
 
 // ---------------------------------------------------------------------------
@@ -161,6 +170,84 @@ fn string_to_jstring(env: &mut JNIEnv, s: &str) -> jstring {
         Ok(js) => js.into_raw(),
         Err(_) => std::ptr::null_mut(),
     }
+}
+
+/// Pair codes are shown to humans, so tolerate spaces/dashes and normalize to the
+/// compact uppercase token the server minted. Empty remains empty so validation
+/// can return a clear error.
+fn normalize_pair_code(code: &str) -> String {
+    code.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
+}
+
+fn ok_pairing_json(pair: &PairResult) -> String {
+    let obj = serde_json::json!({
+        "ok": true,
+        "child_id": pair.child_id,
+        "family_id": pair.family_id,
+    });
+    serde_json::to_string(&obj).unwrap_or_else(|_| {
+        r#"{"ok":false,"error":"could not serialize enrollment result"}"#.to_string()
+    })
+}
+
+fn err_pairing_json(error: impl AsRef<str>) -> String {
+    let obj = serde_json::json!({
+        "ok": false,
+        "error": error.as_ref(),
+    });
+    serde_json::to_string(&obj)
+        .unwrap_or_else(|_| r#"{"ok":false,"error":"enrollment failed"}"#.to_string())
+}
+
+async fn redeem_pair_code_rpc(
+    endpoint: String,
+    code: String,
+    device_id: String,
+) -> Result<PairResult, String> {
+    let endpoint = endpoint.trim();
+    if !(endpoint.starts_with("http://") || endpoint.starts_with("https://")) {
+        return Err("server must start with http:// or https://".to_string());
+    }
+
+    let code = normalize_pair_code(&code);
+    if code.is_empty() {
+        return Err("enter the pair code from the parent app".to_string());
+    }
+    let device_id = device_id.trim();
+    if device_id.is_empty() {
+        return Err("device id is not ready yet".to_string());
+    }
+
+    let builder = Endpoint::from_shared(endpoint.to_string())
+        .map_err(|_| "server address is not valid".to_string())?
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10));
+    let channel = builder
+        .connect()
+        .await
+        .map_err(|e| format!("could not reach server: {e}"))?;
+    let mut accounts = AccountsClient::new(channel);
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        accounts.redeem_pair_code(RedeemPairCodeRequest {
+            code,
+            device_id: device_id.to_string(),
+        }),
+    )
+    .await
+    .map_err(|_| "server timed out while redeeming the code".to_string())?
+    .map_err(|e| match e.code() {
+        tonic::Code::NotFound => "pair code is invalid, expired, or for another server".to_string(),
+        tonic::Code::AlreadyExists => "this device is already enrolled on that server".to_string(),
+        tonic::Code::InvalidArgument => "pair code or device id was rejected".to_string(),
+        _ => format!("server rejected enrollment: {}", e.code()),
+    })?
+    .into_inner();
+
+    Ok(result)
 }
 
 /// The fail-open verdict JSON used whenever input is bad or the engine is
@@ -249,7 +336,7 @@ fn verdict_json(verdict: &Verdict, decision: &PolicyDecision) -> String {
 // i.e. Java_co_libertyware_aegis_core_RustBridge_<method>.
 // ---------------------------------------------------------------------------
 
-/// `external fun startVpn(tunFd: Int, configJson: String): Long`
+/// `external fun startVpn(vpnService: VpnService, tunFd: Int, configJson: String): Long`
 ///
 /// Box a [`VpnSession`] and return its pointer as the opaque handle. The actual
 /// TUN intercept loop is owned by the networking crates (out of scope here); we
@@ -264,6 +351,7 @@ fn verdict_json(verdict: &Verdict, decision: &PolicyDecision) -> String {
 pub extern "system" fn Java_co_libertyware_aegis_core_RustBridge_startVpn(
     mut env: JNIEnv,
     _class: JClass,
+    vpn_service: JObject,
     tun_fd: jint,
     config_json: JString,
 ) -> jlong {
@@ -271,9 +359,15 @@ pub extern "system" fn Java_co_libertyware_aegis_core_RustBridge_startVpn(
     let _ = engine();
 
     let config = jstring_to_string(&mut env, &config_json).unwrap_or_default();
+    let vpn_service = if vpn_service.is_null() {
+        None
+    } else {
+        env.new_global_ref(vpn_service).ok()
+    };
     let session = Box::new(VpnSession {
         tun_fd: tun_fd as i32,
         config_json: config,
+        vpn_service,
     });
     // Leak the box into a raw pointer the caller owns; stopVpn reclaims it.
     Box::into_raw(session) as jlong
@@ -364,6 +458,51 @@ pub extern "system" fn Java_co_libertyware_aegis_core_RustBridge_analyzeText(
     let decision = engine.policy.evaluate(&verdict, &ctx);
 
     let json = verdict_json(&verdict, &decision);
+    string_to_jstring(&mut env, &json)
+}
+
+/// `external fun redeemPairCode(endpoint: String, code: String, deviceId: String): String`
+///
+/// Child enrollment path. The Android setup screen calls this after the guardian
+/// has selected the same server in the parent app and generated a short-lived
+/// code. The code is the credential; the device id is the stable child-device
+/// routing key. Returns compact JSON:
+///
+/// * `{"ok":true,"child_id":"...","family_id":"..."}`
+/// * `{"ok":false,"error":"..."}`
+///
+/// No pair code or device id is echoed in errors.
+///
+/// # Safety
+/// JNI entry point. Every jstring argument is null-/UTF-8-validated; invalid
+/// input returns an error JSON instead of panicking.
+#[no_mangle]
+pub extern "system" fn Java_co_libertyware_aegis_core_RustBridge_redeemPairCode(
+    mut env: JNIEnv,
+    _class: JClass,
+    endpoint: JString,
+    code: JString,
+    device_id: JString,
+) -> jstring {
+    let endpoint = match jstring_to_string(&mut env, &endpoint) {
+        Some(s) => s,
+        None => return string_to_jstring(&mut env, &err_pairing_json("server address is missing")),
+    };
+    let code = jstring_to_string(&mut env, &code).unwrap_or_default();
+    let device_id = jstring_to_string(&mut env, &device_id).unwrap_or_default();
+
+    let json = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(2)
+        .thread_name("aegis-android-enroll")
+        .build()
+    {
+        Ok(rt) => match rt.block_on(redeem_pair_code_rpc(endpoint, code, device_id)) {
+            Ok(pair) => ok_pairing_json(&pair),
+            Err(e) => err_pairing_json(e),
+        },
+        Err(_) => err_pairing_json("enrollment runtime could not start"),
+    };
     string_to_jstring(&mut env, &json)
 }
 
@@ -547,5 +686,27 @@ mod tests {
         let json = safe_verdict_json();
         assert!(json.contains("\"SAFE\""));
         assert!(json.contains("\"ALLOW\""));
+    }
+
+    #[test]
+    fn pair_code_normalization_is_human_tolerant() {
+        assert_eq!(normalize_pair_code(" abcd-2345 "), "ABCD2345");
+        assert_eq!(normalize_pair_code("a b c 1 2 3"), "ABC123");
+        assert!(normalize_pair_code(" - ").is_empty());
+    }
+
+    #[test]
+    fn pairing_json_shapes_are_stable() {
+        let ok = ok_pairing_json(&PairResult {
+            child_id: "child-1".to_string(),
+            family_id: "family-1".to_string(),
+        });
+        assert!(ok.contains("\"ok\":true"), "{ok}");
+        assert!(ok.contains("\"child_id\":\"child-1\""), "{ok}");
+        assert!(ok.contains("\"family_id\":\"family-1\""), "{ok}");
+
+        let err = err_pairing_json("pair code is invalid");
+        assert!(err.contains("\"ok\":false"), "{err}");
+        assert!(err.contains("pair code is invalid"), "{err}");
     }
 }
