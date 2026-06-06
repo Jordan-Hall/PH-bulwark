@@ -35,8 +35,29 @@ The child-side app is **filter + enrollment only** — no parent/review UI, no
 device-control surface. Enrollment links the device to a child record so alerts
 route to the right guardians.
 
+## Pairing
+
+The server supports both direct provisioning and app-driven pairing:
+
+- Direct provisioning: `AddChild(token, child_name, device_id)`.
+- App-driven pairing:
+  1. Guardian logs in and calls `CreatePairCode(token, child_name)`.
+  2. Child app calls `RedeemPairCode(code, device_id)`.
+  3. The server creates the child, links the stable device id, assigns the
+     minting guardian, and returns `child_id` + `family_id`.
+
+Pair codes are short-lived and single-use. Redemption is unauthenticated because
+the code is the credential.
+
+## Server Choice
+
+Accounts and tokens are scoped to one backend: UK/London cloud, US cloud, or a
+self-hosted server. A token from one backend must not be reused on another. See
+[`app-pairing-and-regions.md`](app-pairing-and-regions.md) for the region and
+self-hosting UX plan.
+
 ## Status / SEAMs
 
-State is in-memory this wave (`Arc<Mutex<…>>`). `// SEAM:` markers show where
-durable, audited storage plugs in. Deliberately **no** `aegis-store`/rusqlite
-dependency (it fails to build on the Windows host, os error 4551).
+State is persisted as JSON when `AEGIS_STATE_DIR` is configured; otherwise it is
+in-memory for dev/single-home runs. Deliberately **no** `aegis-store`/rusqlite
+dependency here (it fails to build on the Windows host, os error 4551).

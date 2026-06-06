@@ -4,8 +4,10 @@
 //! captured and redirected to the in-process MITM proxy. Each platform offers a
 //! different primitive:
 //!   * **Windows** → `wintun` (WireGuard's pre-signed driver) — **real** here.
-//!   * **Linux/macOS** → `tun-rs` — **stubbed** (`todo!()`), documented to slot in.
-//!   * **Android** → `VpnService` via JNI — **stubbed**, documented.
+//!   * **Linux/macOS** → `tun-rs` device plumbing, with routing still fail-closed
+//!     until the shared bridge is device-tested.
+//!   * **Android** → `VpnService` fd handoff via JNI; routing is owned by the
+//!     Android service shell.
 //!
 //! [`TunDevice`] is the common contract every backend implements. [`open_tun`]
 //! picks the backend for the current target.
@@ -19,6 +21,12 @@
 
 #[cfg(windows)]
 pub mod windows;
+
+/// Pure routing command builders for transparent VPN setup/teardown.
+///
+/// These are compiled on every host so Linux/macOS routing plans can be unit-tested
+/// without mutating the machine running the tests.
+pub mod routing;
 
 #[cfg(not(windows))]
 pub mod stub;
@@ -113,4 +121,10 @@ pub fn open_tun() -> Result<Box<dyn TunDevice>> {
     {
         stub::open_stub()
     }
+}
+
+/// Open an Android `VpnService` file descriptor as a TUN backend.
+#[cfg(target_os = "android")]
+pub fn open_tun_from_fd(fd: std::os::fd::RawFd) -> Result<Box<dyn TunDevice>> {
+    stub::open_android_fd(fd)
 }

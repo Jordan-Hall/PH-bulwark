@@ -254,7 +254,9 @@ pub mod ffmpeg {
     /// Resolve the ffmpeg binary. ffmpeg-sidecar's own `ffmpeg_path()` only looks
     /// for a binary adjacent to our exe or on `PATH`; it does **not** read
     /// `FFMPEG_BINARY`. We honour `FFMPEG_BINARY` ourselves (matching the wider
-    /// sidecar ecosystem convention) and otherwise fall back to bare `ffmpeg`.
+    /// sidecar ecosystem convention), plus the product-specific
+    /// `AEGIS_FFMPEG_BINARY`, plus Aegis' per-install `ffmpeg_binary.txt`, and
+    /// otherwise fall back to bare `ffmpeg`.
     fn resolve_binary(explicit: Option<&Path>) -> OsString {
         if let Some(p) = explicit {
             return p.as_os_str().to_owned();
@@ -264,7 +266,44 @@ pub mod ffmpeg {
                 return env;
             }
         }
+        if let Some(env) = std::env::var_os("AEGIS_FFMPEG_BINARY") {
+            if !env.is_empty() {
+                return env;
+            }
+        }
+        if let Some(config) = read_config_value("ffmpeg_binary.txt") {
+            return config.into();
+        }
         OsString::from("ffmpeg")
+    }
+
+    fn read_config_value(file_name: &str) -> Option<OsString> {
+        let path = aegis_config_dir()?.join(file_name);
+        let value = std::fs::read_to_string(path).ok()?;
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(OsString::from(trimmed))
+        }
+    }
+
+    fn aegis_config_dir() -> Option<PathBuf> {
+        #[cfg(windows)]
+        {
+            std::env::var_os("LOCALAPPDATA")
+                .map(PathBuf::from)
+                .map(|base| base.join("Aegis"))
+        }
+        #[cfg(not(windows))]
+        {
+            std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .or_else(|| {
+                    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config"))
+                })
+                .map(|base| base.join("aegis"))
+        }
     }
 
     /// Real ffmpeg-backed demuxer.

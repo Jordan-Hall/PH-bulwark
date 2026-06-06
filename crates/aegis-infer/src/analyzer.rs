@@ -108,15 +108,25 @@ pub mod onnx {
         /// over-optimistic list is safe (see `aegis-core::exec_providers_for`).
         pub fn new(cfg: OnnxConfig, profile: &DeviceProfile) -> Result<Self> {
             let providers = providers_from_profile(profile);
-            let session = ort::session::Session::builder()
-                .and_then(|b| b.with_execution_providers(providers))
-                .and_then(|b| b.commit_from_file(&cfg.model_path))
-                .map_err(|e| {
-                    aegis_core::Error::from(crate::error::InferError::Transport(format!(
-                        "ort session for {:?}: {e}",
-                        cfg.model_path
-                    )))
-                })?;
+            let map_ort = |e| {
+                aegis_core::Error::from(crate::error::InferError::Transport(format!(
+                    "ort session for {:?}: {e}",
+                    cfg.model_path
+                )))
+            };
+            let builder = ort::session::Session::builder().map_err(map_ort)?;
+            let mut builder = builder.with_execution_providers(providers).map_err(|e| {
+                aegis_core::Error::from(crate::error::InferError::Transport(format!(
+                    "ort session for {:?}: {e}",
+                    cfg.model_path
+                )))
+            })?;
+            let session = builder.commit_from_file(&cfg.model_path).map_err(|e| {
+                aegis_core::Error::from(crate::error::InferError::Transport(format!(
+                    "ort session for {:?}: {e}",
+                    cfg.model_path
+                )))
+            })?;
             Ok(Self { cfg, session })
         }
     }

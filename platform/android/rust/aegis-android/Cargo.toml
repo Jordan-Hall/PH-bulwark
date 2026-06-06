@@ -54,6 +54,11 @@ aegis-proto = { path = "../../../../crates/aegis-proto" }
 # explicitly as a normal dep.)
 serde_json = "1"
 
+# Child enrollment talks to the same Accounts gRPC service as the parent app.
+# Keep this in Rust so Android does not need a second generated gRPC client.
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+tonic = { version = "0.14", features = ["transport", "tls-ring", "tls-webpki-roots"] }
+
 # Detached workspace — this crate builds on its own:
 #   cd platform/android/rust/aegis-android && cargo build
 [workspace]

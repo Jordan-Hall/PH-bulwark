@@ -32,10 +32,12 @@ object RustBridge {
 
     /**
      * Start the Rust filtering loop on the VpnService TUN [tunFd].
+     * @param vpnService service instance used by Rust to call VpnService.protect
+     *        on future upstream sockets so they do not loop through the VPN.
      * @param configJson serialized client config (cluster endpoint, device id…).
      * @return an opaque handle to pass back to [stopVpn].
      */
-    external fun startVpn(tunFd: Int, configJson: String): Long
+    external fun startVpn(vpnService: android.net.VpnService, tunFd: Int, configJson: String): Long
 
     /** Stop the loop and release the handle. */
     external fun stopVpn(handle: Long)
@@ -48,6 +50,13 @@ object RustBridge {
 
     /** Poll the next guardian alert as JSON, or null if none is pending. */
     external fun nextAlert(): String?
+
+    /**
+     * Redeem the guardian-generated child pairing code against the selected
+     * Accounts endpoint. Returns JSON:
+     * `{ ok: true, child_id, family_id }` or `{ ok: false, error }`.
+     */
+    external fun redeemPairCode(endpoint: String, code: String, deviceId: String): String
 
     /**
      * Submit the guardian's review decision for a flagged item: `approve` = allow

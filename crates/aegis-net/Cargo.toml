@@ -76,6 +76,7 @@ windows = { version = "0.60", features = [
 # NetworkExtension shells, NOT this.
 [target.'cfg(any(windows, target_os = "linux", target_os = "macos"))'.dependencies]
 tokio-util = { workspace = true }
+smoltcp = { workspace = true }
 
 # Linux/macOS TUN — stubbed (todo!()) behind cfg; dependency declared so the
 # stub module's doc references resolve and the real impl can slot in later.
@@ -86,6 +87,9 @@ libc = "0.2" # geteuid() for the VPN elevation pre-flight check
 # Android VpnService shim — stubbed behind cfg; JNI dep declared for later.
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { workspace = true }
+tun-rs = { workspace = true }
+libc = "0.2"
+smoltcp = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

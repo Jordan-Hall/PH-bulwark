@@ -39,8 +39,10 @@ pub enum StoreScope {
 
 /// Install the per-install root CA (DER) into the Trusted Root store.
 ///
-/// Idempotent at the OS level (adding the same cert twice is a no-op / replace).
-/// Logs the fingerprint so the install is auditable (threat-model Asset 6).
+/// Idempotent at the store-query level: if the exact DER certificate is already
+/// present, returns without invoking the Windows add path, avoiding repeated
+/// consent prompts on every app restart. Logs the install so it is auditable
+/// (threat-model Asset 6).
 #[cfg(windows)]
 pub fn install_root(cert_der: &[u8], scope: StoreScope) -> Result<()> {
     win::add_to_store(cert_der, scope)
@@ -169,6 +171,11 @@ mod win {
 
     pub(super) fn add_to_store(cert_der: &[u8], scope: StoreScope) -> Result<()> {
         let store = open_root_store(scope)?;
+        if contains_cert_der(store, cert_der) {
+            close_store(store);
+            tracing::info!("per-install root CA already present in Windows Trusted Root store");
+            return Ok(());
+        }
         // SAFETY: `cert_der` is a valid byte slice we keep alive for the call.
         // `CertAddEncodedCertificateToStore` copies the encoded cert into the
         // store; `CERT_STORE_ADD_REPLACE_EXISTING` makes it idempotent. We pass
@@ -188,6 +195,29 @@ mod win {
         result?;
         tracing::info!("installed per-install root CA into Windows Trusted Root store");
         Ok(())
+    }
+
+    fn contains_cert_der(store: HCERTSTORE, cert_der: &[u8]) -> bool {
+        let mut ctx: *mut windows::Win32::Security::Cryptography::CERT_CONTEXT =
+            core::ptr::null_mut();
+        loop {
+            // SAFETY: `store` is valid and `ctx` is either null for the first call
+            // or the prior context returned by the same enumerator. The API owns
+            // and advances/free-tracks the prior context as documented.
+            ctx = unsafe { CertEnumCertificatesInStore(store, Some(ctx as *const _)) };
+            if ctx.is_null() {
+                return false;
+            }
+            // SAFETY: a non-null `ctx` points to a live CERT_CONTEXT for this
+            // iteration. We only borrow the encoded cert bytes for comparison.
+            let this_der = unsafe {
+                let c = &*ctx;
+                std::slice::from_raw_parts(c.pbCertEncoded, c.cbCertEncoded as usize)
+            };
+            if this_der == cert_der {
+                return true;
+            }
+        }
     }
 
     pub(super) fn remove_from_store(cert_der: &[u8], scope: StoreScope) -> Result<()> {
