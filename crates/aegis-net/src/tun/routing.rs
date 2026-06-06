@@ -3,6 +3,11 @@
 //! The real installers execute these specs only from privileged setup/teardown
 //! paths. Keeping the builders pure lets Windows CI test Linux/macOS coverage
 //! (v4 + v6, idempotent teardown) without mutating the host firewall.
+//!
+//! WIP scaffolding: the executor (`execute_plan`) is consumed by the per-platform
+//! `install_routing`/`teardown_routing` impls that land with real-device testing,
+//! so it reads as dead code under `-D warnings` until then.
+#![allow(dead_code)]
 
 use std::fmt;
 
