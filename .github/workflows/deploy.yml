@@ -16,9 +16,18 @@ name: deploy
 # one-time setup, see docs/release.md §5. Triggers: published Release or manual run.
 
 on:
+  # TESTING PHASE: continuously deploy every merge to master to the London server,
+  # alongside the rolling pre-release (prerelease.yml). Switch to release-only
+  # (drop the push trigger) once we cut production releases.
+  push:
+    branches: [master]
   release:
     types: [published]
   workflow_dispatch: {}
+
+concurrency:
+  group: deploy-server
+  cancel-in-progress: true
 
 jobs:
   deploy-server:
