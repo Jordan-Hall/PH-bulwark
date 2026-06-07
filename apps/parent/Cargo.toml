@@ -6,11 +6,11 @@ license = "Apache-2.0 OR MIT"
 description = "Aegis parent console — all-Rust Dioxus UI over the shared core."
 
 [dependencies]
-# All-Rust UI. Currently pinned to the 0.6 desktop line used by this app. Dioxus
-# 0.7/Dioxus Native + Blitz are the migration path for shared native-rendered UI;
-# treat 0.8 as a future runtime upgrade, not a blind dependency bump. `desktop`
-# covers Windows + macOS; `mobile`/native will need a deliberate UI test pass.
-dioxus = { version = "0.6", features = ["desktop"] }
+# All-Rust UI, migrated to the Dioxus 0.8 line (shared with the labeling app), so
+# the same RSX can target desktop now and mobile/native (Blitz) next. `desktop`
+# covers Windows + macOS. NOTE: 0.8 is alpha — the dx CLI must be installed with
+# --locked; the library builds with plain cargo.
+dioxus = { version = "0.8.0-alpha.0", features = ["desktop"] }
 
 # The parent console is just another Rust client of the shared core: it speaks
 # the SAME gRPC contract the cluster serves (no FFI bridge). It only uses the
