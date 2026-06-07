@@ -54,7 +54,9 @@ pub use state::{ThreadState, ESCALATION_WINDOW_MS};
 pub use traits::GroomingRules;
 
 #[cfg(feature = "classifier")]
-pub use classifier::{OrtGroomingClassifier, SklearnTfidfClassifier, Tokenizer};
+pub use classifier::{
+    DistilbertGroomingClassifier, OrtGroomingClassifier, SklearnTfidfClassifier, Tokenizer,
+};
 
 // --- End-to-end integration tests ----------------------------------------
 
