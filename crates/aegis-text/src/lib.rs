@@ -54,7 +54,7 @@ pub use state::{ThreadState, ESCALATION_WINDOW_MS};
 pub use traits::GroomingRules;
 
 #[cfg(feature = "classifier")]
-pub use classifier::{OrtGroomingClassifier, Tokenizer};
+pub use classifier::{OrtGroomingClassifier, SklearnTfidfClassifier, Tokenizer};
 
 // --- End-to-end integration tests ----------------------------------------
 
@@ -63,6 +63,24 @@ mod integration_tests {
     use super::*;
     use crate::test_util::text_span;
     use aegis_proto::{Action, Category, GroomingRule, Severity};
+
+    /// Layer 4: with the sklearn model wired as the confirm-only backstop, a
+    /// grooming span (image-request rule fires AND the model agrees) is
+    /// `classifier_backed`; a benign span is not. The classifier never gates.
+    #[cfg(feature = "classifier")]
+    #[test]
+    fn sklearn_backstop_confirms_grooming_not_benign() {
+        let a = TextAnalyzer::with_builtin_grooming_model().unwrap();
+        let v = a.analyze_span("m1", &text_span("t", "send me a pic of you"), 0);
+        let g = v.grooming.as_ref().expect("grooming signal");
+        assert!(g.classifier_backed, "grooming span should be classifier-backed");
+
+        let v2 = a.analyze_span("m2", &text_span("t2", "did you finish the math homework"), 0);
+        assert!(
+            v2.grooming.as_ref().map(|g| !g.classifier_backed).unwrap_or(true),
+            "benign span should not be classifier-backed"
+        );
+    }
 
     /// THE headline flow: secrecy → platform-switch → image-request, across
     /// three messages in one thread, escalates to a CRITICAL / CSAM-suspected

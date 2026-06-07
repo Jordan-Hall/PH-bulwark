@@ -180,10 +180,96 @@ mod ort_impl {
             &self.model_id
         }
     }
+
+    // -----------------------------------------------------------------------
+    // sklearn TF-IDF model — the "use now" classifier until DistilBERT lands.
+    // -----------------------------------------------------------------------
+
+    /// The full-corpus sklearn (TF-IDF + linear) grooming model, exported to ONNX
+    /// with a STRING input (`"text"`) and a `[N, 2]` probability tensor
+    /// (`[P(safe), P(grooming)]`). This is the live backstop until the DistilBERT
+    /// ONNX is ready (which plugs into [`OrtGroomingClassifier`] above). Same
+    /// confirm-only role: it sets `classifier_backed`, never gates a verdict.
+    ///
+    /// The model is bundled in the binary (`include_bytes!`) so there is no runtime
+    /// file dependency. Input is formatted with the `[OTHER]` role marker the model
+    /// was trained on (training joins segments as `[OTHER]/[SELF] … [SEP] …`).
+    pub struct SklearnTfidfClassifier {
+        session: Mutex<Session>,
+        model_id: String,
+        threshold: f32,
+    }
+
+    impl SklearnTfidfClassifier {
+        /// Load the full-corpus model bundled in the binary (no external file).
+        pub fn load_builtin() -> Result<Self, TextError> {
+            const MODEL: &[u8] = include_bytes!("../models/grooming_detector.onnx");
+            Self::from_bytes(MODEL, "sklearn-tfidf-grooming-fullcorpus-v1")
+        }
+
+        /// Load from raw ONNX bytes (string input → `[N,2]` probability tensor).
+        pub fn from_bytes(bytes: &[u8], model_id: impl Into<String>) -> Result<Self, TextError> {
+            let session = Session::builder()
+                .map_err(|e| TextError::Classifier(e.to_string()))?
+                .with_optimization_level(GraphOptimizationLevel::Level3)
+                .map_err(|e| TextError::Classifier(e.to_string()))?
+                .with_intra_threads(1)
+                .map_err(|e| TextError::Classifier(e.to_string()))?
+                .commit_from_memory(bytes)
+                .map_err(|e| TextError::Classifier(e.to_string()))?;
+            Ok(Self {
+                session: Mutex::new(session),
+                model_id: model_id.into(),
+                threshold: 0.5,
+            })
+        }
+
+        /// Set the agreement threshold (default 0.5).
+        pub fn with_threshold(mut self, t: f32) -> Self {
+            self.threshold = t;
+            self
+        }
+
+        fn infer(&self, text: &str) -> Result<f32, TextError> {
+            // Match the training text format (role-marked segments). A single span
+            // is one [OTHER] segment; structured windows can join with " [SEP] ".
+            let formatted = vec![format!("[OTHER] {text}")];
+            let input = ort::value::Tensor::from_string_array(([1_usize, 1], formatted.as_slice()))
+                .map_err(|e| TextError::Classifier(e.to_string()))?;
+
+            let mut session = self
+                .session
+                .lock()
+                .map_err(|_| TextError::Classifier("session lock poisoned".into()))?;
+
+            let outputs = session
+                .run(ort::inputs!["text" => input])
+                .map_err(|e| TextError::Classifier(e.to_string()))?;
+
+            // "probabilities": [1, 2] f32 = [P(safe), P(grooming)].
+            let (_shape, probs) = outputs["probabilities"]
+                .try_extract_tensor::<f32>()
+                .map_err(|e| TextError::Classifier(e.to_string()))?;
+            Ok(probs.get(1).copied().unwrap_or(0.0))
+        }
+    }
+
+    impl TextClassifier for SklearnTfidfClassifier {
+        fn grooming_probability(&self, span: &TextSpan) -> f32 {
+            // Errors degrade to 0.0 (no agreement) so it can never break a verdict.
+            self.infer(&span.text).unwrap_or(0.0)
+        }
+        fn agrees_grooming(&self, span: &TextSpan) -> bool {
+            self.grooming_probability(span) >= self.threshold
+        }
+        fn model_id(&self) -> &str {
+            &self.model_id
+        }
+    }
 }
 
 #[cfg(feature = "classifier")]
-pub use ort_impl::{OrtGroomingClassifier, Tokenizer};
+pub use ort_impl::{OrtGroomingClassifier, SklearnTfidfClassifier, Tokenizer};
 
 #[cfg(test)]
 mod tests {
@@ -199,5 +285,42 @@ mod tests {
         assert_eq!(c.grooming_probability(&span), 0.0);
         assert!(!c.agrees_grooming(&span));
         assert_eq!(c.model_id(), "none");
+    }
+
+    #[cfg(feature = "classifier")]
+    #[test]
+    fn sklearn_classifier_matches_python_reference() {
+        // Layer 2 (parity) + Layer 3 (golden): the bundled ONNX, run via ort,
+        // reproduces the Python onnxruntime reference probabilities, and known
+        // grooming/benign cases land on the right side of the 0.5 threshold.
+        let c = super::SklearnTfidfClassifier::load_builtin().expect("bundled model loads");
+        let cases = [
+            ("send me a pic of yourself", 0.7212_f32),
+            ("did you finish the math homework", 0.0041),
+            ("how old are you where do you live", 0.9336),
+            ("want to play minecraft after school", 0.0891),
+        ];
+        for (text, want) in cases {
+            let span = TextSpan {
+                text: text.into(),
+                ..Default::default()
+            };
+            let got = c.grooming_probability(&span);
+            assert!(
+                (got - want).abs() < 1e-3,
+                "{text}: rust {got} vs python reference {want}"
+            );
+        }
+        let pic = TextSpan {
+            text: "send me a pic of yourself".into(),
+            ..Default::default()
+        };
+        let hw = TextSpan {
+            text: "did you finish the math homework".into(),
+            ..Default::default()
+        };
+        assert!(c.agrees_grooming(&pic), "grooming should agree");
+        assert!(!c.agrees_grooming(&hw), "benign should not agree");
+        assert_eq!(c.model_id(), "sklearn-tfidf-grooming-fullcorpus-v1");
     }
 }
