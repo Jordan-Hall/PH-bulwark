@@ -108,7 +108,7 @@ fn App() -> Element {
     });
 
     // Submit the current task with `label`, then advance to the next.
-    let mut submit_label = move |label: u8| {
+    let submit_label = move |label: u8| {
         let Some(t) = task() else { return };
         let stages = selected();
         spawn(async move {
