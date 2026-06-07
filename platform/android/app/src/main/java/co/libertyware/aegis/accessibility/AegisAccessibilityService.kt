@@ -82,8 +82,15 @@ class AegisAccessibilityService : AccessibilityService() {
             // The deterministic detector still fired and the parent is still told;
             // this just stops over-blocking benign-looking chat (the false-positive fix).
             isFlagged(verdictJson) -> {
-                Log.w(TAG, "borderline content in $pkg — alerting guardian (no block)")
-                notifyGuardian(pkg, verdictJson)
+                // Try a non-disruptive guardian alert. If it can't be delivered
+                // (e.g. POST_NOTIFICATIONS not granted on Android 13+), FAIL SAFE:
+                // block, so flagged content is never shown with no guardian signal.
+                if (notifyGuardian(pkg, verdictJson)) {
+                    Log.w(TAG, "borderline content in $pkg — guardian alerted (no block)")
+                } else {
+                    Log.w(TAG, "borderline content in $pkg — alert undeliverable, blocking (fail-safe)")
+                    blockContent()
+                }
             }
         }
     }
@@ -129,9 +136,14 @@ class AegisAccessibilityService : AccessibilityService() {
      * account-linked path; this is the local signal so a borderline detection
      * isn't silent just because we chose not to block the screen.
      */
-    private fun notifyGuardian(pkg: String, json: String) {
-        runCatching {
+    private fun notifyGuardian(pkg: String, json: String): Boolean {
+        return runCatching {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+            // On Android 13+ the notification is silently dropped without the
+            // POST_NOTIFICATIONS runtime grant. If alerts can't reach the guardian,
+            // report failure so the caller fails SAFE (blocks) rather than passing
+            // flagged content with no signal at all.
+            if (!nm.areNotificationsEnabled()) return@runCatching false
             val channelId = "ph_bulwark_alerts"
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                 nm.createNotificationChannel(
@@ -156,7 +168,8 @@ class AegisAccessibilityService : AccessibilityService() {
                 .setAutoCancel(true)
                 .build()
             nm.notify(pkg.hashCode(), notification)
-        }
+            true
+        }.getOrDefault(false)
     }
 
     private var overlay: View? = null
