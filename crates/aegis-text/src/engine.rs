@@ -1,16 +1,18 @@
 //! The deterministic grooming rule engine — the PRIMARY detector.
 //!
-//! This is the real work: no model, no network, no LLM. It runs the eight
+//! This is the real work: no model, no network, no LLM. It runs the nine
 //! indicator categories from model-research.md §grooming, applies per-category
 //! weights and cross-message context multipliers, normalizes to 0.0–1.0, and
 //! bands the score to a [`Severity`]. Every decision cites the rules that fired,
 //! so the verdict is explainable and auditable.
 //!
 //! Scoring (model-research.md §grooming):
-//!   weights — secrecy +0.5, platform_switching +0.5, personal_info_age_probing
-//!   +0.4, sexualization +0.6, gifts_bribery +0.4, emotional_manipulation +0.5,
-//!   boundary_testing +0.3, image_request **+5.0**.
+//!   weights — secrecy (soft) +0.5, secrecy_isolation (guardian-isolation) +0.6,
+//!   platform_switching +0.5, personal_info_age_probing +0.4, sexualization +0.6,
+//!   gifts_bribery +0.4, emotional_manipulation +0.5, boundary_testing +0.3,
+//!   image_request **+5.0**.
 //!   context multipliers (additive bonuses) —
+//!     guardian-isolation secrecy (single category)    +2.5  (alerts on its own)
 //!     secrecy × platform-switch                       +2.0
 //!     personal-info + age-probing (single category)   +1.5
 //!     sexualization × (gifts | emotional-manip)       +2.0
@@ -31,6 +33,7 @@ use crate::state::{ThreadState, ESCALATION_WINDOW_MS};
 pub fn weight(rule: GroomingRule) -> f32 {
     match rule {
         GroomingRule::Secrecy => 0.5,
+        GroomingRule::SecrecyIsolation => 0.6,
         GroomingRule::PlatformSwitching => 0.5,
         GroomingRule::PersonalInfoAgeProbing => 0.4,
         GroomingRule::Sexualization => 0.6,
@@ -109,8 +112,22 @@ impl GroomingRuleEngine {
         // --- additive context multipliers (model-research §grooming) ---
         let mut applied: Vec<Applied> = Vec::new();
 
-        // secrecy × platform-switch (+2.0), across messages.
-        if in_thread(GroomingRule::Secrecy) && in_thread(GroomingRule::PlatformSwitching) {
+        // Guardian-isolation secrecy is a strong signal ON ITS OWN (+2.5): "don't
+        // tell your parents", "delete these messages" — near-zero innocent reading.
+        // With base 0.6 this lone hit reaches ~0.31 → LOW (alerts), and outranks a
+        // lone age-probe (0.19) — the relative-weighting fix.
+        if in_thread(GroomingRule::SecrecyIsolation) {
+            raw += 2.5;
+            applied.push(Applied {
+                label: "guardian-isolation secrecy (+2.5)",
+                bonus: 2.5,
+            });
+        }
+
+        // secrecy (soft OR isolation) × platform-switch (+2.0), across messages.
+        if (in_thread(GroomingRule::Secrecy) || in_thread(GroomingRule::SecrecyIsolation))
+            && in_thread(GroomingRule::PlatformSwitching)
+        {
             raw += 2.0;
             applied.push(Applied {
                 label: "secrecy × platform-switch (+2.0)",
@@ -263,6 +280,36 @@ mod tests {
         let out = eng.evaluate("our little secret ok", lex.resolve("en"), &st, 0);
         assert_eq!(out.fired, vec![GroomingRule::Secrecy]);
         assert!(out.score < 0.3);
+    }
+
+    #[test]
+    fn guardian_isolation_secrecy_alerts_on_its_own() {
+        let lex = en();
+        let eng = GroomingRuleEngine::new();
+        let st = ThreadState::new("t");
+        // "don't tell your parents" is guardian-isolation secrecy: base 0.6 + 2.5
+        // standalone bonus = 3.1 / 10 = 0.31 → LOW (alerts), unlike soft secrecy.
+        let out = eng.evaluate("dont tell your parents", lex.resolve("en"), &st, 0);
+        assert!(out.fired.contains(&GroomingRule::SecrecyIsolation));
+        assert!(out.score >= 0.3, "score was {}", out.score);
+        assert_eq!(out.severity, Severity::Low);
+    }
+
+    #[test]
+    fn isolation_secrecy_outranks_age_probing() {
+        // The fix Jordan flagged: guardian-isolation secrecy is a STRONGER signal
+        // than age/location probing (which is common and often innocent).
+        let lex = en();
+        let eng = GroomingRuleEngine::new();
+        let st = ThreadState::new("t");
+        let isolation = eng.evaluate("dont tell your parents", lex.resolve("en"), &st, 0);
+        let age = eng.evaluate("how old are you", lex.resolve("en"), &st, 0);
+        assert!(
+            isolation.score > age.score,
+            "isolation {} should outrank age-probing {}",
+            isolation.score,
+            age.score
+        );
     }
 
     #[test]

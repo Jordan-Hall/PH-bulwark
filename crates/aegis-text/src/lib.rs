@@ -76,16 +76,16 @@ mod integration_tests {
         // threshold (weight 0.5 / 10 = 0.05), so it just records state.
         let v1 = a.analyze_span(
             "m1",
-            &text_span(
-                thread,
-                "hey this is our little secret ok, dont tell your parents",
-            ),
+            // Soft secrecy only ("our little secret") — a single low-weight signal.
+            // (Guardian-isolation phrases like "don't tell your parents" are
+            // intentionally NOT low on their own; that's covered in engine.rs tests.)
+            &text_span(thread, "hey this is our little secret ok"),
             0,
         );
         assert_eq!(v1.category, Category::Grooming as i32);
         let g1 = v1.grooming.as_ref().unwrap();
         assert!(g1.fired_categories.iter().any(|c| c == "secrecy"));
-        assert!(g1.score < 0.3, "secrecy alone stays low: {}", g1.score);
+        assert!(g1.score < 0.3, "soft secrecy alone stays low: {}", g1.score);
 
         // Day 1, message 2 — platform switch. Thread memory pulls in the
         // secrecy×platform-switch +2.0 bonus and the rapid-escalation ×1.5,
