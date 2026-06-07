@@ -16,9 +16,21 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
-const API: &str = "http://127.0.0.1:7878";
-const TOKEN: &str = "dev-token";
-const LABELER: &str = "volunteer-1";
+// Configurable at BUILD time so the volunteer (mobile/web) build targets the real
+// labeling server — `127.0.0.1` is the device itself, unreachable on a phone. Set
+// LABELING_API / LABELING_TOKEN / LABELING_LABELER; the values below are dev defaults.
+const API: &str = match option_env!("LABELING_API") {
+    Some(u) => u,
+    None => "http://127.0.0.1:7878",
+};
+const TOKEN: &str = match option_env!("LABELING_TOKEN") {
+    Some(t) => t,
+    None => "dev-token",
+};
+const LABELER: &str = match option_env!("LABELING_LABELER") {
+    Some(l) => l,
+    None => "volunteer-1",
+};
 const STAGES: &[&str] = &[
     "age_probing",
     "trust_building",

@@ -97,7 +97,14 @@ impl LabelStore {
     }
 
     /// Record a human label: append a correction line and mark the task done.
+    ///
+    /// Idempotent: a retry, a double-click, or a task served to two volunteers must
+    /// not append a second (possibly conflicting) correction. First label wins;
+    /// repeats are a no-op, so the retrain input never gets duplicate rows for a task.
     pub fn record(&mut self, sub: &Submission) -> std::io::Result<()> {
+        if self.labeled.contains(&sub.task_id) {
+            return Ok(());
+        }
         let task = self
             .tasks
             .iter()
@@ -249,6 +256,27 @@ mod tests {
         let store = LabelStore::load(&tmp("no_tasks_file"), &p).unwrap();
         // loaded with no tasks file -> empty pool, but labeled set has t1.
         assert!(store.next_task().is_none());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn record_is_idempotent() {
+        // Codex #57: a repeat submission (retry / double-click) must not append a
+        // second correction row.
+        let p = tmp("idemp");
+        let _ = std::fs::remove_file(&p);
+        let mut store = LabelStore::from_tasks(vec![task("t1", Some(0.5))], p.clone());
+        let sub = Submission {
+            task_id: "t1".into(),
+            labeler: "v".into(),
+            label: 1,
+            stages: vec![],
+        };
+        store.record(&sub).unwrap();
+        store.record(&sub).unwrap(); // repeat — must be a no-op
+        let lines = std::fs::read_to_string(&p).unwrap().lines().count();
+        assert_eq!(lines, 1, "repeat submission must not append a duplicate");
+        assert_eq!(store.stats(), (1, 1));
         let _ = std::fs::remove_file(&p);
     }
 }
