@@ -54,7 +54,7 @@ pub use state::{ThreadState, ESCALATION_WINDOW_MS};
 pub use traits::GroomingRules;
 
 #[cfg(feature = "classifier")]
-pub use classifier::{OrtGroomingClassifier, Tokenizer};
+pub use classifier::{OrtGroomingClassifier, SklearnTfidfClassifier, Tokenizer};
 
 // --- End-to-end integration tests ----------------------------------------
 
@@ -63,6 +63,34 @@ mod integration_tests {
     use super::*;
     use crate::test_util::text_span;
     use aegis_proto::{Action, Category, GroomingRule, Severity};
+
+    /// Layer 4: with the sklearn model wired as the confirm-only backstop, a
+    /// grooming span (image-request rule fires AND the model agrees) is
+    /// `classifier_backed`; a benign span is not. The classifier never gates.
+    #[cfg(feature = "classifier")]
+    #[test]
+    fn sklearn_backstop_confirms_grooming_not_benign() {
+        let a = TextAnalyzer::with_builtin_grooming_model().unwrap();
+        let v = a.analyze_span("m1", &text_span("t", "send me a pic of you"), 0);
+        let g = v.grooming.as_ref().expect("grooming signal");
+        assert!(
+            g.classifier_backed,
+            "grooming span should be classifier-backed"
+        );
+
+        let v2 = a.analyze_span(
+            "m2",
+            &text_span("t2", "did you finish the math homework"),
+            0,
+        );
+        assert!(
+            v2.grooming
+                .as_ref()
+                .map(|g| !g.classifier_backed)
+                .unwrap_or(true),
+            "benign span should not be classifier-backed"
+        );
+    }
 
     /// THE headline flow: secrecy → platform-switch → image-request, across
     /// three messages in one thread, escalates to a CRITICAL / CSAM-suspected
@@ -76,16 +104,16 @@ mod integration_tests {
         // threshold (weight 0.5 / 10 = 0.05), so it just records state.
         let v1 = a.analyze_span(
             "m1",
-            &text_span(
-                thread,
-                "hey this is our little secret ok, dont tell your parents",
-            ),
+            // Soft secrecy only ("our little secret") — a single low-weight signal.
+            // (Guardian-isolation phrases like "don't tell your parents" are
+            // intentionally NOT low on their own; that's covered in engine.rs tests.)
+            &text_span(thread, "hey this is our little secret ok"),
             0,
         );
         assert_eq!(v1.category, Category::Grooming as i32);
         let g1 = v1.grooming.as_ref().unwrap();
         assert!(g1.fired_categories.iter().any(|c| c == "secrecy"));
-        assert!(g1.score < 0.3, "secrecy alone stays low: {}", g1.score);
+        assert!(g1.score < 0.3, "soft secrecy alone stays low: {}", g1.score);
 
         // Day 1, message 2 — platform switch. Thread memory pulls in the
         // secrecy×platform-switch +2.0 bonus and the rapid-escalation ×1.5,

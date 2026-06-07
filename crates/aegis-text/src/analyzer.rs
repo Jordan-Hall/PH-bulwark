@@ -68,6 +68,15 @@ impl TextAnalyzer<NoClassifier> {
     }
 }
 
+#[cfg(feature = "classifier")]
+impl TextAnalyzer<crate::classifier::SklearnTfidfClassifier> {
+    /// Build with the bundled full-corpus sklearn grooming model as the
+    /// confirm-only backstop — the "use now" model until DistilBERT lands.
+    pub fn with_builtin_grooming_model() -> Result<Self, TextError> {
+        Self::with_classifier(crate::classifier::SklearnTfidfClassifier::load_builtin()?)
+    }
+}
+
 impl<C: TextClassifier> TextAnalyzer<C> {
     /// Build with a specific classifier backstop (used under the `classifier`
     /// feature). The classifier only ever sets `classifier_backed`.

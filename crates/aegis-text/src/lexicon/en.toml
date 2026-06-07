@@ -13,9 +13,27 @@
 
 lang = "en"
 
-# -- The eight grooming indicator categories -------------------------------
+# -- The nine grooming indicator categories --------------------------------
 
+# SOFT secrecy: a secrecy *framing* that can have an innocent reading (a surprise
+# party, a gift). Kept low-weight so a lone hit doesn't over-block.
 [grooming.secrecy]
+phrases = [
+  "our little secret",
+  "our secret",
+  "keep this between us",
+  "keep it between us",
+  "just between us",
+  "no one needs to know",
+  "this stays between you and me",
+]
+patterns = [
+  "\\bkeep (this|it|us) (a )?secret\\b",
+]
+
+# HARD secrecy — guardian isolation / evidence destruction. Almost no innocent
+# reading, so it's weighted as a strong, alert-on-its-own signal (engine.rs).
+[grooming.secrecy_isolation]
 phrases = [
   "don't tell your parents",
   "dont tell your parents",
@@ -24,20 +42,12 @@ phrases = [
   "don't tell your mom",
   "don't tell your mum",
   "don't tell your dad",
-  "our little secret",
-  "our secret",
-  "keep this between us",
-  "keep it between us",
-  "just between us",
   "delete these messages",
   "delete this chat",
   "delete our chats",
   "make sure no one sees",
-  "no one needs to know",
-  "this stays between you and me",
 ]
 patterns = [
-  "\\bkeep (this|it|us) (a )?secret\\b",
   "\\bdon'?t (let|tell) (anyone|anybody|your (mum|mom|dad|parents))\\b",
 ]
 

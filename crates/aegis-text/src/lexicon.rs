@@ -40,6 +40,10 @@ struct RawLexicon {
 #[derive(Debug, Deserialize)]
 struct RawGrooming {
     secrecy: RawCategory,
+    // #[serde(default)] so existing per-language files without the (newer)
+    // guardian-isolation split still load (empty = no hard-secrecy phrases).
+    #[serde(default)]
+    secrecy_isolation: RawCategory,
     platform_switching: RawCategory,
     personal_info_age_probing: RawCategory,
     sexualization: RawCategory,
@@ -59,9 +63,10 @@ struct RawCategory {
 
 impl RawGrooming {
     /// Pair each typed rule with its raw category, in spec order.
-    fn by_rule(&self) -> [(GroomingRule, &RawCategory); 8] {
+    fn by_rule(&self) -> [(GroomingRule, &RawCategory); 9] {
         [
             (GroomingRule::Secrecy, &self.secrecy),
+            (GroomingRule::SecrecyIsolation, &self.secrecy_isolation),
             (GroomingRule::PlatformSwitching, &self.platform_switching),
             (
                 GroomingRule::PersonalInfoAgeProbing,
@@ -226,10 +231,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtin_lexicon_loads_and_has_all_eight_categories() {
+    fn builtin_lexicon_loads_and_has_all_nine_categories() {
         let lex = Lexicon::load_builtin().expect("lexicon compiles");
         let en = lex.resolve("en");
-        assert_eq!(en.grooming.len(), 8);
+        assert_eq!(en.grooming.len(), 9);
         assert_eq!(lex.languages(), vec!["en"]);
     }
 

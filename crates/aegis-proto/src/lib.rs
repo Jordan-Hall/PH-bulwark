@@ -78,6 +78,10 @@ impl fmt::Display for NodeId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum GroomingRule {
     Secrecy,
+    /// Guardian-isolation secrecy — "don't tell your parents", "delete these
+    /// messages". Split from soft `Secrecy` ("our secret") because it has almost
+    /// no innocent reading, so it's weighted as a strong, alert-on-its-own signal.
+    SecrecyIsolation,
     PlatformSwitching,
     PersonalInfoAgeProbing,
     Sexualization,
@@ -88,9 +92,10 @@ pub enum GroomingRule {
 }
 
 impl GroomingRule {
-    /// All eight rule categories, in spec order.
-    pub const ALL: [GroomingRule; 8] = [
+    /// All nine rule categories, in spec order.
+    pub const ALL: [GroomingRule; 9] = [
         GroomingRule::Secrecy,
+        GroomingRule::SecrecyIsolation,
         GroomingRule::PlatformSwitching,
         GroomingRule::PersonalInfoAgeProbing,
         GroomingRule::Sexualization,
@@ -104,6 +109,7 @@ impl GroomingRule {
     pub fn as_str(self) -> &'static str {
         match self {
             GroomingRule::Secrecy => "secrecy",
+            GroomingRule::SecrecyIsolation => "secrecy_isolation",
             GroomingRule::PlatformSwitching => "platform_switching",
             GroomingRule::PersonalInfoAgeProbing => "personal_info_age_probing",
             GroomingRule::Sexualization => "sexualization",
