@@ -116,7 +116,11 @@ impl GroomingRuleEngine {
         // tell your parents", "delete these messages" — near-zero innocent reading.
         // With base 0.6 this lone hit reaches ~0.31 → LOW (alerts), and outranks a
         // lone age-probe (0.19) — the relative-weighting fix.
-        if in_thread(GroomingRule::SecrecyIsolation) {
+        // fired_now (NOT in_thread): the standalone boost is for THIS message's hit.
+        // Gating on thread history would re-apply +2.5 to every later message once
+        // isolation was ever seen — inflating a benign follow-up into a false
+        // grooming verdict. Cross-message persistence is the rapid-escalation ×1.5.
+        if fired_now(GroomingRule::SecrecyIsolation) {
             raw += 2.5;
             applied.push(Applied {
                 label: "guardian-isolation secrecy (+2.5)",
@@ -309,6 +313,27 @@ mod tests {
             "isolation {} should outrank age-probing {}",
             isolation.score,
             age.score
+        );
+    }
+
+    #[test]
+    fn isolation_bonus_does_not_persist_to_later_messages() {
+        // Codex #58: the +2.5 isolation boost must apply to the CURRENT hit only.
+        // If gated on thread history it re-fires on every later message once
+        // isolation was seen, scoring a benign follow-up as a false grooming
+        // verdict with empty fired_categories.
+        let lex = en();
+        let eng = GroomingRuleEngine::new();
+        let mut st = ThreadState::new("t");
+        let m1 = eng.evaluate("dont tell your parents", lex.resolve("en"), &st, 0);
+        st.record(&m1.fired, 0);
+        assert!(m1.score >= 0.3, "isolation alone should alert: {}", m1.score);
+        // A benign follow-up must NOT inherit the bonus — it stays silent.
+        let m2 = eng.evaluate("haha yeah ok", lex.resolve("en"), &st, 1_000);
+        assert!(
+            m2.is_silent(),
+            "benign follow-up must not inherit the isolation bonus: score={}",
+            m2.score
         );
     }
 
