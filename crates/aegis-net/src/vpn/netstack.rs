@@ -156,6 +156,39 @@ fn tcp_connect_authority(summary: &PacketSummary) -> Option<String> {
     }
 }
 
+/// QUIC's default UDP port. UDP to :443 is HTTP/3 — the bridge drops it so the
+/// browser falls back to TCP/443, which the MITM can actually inspect. Without
+/// this, HTTP/3 sails straight past the content filter.
+const QUIC_UDP_PORT: u16 = 443;
+
+/// What the bridge should do with a parsed packet — the POLICY layer, independent
+/// of (and testable without) the still-gated socket pump in [`run_netstack`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum FlowAction {
+    /// A new TCP flow (SYN): open a tunnel to the MITM proxy via `CONNECT` to this
+    /// `host:port`, so the flow is decrypted and content-filtered.
+    ProxyConnect(String),
+    /// Drop the packet (with a reason). Used for QUIC/UDP-443 to force the HTTP/3
+    /// fallback to TCP/443 — closing the bypass where HTTP/3 evades the filter.
+    Drop(&'static str),
+    /// An established TCP flow, DNS, or other traffic the bridge forwards as-is.
+    Forward,
+}
+
+/// Classify a parsed packet into the action the bridge must take. Pure + total;
+/// this is the policy the socket pump (same module) will enforce once it lands.
+fn decide(summary: &PacketSummary) -> FlowAction {
+    match summary.transport {
+        Transport::Tcp { syn: true, .. } => tcp_connect_authority(summary)
+            .map(FlowAction::ProxyConnect)
+            .unwrap_or(FlowAction::Forward),
+        Transport::Udp { dst_port, .. } if dst_port == QUIC_UDP_PORT => {
+            FlowAction::Drop("QUIC/HTTP-3 (UDP/443) blocked -> forces TCP/443 for MITM")
+        }
+        _ => FlowAction::Forward,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,6 +241,38 @@ mod tests {
             Transport::Udp { dst_port: 443, .. }
         ));
         assert!(tcp_connect_authority(&summary).is_none());
+    }
+
+    #[test]
+    fn tcp_syn_decides_proxy_connect() {
+        let s = parse_packet(&ipv4_tcp_syn(443)).expect("valid packet");
+        assert_eq!(
+            decide(&s),
+            FlowAction::ProxyConnect("93.184.216.34:443".into())
+        );
+    }
+
+    #[test]
+    fn quic_udp_443_is_dropped() {
+        // HTTP/3 over QUIC must be dropped so the browser falls back to TCP/443
+        // (which the MITM inspects) — otherwise it bypasses the content filter.
+        let s = parse_packet(&ipv4_udp(443)).expect("valid packet");
+        assert!(matches!(decide(&s), FlowAction::Drop(_)));
+    }
+
+    #[test]
+    fn dns_udp_53_is_forwarded_not_dropped() {
+        // Only QUIC (443) is dropped; DNS and other UDP must pass through.
+        let s = parse_packet(&ipv4_udp(53)).expect("valid packet");
+        assert_eq!(decide(&s), FlowAction::Forward);
+    }
+
+    #[test]
+    fn established_tcp_is_forwarded() {
+        let mut pkt = ipv4_tcp_syn(443);
+        pkt[32..34].copy_from_slice(&0x5010u16.to_be_bytes()); // ACK, no SYN
+        let s = parse_packet(&pkt).expect("valid packet");
+        assert_eq!(decide(&s), FlowAction::Forward);
     }
 
     #[test]
