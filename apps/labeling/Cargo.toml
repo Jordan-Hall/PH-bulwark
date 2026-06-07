@@ -1,0 +1,23 @@
+[package]
+name = "aegis-labeling-app"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "PH Bulwark labeling app — Dioxus 0.8 client for trusted volunteers to label grooming windows. One codebase -> desktop (dev) + Android/iOS (volunteers) + web."
+
+[dependencies]
+# Dioxus 0.8 (alpha): the SAME multiplatform codebase compiles to desktop, mobile
+# (Android/iOS — the "native first" target) and web. `desktop` is the dev/preview
+# feature; build the volunteer app with `dx build --platform android` (see README).
+# NOTE: 0.8-alpha — the dx CLI must be installed with `--locked` (release notes).
+dioxus = { version = "0.8.0-alpha.0", features = ["desktop"] }
+
+# Talks to aegis-labeling-server over HTTP/JSON. rustls (no OpenSSL) so it builds
+# clean cross-platform.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Detached from the core cargo workspace (like apps/parent) so the engine build
+# stays lean and isn't blocked by the heavy UI tree.
+[workspace]

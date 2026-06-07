@@ -1,0 +1,32 @@
+[package]
+name = "aegis-labeling-server"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "PH Bulwark labeling service — serves prioritized labeling tasks to trusted volunteers and records corrections for the retrain loop (rom pipeline/retrain.py)."
+
+[lib]
+name = "aegis_labeling_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "aegis-labeling-server"
+path = "src/main.rs"
+required-features = ["server"]
+
+[features]
+default = ["server"]
+# The HTTP transport. Disable (`--no-default-features`) to compile/test just the
+# pure-Rust store core fast (serde only, no axum/tokio).
+server = ["dep:axum", "dep:tower-http", "dep:tokio"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"], optional = true }
+axum = { version = "0.7", optional = true }
+tower-http = { version = "0.5", features = ["cors"], optional = true }
+
+# Detached from the core cargo workspace (like apps/parent) so the engine's
+# `cargo build --workspace` stays lean and isn't blocked by the UI/server tree.
+[workspace]
