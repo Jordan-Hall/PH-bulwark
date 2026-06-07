@@ -17,8 +17,9 @@ web = ["dioxus/web"]
 
 [dependencies]
 # Dioxus 0.8 (alpha) — same multiplatform line as the parent + labeling apps.
-# Renderer chosen via the platform features above (no hard-enabled desktop).
-dioxus = { version = "0.8.0-alpha.0", default-features = false }
+# Keep dioxus' default features (the rsx!/#[component] macros, hooks, signals);
+# the RENDERER is added by the platform features above, not hard-enabled here.
+dioxus = { version = "0.8.0-alpha.0" }
 
 # Detached from the core cargo workspace (like apps/parent) so the engine build
 # stays lean and isn't blocked by the UI tree.
