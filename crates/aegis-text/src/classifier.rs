@@ -313,7 +313,9 @@ mod ort_impl {
                 tokenizer,
                 model_id: model_id.into(),
                 threshold: 0.5,
-                max_len: 128,
+                // Matches training MAX_SEQ_LENGTH (train_v2.py) — truncating shorter
+                // would diverge from training on long windows.
+                max_len: 256,
             })
         }
 
