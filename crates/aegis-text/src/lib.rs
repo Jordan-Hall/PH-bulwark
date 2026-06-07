@@ -73,11 +73,21 @@ mod integration_tests {
         let a = TextAnalyzer::with_builtin_grooming_model().unwrap();
         let v = a.analyze_span("m1", &text_span("t", "send me a pic of you"), 0);
         let g = v.grooming.as_ref().expect("grooming signal");
-        assert!(g.classifier_backed, "grooming span should be classifier-backed");
-
-        let v2 = a.analyze_span("m2", &text_span("t2", "did you finish the math homework"), 0);
         assert!(
-            v2.grooming.as_ref().map(|g| !g.classifier_backed).unwrap_or(true),
+            g.classifier_backed,
+            "grooming span should be classifier-backed"
+        );
+
+        let v2 = a.analyze_span(
+            "m2",
+            &text_span("t2", "did you finish the math homework"),
+            0,
+        );
+        assert!(
+            v2.grooming
+                .as_ref()
+                .map(|g| !g.classifier_backed)
+                .unwrap_or(true),
             "benign span should not be classifier-backed"
         );
     }
