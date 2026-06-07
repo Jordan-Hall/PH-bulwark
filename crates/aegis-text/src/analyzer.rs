@@ -77,6 +77,23 @@ impl TextAnalyzer<crate::classifier::SklearnTfidfClassifier> {
     }
 }
 
+#[cfg(feature = "classifier")]
+impl TextAnalyzer<crate::classifier::DistilbertGroomingClassifier> {
+    /// Build with the fine-tuned DistilBERT model (higher accuracy, windowed AUC
+    /// ~0.98) as the confirm-only backstop. `model_path` is grooming_detector_v2.onnx
+    /// (its `.onnx.data` sidecar must be alongside); `tokenizer_json` is tokenizer.json.
+    pub fn with_distilbert_grooming_model(
+        model_path: impl AsRef<std::path::Path>,
+        tokenizer_json: impl AsRef<std::path::Path>,
+    ) -> Result<Self, TextError> {
+        Self::with_classifier(crate::classifier::DistilbertGroomingClassifier::load(
+            model_path,
+            tokenizer_json,
+            "distilbert-grooming-fullcorpus-v2",
+        )?)
+    }
+}
+
 impl<C: TextClassifier> TextAnalyzer<C> {
     /// Build with a specific classifier backstop (used under the `classifier`
     /// feature). The classifier only ever sets `classifier_backed`.
