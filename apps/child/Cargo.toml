@@ -1,0 +1,16 @@
+[package]
+name = "aegis-child"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "PH Bulwark child app — Dioxus 0.8 onboarding/setup journey (UI). The native Android OS services (VpnService/Accessibility/DeviceAdmin in platform/android) bridge in via java_plugin! on the mobile target."
+
+[dependencies]
+# Dioxus 0.8 (alpha) — same multiplatform line as the parent + labeling apps.
+# `desktop` is the dev/preview target; the volunteer device build is
+# `dx build --platform android` (the native OS services bridge via java_plugin!).
+dioxus = { version = "0.8.0-alpha.0", features = ["desktop"] }
+
+# Detached from the core cargo workspace (like apps/parent) so the engine build
+# stays lean and isn't blocked by the UI tree.
+[workspace]
