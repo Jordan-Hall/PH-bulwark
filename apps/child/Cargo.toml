@@ -1,0 +1,26 @@
+[package]
+name = "aegis-child"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "PH Bulwark child app — Dioxus 0.8 onboarding/setup journey (UI). The native Android OS services (VpnService/Accessibility/DeviceAdmin in platform/android) bridge in via java_plugin! on the mobile target."
+
+# Platform features map to the matching dioxus renderer — dx enables the right one
+# per target (`dx serve` = desktop; `dx build --platform android` = mobile; web).
+# default = desktop for dev/preview; the volunteer device build is
+# `dx build --platform android` (the native OS services bridge via java_plugin!).
+[features]
+default = ["desktop"]
+desktop = ["dioxus/desktop"]
+mobile = ["dioxus/mobile"]
+web = ["dioxus/web"]
+
+[dependencies]
+# Dioxus 0.8 (alpha) — same multiplatform line as the parent + labeling apps.
+# Keep dioxus' default features (the rsx!/#[component] macros, hooks, signals);
+# the RENDERER is added by the platform features above, not hard-enabled here.
+dioxus = { version = "0.8.0-alpha.0" }
+
+# Detached from the core cargo workspace (like apps/parent) so the engine build
+# stays lean and isn't blocked by the UI tree.
+[workspace]
