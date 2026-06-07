@@ -327,7 +327,11 @@ mod tests {
         let mut st = ThreadState::new("t");
         let m1 = eng.evaluate("dont tell your parents", lex.resolve("en"), &st, 0);
         st.record(&m1.fired, 0);
-        assert!(m1.score >= 0.3, "isolation alone should alert: {}", m1.score);
+        assert!(
+            m1.score >= 0.3,
+            "isolation alone should alert: {}",
+            m1.score
+        );
         // A benign follow-up must NOT inherit the bonus — it stays silent.
         let m2 = eng.evaluate("haha yeah ok", lex.resolve("en"), &st, 1_000);
         assert!(
