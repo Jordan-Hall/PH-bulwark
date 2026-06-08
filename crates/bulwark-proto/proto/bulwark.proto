@@ -179,6 +179,11 @@ message Verdict {
   // analyzer retained for guardian review (bulwark-video::SegmentStore). Copied into
   // AlertEvent.local_segment_uri. Empty for non-video / benign / CSAM (never stored).
   string   local_segment_uri = 11;
+  // Remediated media bytes when the analyzer softened the clip in place (blurred
+  // NSFW frames + muted flagged-speech timecodes), re-packaged in the SAME container
+  // with preserved timestamps. The proxy serves these instead of the original.
+  // Empty when nothing was remediated. CSAM is never remediated/served — always blocked.
+  bytes    remediated_media = 12;
 }
 
 // Output of the deterministic grooming rule engine (model-research §grooming).

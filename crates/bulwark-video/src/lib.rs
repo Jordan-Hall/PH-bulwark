@@ -43,12 +43,26 @@ impl Default for VideoConfig {
 /// windows. Implemented by the `ffmpeg` feature; the default returns nothing.
 pub trait Demuxer: Send + Sync {
     fn sample(&self, segment: &[u8], sample_fps: f32) -> DecodedSegment;
+
+    /// Re-encode `segment`, blurring video during `blur_ranges` and muting audio
+    /// during `mute_ranges` (seconds), preserving the container + timecodes. Returns
+    /// the cleaned bytes. Default: no remediation (e.g. NullDemuxer) → `None`.
+    fn remediate(
+        &self,
+        _segment: &[u8],
+        _blur_ranges: &[(f32, f32)],
+        _mute_ranges: &[(f32, f32)],
+    ) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 #[derive(Default)]
 pub struct DecodedSegment {
     pub frames: Vec<Vec<u8>>, // sampled frame images (e.g. JPEG)
     pub audio_windows: Vec<Vec<u8>>,
+    /// Seconds each audio window spans (to derive mute timecodes). 0 if no audio.
+    pub audio_window_secs: f32,
     pub decoded: bool, // false = couldn't decode (→ conservative handling)
 }
 
@@ -185,6 +199,11 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
         }
 
         let mut worst: Option<Verdict> = None;
+        // Flagged timecodes for in-place remediation (blur frames / mute speech).
+        let mut blur_ranges: Vec<(f32, f32)> = Vec::new();
+        let mut mute_ranges: Vec<(f32, f32)> = Vec::new();
+        let fps = self.cfg.sample_fps.max(0.001);
+        let win_secs = decoded.audio_window_secs;
         let mut take = |v: Verdict| {
             let better = worst.as_ref().map(|w| v.score > w.score).unwrap_or(true);
             if better {
@@ -201,6 +220,8 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
                 ))
                 .await?;
             if v.category == Category::AdultImage as i32 {
+                let t = i as f32 / fps;
+                blur_ranges.push((t, t + 1.0 / fps));
                 take(v);
             }
         }
@@ -212,6 +233,8 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
             // Flag the clip on adult OR grooming speech in any window.
             if v.category == Category::AdultAudio as i32 || v.category == Category::Grooming as i32
             {
+                let t = i as f32 * win_secs;
+                mute_ranges.push((t, t + win_secs));
                 take(v);
             }
         }
@@ -224,6 +247,18 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
             rationale: "no flagged frames/audio in segment".into(),
             ..Default::default()
         });
+
+        // Soften the flagged timecodes in place (blur NSFW frames, mute bad speech),
+        // re-packaged in the same container with preserved timestamps. CSAM is NEVER
+        // remediated/served — it is always blocked. The proxy serves `remediated_media`
+        // when present (a no-op for the NullDemuxer, which returns None).
+        if verdict.category != Category::CsamSuspected as i32
+            && (!blur_ranges.is_empty() || !mute_ranges.is_empty())
+        {
+            if let Some(cleaned) = self.demux.remediate(&segment, &blur_ranges, &mute_ranges) {
+                verdict.remediated_media = cleaned;
+            }
+        }
 
         // Retain the segment for guardian review when it was blocked/borderline.
         // `store_if_safe` enforces the CSAM-never-stored boundary and skips benign
@@ -452,11 +487,21 @@ pub mod ffmpeg {
                         .decode_segment_audio(segment)
                         .map(|wav| window_wav(&wav, AUDIO_WINDOW_SECS))
                         .unwrap_or_default(),
+                    audio_window_secs: AUDIO_WINDOW_SECS as f32,
                     decoded: true,
                 },
                 // ffmpeg unavailable → not decoded → conservative handling upstream.
                 None => DecodedSegment::default(),
             }
+        }
+
+        fn remediate(
+            &self,
+            segment: &[u8],
+            blur_ranges: &[(f32, f32)],
+            mute_ranges: &[(f32, f32)],
+        ) -> Option<Vec<u8>> {
+            self.remediate_impl(segment, blur_ranges, mute_ranges)
         }
     }
 
@@ -534,10 +579,10 @@ pub mod ffmpeg {
 
     impl FfmpegDemuxer {
         /// Re-encode `segment`, blurring the video during `blur_ranges` and muting the
-        /// audio during `mute_ranges` (seconds). Returns the remediated bytes, or
-        /// `None` if there is nothing to do or ffmpeg is unavailable. Softens the
-        /// offending timecodes rather than dropping the whole clip.
-        pub fn remediate(
+        /// audio during `mute_ranges` (seconds), in the SAME container with preserved
+        /// timestamps (`-copyts`). A stream with no filter is stream-copied (no
+        /// re-encode). `None` if there's nothing to do / ffmpeg is unavailable.
+        fn remediate_impl(
             &self,
             segment: &[u8],
             blur_ranges: &[(f32, f32)],
@@ -547,19 +592,31 @@ pub mod ffmpeg {
                 return None;
             }
             let input = TempInput::write(segment).ok()?;
-            let output = TempInput::reserve("mp4");
+            // Same container in → out (ffmpeg picks the muxer from the extension).
+            let output = TempInput::reserve(output_ext(segment));
             let in_path = input.path().to_string_lossy().into_owned();
             let out_path = output.path().to_string_lossy().into_owned();
             let mut cmd = self.command();
             cmd.hide_banner();
             cmd.input(&in_path);
-            if let Some(vf) = blur_filter(blur_ranges) {
-                cmd.arg("-vf").arg(vf);
+            cmd.arg("-copyts"); // preserve the original timecodes
+            match blur_filter(blur_ranges) {
+                Some(vf) => {
+                    cmd.arg("-vf").arg(vf);
+                }
+                None => {
+                    cmd.arg("-c:v").arg("copy"); // no NSFW frames → copy video through
+                }
             }
-            if let Some(af) = mute_filter(mute_ranges) {
-                cmd.arg("-af").arg(af);
+            match mute_filter(mute_ranges) {
+                Some(af) => {
+                    cmd.arg("-af").arg(af);
+                }
+                None => {
+                    cmd.arg("-c:a").arg("copy"); // no flagged speech → copy audio through
+                }
             }
-            cmd.arg("-y").arg(&out_path); // overwrite the reserved output path
+            cmd.arg("-y").arg(&out_path);
             let mut child = cmd.spawn().ok()?;
             if let Ok(iter) = child.iter() {
                 for _ in iter {} // drain events so ffmpeg runs to completion
@@ -570,9 +627,25 @@ pub mod ffmpeg {
         }
     }
 
+    /// Best-effort container sniff from the leading bytes, so remediation re-packages
+    /// in the SAME format (ffmpeg picks the muxer from this output extension).
+    fn output_ext(bytes: &[u8]) -> &'static str {
+        if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+            "mp4" // ISO-BMFF (mp4/m4v/mov)
+        } else if bytes.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+            "webm" // Matroska / WebM
+        } else if bytes.first() == Some(&0x47) {
+            "ts" // MPEG-TS
+        } else if bytes.starts_with(b"FLV") {
+            "flv"
+        } else {
+            "mp4" // sensible default
+        }
+    }
+
     #[cfg(test)]
     mod ffmpeg_tests {
-        use super::{blur_filter, mute_filter, rgb24_to_jpeg, window_wav};
+        use super::{blur_filter, mute_filter, output_ext, rgb24_to_jpeg, window_wav};
 
         #[test]
         fn rgb24_converts_to_decodable_jpeg() {
@@ -627,6 +700,15 @@ pub mod ffmpeg {
             for win in &windows {
                 assert!(hound::WavReader::new(std::io::Cursor::new(win)).is_ok());
             }
+        }
+
+        #[test]
+        fn container_sniff_preserves_format() {
+            // ISO-BMFF mp4 ("....ftyp....") → mp4; Matroska → webm; TS sync → ts.
+            assert_eq!(output_ext(b"\0\0\0\x18ftypmp42"), "mp4");
+            assert_eq!(output_ext(&[0x1A, 0x45, 0xDF, 0xA3, 0, 0]), "webm");
+            assert_eq!(output_ext(&[0x47, 0, 0]), "ts");
+            assert_eq!(output_ext(&[0, 1, 2, 3]), "mp4"); // unknown → default
         }
     }
 
@@ -698,6 +780,7 @@ mod tests {
             DecodedSegment {
                 frames: vec![vec![1, 2, 3]],
                 audio_windows: vec![],
+                audio_window_secs: 0.0,
                 decoded: true,
             }
         }
