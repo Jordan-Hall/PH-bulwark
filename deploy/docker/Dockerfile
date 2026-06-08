@@ -4,14 +4,24 @@
 #   docker build --build-arg FEATURES=onnx ...   # real image scoring + bundled model
 #
 # Built in CI (which has the RAM for the ORT/release build) and pulled by the small
-# instance — see .github/workflows/deploy.yml. On Linux, onnx uses ort `load-dynamic`
-# (see aegis-vision/Cargo.toml): the build does NOT static-link onnxruntime (which
-# drags in undefined abseil symbols and fails the slim-builder link); instead ort
-# dlopens the .so at runtime, which we stage below and point ORT_DYLIB_PATH at.
-# aegis-proto compiles its .proto hermetically via protox — no system protoc needed.
+# instance — see .github/workflows/deploy.yml. Base = Ubuntu 24.04 (matches the CI
+# runner where `aegis-server --features onnx` links cleanly; on debian-slim the
+# onnxruntime static link fails with undefined abseil symbols). `ort`
+# (download-binaries) downloads + links the matching onnxruntime; if that yields a
+# shared lib we stage it next to the binary (LD_LIBRARY_PATH). aegis-proto compiles
+# its .proto hermetically via protox — no system protoc needed.
 
 # ---- builder ------------------------------------------------------------------
-FROM rust:1-bookworm AS builder
+FROM ubuntu:24.04 AS builder
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        curl ca-certificates build-essential pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+# Pinned-channel stable Rust via rustup (matches the workspace rust-toolchain).
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable --profile minimal
+ENV PATH=/root/.cargo/bin:$PATH
 ARG FEATURES=""
 WORKDIR /src
 COPY . .
@@ -22,23 +32,23 @@ RUN if [ -n "$FEATURES" ]; then \
     fi \
     && mkdir -p /out/lib \
     && cp target/release/aegis-server target/release/aegis_admin /out/ \
-    && so="$(find target/release -name 'libonnxruntime.so*' -type f | head -1)" \
-    && if [ -n "$so" ]; then cp "$so" /out/lib/libonnxruntime.so; fi \
+    && find target/release -name 'libonnxruntime.so*' -type f -exec cp {} /out/lib/ \; \
     && ls -l /out /out/lib
 
 # ---- runtime ------------------------------------------------------------------
-FROM debian:bookworm-slim AS runtime
+# Ubuntu 24.04 too, so the binary's glibc/libstdc++ match the builder.
+FROM ubuntu:24.04 AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -r -u 10001 -m -d /var/lib/aegis aegis
 COPY --from=builder /out/aegis-server /usr/local/bin/aegis-server
 COPY --from=builder /out/aegis_admin  /usr/local/bin/aegis_admin
-# ONNX Runtime shared lib — present only for FEATURES=onnx builds (the dir always
-# exists, so this COPY never fails). ort (load-dynamic) dlopens it via ORT_DYLIB_PATH.
-# For the default build the dir is empty and ort isn't compiled in, so this is inert.
+# onnxruntime shared lib if the onnx build linked one (present only for
+# FEATURES=onnx; the dir always exists so this COPY never fails). LD_LIBRARY_PATH
+# lets the loader find it; empty + inert for the default build.
 COPY --from=builder /out/lib/ /usr/local/lib/aegis/
-ENV ORT_DYLIB_PATH=/usr/local/lib/aegis/libonnxruntime.so
+ENV LD_LIBRARY_PATH=/usr/local/lib/aegis
 USER aegis
 # Sensible container defaults; override per deployment. State persists on a volume.
 ENV AEGIS_BIND=0.0.0.0:8443 \
