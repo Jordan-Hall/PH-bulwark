@@ -22,7 +22,7 @@ use bulwark_proto::v1::{
 
 use bulwark_core::Analyzer;
 
-use bulwark_audio::AudioAnalyzer;
+use bulwark_audio::{AudioAnalyzer, StubTranscriber, Transcriber};
 use bulwark_vision::{Scorer, VisionAnalyzer, VisionConfig};
 
 pub mod store;
@@ -68,7 +68,9 @@ pub struct VideoAnalyzer<D: Demuxer = NullDemuxer> {
     /// real model; otherwise it is the fail-open stub. (`VisionAnalyzer::new()`
     /// would pin the stub even under onnx, leaving sampled frames unscored.)
     vision: VisionAnalyzer<Box<dyn Scorer>>,
-    audio: AudioAnalyzer,
+    /// Audio path: transcribe windows → bulwark-text. Boxed so the server can inject
+    /// whisper (default = StubTranscriber, which fail-CLOSES with no model).
+    audio: AudioAnalyzer<Box<dyn Transcriber>>,
     /// Optional local store for blocked/borderline segments (guardian review).
     /// `None` = don't retain clips (default). CSAM is never stored regardless.
     segment_store: Option<SegmentStore>,
@@ -80,7 +82,7 @@ impl VideoAnalyzer<NullDemuxer> {
             cfg: VideoConfig::default(),
             demux: NullDemuxer,
             vision: VisionAnalyzer::from_env(VisionConfig::default()),
-            audio: AudioAnalyzer::new(),
+            audio: AudioAnalyzer::with_transcriber(Box::new(StubTranscriber) as Box<dyn Transcriber>),
             segment_store: None,
         }
     }
@@ -96,7 +98,7 @@ impl<D: Demuxer> VideoAnalyzer<D> {
             cfg,
             demux,
             vision: VisionAnalyzer::from_env(VisionConfig::default()),
-            audio: AudioAnalyzer::new(),
+            audio: AudioAnalyzer::with_transcriber(Box::new(StubTranscriber) as Box<dyn Transcriber>),
             segment_store: None,
         }
     }
@@ -113,6 +115,13 @@ impl<D: Demuxer> VideoAnalyzer<D> {
     /// custom model).
     pub fn with_vision_scorer(mut self, scorer: Box<dyn Scorer>) -> Self {
         self.vision = VisionAnalyzer::with_scorer(VisionConfig::default(), scorer);
+        self
+    }
+
+    /// Inject the audio transcriber (e.g. whisper) for the video's speech windows.
+    /// Default is the StubTranscriber (fail-CLOSED); the server swaps in whisper.
+    pub fn with_audio_transcriber(mut self, transcriber: Box<dyn Transcriber>) -> Self {
+        self.audio = AudioAnalyzer::with_transcriber(transcriber);
         self
     }
 }
@@ -196,7 +205,8 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
                 .audio
                 .analyze(audio_req(&format!("{}-a{i}", req.request_id), win.clone()))
                 .await?;
-            if v.category == Category::AdultAudio as i32 {
+            // Flag the clip on adult OR grooming speech in any window.
+            if v.category == Category::AdultAudio as i32 || v.category == Category::Grooming as i32 {
                 take(v);
             }
         }
@@ -390,6 +400,36 @@ pub mod ffmpeg {
             let tmp = TempInput::write(segment).ok()?;
             self.decode_path_frames(&tmp.path().to_string_lossy(), sample_fps, false)
         }
+
+        /// Extract the segment's audio as a single 16 kHz-mono PCM WAV (the format
+        /// whisper wants). `None` if there's no audio / ffmpeg is unavailable.
+        fn decode_segment_audio(&self, segment: &[u8]) -> Option<Vec<u8>> {
+            if segment.is_empty() {
+                return None;
+            }
+            let input = TempInput::write(segment).ok()?;
+            let output = TempInput::reserve("wav");
+            let in_path = input.path().to_string_lossy().into_owned();
+            let out_path = output.path().to_string_lossy().into_owned();
+            let mut cmd = self.command();
+            cmd.hide_banner();
+            cmd.input(&in_path);
+            // Strip video, downmix to mono, resample to 16 kHz, 16-bit PCM.
+            cmd.arg("-vn")
+                .arg("-ac")
+                .arg("1")
+                .arg("-ar")
+                .arg("16000")
+                .arg("-c:a")
+                .arg("pcm_s16le");
+            cmd.arg("-y").arg(&out_path);
+            let mut child = cmd.spawn().ok()?;
+            if let Ok(iter) = child.iter() {
+                for _ in iter {} // drain so ffmpeg runs to completion
+            }
+            let _ = child.wait();
+            std::fs::read(output.path()).ok().filter(|b| !b.is_empty())
+        }
     }
 
     impl Demuxer for FfmpegDemuxer {
@@ -402,7 +442,11 @@ pub mod ffmpeg {
                         .into_iter()
                         .filter_map(|f| rgb24_to_jpeg(f.width, f.height, &f.data))
                         .collect(),
-                    audio_windows: Vec::new(),
+                    // Extract + window the audio track so speech gets transcribed.
+                    audio_windows: self
+                        .decode_segment_audio(segment)
+                        .map(|wav| window_wav(&wav, AUDIO_WINDOW_SECS))
+                        .unwrap_or_default(),
                     decoded: true,
                 },
                 // ffmpeg unavailable → not decoded → conservative handling upstream.
@@ -421,6 +465,37 @@ pub mod ffmpeg {
             .write_to(&mut jpeg, image::ImageFormat::Jpeg)
             .ok()?;
         Some(jpeg.into_inner())
+    }
+
+    /// Audio is windowed into chunks this many seconds long; each window is scored
+    /// independently so a flagged window maps to a precise mute timecode.
+    const AUDIO_WINDOW_SECS: u32 = 15;
+
+    /// Split a 16 kHz-mono PCM WAV into `window_secs`-long WAV windows. Window `i`
+    /// covers `[i*window_secs, (i+1)*window_secs)` — its timecode for remediation.
+    fn window_wav(wav: &[u8], window_secs: u32) -> Vec<Vec<u8>> {
+        let reader = match hound::WavReader::new(std::io::Cursor::new(wav)) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+        let spec = reader.spec();
+        let samples: Vec<i16> = reader.into_samples::<i16>().filter_map(Result::ok).collect();
+        let per_window = spec.sample_rate as usize * window_secs as usize * spec.channels as usize;
+        if per_window == 0 {
+            return Vec::new();
+        }
+        samples
+            .chunks(per_window)
+            .filter_map(|chunk| {
+                let mut buf = std::io::Cursor::new(Vec::new());
+                let mut writer = hound::WavWriter::new(&mut buf, spec).ok()?;
+                for &s in chunk {
+                    writer.write_sample(s).ok()?;
+                }
+                writer.finalize().ok()?;
+                Some(buf.into_inner())
+            })
+            .collect()
     }
 
     // ---- remediation: soften flagged timecodes instead of blocking the whole clip ----
@@ -489,7 +564,7 @@ pub mod ffmpeg {
 
     #[cfg(test)]
     mod ffmpeg_tests {
-        use super::{blur_filter, mute_filter, rgb24_to_jpeg};
+        use super::{blur_filter, mute_filter, rgb24_to_jpeg, window_wav};
 
         #[test]
         fn rgb24_converts_to_decodable_jpeg() {
@@ -520,6 +595,30 @@ pub mod ffmpeg {
         fn empty_ranges_yield_no_filter() {
             assert!(blur_filter(&[]).is_none());
             assert!(mute_filter(&[]).is_none());
+        }
+
+        #[test]
+        fn audio_splits_into_timecoded_windows() {
+            // 32 s of 16 kHz mono → 15 s windows → [0,15),[15,30),[30,32) = 3 windows.
+            let spec = hound::WavSpec {
+                channels: 1,
+                sample_rate: 16_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut buf = std::io::Cursor::new(Vec::new());
+            {
+                let mut w = hound::WavWriter::new(&mut buf, spec).unwrap();
+                for _ in 0..(16_000 * 32) {
+                    w.write_sample(0i16).unwrap();
+                }
+                w.finalize().unwrap();
+            }
+            let windows = window_wav(&buf.into_inner(), 15);
+            assert_eq!(windows.len(), 3);
+            for win in &windows {
+                assert!(hound::WavReader::new(std::io::Cursor::new(win)).is_ok());
+            }
         }
     }
 

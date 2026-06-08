@@ -37,6 +37,18 @@ impl Transcriber for StubTranscriber {
     }
 }
 
+/// Forward through a boxed transcriber so callers can hold an
+/// `AudioAnalyzer<Box<dyn Transcriber>>` and swap the engine at runtime (e.g. let
+/// the server inject whisper into the video analyzer's audio path).
+impl Transcriber for Box<dyn Transcriber> {
+    fn transcribe(&self, audio: &[u8]) -> Option<String> {
+        (**self).transcribe(audio)
+    }
+    fn engine_id(&self) -> &str {
+        (**self).engine_id()
+    }
+}
+
 fn sha256(b: &[u8]) -> Vec<u8> {
     ring::digest::digest(&ring::digest::SHA256, b)
         .as_ref()
