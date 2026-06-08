@@ -58,7 +58,8 @@ jobs:
             "df -h / || true",
             "docker system prune -af || true",
             "df -h / || true",
-            "docker build --build-arg FEATURES=onnx -f deploy/docker/Dockerfile -t aegis-server:local .",
+            "echo 'NOTE: onnx (real image scoring + bundled model) is NOT built on the instance — the ORT+release build OOMs this box. Activate via a larger instance or build-in-CI + docker pull (tracked in docs/production-readiness.md). Fail-CLOSED posture means unscored images are blocked, not allowed.'",
+            "docker build -f deploy/docker/Dockerfile -t aegis-server:local .",
             "docker rm -f aegis-server || true",
             "docker run -d --name aegis-server --restart unless-stopped -p ${PORT}:${PORT} -v /var/lib/aegis:/var/lib/aegis -e AEGIS_BIND=0.0.0.0:${PORT} -e AEGIS_ACCOUNTS=1 -e AEGIS_STATE_DIR=/var/lib/aegis aegis-server:local --role all-in-one"
           ]}
