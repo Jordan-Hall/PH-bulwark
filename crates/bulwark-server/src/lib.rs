@@ -145,6 +145,20 @@ impl AnalyzerRegistry {
         r.register(Arc::new(bulwark_vision::VisionAnalyzer::from_env(
             bulwark_vision::VisionConfig::default(),
         )));
+        // Real on-worker AUDIO scoring when built with `whisper` + a model
+        // (BULWARK_WHISPER_MODEL): transcribe speech → bulwark-text. With no model the
+        // analyzer emits Unspecified → policy fail-CLOSES; without the feature, AUDIO
+        // stays unregistered → also fail-closed via `inconclusive`.
+        #[cfg(feature = "whisper")]
+        {
+            use bulwark_audio::whisper::WhisperTranscriber;
+            use bulwark_audio::AudioAnalyzer;
+            let audio: Arc<dyn Analyzer> = match WhisperTranscriber::from_env() {
+                Some(stt) => Arc::new(AudioAnalyzer::with_transcriber(stt)),
+                None => Arc::new(AudioAnalyzer::new()),
+            };
+            r.register(audio);
+        }
         r
     }
 }
