@@ -22,7 +22,10 @@ ring.workspace = true
 # clean (ffmpeg is GPL/LGPL). Behind the `ffmpeg` feature; default build stubs
 # decoding so the crate links without the ffmpeg binary present.
 ffmpeg-sidecar = { workspace = true, optional = true }
+# Re-encode the raw RGB24 frames ffmpeg emits into JPEG so bulwark-vision (which
+# decodes via the `image` crate) can actually score them.
+image = { version = "0.25", optional = true, default-features = false, features = ["jpeg"] }
 
 [features]
 default = []
-ffmpeg = ["dep:ffmpeg-sidecar"]
+ffmpeg = ["dep:ffmpeg-sidecar", "dep:image"]

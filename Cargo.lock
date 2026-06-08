@@ -770,6 +770,7 @@ dependencies = [
  "bulwark-proto",
  "bulwark-vision",
  "ffmpeg-sidecar",
+ "image",
  "ring",
  "thiserror 2.0.18",
  "tokio",
