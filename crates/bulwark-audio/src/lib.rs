@@ -199,7 +199,10 @@ pub mod whisper {
                 hound::SampleFormat::Int => {
                     let ints: Vec<i16> =
                         reader.into_samples::<i16>().filter_map(Result::ok).collect();
-                    convert_integer_to_float_audio(&ints)
+                    let mut floats = vec![0.0f32; ints.len()];
+                    convert_integer_to_float_audio(&ints, &mut floats)
+                        .map_err(|e| anyhow::anyhow!("whisper: int->float: {e}"))?;
+                    floats
                 }
             };
             let mono = if spec.channels >= 2 {
