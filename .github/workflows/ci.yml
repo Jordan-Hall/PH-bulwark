@@ -55,7 +55,6 @@ jobs:
       # build without the model/ffmpeg binary present (those are runtime only).
       - run: cargo build -p bulwark-text --features classifier
       - run: cargo build -p bulwark-vision --features onnx
-      - run: cargo build -p bulwark-audio --features onnx
       - run: cargo build -p bulwark-video --features ffmpeg
       - run: cargo build -p bulwark-ui --features llm-explain
       - run: cargo build -p bulwark-cluster --features gossip,quorum

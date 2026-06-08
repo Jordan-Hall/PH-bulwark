@@ -475,13 +475,11 @@ dependencies = [
 name = "bulwark-audio"
 version = "0.0.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "bulwark-core",
  "bulwark-proto",
- "ort",
+ "bulwark-text",
  "ring",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
