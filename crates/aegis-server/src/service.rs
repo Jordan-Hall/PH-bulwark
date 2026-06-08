@@ -108,8 +108,13 @@ impl Analysis for AnalysisService {
     }
 }
 
+/// Caches the per-device [`DeviceProfile`] captured at `negotiate_offload` so a
+/// later `refresh_offload` — which only carries fresh RTT/battery, not the device
+/// capabilities — can re-derive a CONSISTENT policy instead of a hardcoded stub.
 #[derive(Clone, Default)]
-pub struct OffloadService;
+pub struct OffloadService {
+    profiles: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, DeviceProfile>>>,
+}
 
 #[tonic::async_trait]
 impl Offload for OffloadService {
@@ -117,22 +122,43 @@ impl Offload for OffloadService {
         &self,
         req: Request<DeviceProfile>,
     ) -> Result<Response<OffloadPolicy>, Status> {
-        Ok(Response::new(default_offload_policy(&req.into_inner())))
+        let profile = req.into_inner();
+        // Cache the capabilities so a later refresh re-derives against live RTT/battery.
+        if let Ok(mut cache) = self.profiles.lock() {
+            cache.insert(profile.device_id.clone(), profile.clone());
+        }
+        Ok(Response::new(default_offload_policy(&profile)))
     }
 
     async fn refresh_offload(
         &self,
         req: Request<RefreshOffloadRequest>,
     ) -> Result<Response<OffloadPolicy>, Status> {
-        // Minimal: keep the same policy id, refresh the TTL. A richer impl would
-        // re-derive from the fresh RTT/battery in the request.
         let r = req.into_inner();
-        Ok(Response::new(OffloadPolicy {
-            run_text_local: true,
-            ttl_secs: 300,
-            policy_id: r.policy_id,
-            ..Default::default()
-        }))
+        // Re-derive from the cached device profile updated with the fresh RTT/battery,
+        // so a refresh stays consistent with the original negotiate (not a fixed stub).
+        let profile = self
+            .profiles
+            .lock()
+            .ok()
+            .and_then(|c| c.get(&r.device_id).cloned())
+            .map(|mut p| {
+                p.rtt_ms = r.rtt_ms;
+                p.battery_pct = r.battery_pct;
+                p
+            })
+            .unwrap_or_else(|| DeviceProfile {
+                device_id: r.device_id.clone(),
+                rtt_ms: r.rtt_ms,
+                battery_pct: r.battery_pct,
+                ..Default::default()
+            });
+        let mut policy = default_offload_policy(&profile);
+        // Keep the client's existing policy id for continuity if it sent one.
+        if !r.policy_id.is_empty() {
+            policy.policy_id = r.policy_id;
+        }
+        Ok(Response::new(policy))
     }
 }
 
@@ -260,7 +286,7 @@ pub async fn run(
     router = router.add_service(health_service);
 
     if matches!(cfg.role, ServerRole::AllInOne | ServerRole::Lb) {
-        router = router.add_service(OffloadServer::new(OffloadService));
+        router = router.add_service(OffloadServer::new(OffloadService::default()));
 
         // Shared guardian relay state: the broadcast hub fans redacted alerts
         // from AlertRelay out to Review's StreamPendingReviews, and carries the
