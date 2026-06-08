@@ -1,0 +1,95 @@
+[package]
+name = "bulwark-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# bulwark-net — the interception layer (SECURITY-CRITICAL crate).
+#
+# Owns: the platform TUN abstraction (Windows `wintun` real; Linux/Android
+# stubbed), the `hudsucker` transparent MITM proxy (rustls + rcgen leaf certs),
+# the **per-install root CA** (the crown jewel — see docs/security/threat-model.md
+# Asset 1), QUIC downgrade, and cert-pinning detection.
+#
+# CROWN-JEWEL INVARIANTS (threat-model Asset 1):
+#   * The CA is generated PER INSTALL. There is NO shared/baked-in CA, ever.
+#   * The CA private key is wrapped by an OS keystore (DPAPI on Windows),
+#     marked non-exportable, and NEVER transmitted off the host.
+#   * Uninstall MUST remove our root from the OS trust store (release-blocker).
+#
+# `#![forbid(unsafe_code)]` is set at the crate root. The unavoidable FFI for
+# `wintun` and the `windows` crate (DPAPI + cert store) is isolated in three
+# clearly-marked modules — `ca::dpapi`, `truststore`, and `tun::windows` — which
+# are the ONLY places `unsafe` is permitted (each locally re-enables it with
+# `#![allow(unsafe_code)]` and documents the soundness of every block).
+
+[features]
+default = []
+# Build the real Windows TUN backend (wintun). Implied on windows targets via
+# cfg in the source; the feature exists so non-windows CI can opt in for docs.
+windows-tun = []
+
+[dependencies]
+# Path deps per the build brief. We DO use bulwark-core's Config/Error here
+# (bulwark-core is already built and re-exports bulwark-proto), so the Interceptor
+# trait returns the shared `bulwark_core::Result`.
+bulwark-proto = { path = "../bulwark-proto" }
+bulwark-core = { path = "../bulwark-core" }
+
+# MITM proxy + TLS + per-install CA.
+hudsucker.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+rcgen.workspace = true
+
+# Async runtime + plumbing.
+tokio.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+bytes.workspace = true # build the canonical FlowPayload::Http body_peek in convert()
+http-body-util = "0.1" # BodyExt::collect() for the hudsucker MITM handler (already transitive via hudsucker)
+
+# Windows TUN driver (WireGuard's pre-signed wintun.dll). Target-gated: only
+# pulled in on Windows. Listed in the workspace allowlist already.
+[target.'cfg(windows)'.dependencies]
+wintun = { workspace = true }
+# The `windows` crate provides the FFI for:
+#   * DPAPI key wrapping + Trusted Root cert store -> "Win32_Security_Cryptography"
+#   * Foundation handles                           -> "Win32_Foundation"
+#   * VPN elevation probe (OpenProcessToken / GetTokenInformation)
+#     -> "Win32_System_Threading" + "Win32_Security"
+windows = { version = "0.60", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+] }
+
+# VPN mode — DESKTOP (Windows / Linux / macOS). The transparent data path is being
+# rebuilt on the PERMISSIVE smoltcp netstack (0BSD) + boringtun/WireGuard (BSD-3)
+# instead of the GPL tun2proxy. `tokio-util`'s CancellationToken drives clean
+# shutdown / route teardown. Mobile (Android/iOS) uses the native VpnService /
+# NetworkExtension shells, NOT this.
+[target.'cfg(any(windows, target_os = "linux", target_os = "macos"))'.dependencies]
+tokio-util = { workspace = true }
+smoltcp = { workspace = true }
+
+# Linux/macOS TUN — stubbed (todo!()) behind cfg; dependency declared so the
+# stub module's doc references resolve and the real impl can slot in later.
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+tun-rs = { workspace = true }
+libc = "0.2" # geteuid() for the VPN elevation pre-flight check
+
+# Android VpnService shim — stubbed behind cfg; JNI dep declared for later.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { workspace = true }
+tun-rs = { workspace = true }
+libc = "0.2"
+smoltcp = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

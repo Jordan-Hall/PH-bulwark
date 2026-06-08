@@ -10,7 +10,7 @@ name: deploy
 #                                                     (ph-bulwark-deployer; ssm:SendCommand)
 #   var    AWS_REGION        e.g. eu-west-2
 #   var    AWS_INSTANCE_ID   the EC2 instance id (SSM-managed)
-#   var    AEGIS_PORT        optional, default 8443
+#   var    BULWARK_PORT        optional, default 8443
 # The instance needs SSM (AmazonSSMManagedInstanceCore) + outbound HTTPS to ghcr.io.
 
 on:
@@ -27,7 +27,7 @@ concurrency:
 env:
   # GHCR image, lowercase (GHCR requires it). Built with FEATURES=onnx so it carries
   # real image scoring + the bundled NSFW model; the instance just runs it.
-  IMAGE: ghcr.io/jordan-hall/aegis-server
+  IMAGE: ghcr.io/jordan-hall/bulwark-server
 
 jobs:
   build-image:
@@ -52,7 +52,7 @@ jobs:
       - name: Smoke test — server boots + loads the ONNX model (.so dlopens)
         run: |
           set -euo pipefail
-          docker run -d --name smoke -e AEGIS_ACCOUNTS=1 "$IMAGE:${GITHUB_SHA}" --role all-in-one
+          docker run -d --name smoke -e BULWARK_ACCOUNTS=1 "$IMAGE:${GITHUB_SHA}" --role all-in-one
           sleep 12
           if [ "$(docker inspect -f '{{.State.Running}}' smoke 2>/dev/null)" != "true" ]; then
             echo "::error::server did not stay up — ONNX runtime .so missing or model load failed"
@@ -85,12 +85,12 @@ jobs:
       - name: Redeploy via SSM Run Command (docker pull the prebuilt image)
         env:
           IID: ${{ vars.AWS_INSTANCE_ID }}
-          AEGIS_PORT: ${{ vars.AEGIS_PORT }}
+          BULWARK_PORT: ${{ vars.BULWARK_PORT }}
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          PORT="${AEGIS_PORT:-8443}"
+          PORT="${BULWARK_PORT:-8443}"
           REF="${IMAGE}:${GITHUB_SHA}"
           # `set -eu` (NOT -eux) on the instance so the GHCR token isn't echoed into
           # the SSM command log. The login cred is removed again with `docker logout`.
@@ -99,10 +99,13 @@ jobs:
             "set -eu",
             "df -h / || true",
             "docker system prune -af || true",
+            "docker rm -f aegis-server || true",
+            "mkdir -p /var/lib/bulwark",
+            "[ -d /var/lib/aegis ] && cp -an /var/lib/aegis/. /var/lib/bulwark/ 2>/dev/null || true",
             "echo '${GHCR_TOKEN}' | docker login ghcr.io -u '${GHCR_USER}' --password-stdin",
             "docker pull '${REF}'",
-            "docker rm -f aegis-server || true",
-            "docker run -d --name aegis-server --restart unless-stopped -p ${PORT}:${PORT} -v /var/lib/aegis:/var/lib/aegis -e AEGIS_BIND=0.0.0.0:${PORT} -e AEGIS_ACCOUNTS=1 -e AEGIS_STATE_DIR=/var/lib/aegis '${REF}' --role all-in-one",
+            "docker rm -f bulwark-server || true",
+            "docker run -d --name bulwark-server --restart unless-stopped -p ${PORT}:${PORT} -v /var/lib/bulwark:/var/lib/bulwark -e BULWARK_BIND=0.0.0.0:${PORT} -e BULWARK_ACCOUNTS=1 -e BULWARK_STATE_DIR=/var/lib/bulwark '${REF}' --role all-in-one",
             "docker logout ghcr.io || true",
             "docker image prune -f || true"
           ]}

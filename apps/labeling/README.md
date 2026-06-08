@@ -5,7 +5,7 @@ windows on their phones; the labels feed the rom **retrain loop** (workstream B,
 `models/pipeline/retrain.py`).
 
 ```
-aegis-labeling-app (Dioxus 0.8, native)        aegis-labeling-server (axum)
+bulwark-labeling-app (Dioxus 0.8, native)        bulwark-labeling-server (axum)
   fetch next task ───────────────────────────▶  GET  /tasks/next   (most-uncertain first)
   submit label ──────────────────────────────▶  POST /labels       (writes corrections.jsonl)
                                                        │

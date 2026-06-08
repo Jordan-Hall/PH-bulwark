@@ -4,7 +4,7 @@
 # Stands up a WireGuard endpoint on the London EC2 so child devices can tunnel
 # their traffic to it (data residency + the "PH Bulwark Cloud — UK" picker option).
 # This is the TRANSPORT half (boringtun on the device speaks the same protocol).
-# The AI MITM filter (aegis-net proxy) running ON the tunnelled traffic is a
+# The AI MITM filter (bulwark-net proxy) running ON the tunnelled traffic is a
 # separate follow-up; this script gets a working, testable tunnel first.
 #
 # RUN IT ON THE SERVER (it makes a privileged, world-reachable change — do it with

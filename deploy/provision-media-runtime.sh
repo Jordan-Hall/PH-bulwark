@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
-# Provision ffmpeg and an optional checksum-pinned NSFW ONNX model for Aegis.
-# Writes per-user config under ${XDG_CONFIG_HOME:-$HOME/.config}/aegis.
+# Provision ffmpeg and an optional checksum-pinned NSFW ONNX model for Bulwark.
+# Writes per-user config under ${XDG_CONFIG_HOME:-$HOME/.config}/bulwark.
 
 set -eu
 
@@ -8,7 +8,7 @@ INSTALL_FFMPEG=0
 FFMPEG_PATH=""
 MODEL_URL=""
 MODEL_SHA256=""
-CONFIG_DIR="${XDG_CONFIG_HOME:-"$HOME/.config"}/aegis"
+CONFIG_DIR="${XDG_CONFIG_HOME:-"$HOME/.config"}/bulwark"
 MODEL_PATH="$CONFIG_DIR/models/nsfw.onnx"
 
 while [ $# -gt 0 ]; do
@@ -115,8 +115,8 @@ fi
 
 cat > "$CONFIG_DIR/media-env.sh" <<EOF
 export FFMPEG_BINARY="$(cat "$CONFIG_DIR/ffmpeg_binary.txt" 2>/dev/null || true)"
-export AEGIS_FFMPEG_BINARY="\$FFMPEG_BINARY"
-export AEGIS_NSFW_MODEL="$(cat "$CONFIG_DIR/nsfw_model.txt" 2>/dev/null || true)"
+export BULWARK_FFMPEG_BINARY="\$FFMPEG_BINARY"
+export BULWARK_NSFW_MODEL="$(cat "$CONFIG_DIR/nsfw_model.txt" 2>/dev/null || true)"
 EOF
 
 echo "env file: $CONFIG_DIR/media-env.sh"

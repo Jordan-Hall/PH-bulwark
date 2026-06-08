@@ -7,12 +7,12 @@ apt-get update
 apt-get install -y docker.io
 systemctl enable --now docker
 
-mkdir -p /var/lib/aegis
+mkdir -p /var/lib/bulwark
 
-docker run -d --name aegis-server --restart unless-stopped \
-  -p ${aegis_port}:${aegis_port} \
-  -v /var/lib/aegis:/var/lib/aegis \
-  -e AEGIS_BIND=0.0.0.0:${aegis_port} \
-  -e AEGIS_ACCOUNTS=1 \
-  -e AEGIS_STATE_DIR=/var/lib/aegis \
-  ${aegis_image} --role all-in-one
+docker run -d --name bulwark-server --restart unless-stopped \
+  -p ${bulwark_port}:${bulwark_port} \
+  -v /var/lib/bulwark:/var/lib/bulwark \
+  -e BULWARK_BIND=0.0.0.0:${bulwark_port} \
+  -e BULWARK_ACCOUNTS=1 \
+  -e BULWARK_STATE_DIR=/var/lib/bulwark \
+  ${bulwark_image} --role all-in-one

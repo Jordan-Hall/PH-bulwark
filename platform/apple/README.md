@@ -1,4 +1,4 @@
-# Aegis — Apple child shell (Network Extension content filter)
+# Bulwark — Apple child shell (Network Extension content filter)
 
 The Apple child shell is a thin **Swift** app extension that hosts the shared
 **Rust** content-safety core as a static library. Apple's sanctioned path for a
@@ -11,53 +11,53 @@ see, asks the Rust core for a verdict over a tiny C ABI, and returns
 ```
 platform/apple/
 ├── README.md                          ← this file
-├── aegis-apple-ffi/                   ← Rust crate (detached cargo workspace)
+├── bulwark-apple-ffi/                   ← Rust crate (detached cargo workspace)
 │   ├── Cargo.toml                     ← [lib] crate-type = ["staticlib","rlib"], empty [workspace]
 │   ├── cbindgen.toml                  ← regenerate the C header on a Mac
 │   ├── include/
-│   │   └── aegis_apple.h              ← hand-authored C ABI (matches src/ffi.rs)
+│   │   └── bulwark_apple.h              ← hand-authored C ABI (matches src/ffi.rs)
 │   └── src/
-│       ├── lib.rs                     ← AegisEngine: TextAnalyzer + Policy
+│       ├── lib.rs                     ← BulwarkEngine: TextAnalyzer + Policy
 │       └── ffi.rs                     ← the C ABI (the only `unsafe` code)
-└── AegisFilter/                       ← Swift shell
+└── BulwarkFilter/                       ← Swift shell
     ├── FilterDataProvider.swift       ← NEFilterDataProvider subclass
-    ├── AegisFilter-Bridging-Header.h  ← imports aegis_apple.h
-    ├── AegisFilter.entitlements       ← networkextension (content-filter-provider)
+    ├── BulwarkFilter-Bridging-Header.h  ← imports bulwark_apple.h
+    ├── BulwarkFilter.entitlements       ← networkextension (content-filter-provider)
     ├── Info.plist                     ← NSExtension content-filter registration
     ├── Package.swift                  ← SwiftPM view (bridge/tests only)
     ├── Sources/
-    │   ├── CAegisApple/module.modulemap        ← exposes aegis_apple.h to Swift
-    │   └── AegisFilterCore/AegisEngine.swift   ← safe Swift wrapper over the FFI
-    └── Tests/AegisFilterCoreTests/AegisEngineTests.swift
+    │   ├── CBulwarkApple/module.modulemap        ← exposes bulwark_apple.h to Swift
+    │   └── BulwarkFilterCore/BulwarkEngine.swift   ← safe Swift wrapper over the FFI
+    └── Tests/BulwarkFilterCoreTests/BulwarkEngineTests.swift
 ```
 
 ## What the Rust core gives us
 
-`aegis-apple-ffi` wraps the **real** Aegis analyzers — no inventions:
+`bulwark-apple-ffi` wraps the **real** Bulwark analyzers — no inventions:
 
-- `aegis_text::TextAnalyzer` — the deterministic grooming **rule** engine
+- `bulwark_text::TextAnalyzer` — the deterministic grooming **rule** engine
   (PRIMARY detector) plus adult-text detection. Built with `TextAnalyzer::new()`
   (returns a `Result`); a span is scored with `analyze_span(request_id, &TextSpan, ts) -> Verdict`.
-- `aegis_policy::Policy` — turns a `Verdict` into a `PolicyDecision`
+- `bulwark_policy::Policy` — turns a `Verdict` into a `PolicyDecision`
   (action + alert + severity) via `Policy::evaluate(&Verdict, &PolicyContext)`.
 
-It does **not** depend on `aegis-store` / `rusqlite` (the extension persists
+It does **not** depend on `bulwark-store` / `rusqlite` (the extension persists
 nothing, and that crate also fails to build on the dev host). It is rules-first,
 has no LLM, sends no telemetry, and logs no message content.
 
-## C ABI (see `aegis-apple-ffi/include/aegis_apple.h`)
+## C ABI (see `bulwark-apple-ffi/include/bulwark_apple.h`)
 
 ```c
-AegisEngine *aegis_apple_engine_new(void);
-void         aegis_apple_engine_free(AegisEngine *ptr);   // NULL = no-op
-int          aegis_apple_classify_text(const AegisEngine *engine,
+BulwarkEngine *bulwark_apple_engine_new(void);
+void         bulwark_apple_engine_free(BulwarkEngine *ptr);   // NULL = no-op
+int          bulwark_apple_classify_text(const BulwarkEngine *engine,
                                        const char *text_utf8, size_t text_len,
                                        const char *thread_utf8, size_t thread_len,
-                                       int *out_category);  // out: AegisAppleCategory
+                                       int *out_category);  // out: BulwarkAppleCategory
 ```
 
-`aegis_apple_classify_text` returns `0` = allow, `1` = warn, `2` = block, and
-writes a category code (mirrors `aegis.v1.Category`) to `out_category` when it is
+`bulwark_apple_classify_text` returns `0` = allow, `1` = warn, `2` = block, and
+writes a category code (mirrors `bulwark.v1.Category`) to `out_category` when it is
 non-NULL. **Fail-open**: a NULL engine, NULL text, or invalid UTF-8 returns
 `0` (allow) and logs nothing sensitive.
 
@@ -74,7 +74,7 @@ rustup target add x86_64-apple-ios           # iOS simulator (Intel)
 rustup target add aarch64-apple-darwin       # macOS Apple Silicon
 rustup target add x86_64-apple-darwin        # macOS Intel
 
-cd platform/apple/aegis-apple-ffi
+cd platform/apple/bulwark-apple-ffi
 
 # 2. Build release static libs per target.
 cargo build --release --target aarch64-apple-ios
@@ -82,7 +82,7 @@ cargo build --release --target aarch64-apple-darwin
 cargo build --release --target x86_64-apple-darwin
 # (and the simulator targets as needed)
 
-# Output: target/<triple>/release/libaegis_apple_ffi.a
+# Output: target/<triple>/release/libbulwark_apple_ffi.a
 ```
 
 Optionally fuse the device + simulator/mac slices into a fat archive or an
@@ -91,27 +91,27 @@ Optionally fuse the device + simulator/mac slices into a fat archive or an
 ```bash
 # macOS universal (Apple Silicon + Intel):
 lipo -create \
-  target/aarch64-apple-darwin/release/libaegis_apple_ffi.a \
-  target/x86_64-apple-darwin/release/libaegis_apple_ffi.a \
-  -output libaegis_apple_ffi-macos.a
+  target/aarch64-apple-darwin/release/libbulwark_apple_ffi.a \
+  target/x86_64-apple-darwin/release/libbulwark_apple_ffi.a \
+  -output libbulwark_apple_ffi-macos.a
 
 # Or an xcframework spanning iOS device + simulator (recommended for Xcode):
 xcodebuild -create-xcframework \
-  -library target/aarch64-apple-ios/release/libaegis_apple_ffi.a \
+  -library target/aarch64-apple-ios/release/libbulwark_apple_ffi.a \
             -headers include \
-  -library libaegis_apple_ffi-iossim.a -headers include \
-  -output AegisAppleFFI.xcframework
+  -library libbulwark_apple_ffi-iossim.a -headers include \
+  -output BulwarkAppleFFI.xcframework
 ```
 
 ### Regenerate the C header (optional)
 
-The header in `include/aegis_apple.h` is hand-authored to match `src/ffi.rs`. To
+The header in `include/bulwark_apple.h` is hand-authored to match `src/ffi.rs`. To
 regenerate from the exports instead:
 
 ```bash
 cargo install cbindgen
-cd platform/apple/aegis-apple-ffi
-cbindgen --config cbindgen.toml --crate aegis-apple-ffi --output include/aegis_apple.h
+cd platform/apple/bulwark-apple-ffi
+cbindgen --config cbindgen.toml --crate bulwark-apple-ffi --output include/bulwark_apple.h
 ```
 
 If you change the ABI, regenerate (or hand-edit) the header **and** keep the
@@ -122,38 +122,38 @@ Swift bridging header / `module.modulemap` in sync.
 This is an Xcode project (a SwiftPM `Package.swift` cannot express an app
 extension with entitlements/provisioning). **Xcode project layout:**
 
-1. **Container app** target (`Aegis`) — a minimal SwiftUI/UIKit app that enables
+1. **Container app** target (`Bulwark`) — a minimal SwiftUI/UIKit app that enables
    the filter via `NEFilterManager.shared().saveToPreferences(...)` and shows
    on/off + the child's age band.
-2. **Network Extension** target (`AegisFilter`, type *Content Filter*):
+2. **Network Extension** target (`BulwarkFilter`, type *Content Filter*):
    - Add `FilterDataProvider.swift`.
    - **Build Settings → Objective-C Bridging Header** =
-     `platform/apple/AegisFilter/AegisFilter-Bridging-Header.h`.
+     `platform/apple/BulwarkFilter/BulwarkFilter-Bridging-Header.h`.
    - **Build Settings → Header Search Paths** +=
-     `$(SRCROOT)/../aegis-apple-ffi/include`.
+     `$(SRCROOT)/../bulwark-apple-ffi/include`.
    - **Build Phases → Link Binary With Libraries** += the built
-     `libaegis_apple_ffi.a` (or the `.xcframework`).
+     `libbulwark_apple_ffi.a` (or the `.xcframework`).
    - **Other Linker Flags** if linking the raw `.a`:
-     `-laegis_apple_ffi` with a matching `-L` library search path. The Rust
+     `-lbulwark_apple_ffi` with a matching `-L` library search path. The Rust
      staticlib also needs the system libs it references; Xcode links the Swift/ObjC
      runtime automatically, and the Rust std deps are self-contained in the `.a`.
    - Set the target's code-signing entitlements to
-     `AegisFilter.entitlements`.
+     `BulwarkFilter.entitlements`.
    - `Info.plist` registers `NSExtensionPointIdentifier =
      com.apple.networkextension.filter-data` and the principal class
      `$(PRODUCT_MODULE_NAME).FilterDataProvider`.
 
 ### Run the Swift bridge tests (optional, on a Mac)
 
-`Package.swift` builds a `CAegisApple` module (from the C header) + a thin
-`AegisFilterCore` Swift wrapper so the bridge can be unit-tested without the NE
+`Package.swift` builds a `CBulwarkApple` module (from the C header) + a thin
+`BulwarkFilterCore` Swift wrapper so the bridge can be unit-tested without the NE
 entitlement. You must put the prebuilt static lib on the linker path:
 
 ```bash
-cd platform/apple/AegisFilter
+cd platform/apple/BulwarkFilter
 swift test \
-  -Xlinker -L../aegis-apple-ffi/target/aarch64-apple-darwin/release \
-  -Xlinker -laegis_apple_ffi
+  -Xlinker -L../bulwark-apple-ffi/target/aarch64-apple-darwin/release \
+  -Xlinker -lbulwark_apple_ffi
 ```
 
 ## Entitlements & provisioning
@@ -162,8 +162,8 @@ swift test \
   ID in the Apple Developer portal for **both** the container app and the NE
   bundle id, and regenerate provisioning profiles that include
   `com.apple.developer.networking.networkextension` with the
-  `content-filter-provider` value (see `AegisFilter.entitlements`).
-- **App Group** (`group.co.uk.predatorhunters.aegis`) lets the container app and the
+  `content-filter-provider` value (see `BulwarkFilter.entitlements`).
+- **App Group** (`group.co.uk.predatorhunters.bulwark`) lets the container app and the
   extension share config (on/off, age band). Replace the id with your team's.
 - **Distribution:** content filters require a provisioning profile and, for the
   App Store, an approved use case (MDM/parental-control). For development, a
@@ -172,7 +172,7 @@ swift test \
   System Settings; on **iOS/iPadOS** the filter is enabled via the container app
   through `NEFilterManager`.
 
-## Out of scope on Apple — and by Aegis policy
+## Out of scope on Apple — and by Bulwark policy
 
 This shell is **FILTER + ALERTS only**. It cannot, and by design will never:
 
@@ -182,7 +182,7 @@ This shell is **FILTER + ALERTS only**. It cannot, and by design will never:
 - **block its own uninstall** / remotely control or wipe the device.
 
 Those capabilities are forbidden for third-party apps on Apple's platform, and
-Aegis does not build device-control/surveillance features on any platform. The
+Bulwark does not build device-control/surveillance features on any platform. The
 Apple child shell observes only the flows the system routes to its content
 filter, classifies text it is entitled to see, and surfaces transparent,
 redacted guardian alerts.

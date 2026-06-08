@@ -1,6 +1,6 @@
 name: docker
 
-# Verify the aegis-server container image builds (the cluster-tier deployment
+# Verify the bulwark-server container image builds (the cluster-tier deployment
 # artifact). Runs only when the image or the server's build inputs change.
 
 on:
@@ -25,7 +25,7 @@ on:
 
 jobs:
   build-image:
-    name: build aegis-server image
+    name: build bulwark-server image
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,6 +36,6 @@ jobs:
           context: .
           file: deploy/docker/Dockerfile
           push: false
-          tags: aegis-server:ci
+          tags: bulwark-server:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max

@@ -2,8 +2,8 @@ name: release
 
 # Build the app binaries and attach them to the GitHub Release on a version tag
 # (or manual dispatch → artifacts): the Linux server, plus the Windows desktop
-# apps — the ADULT console (aegis-parent) and the CHILD filter (aegis_proxy /
-# aegis_vpn / aegis_svc). The CHILD Android APK is produced by android.yml.
+# apps — the ADULT console (bulwark-parent) and the CHILD filter (bulwark_proxy /
+# bulwark_vpn / bulwark_svc). The CHILD Android APK is produced by android.yml.
 # Code-signing (Windows/macOS/Android) is documented in docs/release.md (it needs
 # keystores/certs as secrets); these artifacts are unsigned for testing.
 
@@ -23,13 +23,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build release (aegis-server + aegis_admin)
-        run: cargo build --release -p aegis-server
+      - name: Build release (bulwark-server + bulwark_admin)
+        run: cargo build --release -p bulwark-server
       - name: Stage artifacts + checksums
         run: |
           mkdir -p dist
-          cp target/release/aegis-server target/release/aegis_admin dist/
-          (cd dist && sha256sum aegis-server aegis_admin > SHA256SUMS)
+          cp target/release/bulwark-server target/release/bulwark_admin dist/
+          (cd dist && sha256sum bulwark-server bulwark_admin > SHA256SUMS)
       - name: Attach to the GitHub Release (tag builds)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
@@ -39,7 +39,7 @@ jobs:
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         uses: actions/upload-artifact@v4
         with:
-          name: aegis-server-linux
+          name: bulwark-server-linux
           path: dist/*
 
   windows-apps:
@@ -49,15 +49,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build child filter (aegis_proxy / aegis_vpn / aegis_svc)
-        run: cargo build --release -p aegis-client
-      - name: Build adult console (aegis-parent)
+      - name: Build child filter (bulwark_proxy / bulwark_vpn / bulwark_svc)
+        run: cargo build --release -p bulwark-client
+      - name: Build adult console (bulwark-parent)
         run: cargo build --release --manifest-path apps/parent/Cargo.toml
       - name: Stage artifacts
         shell: bash
         run: |
           mkdir -p dist
-          for b in aegis_proxy aegis_vpn aegis_svc; do
+          for b in bulwark_proxy bulwark_vpn bulwark_svc; do
             if [ -f "target/release/$b.exe" ]; then cp "target/release/$b.exe" dist/; fi
           done
           cp apps/parent/target/release/*.exe dist/ 2>/dev/null || true

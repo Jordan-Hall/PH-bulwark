@@ -1,9 +1,9 @@
-# Aegis — Threat Model
+# Bulwark — Threat Model
 
 > Author: agent **B2** (Wave B). Inputs: `PLAN.md` §0c, §3, §5; `docs/research/platform-feasibility.md`;
 > `docs/research/model-research.md`. Companion docs: `data-handling.md`, `legal-consent.md`.
 >
-> **Scope.** Aegis is a free/OSS Rust client/server child-safety filtering VPN. Thin clients on
+> **Scope.** Bulwark is a free/OSS Rust client/server child-safety filtering VPN. Thin clients on
 > owned/controlled devices intercept traffic and capture on-device text (OCR/accessibility); a
 > clusterable backend (LB / worker / all-in-one over gRPC + mTLS, Postgres shared state) runs heavy
 > analysis. This model enumerates the **assets**, then per-asset **STRIDE** threats and **concrete
@@ -19,16 +19,16 @@
 ## 0. Trust boundaries & adversaries
 
 ```
- [hostile media/network input] ─► aegis-net (MITM, holds CA key) ─► aegis-flow ─► sandboxed parsers
+ [hostile media/network input] ─► bulwark-net (MITM, holds CA key) ─► bulwark-flow ─► sandboxed parsers
                                           │                                            │
- [on-device apps / E2E plaintext] ─► aegis-agent (OCR/accessibility) ───────────────────┤
+ [on-device apps / E2E plaintext] ─► bulwark-agent (OCR/accessibility) ───────────────────┤
                                           │                                            ▼
-                                  aegis-client (mTLS client cert) ══ gRPC/mTLS ══► aegis-server cluster
+                                  bulwark-client (mTLS client cert) ══ gRPC/mTLS ══► bulwark-server cluster
                                                                                    (LB ↔ workers, node↔node mTLS)
                                                                                           │
                                                                                    Postgres (shared state, quorum)
                                                                                           │
-                                                                                   aegis-alert (SMTP creds) ─► guardian
+                                                                                   bulwark-alert (SMTP creds) ─► guardian
 ```
 
 **Trust boundaries crossed:** (a) hostile network/media input → parsers; (b) device → cluster (network);
@@ -37,27 +37,27 @@ storage on every host.
 
 **Adversary classes:**
 - **A1 — Network attacker / MITM-on-MITM:** intercepts client↔cluster or node↔node links, or impersonates a node.
-- **A2 — Malicious / compromised content:** crafted images, video, audio, fonts, archives designed to exploit a parser. *Aegis ingests hostile input by design — this is the highest-likelihood code-exec vector.*
+- **A2 — Malicious / compromised content:** crafted images, video, audio, fonts, archives designed to exploit a parser. *Bulwark ingests hostile input by design — this is the highest-likelihood code-exec vector.*
 - **A3 — Local attacker on a device:** malware/another user trying to steal the CA key, client cert, or plaintext intermediates.
 - **A4 — Compromised cluster node / insider:** a worker or operator turning the analysis backend into an exfiltration surface for child PII / plaintext.
 - **A5 — Supply-chain attacker:** poisoned crate, poisoned model artifact, typosquat, malicious build.
 - **A6 — The monitored minor:** a technically capable child attempting to disable, bypass, or discredit the agent (in scope for evasion/repudiation, **not** for hostile pentest of their own privacy — see legal doc).
-- **A7 — Aegis itself misbehaving:** false negatives that leave a child exposed, or false positives / over-collection that harm the family. Treated as a first-class threat ("the tool is the threat").
+- **A7 — Bulwark itself misbehaving:** false negatives that leave a child exposed, or false positives / over-collection that harm the family. Treated as a first-class threat ("the tool is the threat").
 
 ---
 
 ## Asset 1 — Per-install root CA private key (CROWN JEWEL)
 
-The MITM proxy (`aegis-net`, `hudsucker` + `rcgen`) mints a per-install root CA and installs it into the
+The MITM proxy (`bulwark-net`, `hudsucker` + `rcgen`) mints a per-install root CA and installs it into the
 device trust store so HTTPS can be decrypted. **Whoever holds this key can transparently impersonate any
 website to this device.** It is the single most dangerous secret in the system.
 
 | STRIDE | Threat | Mitigation |
 |---|---|---|
 | **S** | Attacker forges a cert chaining to our CA → MITMs the child's banking/everything. | Key never leaves the host. **No network egress of the key, ever** (not even to the owner's cluster — leaf certs are minted locally). One CA per install (see §"No shared CA"). |
-| **T** | Malware tampers with the trust store to add its own root alongside ours. | Out of Aegis's control once OS trust store is writable by admin, but: log CA fingerprint at startup, surface installed-root inventory in the UI, alert on unexpected roots. |
+| **T** | Malware tampers with the trust store to add its own root alongside ours. | Out of Bulwark's control once OS trust store is writable by admin, but: log CA fingerprint at startup, surface installed-root inventory in the UI, alert on unexpected roots. |
 | **R** | No record of who/when the CA was created or rotated. | Append CA create/rotate/revoke events to the **audit log** (Asset 6) with timestamp + host identity. |
-| **I** | **Key exfiltrated from disk.** Primary loss scenario. | Store the private key **wrapped by a hardware/OS keystore**, never as a plaintext file: <br>• **Windows:** DPAPI (`CryptProtectData`, machine+user scope), **TPM-backed where a TPM is present** (CNG `Microsoft Platform Crypto Provider`, key non-exportable). <br>• **Android:** **Android Keystore** (StrongBox/TEE when available), key flagged non-exportable, optionally `setUserAuthenticationRequired`. <br>• **macOS:** **Keychain** as a non-exportable key, Secure Enclave when available. <br>• **Linux gateway:** TPM 2.0 via `tpm2-tss` if present; else kernel keyring + root-only file `0600`, documented as a weaker tier. <br>Key marked **non-exportable**; signing happens inside the keystore, the raw key bytes never enter Aegis address space. |
+| **I** | **Key exfiltrated from disk.** Primary loss scenario. | Store the private key **wrapped by a hardware/OS keystore**, never as a plaintext file: <br>• **Windows:** DPAPI (`CryptProtectData`, machine+user scope), **TPM-backed where a TPM is present** (CNG `Microsoft Platform Crypto Provider`, key non-exportable). <br>• **Android:** **Android Keystore** (StrongBox/TEE when available), key flagged non-exportable, optionally `setUserAuthenticationRequired`. <br>• **macOS:** **Keychain** as a non-exportable key, Secure Enclave when available. <br>• **Linux gateway:** TPM 2.0 via `tpm2-tss` if present; else kernel keyring + root-only file `0600`, documented as a weaker tier. <br>Key marked **non-exportable**; signing happens inside the keystore, the raw key bytes never enter Bulwark address space. |
 | **D** | Keystore unavailable (TPM cleared, profile reset) → proxy can't sign → no filtering. | **Fail-closed** for new TLS interception (don't silently pass traffic unfiltered); see §Fail-open/closed. Detect missing key → block + alert + prompt re-provision. |
 | **E** | Stolen CA used to escalate: phishing, credential capture, code-signing-trust abuse. | Same as **I** mitigations + **rotation** + scoped lifetime (below). Treat any suspected key exposure as full re-provision (revoke + regenerate + re-install). |
 
@@ -68,7 +68,7 @@ website to this device.** It is the single most dangerous secret in the system.
 - On **suspected compromise**: immediate revoke + regenerate + re-install + audit-log entry + guardian notification.
 
 **Why NO shared / baked-in CA (non-negotiable):**
-- A single CA embedded in the OSS binary would mean **every Aegis install on Earth shares one private key**. The key is in the public repo or trivially extracted from any binary → anyone could MITM **any** Aegis user.
+- A single CA embedded in the OSS binary would mean **every Bulwark install on Earth shares one private key**. The key is in the public repo or trivially extracted from any binary → anyone could MITM **any** Bulwark user.
 - It would also let one compromised install pivot to all others.
 - Therefore the CA is **generated locally, per install, stored only in that host's keystore, never transmitted**. This is stated in `PLAN.md` §3 and is a hard invariant. Reviewers must reject any code path that ships, bakes in, or transmits a CA private key.
 
@@ -93,7 +93,7 @@ cluster over mTLS; nodes authenticate to each other with a **separate cluster CA
 
 ## Asset 3 — Plaintext analysis intermediates (OCR text, decoded frames, decoded audio, demuxed video)
 
-To filter, Aegis necessarily produces **plaintext**: decrypted HTTPS bodies, decoded image/video frames,
+To filter, Bulwark necessarily produces **plaintext**: decrypted HTTPS bodies, decoded image/video frames,
 demuxed audio, and **OCR'd text of E2E chats** (the on-device answer for Signal/WhatsApp/iMessage). The
 cluster *sees these by design* (`platform-feasibility.md` §6). **This is both the product and the biggest
 privacy/liability surface.**
@@ -103,20 +103,20 @@ privacy/liability surface.**
 | **S** | — | (covered by Asset 2 mTLS — only authenticated devices submit/receive). |
 | **T** | Intermediate altered in flight → wrong verdict. | mTLS integrity on the wire; verdicts carry the analyzed-content hash. |
 | **R** | Dispute over what was analyzed. | Audit log records **hashes + verdict + model id/version**, never the plaintext itself (see Asset 6 + `data-handling.md`). |
-| **I** | **Plaintext persisted or leaked** → catastrophic (could include CSAM, intimate images, a child's private messages). | **In-memory only.** Hard rules (enforced in `aegis-store` and reviewed everywhere): <br>• Never write decoded frames / explicit imagery / raw OCR plaintext to disk, swap, or logs. <br>• Zeroize buffers after analysis (`zeroize` crate); avoid `Debug`/`Display` that prints content. <br>• **Disable swap / lock pages** for buffers holding intermediates where the OS allows (`mlock`), or run on swap-encrypted hosts. <br>• Crash dumps disabled / scrubbed (no core dumps containing media). <br>• Evidence emitted downstream = **hashes, safe redacted thumbnails, short text snippets only** — never the raw artifact (`data-handling.md`). |
-| **D** | Backpressure: heavy media stalls workers, latency-critical filtering misses. | Bounded queues, drop-to-fail-safe policy, offload heuristics in `aegis-infer` (device caps + RTT + queue depth). |
+| **I** | **Plaintext persisted or leaked** → catastrophic (could include CSAM, intimate images, a child's private messages). | **In-memory only.** Hard rules (enforced in `bulwark-store` and reviewed everywhere): <br>• Never write decoded frames / explicit imagery / raw OCR plaintext to disk, swap, or logs. <br>• Zeroize buffers after analysis (`zeroize` crate); avoid `Debug`/`Display` that prints content. <br>• **Disable swap / lock pages** for buffers holding intermediates where the OS allows (`mlock`), or run on swap-encrypted hosts. <br>• Crash dumps disabled / scrubbed (no core dumps containing media). <br>• Evidence emitted downstream = **hashes, safe redacted thumbnails, short text snippets only** — never the raw artifact (`data-handling.md`). |
+| **D** | Backpressure: heavy media stalls workers, latency-critical filtering misses. | Bounded queues, drop-to-fail-safe policy, offload heuristics in `bulwark-infer` (device caps + RTT + queue depth). |
 | **E** | A hostile media parser (see Asset 7) escapes and reads other flows' plaintext in shared worker memory. | **Sandbox + process isolation per parse** (§Sandboxing). One tenant's plaintext must not be reachable from a compromised parser. |
 
 ---
 
 ## Asset 4 — Alert email credentials (SMTP / Gmail OAuth)
 
-`aegis-alert` emails the guardian on intervention / suspected grooming (`lettre` SMTP, optional Gmail API).
+`bulwark-alert` emails the guardian on intervention / suspected grooming (`lettre` SMTP, optional Gmail API).
 Credentials let an attacker read sent-alert metadata, send spoofed alerts, or pivot into the guardian's mailbox.
 
 | STRIDE | Threat | Mitigation |
 |---|---|---|
-| **S** | Attacker sends fake "all clear" / fake alerts to the guardian. | Alerts sent only by the local `aegis-alert` instance; consider signing alert bodies / a per-install shared secret the guardian can verify. |
+| **S** | Attacker sends fake "all clear" / fake alerts to the guardian. | Alerts sent only by the local `bulwark-alert` instance; consider signing alert bodies / a per-install shared secret the guardian can verify. |
 | **T** | Tamper with alert content (suppress a real grooming alert). | Rate-limit + **digest with sequence numbers** so a gap is detectable; missing-heartbeat alert. |
 | **R** | — | Log alert-send events (metadata only) in the audit log. |
 | **I** | **SMTP password / OAuth token stolen.** | Store in the **OS keystore** (DPAPI/Keychain/Keystore), never plaintext config. Prefer **OAuth with narrow scope** (Gmail send-only) over a stored password; prefer app-passwords over primary creds. No creds in logs, env dumps, or telemetry (there is no telemetry). |
@@ -127,7 +127,7 @@ Credentials let an attacker read sent-alert metadata, send spoofed alerts, or pi
 
 ## Asset 5 — Child PII (identity, message content, browsing, location-ish metadata, evidence)
 
-The whole point is observing a minor — so Aegis aggregates an unusually sensitive corpus about a child.
+The whole point is observing a minor — so Bulwark aggregates an unusually sensitive corpus about a child.
 **Over-collection is itself a harm** (legal + ethical). See `data-handling.md` for classification/retention
 and `legal-consent.md` for lawful basis.
 
@@ -165,8 +165,8 @@ restricted access. Keys held in the OS keystore. (Details in `data-handling.md`.
 
 ## Asset 7 — Hostile-media parsers (the ingest surface) — and their sandbox
 
-Not a stored secret, but the **highest-likelihood remote-code-execution surface**: `aegis-flow`,
-`aegis-vision`, `aegis-audio`, `aegis-video` (ffmpeg), and image/OCR decoders all parse **attacker-controlled
+Not a stored secret, but the **highest-likelihood remote-code-execution surface**: `bulwark-flow`,
+`bulwark-vision`, `bulwark-audio`, `bulwark-video` (ffmpeg), and image/OCR decoders all parse **attacker-controlled
 bytes**. A malicious JPEG/MP4/font/codec can carry a memory-corruption exploit. `PLAN.md` §2 mandates these
 run as **sandboxed worker processes**.
 
@@ -181,7 +181,7 @@ run as **sandboxed worker processes**.
 
 ## Asset 8 — The cluster as a system (split-brain & exfiltration surface)
 
-The clustered backend (`aegis-cluster`/`aegis-server`) concentrates plaintext + PII from every device.
+The clustered backend (`bulwark-cluster`/`bulwark-server`) concentrates plaintext + PII from every device.
 `platform-feasibility.md` §6 flags **split-brain** and **cluster-as-exfil-surface** as High risk.
 
 **Split-brain (Postgres quorum):**
@@ -202,7 +202,7 @@ The clustered backend (`aegis-cluster`/`aegis-server`) concentrates plaintext + 
 ### Supply chain (A5)
 - **`cargo-deny`** (license allowlist — MIT/Apache/BSD/LGPL-with-isolation only — **and** advisory/RUSTSEC gate) + **`cargo-audit`** in CI; build fails on a flagged advisory or disallowed license (`PLAN.md` §3).
 - **Pinned dependencies** (`Cargo.lock` committed); review on bump; minimize transitive surface.
-- **Model artifacts checksum-pinned** (SHA256 in `aegis-core`; reject mismatch on load — `model-research.md`). Fetch over TLS from a pinned source; models are untrusted-until-verified inputs.
+- **Model artifacts checksum-pinned** (SHA256 in `bulwark-core`; reject mismatch on load — `model-research.md`). Fetch over TLS from a pinned source; models are untrusted-until-verified inputs.
 - No build scripts / proc-macros from unaudited crates without review; reproducible builds where feasible; signed releases.
 
 ### Fail-open vs fail-closed (explicit policy — charter)
@@ -222,7 +222,7 @@ aren't, and never by bricking a child's device for unrelated reasons. Where we c
 (coverage dashboard) rather than fail silently — that honesty is a security property here.
 
 ### "The tool is the threat" (A7)
-Aegis is designed to surveil a child. Misuse, over-collection, false accusation, or use against a
+Bulwark is designed to surveil a child. Misuse, over-collection, false accusation, or use against a
 non-minor / on a non-owned device are treated as in-scope harms. Mitigations live in `data-handling.md`
 (minimization, retention, no telemetry) and `legal-consent.md` (lawful basis, consent, disclosure,
 age-appropriate design, "not legal advice" review gate).
@@ -232,6 +232,6 @@ age-appropriate design, "not legal advice" review gate).
 ## Residual risks (accepted / documented, not solved)
 1. **Compromised node with valid keys** can read what it processes (Asset 8) — mitigated, not eliminated.
 2. **E2E/pinned coverage gap** — OCR/accessibility only sees on-screen text; some content is never observed (`platform-feasibility.md` §3/§5).
-3. **Local admin malware** on a device can attack the keystore at the OS level — outside Aegis's control.
+3. **Local admin malware** on a device can attack the keystore at the OS level — outside Bulwark's control.
 4. **OS trust-store hygiene** depends on clean uninstall removing our root — covered by a release-blocker test, but a force-killed/partial uninstall can orphan the root.
 5. **CSAM legal exposure** — handled by report-never-archive + in-memory-only, but jurisdiction-specific (see `data-handling.md` + `legal-consent.md`).

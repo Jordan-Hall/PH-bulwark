@@ -58,4 +58,4 @@ LLM = **opt-in manual review UI only**, never hot-path, never on-device, never a
 
 ## Notes
 - `ort` exec providers: CPU/oneDNN, CUDA/TensorRT, DirectML, NNAPI, CoreML — request best, auto-fallback to CPU.
-- **Checksum-pin every model** (SHA256 in `aegis-core`); reject mismatches on load. Use ONNX in production.
+- **Checksum-pin every model** (SHA256 in `bulwark-core`); reject mismatches on load. Use ONNX in production.

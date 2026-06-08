@@ -1,0 +1,32 @@
+[package]
+name = "bulwark-apple-ffi"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "Bulwark Apple FFI — a thin C ABI over the shared Rust content-safety core, for the iOS/macOS Network Extension content filter (NEFilterDataProvider)."
+
+# A `staticlib` is what Xcode links into the Network Extension target; `rlib`
+# lets us run the host-target unit tests (`cargo test`) without a C harness.
+[lib]
+name = "bulwark_apple_ffi"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+# Only the LEGITIMATE, deterministic content-safety analyzers. No bulwark-store /
+# rusqlite (it fails to build on the dev host, and the Apple shell does not
+# persist anything from the extension anyway). Relative path deps into the core
+# workspace crates — exactly the public APIs read from their lib.rs.
+bulwark-core = { path = "../../../crates/bulwark-core" }
+bulwark-text = { path = "../../../crates/bulwark-text" }
+bulwark-policy = { path = "../../../crates/bulwark-policy" }
+bulwark-proto = { path = "../../../crates/bulwark-proto" }
+
+[build-dependencies]
+# Optional: regenerate include/bulwark_apple.h from the #[no_mangle] exports.
+# Not required at build time (a hand-written header is checked in and kept in
+# sync); see cbindgen.toml and the README. Left out of [dependencies] on purpose.
+
+# DETACHED from the root cargo workspace (same pattern as apps/parent/Cargo.toml).
+# This empty table makes this crate its own workspace root so building it never
+# perturbs `cargo build --workspace` for the engine crates, and vice-versa.
+[workspace]

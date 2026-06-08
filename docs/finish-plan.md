@@ -6,7 +6,7 @@ architecture and [integration-todo.md](integration-todo.md) for the crate wiring
 both effectively done). This doc tracks what's left to *ship the experience*.
 
 Branding: child app = **PH Bulwark Shield**, console = **PH Bulwark Manager**, internal
-codename stays `aegis`. Brand palette: navy `#0F3D5C`, green `#57A639`, orange `#EE7B22`,
+codename stays `bulwark`. Brand palette: navy `#0F3D5C`, green `#57A639`, orange `#EE7B22`,
 on white; type = Plus Jakarta Sans; logo = `branding/logo.jpg` (BULWARK SHIELD mark).
 
 Status legend: ✅ done · 🚧 doing · ⏭️ next · ⛔ blocked/needs-decision

@@ -1,6 +1,6 @@
 //! PH Bulwark labeling app — Dioxus 0.8 client for trusted volunteers.
 //!
-//! Fetches the next (most-uncertain) window from `aegis-labeling-server`, shows
+//! Fetches the next (most-uncertain) window from `bulwark-labeling-server`, shows
 //! the conversation, lets the volunteer mark it grooming/safe + pick stages, and
 //! submits the label. The server records it as `corrections.jsonl`, which the rom
 //! retrain loop (`pipeline/retrain.py`) consumes.

@@ -1,0 +1,25 @@
+[package]
+name = "bulwark-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bulwark-proto = { path = "../bulwark-proto" }
+bulwark-core = { path = "../bulwark-core" }
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+
+# CONVENTIONAL OCR only (never a vision-LLM): Tesseract (`leptess`) cross-platform
+# behind `tesseract`, OS-native (Windows.Media.Ocr) behind `winocr`. Default build
+# uses a stub source so the crate links without native OCR libs.
+leptess = { workspace = true, optional = true }
+windows = { workspace = true, optional = true }
+
+[features]
+default = []
+tesseract = ["dep:leptess"]
+winocr = ["dep:windows"]

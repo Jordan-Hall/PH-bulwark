@@ -1,10 +1,10 @@
-# Aegis — the app suite (child app + parent app, four OSes)
+# Bulwark — the app suite (child app + parent app, four OSes)
 
 Two apps over one shared Rust core, native on **Android / iOS / Windows / macOS**.
 
 ```
                          ┌──────────────────────────────┐
-   shared Rust core ───► │ crates/aegis-*  (engine)      │ ◄─── one codebase, all platforms
+   shared Rust core ───► │ crates/bulwark-*  (engine)      │ ◄─── one codebase, all platforms
    (already built)       │ proto · net · flow · vision · │
                          │ audio · video · text · policy │
                          │ alert · infer · cluster · store│
@@ -17,7 +17,7 @@ Two apps over one shared Rust core, native on **Android / iOS / Windows / macOS*
 ```
 
 ## Parent app — `apps/parent` (Dioxus, all-Rust)
-- One Rust crate, RSX UI, **directly uses `aegis-proto`'s gRPC clients** (`AlertRelay`,
+- One Rust crate, RSX UI, **directly uses `bulwark-proto`'s gRPC clients** (`AlertRelay`,
   `Review`) over mTLS — no FFI bridge, no JS. `desktop` feature → Windows + macOS;
   `mobile` (experimental) → Android/iOS; bumps to the **native Blitz renderer** (no
   webview) at 0.7/0.8.
@@ -32,7 +32,7 @@ The on-device filter must be native because traffic capture is a kernel/OS featu
 
 | OS | Capture mechanism | Status / notes |
 |---|---|---|
-| **Windows** | Wintun TUN + MITM (`aegis-net`) | built |
+| **Windows** | Wintun TUN + MITM (`bulwark-net`) | built |
 | **Android** | `VpnService` + accessibility (`platform/android`) | built (transparent) |
 | **macOS** | Network Extension — `NEFilterDataProvider` / Packet Tunnel + Rust core | to build (Swift shell) |
 | **iOS** | Network Extension content filter + Rust core | to build; **content-filtering + alerts only** |
@@ -57,11 +57,11 @@ combination is the stalkerware profile and is restricted regardless of intent
 (an implementation agent was blocked by Anthropic's usage policy). For
 tamper-resistance / app-blocking / location done the sanctioned way, use the
 platforms' own family tooling (**Android Family Link / Android Enterprise**,
-**Apple Screen Time**) — official, consented, auditable — alongside Aegis's
-content filtering. Aegis stays transparent: the child can see it's running.
+**Apple Screen Time**) — official, consented, auditable — alongside Bulwark's
+content filtering. Bulwark stays transparent: the child can see it's running.
 
 ## Build
 - Parent: `cd apps/parent && cargo run` (detached from the core workspace so it
   doesn't pull the Dioxus tree into the engine's `cargo build --workspace`).
-- Child (Windows): the `aegis-client` + `aegis-net` path. Android: `platform/android`
+- Child (Windows): the `bulwark-client` + `bulwark-net` path. Android: `platform/android`
   + `cargo-ndk`. Apple: Network Extension shell + the core as a static lib (to build).

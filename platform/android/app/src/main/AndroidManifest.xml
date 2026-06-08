@@ -8,7 +8,7 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
-        android:name=".AegisApp"
+        android:name=".BulwarkApp"
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -26,10 +26,10 @@
         </activity>
 
         <!-- The filtering VPN client. Android binds this; it owns the TUN fd and
-             hands it to the Rust core (libaegis_client.so) for the real-time
+             hands it to the Rust core (libbulwark_client.so) for the real-time
              intercept -> classify -> policy -> block/blur/mute + alert loop. -->
         <service
-            android:name=".vpn.AegisVpnService"
+            android:name=".vpn.BulwarkVpnService"
             android:exported="false"
             android:permission="android.permission.BIND_VPN_SERVICE"
             android:foregroundServiceType="specialUse">
@@ -45,7 +45,7 @@
              VPN cannot read (WhatsApp, Signal, Messenger secret chats, ...).
              Requires explicit guardian consent in Settings > Accessibility. -->
         <service
-            android:name=".accessibility.AegisAccessibilityService"
+            android:name=".accessibility.BulwarkAccessibilityService"
             android:exported="false"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
@@ -65,7 +65,7 @@
              alert. Device Owner provisioning (Lockdown.kt) upgrades this to true
              anti-removal. Transparent + consented on the managed child device. -->
         <receiver
-            android:name=".admin.AegisDeviceAdminReceiver"
+            android:name=".admin.BulwarkDeviceAdminReceiver"
             android:label="@string/device_admin_label"
             android:description="@string/device_admin_description"
             android:exported="true"
@@ -77,7 +77,7 @@
                 <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
                 <!-- Managed-provisioning completion (QR / NFC / zero-touch) and the
                      explicit Device-Owner transition: both finalize enrollment and
-                     auto-apply the anti-removal lockdown (see AegisDeviceAdminReceiver). -->
+                     auto-apply the anti-removal lockdown (see BulwarkDeviceAdminReceiver). -->
                 <action android:name="android.app.action.PROFILE_PROVISIONING_COMPLETE" />
                 <action android:name="android.app.action.DEVICE_OWNER_CHANGED" />
             </intent-filter>

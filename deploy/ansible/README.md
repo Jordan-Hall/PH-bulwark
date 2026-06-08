@@ -1,16 +1,16 @@
-# Aegis cluster — deploy as code (Ansible)
+# Bulwark cluster — deploy as code (Ansible)
 
-Give it the IPs of your Ubuntu hosts; it installs Docker and runs `aegis-server`
+Give it the IPs of your Ubuntu hosts; it installs Docker and runs `bulwark-server`
 on each — one **LB/coordinator** + N **workers** that seed off the LB. **Scale out**
 by adding worker IPs and re-running (idempotent).
 
 ## Prerequisites
-1. An `aegis-server` image in a registry your hosts can pull. Build + push once
+1. An `bulwark-server` image in a registry your hosts can pull. Build + push once
    (from the repo root) — use the cluster feature build:
    ```sh
    docker build -f deploy/docker/Dockerfile --build-arg FEATURES=gossip,quorum \
-       -t <registry>/aegis-server:latest .
-   docker push <registry>/aegis-server:latest
+       -t <registry>/bulwark-server:latest .
+   docker push <registry>/bulwark-server:latest
    ```
 2. Ansible + the required collections:
    ```sh
@@ -21,18 +21,18 @@ by adding worker IPs and re-running (idempotent).
 ## Deploy
 ```sh
 cp deploy/ansible/inventory.example.ini deploy/ansible/inventory.ini
-# edit inventory.ini: [lb] + [workers] IPs, aegis_image, aegis_cluster_id, (opt) DSN
+# edit inventory.ini: [lb] + [workers] IPs, bulwark_image, bulwark_cluster_id, (opt) DSN
 ansible-playbook -i deploy/ansible/inventory.ini deploy/ansible/site.yml
 ```
 
 ## Scale out
 Add the new host IP under `[workers]` in `inventory.ini` and re-run the **same**
-command. New workers seed off the LB via `AEGIS_CLUSTER_SEEDS`.
+command. New workers seed off the LB via `BULWARK_CLUSTER_SEEDS`.
 
 ## What it sets per node
-`AEGIS_NODE_ID` (the host), `AEGIS_CLUSTER_ID`, `AEGIS_CLUSTER_ADDRESS`
-(`host:port` advertised to peers), and — on workers — `AEGIS_CLUSTER_SEEDS` = the
-LB's address; optional `AEGIS_QUORUM_DSN` for the shared Postgres lease store. See
+`BULWARK_NODE_ID` (the host), `BULWARK_CLUSTER_ID`, `BULWARK_CLUSTER_ADDRESS`
+(`host:port` advertised to peers), and — on workers — `BULWARK_CLUSTER_SEEDS` = the
+LB's address; optional `BULWARK_QUORUM_DSN` for the shared Postgres lease store. See
 `docs/deployment.md` §2 for the full contract.
 
 ## Honest status

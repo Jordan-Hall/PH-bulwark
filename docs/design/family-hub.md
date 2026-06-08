@@ -8,7 +8,7 @@ The product plan is transparent content safety, not remote administration.
 - Guardian/adult accounts.
 - Child records linked to supervised device ids.
 - Short-lived pairing codes for enrolling child devices.
-- Server selection: UK/London cloud, US cloud, or self-hosted `aegis-server`.
+- Server selection: UK/London cloud, US cloud, or self-hosted `bulwark-server`.
 - Redacted alerts and guardian approve/deny review.
 - Protection heartbeat and tamper/status alerts.
 - Honest coverage and platform-limit reporting.

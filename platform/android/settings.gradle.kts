@@ -12,5 +12,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Aegis"
+rootProject.name = "Bulwark"
 include(":app")

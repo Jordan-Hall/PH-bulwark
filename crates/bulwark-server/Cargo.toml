@@ -1,0 +1,68 @@
+[package]
+name = "bulwark-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bulwark-proto = { path = "../bulwark-proto" }
+bulwark-core = { path = "../bulwark-core" }
+bulwark-cluster = { path = "../bulwark-cluster" }
+bulwark-text = { path = "../bulwark-text" }
+bulwark-alert = { path = "../bulwark-alert" }
+# bulwark-policy is pure-Rust (no rusqlite/SQLite) — it carries the per-device
+# approve-allowlist + tamper-evident audit chain the Review service applies.
+bulwark-policy = { path = "../bulwark-policy" }
+# Buffered-video analyzer for the worker dispatch (MediaKind::VIDEO). Default
+# features → no ffmpeg/onnx (NullDemuxer fail-open), so registering it is safe and
+# links without the ffmpeg binary; real sampling is a feature-gated upgrade.
+bulwark-video = { path = "../bulwark-video" }
+# Image NSFW analyzer for the worker dispatch (MediaKind::IMAGE), behind `onnx`.
+# Without onnx+model it fail-CLOSES (emits Unspecified), so registering it only
+# under the feature keeps default builds lean and the no-model path safe.
+bulwark-vision = { path = "../bulwark-vision", optional = true }
+tonic.workspace = true
+# Standard gRPC health service (grpc.health.v1.Health) for readiness probes.
+tonic-health = "0.14"
+prost.workspace = true
+# `signal` for graceful shutdown (Ctrl-C / SIGTERM) on top of the workspace features.
+tokio = { workspace = true, features = ["signal"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+futures-core.workspace = true
+futures-util.workspace = true
+# Password hashing for parent accounts (PBKDF2-HMAC-SHA256). ring is already in
+# the build graph (tonic tls-ring) so this adds no new native dependency.
+ring.workspace = true
+# Optional file-backed durability for guardian state (BULWARK_STATE_DIR) — JSON
+# snapshots via the `persist` module. NO rusqlite (won't build on this host).
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+[features]
+default = []
+# Enable the small text classifier backstop in bulwark-text on worker nodes.
+classifier = ["bulwark-text/classifier"]
+# Enable real on-worker image NSFW scoring (bulwark-vision + its ONNX runtime).
+# Requires a pinned model (BULWARK_NSFW_MODEL); without one, vision fail-CLOSES.
+onnx = ["dep:bulwark-vision", "bulwark-vision/onnx"]
+# Enable the FCM push fan-out sink (forwards to bulwark-alert's push feature). OFF
+# by default so the default server build + host CI stay byte-identical.
+push = ["bulwark-alert/push"]
+
+[dev-dependencies]
+# In-process end-to-end guardian approve/deny test (tests/e2e_review.rs):
+# spin the AlertRelay + Review tonic services on a loopback OS-assigned port
+# (plaintext — no TLS), drive them with the generated gRPC clients, and assert
+# the fan-out + decision loop. NOTE: deliberately no bulwark-store/rusqlite — it
+# does not build on this host and is not needed for the relay path.
+bulwark-proto = { path = "../bulwark-proto" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
+tonic = { version = "0.14", features = ["transport"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+# The push e2e test (cfg(feature="push")) builds a mock PushTransport over a
+# serde_json::Value payload; dev-only, so the default build is unaffected.
+serde_json = { workspace = true }

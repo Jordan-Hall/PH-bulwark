@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  BulwarkFilter.entitlements — the Network Extension (content-filter) target.
+
+  The content-filter-provider value requires the Network Extensions capability
+  to be enabled on the App ID in the Apple Developer portal, and a provisioning
+  profile that includes it. App Sandbox keys are for the macOS build; iOS ignores
+  the sandbox keys but uses the same networking.networkextension entitlement.
+
+  SCOPE: this entitlement authorizes a CONTENT FILTER only. It does NOT grant —
+  and Apple does not offer to third parties — screen capture, reading other apps'
+  data, location tracking, or uninstall blocking.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Network Extension: content filter provider. -->
+    <key>com.apple.developer.networking.networkextension</key>
+    <array>
+        <string>content-filter-provider</string>
+    </array>
+
+    <!-- Shared App Group so the container app and the extension can share
+         configuration (age band, on/off). Replace with your team's group id. -->
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>group.co.uk.predatorhunters.bulwark</string>
+    </array>
+
+    <!-- macOS App Sandbox (ignored on iOS). The filter needs outbound/inbound
+         network to observe flows; it does NOT request files/camera/etc. -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <key>com.apple.security.network.server</key>
+    <true/>
+</dict>
+</plist>

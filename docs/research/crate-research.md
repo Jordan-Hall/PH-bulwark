@@ -53,4 +53,4 @@ sync for nodes rejoining after long outages.
 
 ## ONNX execution-provider note
 `SessionBuilder::execution_providers([...])` tries providers in order, **silently falling back to
-CPU**. Lets `aegis-infer` request GPU/NNAPI/CoreML and degrade gracefully per device tier.
+CPU**. Lets `bulwark-infer` request GPU/NNAPI/CoreML and degrade gracefully per device tier.

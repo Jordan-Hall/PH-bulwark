@@ -25,7 +25,7 @@ use serde::Deserialize;
 use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 
-use aegis_labeling_server::store::{LabelStore, Submission};
+use bulwark_labeling_server::store::{LabelStore, Submission};
 
 #[derive(Clone)]
 struct AppState {

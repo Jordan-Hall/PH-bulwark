@@ -1,0 +1,28 @@
+[package]
+name = "bulwark-video"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bulwark-proto = { path = "../bulwark-proto" }
+bulwark-core = { path = "../bulwark-core" }
+bulwark-vision = { path = "../bulwark-vision" }
+bulwark-audio = { path = "../bulwark-audio" }
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+# SHA-256 content addressing for the local segment store. Already in the build
+# graph via tonic's tls-ring, so this adds no new native dependency.
+ring.workspace = true
+
+# ffmpeg is SHELLED OUT (sidecar) — never linked — to keep our binary's license
+# clean (ffmpeg is GPL/LGPL). Behind the `ffmpeg` feature; default build stubs
+# decoding so the crate links without the ffmpeg binary present.
+ffmpeg-sidecar = { workspace = true, optional = true }
+
+[features]
+default = []
+ffmpeg = ["dep:ffmpeg-sidecar"]

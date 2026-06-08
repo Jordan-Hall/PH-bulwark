@@ -10,7 +10,7 @@ AWS credentials — nothing here touches your account. The server auto-starts on
 - An **EC2 key pair** that already exists *in each region* you deploy to (for SSH).
 - The server **image** — either:
   - **(a)** push a pre-built image to a registry your instance can pull (public GHCR
-    is easiest): `docker build -f deploy/docker/Dockerfile -t <registry>/aegis-server:latest . && docker push …`, then `-var aegis_image=<registry>/aegis-server:latest`; **or**
+    is easiest): `docker build -f deploy/docker/Dockerfile -t <registry>/bulwark-server:latest . && docker push …`, then `-var bulwark_image=<registry>/bulwark-server:latest`; **or**
   - **(b) no registry** — `-var build_on_instance=true` builds the image **on the
     instance** from source (`-var repo_url=…`, defaults to the public repo). Slower
     first boot (~10 min); use `-var instance_type=t3.medium` so the build doesn't OOM
@@ -24,7 +24,7 @@ terraform apply \
   -var region=eu-west-2 \           # London (see variables.tf for the country list)
   -var key_name=my-keypair \
   -var ssh_cidr=$(curl -s ifconfig.me)/32 \   # lock SSH to your IP
-  -var aegis_image=ghcr.io/your-org/aegis-server:latest
+  -var bulwark_image=ghcr.io/your-org/bulwark-server:latest
 # -> outputs the public endpoint; set it in the client (self-hosted, or as a
 #    PH Bulwark Cloud regional endpoint).
 ```

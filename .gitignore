@@ -15,8 +15,8 @@ platform/android/local.properties
 *.onnx
 *.gguf
 # ...except the small bundled models we DO vendor (compiled in via include_bytes!):
-!crates/aegis-text/models/grooming_detector.onnx
-!crates/aegis-vision/models/nsfw_detector.onnx
+!crates/bulwark-text/models/grooming_detector.onnx
+!crates/bulwark-vision/models/nsfw_detector.onnx
 
 # Secrets & local state — NEVER commit
 *.pem

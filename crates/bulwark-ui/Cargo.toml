@@ -1,0 +1,23 @@
+[package]
+name = "bulwark-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bulwark-proto = { path = "../bulwark-proto" }
+bulwark-core = { path = "../bulwark-core" }
+bulwark-store = { path = "../bulwark-store" }
+axum.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+
+[features]
+default = []
+# Optional, OFF by default: the guardian-initiated "explain this flagged thread"
+# escalation that calls a large LLM. Never automatic, never in the hot path.
+llm-explain = []

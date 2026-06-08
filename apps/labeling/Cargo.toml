@@ -1,5 +1,5 @@
 [package]
-name = "aegis-labeling-app"
+name = "bulwark-labeling-app"
 version = "0.0.0"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
@@ -12,7 +12,7 @@ description = "PH Bulwark labeling app — Dioxus 0.8 client for trusted volunte
 # NOTE: 0.8-alpha — the dx CLI must be installed with `--locked` (release notes).
 dioxus = { version = "0.8.0-alpha.0", features = ["desktop"] }
 
-# Talks to aegis-labeling-server over HTTP/JSON. rustls (no OpenSSL) so it builds
+# Talks to bulwark-labeling-server over HTTP/JSON. rustls (no OpenSSL) so it builds
 # clean cross-platform.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }

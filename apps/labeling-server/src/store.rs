@@ -203,7 +203,7 @@ mod tests {
     }
 
     fn tmp(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("aegis_label_test_{}_{}.jsonl", name, std::process::id()))
+        std::env::temp_dir().join(format!("bulwark_label_test_{}_{}.jsonl", name, std::process::id()))
     }
 
     #[test]

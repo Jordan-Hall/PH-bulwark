@@ -13,7 +13,7 @@ coverage status.
 Runs on the supervised child device.
 
 - Filters traffic/content using the platform-appropriate child shell:
-  - Windows: `aegis_proxy` today; transparent VPN path is still fail-closed while
+  - Windows: `bulwark_proxy` today; transparent VPN path is still fail-closed while
     the replacement netstack is device-tested.
   - Android: native `VpnService`/accessibility shell plus the shared Rust core.
   - macOS/iOS: Network Extension shell planned.
@@ -40,7 +40,7 @@ belongs to one selected backend at a time:
 
 - UK/London cloud: data stays on the UK deployment.
 - US cloud: data stays on the US deployment.
-- Self-hosted: user enters `http(s)://host:port` for their own `aegis-server`.
+- Self-hosted: user enters `http(s)://host:port` for their own `bulwark-server`.
 
 Current parent app state:
 
@@ -49,12 +49,12 @@ Current parent app state:
 - `servers.json` stores named self-hosted endpoints, merged with the built-in
   UK/London and US cloud choices.
 - `cluster_endpoint()` resolves the saved choice and passes it to the spawned
-  child filter through `AEGIS_CLUSTER_ENDPOINT`.
+  child filter through `BULWARK_CLUSTER_ENDPOINT`.
 - Guardian sessions are endpoint-scoped under
   `sessions/<server_hash>/guardian_token.txt`, so a London token is not silently
   reused against US or self-hosted servers.
 - A server-specific pinned CA can be placed at
-  `sessions/<server_hash>/cluster_ca.pem`; `AEGIS_CLUSTER_CA` still wins as the
+  `sessions/<server_hash>/cluster_ca.pem`; `BULWARK_CLUSTER_CA` still wins as the
   ops override.
 
 Required next change:
@@ -106,19 +106,19 @@ Important security properties:
 
 ## Self-Hosted Server
 
-A self-hosted family runs the same `aegis-server` binary:
+A self-hosted family runs the same `bulwark-server` binary:
 
 ```text
-AEGIS_ACCOUNTS=1
-AEGIS_STATE_DIR=/var/lib/aegis
-AEGIS_BIND=0.0.0.0:8443
-aegis-server --role all-in-one
+BULWARK_ACCOUNTS=1
+BULWARK_STATE_DIR=/var/lib/bulwark
+BULWARK_BIND=0.0.0.0:8443
+bulwark-server --role all-in-one
 ```
 
 For production self-hosting:
 
-- Prefer TLS and set `AEGIS_CLUSTER_CA` in the guardian app if using a private CA.
-- Keep `AEGIS_STATE_DIR` durable, backed up, and private.
+- Prefer TLS and set `BULWARK_CLUSTER_CA` in the guardian app if using a private CA.
+- Keep `BULWARK_STATE_DIR` durable, backed up, and private.
 - Provision SMTP/FCM only if alerts need email/push fan-out.
 - Client heavy-media offload still needs client mTLS material; alert/review can
   use the normal guardian token path.
@@ -138,15 +138,15 @@ Implemented:
   `Accounts.RedeemPairCode`, stable device id, and local
   `family_id`/`child_id`/endpoint persistence.
 - Accounts service, guardian scoping, child/device records, pair codes.
-- JSON persistence when `AEGIS_STATE_DIR` is set.
+- JSON persistence when `BULWARK_STATE_DIR` is set.
 - CLI provisioning for accounts, children, guardians, and pair codes.
 - E2E gRPC coverage for guardian pairing, guardian-scoped alert delivery,
   decision authorization, and cross-server token/code isolation:
-  `crates/aegis-server/tests/e2e_accounts_pairing.rs`.
+  `crates/bulwark-server/tests/e2e_accounts_pairing.rs`.
 - Reusable app-workflow harness for future UI/account screens:
-  `crates/aegis-server/tests/support/workflow.rs` models guardian and child app
+  `crates/bulwark-server/tests/support/workflow.rs` models guardian and child app
   actors over real gRPC, and
-  `crates/aegis-server/tests/e2e_app_workflow_harness.rs` covers happy-path
+  `crates/bulwark-server/tests/e2e_app_workflow_harness.rs` covers happy-path
   enrollment, server switching, single-use pair codes, and duplicate-device
   rejection.
 

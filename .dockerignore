@@ -1,5 +1,5 @@
 # Keep the build context small. Do NOT exclude any `crates/**` source — they are
-# root-workspace members and cargo needs them all to build `-p aegis-server`.
+# root-workspace members and cargo needs them all to build `-p bulwark-server`.
 **/target
 .git
 .github

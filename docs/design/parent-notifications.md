@@ -1,12 +1,12 @@
 # Parent notifications & approve/deny review
 
-The guardian is notified whenever Aegis steps in or suspects grooming, with the
+The guardian is notified whenever Bulwark steps in or suspects grooming, with the
 evidence appropriate to the category, and can (roadmap) **approve** or **deny**
 the item.
 
 ## Delivery paths
-1. **Email** — `aegis-alert` (SMTP), redacted, exists today (INTERVENTION + GROOMING_SUSPECTED).
-2. **On-device notification** — Android `AlertNotifier`: `AegisVpnService` polls the
+1. **Email** — `bulwark-alert` (SMTP), redacted, exists today (INTERVENTION + GROOMING_SUSPECTED).
+2. **On-device notification** — Android `AlertNotifier`: `BulwarkVpnService` polls the
    Rust core (`RustBridge.nextAlert()`) and posts a system notification with the
    evidence + Approve / "Keep blocked" actions. This is the **same-device** path
    (guardian reviews on the child's device, or a shared/family device).
@@ -33,20 +33,20 @@ and only from `evidence.safe_thumbnail`.
 ## Approve / deny (roadmap)
 Notification actions (and a future Review screen) call
 `RustBridge.submitReviewDecision(alertId, approve)` →
-`ReviewActionReceiver` → the Rust core → **`aegis-policy`**, which records the
+`ReviewActionReceiver` → the Rust core → **`bulwark-policy`**, which records the
 decision and may allowlist the host / content-hash for this child so the same
 item isn't re-blocked. "Deny" confirms the block (and can tighten policy).
 
 ### Work to wire it end-to-end
-- **proto** (`aegis-proto`): add a `Review` service —
+- **proto** (`bulwark-proto`): add a `Review` service —
   `SubmitDecision(ReviewDecision{alert_id, decision: APPROVE|DENY, scope}) -> Ack`,
   `StreamPendingReviews(DeviceFilter) -> stream AlertEvent`, and
   `RegisterPushTarget(PushTarget{device_id, fcm_token})`.
-- **aegis-policy**: consume `ReviewDecision` → per-child allowlist (host/hash) +
+- **bulwark-policy**: consume `ReviewDecision` → per-child allowlist (host/hash) +
   audit (every override is logged, tamper-evident).
-- **aegis-alert**: add an FCM push channel alongside email; redaction unchanged.
+- **bulwark-alert**: add an FCM push channel alongside email; redaction unchanged.
 - **Android**: JNI exports for `nextAlert` / `submitReviewDecision` /
-  `registerParentPushToken` on `aegis-client` (the `android` feature), a
+  `registerParentPushToken` on `bulwark-client` (the `android` feature), a
   `FirebaseMessagingService`, and a Review screen listing pending items.
 
 ## Privacy invariant (unchanged)

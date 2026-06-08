@@ -1,4 +1,4 @@
-# Aegis — Build, Run & Setup Guide
+# Bulwark — Build, Run & Setup Guide
 
 > ⚠️ The tree is **not compile-verified yet**. Do the integration pass in
 > [`integration-todo.md`](integration-todo.md) alongside the first `cargo build`.
@@ -10,7 +10,7 @@
 |---|---|---|
 | **Rust stable** (≥ 1.79) + cargo | build everything | https://rustup.rs |
 | **Admin / elevation** | open the TUN device + install the per-install root CA into the trust store | Windows: run elevated (one UAC at setup) |
-| **ffmpeg** binary | `aegis-video` (only with `--features ffmpeg`) | Windows: `winget install Gyan.FFmpeg`; Linux: distro pkg |
+| **ffmpeg** binary | `bulwark-video` (only with `--features ffmpeg`) | Windows: `winget install Gyan.FFmpeg`; Linux: distro pkg |
 | **Postgres** | only for a **multi-node** cluster (single-node uses SQLite) | any 14+ |
 | **Model artifacts** | `onnx`/`classifier` features (NSFW image/audio, grooming text) | download + SHA-256 pin (see §6) |
 | `cargo-deny` | license/advisory gate | `cargo install cargo-deny` |
@@ -30,20 +30,20 @@ cargo deny check                                 # licenses + advisories + bans
 ```
 
 Likely first fixes (all catalogued in integration-todo): unify the per-crate `Analyzer`
-trait into `aegis-core`; confirm `tonic` generated server-trait associated-type names
+trait into `bulwark-core`; confirm `tonic` generated server-trait associated-type names
 (`AnalyzeStreamStream`, `WatchHealthStream`); confirm a few cross-crate constructors
-(`aegis_store::SqliteStore::open_in_memory`, `aegis_policy::AgeProfile::default`).
+(`bulwark_store::SqliteStore::open_in_memory`, `bulwark_policy::AgeProfile::default`).
 
 ## 3. Feature flags (all OFF by default)
 
 | Feature | Crate | Effect |
 |---|---|---|
-| `classifier` | `aegis-text` | small ONNX text classifier backs up the rule engine |
-| `onnx` | `aegis-vision`, `aegis-audio` | real model inference via `ort` (else fails open) |
-| `ffmpeg` | `aegis-video` | real decode/sample via ffmpeg-sidecar (else passes video) |
-| `tesseract` / `winocr` | `aegis-agent` | OCR backends (else stub source) |
-| `gossip` / `quorum` | `aegis-cluster` | multi-node SWIM (`foca`) / Postgres quorum |
-| `llm-explain` | `aegis-ui` | guardian-initiated "explain thread" endpoint (opt-in only) |
+| `classifier` | `bulwark-text` | small ONNX text classifier backs up the rule engine |
+| `onnx` | `bulwark-vision`, `bulwark-audio` | real model inference via `ort` (else fails open) |
+| `ffmpeg` | `bulwark-video` | real decode/sample via ffmpeg-sidecar (else passes video) |
+| `tesseract` / `winocr` | `bulwark-agent` | OCR backends (else stub source) |
+| `gossip` / `quorum` | `bulwark-cluster` | multi-node SWIM (`foca`) / Postgres quorum |
+| `llm-explain` | `bulwark-ui` | guardian-initiated "explain thread" endpoint (opt-in only) |
 
 A bare `cargo run` (no features) starts and wires the loop but the model analyzers
 **fail open** (allow) and video isn't decoded — useful for exercising the control flow,
@@ -55,13 +55,13 @@ Three processes (or fold client+server via `all-in-one`):
 
 ```bash
 # 1) Backend (all services in one process)
-AEGIS_BIND=127.0.0.1:8443  cargo run -p aegis-server -- --role all-in-one
+BULWARK_BIND=127.0.0.1:8443  cargo run -p bulwark-server -- --role all-in-one
 
 # 2) Interception loop (ELEVATED — opens TUN, installs the CA on first run)
-cargo run -p aegis-client
+cargo run -p bulwark-client
 
 # 3) Dashboard
-AEGIS_UI_BIND=127.0.0.1:8080  cargo run -p aegis-ui
+BULWARK_UI_BIND=127.0.0.1:8080  cargo run -p bulwark-ui
 # open http://127.0.0.1:8080  (/api/events, /api/coverage, /healthz)
 ```
 
@@ -69,25 +69,25 @@ Environment variables:
 
 | Var | Used by | Meaning |
 |---|---|---|
-| `AEGIS_ROLE` | server | `lb` \| `worker` \| `all-in-one` |
-| `AEGIS_BIND` | server | gRPC listen addr (default `127.0.0.1:8443`) |
-| `AEGIS_UI_BIND` | ui | dashboard listen addr (default `127.0.0.1:8080`) |
-| `AEGIS_CONFIG` | all | path to the TOML config (see §5) |
-| `AEGIS_LOG` / `RUST_LOG` | all | tracing filter (e.g. `info`, `aegis_net=debug`) |
-| `AEGIS_SMTP_USERNAME` / `AEGIS_SMTP_PASSWORD` | alert | SMTP creds (never put in the config file) |
+| `BULWARK_ROLE` | server | `lb` \| `worker` \| `all-in-one` |
+| `BULWARK_BIND` | server | gRPC listen addr (default `127.0.0.1:8443`) |
+| `BULWARK_UI_BIND` | ui | dashboard listen addr (default `127.0.0.1:8080`) |
+| `BULWARK_CONFIG` | all | path to the TOML config (see §5) |
+| `BULWARK_LOG` / `RUST_LOG` | all | tracing filter (e.g. `info`, `bulwark_net=debug`) |
+| `BULWARK_SMTP_USERNAME` / `BULWARK_SMTP_PASSWORD` | alert | SMTP creds (never put in the config file) |
 
 ## 5. Configuration
 
-`aegis-core::Config` loads **defaults → TOML file (`$AEGIS_CONFIG`) → `AEGIS_` env**
-(nested with `__`, e.g. `AEGIS_SMTP__HOST`). Example `aegis.toml`:
+`bulwark-core::Config` loads **defaults → TOML file (`$BULWARK_CONFIG`) → `BULWARK_` env**
+(nested with `__`, e.g. `BULWARK_SMTP__HOST`). Example `bulwark.toml`:
 
 ```toml
 [smtp]
 host = "smtp.example.com"
 port = 587
-from = "aegis@example.com"
+from = "bulwark@example.com"
 recipients = ["guardian@example.com"]
-# username/password come from AEGIS_SMTP_USERNAME / AEGIS_SMTP_PASSWORD only
+# username/password come from BULWARK_SMTP_USERNAME / BULWARK_SMTP_PASSWORD only
 
 [cluster]
 endpoint = "https://127.0.0.1:8443"
@@ -97,7 +97,7 @@ dir = "./models"
 # each model's SHA-256 is pinned in the checksum registry and verified on load
 
 [policy]
-# per-age-band thresholds live in aegis-policy's PolicyConfig (log/flag/block)
+# per-age-band thresholds live in bulwark-policy's PolicyConfig (log/flag/block)
 ```
 
 ## 6. Models (only for `onnx` / `classifier`)
@@ -111,7 +111,7 @@ Per [`research/model-research.md`](research/model-research.md):
 
 ## 7. Security setup (the per-install CA)
 
-On first `aegis-client` run (elevated), `aegis-net`:
+On first `bulwark-client` run (elevated), `bulwark-net`:
 1. **generates a unique per-install root CA** (`rcgen`) — never shared/baked-in;
 2. wraps the private key with the OS keystore (**DPAPI** on Windows; non-exportable);
 3. installs the public root into the **current-user Trusted Root** store (one UAC prompt).
@@ -131,8 +131,8 @@ that loses its lease stops accepting work). Every link is **mTLS** with per-node
 | Symptom | Cause | Fix |
 |---|---|---|
 | Some apps stop connecting | QUIC blocked (downgrade) or cert-pinned app rejecting the MITM cert | allowlist the app's QUIC, or accept it routes to the on-device OCR path; check the coverage matrix |
-| A messaging app shows nothing filtered | it's E2E/pinned — network can't read it | enable `aegis-agent` (OCR) for that app |
-| `aegis-video` passes everything | built without `--features ffmpeg`, or ffmpeg not on PATH | install ffmpeg + rebuild with the feature |
+| A messaging app shows nothing filtered | it's E2E/pinned — network can't read it | enable `bulwark-agent` (OCR) for that app |
+| `bulwark-video` passes everything | built without `--features ffmpeg`, or ffmpeg not on PATH | install ffmpeg + rebuild with the feature |
 | NSFW never triggers | built without `--features onnx` or no model artifact | add the model + SHA-256 pin + rebuild |
 
 ## Media Runtime Provisioning
@@ -152,11 +152,11 @@ launches and service starts:
   --model-sha256 "<sha256>"
 ```
 
-They write `nsfw_model.txt` and `ffmpeg_binary.txt` under the Aegis config dir
-(`%LOCALAPPDATA%\Aegis` on Windows, `${XDG_CONFIG_HOME:-$HOME/.config}/aegis` on
-Unix). The parent app reads those files and passes `AEGIS_NSFW_MODEL` and
+They write `nsfw_model.txt` and `ffmpeg_binary.txt` under the Bulwark config dir
+(`%LOCALAPPDATA%\Bulwark` on Windows, `${XDG_CONFIG_HOME:-$HOME/.config}/bulwark` on
+Unix). The parent app reads those files and passes `BULWARK_NSFW_MODEL` and
 `FFMPEG_BINARY` to the spawned filter. The filter crates also read those files
-directly, so direct `aegis_proxy` / `aegis_vpn` launches use the same model and
+directly, so direct `bulwark_proxy` / `bulwark_vpn` launches use the same model and
 ffmpeg paths when the env vars are absent.
 
 | Browser warns the CA isn't trusted | CA not installed / wrong store | re-run setup elevated; confirm install |
