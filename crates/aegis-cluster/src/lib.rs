@@ -94,9 +94,17 @@ impl ClusterConfig {
     }
 }
 
+/// Visibility timeout for dequeued-but-unacked work. A worker that dies after
+/// dequeue must not silently drop the item — its lease expires and it's requeued.
+const LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[derive(Default)]
 struct Queue {
     items: VecDeque<WorkItem>,
+    /// Dequeued, not-yet-acked work: `work_id -> (item, lease deadline)`. On the
+    /// next dequeue, leases past their deadline are requeued (attempts++). Cleared
+    /// by [`Cluster::complete`].
+    leased: HashMap<String, (WorkItem, std::time::Instant)>,
 }
 
 /// The cluster member: membership view + work queue + health, behind the
@@ -135,6 +143,14 @@ impl Cluster {
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 Some(v.saturating_sub(1))
             });
+    }
+
+    /// Acknowledge a completed work item: clear its lease so it isn't redelivered,
+    /// and decrement the in-flight counter. The real ack the dequeue lease pairs
+    /// with — a worker calls this after producing a Verdict.
+    pub async fn complete(&self, work_id: &str) {
+        self.queue.lock().await.leased.remove(work_id);
+        self.complete_inflight();
     }
 
     async fn queue_depth(&self) -> u32 {
@@ -249,6 +265,21 @@ impl ClusterMember for Cluster {
         loop {
             {
                 let mut q = self.queue.lock().await;
+                let now = std::time::Instant::now();
+                // Requeue any lease past its deadline (a worker died after dequeue);
+                // attempts++ records the redelivery.
+                let expired: Vec<String> = q
+                    .leased
+                    .iter()
+                    .filter(|(_, (_, dl))| *dl <= now)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in expired {
+                    if let Some((mut item, _)) = q.leased.remove(&id) {
+                        item.attempts += 1;
+                        q.items.push_front(item);
+                    }
+                }
                 if !q.items.is_empty() {
                     let n = req.max_items.max(1) as usize;
                     let mut items = Vec::with_capacity(n.min(q.items.len()));
@@ -256,6 +287,9 @@ impl ClusterMember for Cluster {
                         match q.items.pop_front() {
                             Some(i) => {
                                 self.inflight.fetch_add(1, Ordering::Relaxed);
+                                // Lease it so it's redelivered if not acked in time.
+                                q.leased
+                                    .insert(i.work_id.clone(), (i.clone(), now + LEASE_TTL));
                                 items.push(i);
                             }
                             None => break,
@@ -384,6 +418,69 @@ mod tests {
             .unwrap();
         assert_eq!(d.items.len(), 1);
         assert_eq!(c.inflight.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn expired_lease_is_requeued() {
+        let c = Cluster::new(ClusterConfig::default());
+        c.enqueue(EnqueueRequest {
+            item: Some(work("w1")),
+        })
+        .await
+        .unwrap();
+        let d = c
+            .dequeue(DequeueRequest {
+                node_id: "w".into(),
+                max_items: 1,
+                provides: vec![],
+                wait_ms: 50,
+            })
+            .await
+            .unwrap();
+        assert_eq!(d.items.len(), 1);
+        let id = d.items[0].work_id.clone();
+        // Force the lease to expire (worker "died"), then dequeue again.
+        {
+            let mut q = c.queue.lock().await;
+            if let Some(e) = q.leased.get_mut(&id) {
+                e.1 = std::time::Instant::now() - std::time::Duration::from_secs(1);
+            }
+        }
+        let d2 = c
+            .dequeue(DequeueRequest {
+                node_id: "w".into(),
+                max_items: 1,
+                provides: vec![],
+                wait_ms: 50,
+            })
+            .await
+            .unwrap();
+        assert_eq!(d2.items.len(), 1, "expired lease must be requeued");
+        assert_eq!(d2.items[0].attempts, 1, "redelivery increments attempts");
+    }
+
+    #[tokio::test]
+    async fn complete_clears_lease() {
+        let c = Cluster::new(ClusterConfig::default());
+        c.enqueue(EnqueueRequest {
+            item: Some(work("w2")),
+        })
+        .await
+        .unwrap();
+        let d = c
+            .dequeue(DequeueRequest {
+                node_id: "w".into(),
+                max_items: 1,
+                provides: vec![],
+                wait_ms: 50,
+            })
+            .await
+            .unwrap();
+        c.complete(&d.items[0].work_id).await;
+        assert!(
+            c.queue.lock().await.leased.is_empty(),
+            "ack must clear the lease"
+        );
     }
 
     #[tokio::test]
