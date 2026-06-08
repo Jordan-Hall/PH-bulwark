@@ -132,6 +132,10 @@ pub struct CapturedFlow {
     /// from `body` (a mere peek) because the NSFW scorer must decode the full
     /// image. In-memory only, never logged or persisted (threat-model Asset 3).
     pub image_body: Option<Vec<u8>>,
+    /// The WHOLE decrypted body when this response carries an HLS/DASH/progressive
+    /// VIDEO SEGMENT (`video/*`) under [`VIDEO_SEGMENT_CAP`] — the video analyzer
+    /// decodes it (frames + audio) and the decision may swap in a remediated segment.
+    pub video_body: Option<Vec<u8>>,
 }
 
 /// Receiver end of the flow channel given to `bulwark-flow` via the interceptor.
@@ -415,6 +419,7 @@ impl FlowHandler {
         is_response: bool,
         content_type: Option<String>,
         image_body: Option<Vec<u8>>,
+        video_body: Option<Vec<u8>>,
     ) -> u64 {
         let flow_id = self
             .next_flow_id
@@ -430,6 +435,7 @@ impl FlowHandler {
             is_response,
             content_type,
             image_body,
+            video_body,
         };
         if self.flow_tx.try_send(flow).is_err() {
             // Bounded channel full → shed (fail-safe on memory). Log metadata only.
@@ -483,6 +489,7 @@ impl HttpHandler for FlowHandler {
             false,
             content_type_of(&parts.headers),
             None, // request bodies are not image-scored (the response carries the image)
+            None, // nor video-segment-scored on the request leg
         );
 
         // Request leg is emit-only (forward the full body unchanged). Blocking a
@@ -505,13 +512,20 @@ impl HttpHandler for FlowHandler {
         // Tiny/oversized images and every non-image body return `None` here.
         let image_body = image_body_for(content_type.as_deref(), &full);
 
-        // Only SCORABLE IMAGE responses are decision-gated. Whether to gate is
-        // decided BEFORE `emit` moves `image_body` up the channel.
-        let is_scorable_image = image_body.is_some();
+        // Scorable images AND HLS/DASH/progressive video segments are decision-gated:
+        // the video analyzer can blur/mute the segment and the decision swaps in the
+        // cleaned bytes. Decided BEFORE `emit` moves the bodies up the channel.
+        let video_body = video_segment_body_for(content_type.as_deref(), &full);
+        let is_gatable = image_body.is_some() || video_body.is_some();
+        let source = if video_body.is_some() {
+            FlowSource::VideoStream
+        } else {
+            FlowSource::Web
+        };
 
         // Emit the response flow for classification.
         let flow_id = self.emit(
-            FlowSource::Web,
+            source,
             "", // host is request-side; response carries none
             "", // no method on a response
             &format!("status:{status}"),
@@ -519,6 +533,7 @@ impl HttpHandler for FlowHandler {
             true,
             content_type,
             image_body,
+            video_body,
         );
 
         // Forward IMMEDIATELY (no gate registration, no wait) when EITHER:
@@ -527,7 +542,7 @@ impl HttpHandler for FlowHandler {
         //   * this is not a scorable image (html/js/css/json/text/icons/etc.).
         // This is what removes the per-resource latency that was killing page
         // loads — only the actual still images a guardian cares about are gated.
-        if !self.gate.is_armed() || !is_scorable_image {
+        if !self.gate.is_armed() || !is_gatable {
             return Response::from_parts(parts, Body::from(full));
         }
 
@@ -660,6 +675,26 @@ fn image_body_for(content_type: Option<&str>, full: &[u8]) -> Option<Vec<u8>> {
     Some(full.to_vec())
 }
 
+/// HLS/DASH/progressive video segments up to this size are surfaced WHOLE for the
+/// video analyzer (decode → blur/mute). Segments are short chunks; a larger body is
+/// a full progressive download we skip (plaintext-channel budget protection).
+const VIDEO_SEGMENT_CAP: usize = 16 * 1024 * 1024;
+
+/// `Some(whole body)` when the response is an HLS/DASH/progressive **video segment**
+/// (`video/*` — mp2t/.ts, mp4/.m4s, iso.segment) within [`VIDEO_SEGMENT_CAP`]; else
+/// `None` (forwards ungated). Playlists/manifests (`application/vnd.apple.mpegurl`,
+/// `application/dash+xml`) are not `video/*`, so they pass through here untouched.
+fn video_segment_body_for(content_type: Option<&str>, full: &[u8]) -> Option<Vec<u8>> {
+    let ct = content_type?;
+    if !ct.starts_with("video/") {
+        return None;
+    }
+    if full.is_empty() || full.len() > VIDEO_SEGMENT_CAP {
+        return None;
+    }
+    Some(full.to_vec())
+}
+
 /// The response served when policy says **Drop**: a minimal blocked-content
 /// 403 with no upstream body (never leak the original bytes downstream).
 fn blocked_response() -> Response<Body> {
@@ -726,6 +761,7 @@ mod tests {
             b"<html/>".to_vec(),
             true,
             Some("text/html".to_owned()),
+            None,
             None,
         );
         assert_eq!(id, 1);
@@ -816,6 +852,23 @@ mod tests {
         );
         let at_cap = vec![0u8; IMAGE_BODY_CAP];
         assert!(image_body_for(Some("image/jpeg"), &at_cap).is_some());
+    }
+
+    #[test]
+    fn video_segments_surfaced_for_remediation_but_not_manifests() {
+        let seg = vec![0u8; 64 * 1024];
+        // HLS .ts (mp2t) and DASH/fMP4 segments are surfaced whole for the analyzer.
+        assert!(video_segment_body_for(Some("video/mp2t"), &seg).is_some());
+        assert!(video_segment_body_for(Some("video/mp4"), &seg).is_some());
+        // Playlists/manifests are NOT video/* → pass through ungated.
+        assert!(video_segment_body_for(Some("application/vnd.apple.mpegurl"), &seg).is_none());
+        assert!(video_segment_body_for(Some("application/dash+xml"), &seg).is_none());
+        assert!(video_segment_body_for(Some("text/html"), &seg).is_none());
+        assert!(video_segment_body_for(None, &seg).is_none());
+        // Empty / oversized are skipped.
+        assert!(video_segment_body_for(Some("video/mp2t"), &[]).is_none());
+        let huge = vec![0u8; VIDEO_SEGMENT_CAP + 1];
+        assert!(video_segment_body_for(Some("video/mp4"), &huge).is_none());
     }
 
     #[tokio::test]
