@@ -7,18 +7,15 @@ license.workspace = true
 [dependencies]
 bulwark-proto = { path = "../bulwark-proto" }
 bulwark-core = { path = "../bulwark-core" }
+# Audio is judged by TRANSCRIBING speech and running the transcript through the
+# proven grooming/adult-text engine (lighter than a dedicated audio-NSFW model).
+bulwark-text = { path = "../bulwark-text" }
 async-trait.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-anyhow.workspace = true
-thiserror.workspace = true
 ring.workspace = true
-
-# Small explicit-audio classifier = a custom head on a YAMNet/PANNs backbone
-# (must be trained — see model-research.md). Runs via `ort` behind `onnx`;
-# default build is a deterministic stub that fails open.
-ort = { workspace = true, optional = true }
 
 [features]
 default = []
-onnx = ["dep:ort"]
+# `whisper` (next): on-device STT via whisper.cpp (whisper-rs) supplying a real
+# Transcriber. Until injected, the analyzer fail-CLOSES (no false "safe").
