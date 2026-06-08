@@ -165,7 +165,8 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
                 category: Category::Unspecified as i32,
                 action: Action::Allow as i32, // policy is the authority and fail-closes
                 severity: Severity::Info as i32,
-                rationale: "video not decoded (ffmpeg feature off / unsupported); not scored".into(),
+                rationale: "video not decoded (ffmpeg feature off / unsupported); not scored"
+                    .into(),
                 ..Default::default()
             });
         }
