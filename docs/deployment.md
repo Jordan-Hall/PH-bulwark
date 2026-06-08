@@ -146,7 +146,7 @@ child device                              home cluster                guardian
 - **Desktop:** the linchpin is **account separation** — child = Standard non-admin
   user, guardian holds admin. Run `aegis_proxy`/`aegis_vpn`; install as a locked
   service: `deploy/windows/install-aegis-service.ps1` (SCM, DACL-locked) /
-  `deploy/macos/co.libertyware.aegis.proxy.plist` / `deploy/linux/aegis-proxy.service`.
+  `deploy/macos/co.predatorhunters.aegis.proxy.plist` / `deploy/linux/aegis-proxy.service`.
   One-time CA trust (no admin): `certutil -addstore -user Root "<…\Aegis\aegis-root-ca.pem>"`.
 - **iOS:** no app-enforced prevention — Screen Time (consumer) or MDM/Supervision;
   contributes the tamper heartbeat for detection.

@@ -223,6 +223,7 @@ dependencies = [
  "aegis-proto",
  "aegis-text",
  "aegis-video",
+ "aegis-vision",
  "anyhow",
  "async-trait",
  "futures-core",

@@ -76,14 +76,14 @@ jobs:
             sleep 5
             # 1) Install must succeed (proves the APK + native ABIs are valid for Android).
             adb install -r platform/android/app/build/outputs/apk/debug/app-debug.apk
-            adb shell pm list packages 2>/dev/null | tr -d "\r" | grep -q "package:co.libertyware.aegis" \
+            adb shell pm list packages 2>/dev/null | tr -d "\r" | grep -q "package:co.predatorhunters.aegis" \
               || { echo "::error::APK did not install"; exit 1; }
             echo "✓ APK installed on Android $(adb shell getprop ro.build.version.release | tr -d '\r')"
             # 2) Best-effort launch, then assert NO native crash (the key signal:
             #    libaegis_client.so loads + no uncaught exception). Launch timing /
             #    activity lifecycle are NOT asserted (they flake on a headless emulator).
             adb logcat -c || true
-            adb shell monkey -p co.libertyware.aegis -c android.intent.category.LAUNCHER 1 || true
+            adb shell monkey -p co.predatorhunters.aegis -c android.intent.category.LAUNCHER 1 || true
             sleep 8
             echo "=== app logcat ==="
             adb logcat -d 2>/dev/null | grep -iE "aegis|libaegis|RustBridge" | tail -20 || true

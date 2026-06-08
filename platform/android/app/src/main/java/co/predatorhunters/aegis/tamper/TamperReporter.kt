@@ -1,8 +1,8 @@
-package co.libertyware.aegis.tamper
+package co.predatorhunters.aegis.tamper
 
 import android.content.Context
-import co.libertyware.aegis.core.RustBridge
-import co.libertyware.aegis.notify.AlertNotifier
+import co.predatorhunters.aegis.core.RustBridge
+import co.predatorhunters.aegis.notify.AlertNotifier
 import org.json.JSONObject
 
 /**

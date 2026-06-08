@@ -1,12 +1,12 @@
-package co.libertyware.aegis.admin
+package co.predatorhunters.aegis.admin
 
 import android.app.admin.DeviceAdminReceiver
 import android.app.admin.DevicePolicyManager
 import android.content.Context
 import android.content.Intent
 import android.util.Log
-import co.libertyware.aegis.MainActivity
-import co.libertyware.aegis.tamper.TamperReporter
+import co.predatorhunters.aegis.MainActivity
+import co.predatorhunters.aegis.tamper.TamperReporter
 
 /**
  * Device-admin receiver (the WEAK tamper-resistance tier — works without a factory

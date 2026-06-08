@@ -46,7 +46,7 @@ Carries **no content** — only *which* protection changed.
 Three tiers, weakest → strongest. All are visible/consented on the managed device.
 
 ### 2. Device Admin + uninstall-guard (no factory reset needed — weakest)
-- **`AegisDeviceAdminReceiver`** (`co.libertyware.aegis.admin`): while it is an
+- **`AegisDeviceAdminReceiver`** (`co.predatorhunters.aegis.admin`): while it is an
   active device admin, Android won't uninstall the app until admin is first
   *deactivated* in Settings. Deactivation fires `onDisabled` →
   `TamperReporter.report(DEVICE_ADMIN_REMOVED)` so the guardian is told.
@@ -64,7 +64,7 @@ Three tiers, weakest → strongest. All are visible/consented on the managed dev
 
 ### 4. Device Owner (DPC) — the only *robust* tier
 Provisioned on a **factory-reset** device via QR / NFC / zero-touch, or in dev with
-`adb shell dpm set-device-owner co.libertyware.aegis/.admin.AegisDeviceAdminReceiver`.
+`adb shell dpm set-device-owner co.predatorhunters.aegis/.admin.AegisDeviceAdminReceiver`.
 `AegisDeviceAdminReceiver` handles `onProfileProvisioningComplete` (QR/NFC/zero-touch)
 and `DEVICE_OWNER_CHANGED` (the dev `dpm` path): both call `Lockdown.enforce`, record
 enrollment (`Enrollment`, reading `family_id`/`child_id`/`cluster_endpoint` from the
@@ -100,7 +100,7 @@ and the guardian holds the admin password. Then:
     `CreateProcessAsUserW` (isolated Win32 in `aegis-net`), or host the in-process
     transparent VPN once its data path lands. `install-aegis-autostart.ps1` remains
     the no-service logon-task fallback.
-  - **macOS** — `deploy/macos/co.libertyware.aegis.proxy.plist` (a LaunchDaemon for
+  - **macOS** — `deploy/macos/co.predatorhunters.aegis.proxy.plist` (a LaunchDaemon for
     root-owned auto-start; a LaunchAgent variant for per-user). A managed Mac can
     additionally pin a Network/System Extension via MDM so it can't be removed
     without the management profile.

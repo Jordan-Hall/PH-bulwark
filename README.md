@@ -4,7 +4,7 @@
 > simply "PH Bulwark"** (the on-device shield); the **guardian/parent console is
 > "PH Bulwark Manager"**. `aegis` / `aegis-*` is the internal engineering
 > codename used throughout the crates, binaries (`aegis_proxy`/`aegis_vpn`/
-> `aegis_svc`), `AEGIS_*` env vars, and the `co.libertyware.aegis` package — that
+> `aegis_svc`), `AEGIS_*` env vars, and the `co.predatorhunters.aegis` package — that
 > stays as-is (a codename ≠ the marketing name).
 
 Free / open-source, Rust **client/server** child-safety system. It blocks

@@ -5,10 +5,10 @@
   Install (guardian, with sudo) so it runs at boot as root and a Standard child
   user cannot stop or remove it:
 
-    sudo cp co.libertyware.aegis.proxy.plist /Library/LaunchDaemons/
-    sudo chown root:wheel /Library/LaunchDaemons/co.libertyware.aegis.proxy.plist
-    sudo chmod 644       /Library/LaunchDaemons/co.libertyware.aegis.proxy.plist
-    sudo launchctl bootstrap system /Library/LaunchDaemons/co.libertyware.aegis.proxy.plist
+    sudo cp co.predatorhunters.aegis.proxy.plist /Library/LaunchDaemons/
+    sudo chown root:wheel /Library/LaunchDaemons/co.predatorhunters.aegis.proxy.plist
+    sudo chmod 644       /Library/LaunchDaemons/co.predatorhunters.aegis.proxy.plist
+    sudo launchctl bootstrap system /Library/LaunchDaemons/co.predatorhunters.aegis.proxy.plist
 
   THE MODEL (docs/design/tamper-protection.md §5): the child is a *Standard* (non-
   admin) account; the guardian holds the admin password. A LaunchDaemon in
@@ -23,7 +23,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>co.libertyware.aegis.proxy</string>
+    <string>co.predatorhunters.aegis.proxy</string>
 
     <key>ProgramArguments</key>
     <array>

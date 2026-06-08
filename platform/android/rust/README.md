@@ -1,6 +1,6 @@
 # `platform/android/rust` — the Android JNI bridge
 
-This directory holds the Rust side of `co.libertyware.aegis.core.RustBridge`.
+This directory holds the Rust side of `co.predatorhunters.aegis.core.RustBridge`.
 
 ## What's here
 
@@ -9,7 +9,7 @@ platform/android/rust/
 ├── README.md            ← this file
 └── aegis-android/       ← the JNI bridge crate
     ├── Cargo.toml       ← cdylib, detached [workspace], path-deps on the analyzers
-    └── src/lib.rs       ← Java_co_libertyware_aegis_core_RustBridge_* exports
+    └── src/lib.rs       ← Java_co_predatorhunters_aegis_core_RustBridge_* exports
 ```
 
 `aegis-android` is a **detached** cargo crate (its own empty `[workspace]` table,
@@ -38,16 +38,16 @@ content-free verdict. It implements **no** device-control / surveillance surface
 ## Exported JNI symbols (the `RustBridge.kt` contract)
 
 Symbol convention: `Java_<package '.'→'_'>_<Class>_<method>`, here
-`Java_co_libertyware_aegis_core_RustBridge_<method>`.
+`Java_co_predatorhunters_aegis_core_RustBridge_<method>`.
 
 | Kotlin `external fun`                                                   | JNI symbol |
 |------------------------------------------------------------------------|------------|
-| `startVpn(tunFd: Int, configJson: String): Long`                       | `Java_co_libertyware_aegis_core_RustBridge_startVpn` |
-| `stopVpn(handle: Long)`                                                 | `Java_co_libertyware_aegis_core_RustBridge_stopVpn` |
-| `analyzeText(app: String, threadId: String, text: String): String`     | `Java_co_libertyware_aegis_core_RustBridge_analyzeText` |
-| `nextAlert(): String?`                                                  | `Java_co_libertyware_aegis_core_RustBridge_nextAlert` |
-| `submitReviewDecision(alertId: String, approve: Boolean)`              | `Java_co_libertyware_aegis_core_RustBridge_submitReviewDecision` |
-| `registerParentPushToken(token: String)`                               | `Java_co_libertyware_aegis_core_RustBridge_registerParentPushToken` |
+| `startVpn(tunFd: Int, configJson: String): Long`                       | `Java_co_predatorhunters_aegis_core_RustBridge_startVpn` |
+| `stopVpn(handle: Long)`                                                 | `Java_co_predatorhunters_aegis_core_RustBridge_stopVpn` |
+| `analyzeText(app: String, threadId: String, text: String): String`     | `Java_co_predatorhunters_aegis_core_RustBridge_analyzeText` |
+| `nextAlert(): String?`                                                  | `Java_co_predatorhunters_aegis_core_RustBridge_nextAlert` |
+| `submitReviewDecision(alertId: String, approve: Boolean)`              | `Java_co_predatorhunters_aegis_core_RustBridge_submitReviewDecision` |
+| `registerParentPushToken(token: String)`                               | `Java_co_predatorhunters_aegis_core_RustBridge_registerParentPushToken` |
 
 `analyzeText` is the fully-implemented path: it runs `TextAnalyzer::analyze_span`
 + `Policy::evaluate` and returns a content-free `Verdict` JSON, e.g.

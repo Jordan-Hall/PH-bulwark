@@ -7,11 +7,11 @@ plugins {
 }
 
 android {
-    namespace = "co.libertyware.aegis"
+    namespace = "co.predatorhunters.aegis"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "co.libertyware.aegis"
+        applicationId = "co.predatorhunters.aegis"
         minSdk = 26          // modern VpnService + foreground-service APIs
         targetSdk = 34
         versionCode = 1

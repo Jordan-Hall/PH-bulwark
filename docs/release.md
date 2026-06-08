@@ -11,7 +11,7 @@ channels first.
 
 ## 1. Channels by platform
 
-### Android — `co.libertyware.aegis`
+### Android — `co.predatorhunters.aegis`
 | Channel | Use | Notes |
 |---|---|---|
 | **Direct APK** | testers now | Built by CI; signed with the release key. Easiest for a testing cohort. |

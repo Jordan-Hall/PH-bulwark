@@ -6,7 +6,7 @@ reset, safe-boot, and pin an always-on VPN — and the app cannot be removed wit
 `dpm remove-active-admin` or a factory reset. Device Owner can only be established
 on a **factory-reset device with no accounts**, openly, at setup — never covertly.
 
-Component: `co.libertyware.aegis/.admin.AegisDeviceAdminReceiver`
+Component: `co.predatorhunters.aegis/.admin.AegisDeviceAdminReceiver`
 
 On completion the receiver's `onProfileProvisioningComplete` (QR/NFC/zero-touch) or
 `DEVICE_OWNER_CHANGED` (dev `dpm`) handler calls `Lockdown.enforce` + records
@@ -19,7 +19,7 @@ account, no secondary users/profiles), Aegis installed.
 
 ```sh
 adb install -r app/build/outputs/apk/debug/app-debug.apk
-adb shell dpm set-device-owner co.libertyware.aegis/.admin.AegisDeviceAdminReceiver
+adb shell dpm set-device-owner co.predatorhunters.aegis/.admin.AegisDeviceAdminReceiver
 # verify:
 adb shell dumpsys device_policy | grep -i "Device Owner"
 ```
@@ -31,7 +31,7 @@ Notes:
   `DEVICE_OWNER_CHANGED`, which our receiver also handles, so lockdown still
   auto-applies and enrollment is recorded.
 - Tear-down (debuggable builds): guardian un-enroll should call `Lockdown.release`
-  first; then `adb shell dpm remove-active-admin co.libertyware.aegis/.admin.AegisDeviceAdminReceiver`.
+  first; then `adb shell dpm remove-active-admin co.predatorhunters.aegis/.admin.AegisDeviceAdminReceiver`.
 
 ## B. QR-code provisioning (self-serve, from factory reset)
 
@@ -44,8 +44,8 @@ The QR encodes this minified JSON:
 
 ```json
 {
-  "android.app.extra.PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME": "co.libertyware.aegis/.admin.AegisDeviceAdminReceiver",
-  "android.app.extra.PROVISIONING_DEVICE_ADMIN_PACKAGE_DOWNLOAD_LOCATION": "https://dl.libertyware.co.uk/aegis/aegis-child-release.apk",
+  "android.app.extra.PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME": "co.predatorhunters.aegis/.admin.AegisDeviceAdminReceiver",
+  "android.app.extra.PROVISIONING_DEVICE_ADMIN_PACKAGE_DOWNLOAD_LOCATION": "https://dl.predatorhunters.co.uk/aegis/aegis-child-release.apk",
   "android.app.extra.PROVISIONING_DEVICE_ADMIN_SIGNATURE_CHECKSUM": "<URL-SAFE-BASE64-OF-SIGNING-CERT-SHA256>",
   "android.app.extra.PROVISIONING_SKIP_ENCRYPTION": false,
   "android.app.extra.PROVISIONING_LEAVE_ALL_SYSTEM_APPS_ENABLED": true,
@@ -55,15 +55,15 @@ The QR encodes this minified JSON:
   "android.app.extra.PROVISIONING_LOCALE": "en_GB",
   "android.app.extra.PROVISIONING_TIME_ZONE": "Europe/London",
   "android.app.extra.PROVISIONING_ADMIN_EXTRAS_BUNDLE": {
-    "co.libertyware.aegis.family_id": "fam_xxx",
-    "co.libertyware.aegis.child_id": "child_xxx",
-    "co.libertyware.aegis.cluster_endpoint": "https://cluster.libertyware.co.uk:8443"
+    "co.predatorhunters.aegis.family_id": "fam_xxx",
+    "co.predatorhunters.aegis.child_id": "child_xxx",
+    "co.predatorhunters.aegis.cluster_endpoint": "https://cluster.predatorhunters.co.uk:8443"
   }
 }
 ```
 
 Key points:
-- **Component name** must be exactly `co.libertyware.aegis/.admin.AegisDeviceAdminReceiver`.
+- **Component name** must be exactly `co.predatorhunters.aegis/.admin.AegisDeviceAdminReceiver`.
 - **Signature checksum** is the **URL-safe, no-padding Base64 of the signing
   certificate SHA-256** (preferred over the full-APK checksum — it survives APK
   rebuilds as long as the signing key is stable). Compute it from the **release**

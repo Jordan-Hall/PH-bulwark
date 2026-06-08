@@ -37,7 +37,7 @@ private enum AegisAction: Int32 {
 final class FilterDataProvider: NEFilterDataProvider {
 
     /// Non-sensitive diagnostics only (counts/categories — never content).
-    private let log = Logger(subsystem: "co.uk.libertyware.aegis.filter", category: "provider")
+    private let log = Logger(subsystem: "co.uk.predatorhunters.aegis.filter", category: "provider")
 
     /// Opaque handle to the Rust engine (deterministic analyzer + policy).
     /// Created once when the filter starts; freed when it stops.
