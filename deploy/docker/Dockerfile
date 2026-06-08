@@ -17,6 +17,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         curl ca-certificates build-essential pkg-config libssl-dev cmake \
+        clang libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 # Pinned-channel stable Rust via rustup (matches the workspace rust-toolchain).
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -33,8 +34,8 @@ RUN if [ -n "$FEATURES" ]; then \
     && mkdir -p /out/lib \
     && cp target/release/bulwark-server target/release/bulwark_admin /out/ \
     && find target/release -name 'libonnxruntime.so*' -type f -exec cp {} /out/lib/ \; \
-    && curl -fsSL https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en-q5_1.bin \
-         -o /out/ggml-tiny.en-q5_1.bin || touch /out/ggml-tiny.en-q5_1.bin \
+    && { curl -fsSL https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en-q5_1.bin \
+           -o /out/ggml-tiny.en-q5_1.bin || touch /out/ggml-tiny.en-q5_1.bin; } \
     && ls -l /out /out/lib
 
 # ---- runtime ------------------------------------------------------------------
