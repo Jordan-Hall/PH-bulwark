@@ -643,7 +643,10 @@ mod tests {
         let p = Policy::default();
         let d = p.evaluate(&verdict(Category::Unspecified, 0.0), &ctx(AgeProfile::Teen));
         assert_eq!(d.action, Action::Block, "uncovered media must fail closed");
-        assert!(d.raise_alert.is_some(), "coverage gap must alert the guardian");
+        assert!(
+            d.raise_alert.is_some(),
+            "coverage gap must alert the guardian"
+        );
     }
 
     // ---- CSAM critical path ---------------------------------------------
