@@ -9,6 +9,8 @@
 
 use std::net::{SocketAddr, ToSocketAddrs};
 
+use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
+use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{
     IpAddress, IpProtocol, IpVersion, Ipv4Packet, Ipv6Packet, TcpPacket, UdpPacket,
 };
@@ -271,6 +273,78 @@ where
         .map_err(|e| NetError::tun(format!("VPN bridge: splice: {e}")))
 }
 
+// ---- smoltcp Device over the TUN (the foundation the netstack polls through) ----
+
+/// A `smoltcp` phy device over a [`TunDevice`]. The poll loop stages one inbound
+/// packet (read from the blocking TUN) before each `poll`; `receive` hands it to
+/// smoltcp once. Outbound frames smoltcp produces are written straight to the TUN.
+struct TunPhy<'d> {
+    tun: &'d dyn TunDevice,
+    mtu: usize,
+    inbound: Option<Vec<u8>>,
+}
+
+impl<'d> TunPhy<'d> {
+    fn new(tun: &'d dyn TunDevice, mtu: usize) -> Self {
+        Self {
+            tun,
+            mtu,
+            inbound: None,
+        }
+    }
+
+    /// Stage the next inbound packet for the upcoming `poll`.
+    fn stage(&mut self, packet: Vec<u8>) {
+        self.inbound = Some(packet);
+    }
+}
+
+impl Device for TunPhy<'_> {
+    type RxToken<'a>
+        = TunRxToken
+    where
+        Self: 'a;
+    type TxToken<'a>
+        = TunTxToken<'a>
+    where
+        Self: 'a;
+
+    fn receive(&mut self, _ts: SmolInstant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        let pkt = self.inbound.take()?;
+        Some((TunRxToken(pkt), TunTxToken { tun: self.tun }))
+    }
+
+    fn transmit(&mut self, _ts: SmolInstant) -> Option<Self::TxToken<'_>> {
+        Some(TunTxToken { tun: self.tun })
+    }
+
+    fn capabilities(&self) -> DeviceCapabilities {
+        let mut caps = DeviceCapabilities::default();
+        caps.medium = Medium::Ip;
+        caps.max_transmission_unit = self.mtu;
+        caps
+    }
+}
+
+struct TunRxToken(Vec<u8>);
+impl RxToken for TunRxToken {
+    fn consume<R, F: FnOnce(&[u8]) -> R>(self, f: F) -> R {
+        f(&self.0)
+    }
+}
+
+struct TunTxToken<'d> {
+    tun: &'d dyn TunDevice,
+}
+impl TxToken for TunTxToken<'_> {
+    fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, len: usize, f: F) -> R {
+        let mut buf = vec![0u8; len];
+        let r = f(&mut buf);
+        let _ = self.tun.send(&buf);
+        r
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,5 +532,45 @@ mod tests {
         drop(client_ext);
         drop(proxy_ext);
         let _ = spliced.await;
+    }
+
+    struct FakeTun {
+        sent: std::sync::Mutex<Vec<Vec<u8>>>,
+    }
+    impl crate::tun::TunDevice for FakeTun {
+        fn up(&mut self, _c: &crate::tun::TunConfig) -> crate::Result<()> {
+            Ok(())
+        }
+        fn recv(&self, _b: &mut [u8]) -> crate::Result<usize> {
+            Ok(0)
+        }
+        fn send(&self, p: &[u8]) -> crate::Result<usize> {
+            self.sent.lock().unwrap().push(p.to_vec());
+            Ok(p.len())
+        }
+        fn close(&mut self) -> crate::Result<()> {
+            Ok(())
+        }
+        fn backend(&self) -> &'static str {
+            "fake"
+        }
+    }
+
+    #[test]
+    fn tun_phy_receives_staged_and_transmits_to_tun() {
+        let fake = FakeTun {
+            sent: std::sync::Mutex::new(Vec::new()),
+        };
+        let mut phy = TunPhy::new(&fake, 1500);
+        phy.stage(vec![1, 2, 3, 4]);
+        let (rx, _tx) =
+            Device::receive(&mut phy, SmolInstant::from_millis(0)).expect("staged packet");
+        rx.consume(|b| assert_eq!(b, &[1, 2, 3, 4]));
+        // Nothing staged now → receive returns None (smoltcp drains until empty).
+        assert!(Device::receive(&mut phy, SmolInstant::from_millis(0)).is_none());
+        // Transmit writes the frame straight to the TUN.
+        let tx = Device::transmit(&mut phy, SmolInstant::from_millis(0)).expect("tx token");
+        tx.consume(3, |buf| buf.copy_from_slice(&[9, 8, 7]));
+        assert_eq!(fake.sent.lock().unwrap()[0], vec![9, 8, 7]);
     }
 }
