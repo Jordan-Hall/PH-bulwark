@@ -563,7 +563,11 @@ pub mod ffmpeg {
             static COUNTER: AtomicU64 = AtomicU64::new(0);
             let n = COUNTER.fetch_add(1, Ordering::Relaxed);
             let mut path = std::env::temp_dir();
-            path.push(format!("bulwark-video-out-{}-{}.{ext}", std::process::id(), n));
+            path.push(format!(
+                "bulwark-video-out-{}-{}.{ext}",
+                std::process::id(),
+                n
+            ));
             Self { path }
         }
         fn path(&self) -> &Path {
