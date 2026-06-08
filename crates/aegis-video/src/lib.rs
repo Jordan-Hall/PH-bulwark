@@ -157,14 +157,15 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
         let decoded = self.demux.sample(&segment, self.cfg.sample_fps);
 
         if !decoded.decoded {
-            // Couldn't decode (no ffmpeg / unsupported) → fail open + LOG so the
-            // coverage dashboard shows the gap rather than silently blocking.
+            // Couldn't decode (no ffmpeg / unsupported) → Unspecified ("couldn't
+            // score") so policy fail-CLOSES on the coverage gap instead of allowing
+            // an unscored video as Safe.
             return Ok(Verdict {
                 request_id: req.request_id,
-                category: Category::Safe as i32,
-                action: Action::Allow as i32,
+                category: Category::Unspecified as i32,
+                action: Action::Allow as i32, // policy is the authority and fail-closes
                 severity: Severity::Info as i32,
-                rationale: "video not decoded (ffmpeg feature off / unsupported)".into(),
+                rationale: "video not decoded (ffmpeg feature off / unsupported); not scored".into(),
                 ..Default::default()
             });
         }
@@ -460,8 +461,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn undecoded_segment_fails_open() {
-        let a = VideoAnalyzer::new(); // NullDemuxer → decoded=false
+    async fn undecoded_segment_fails_closed() {
+        // NullDemuxer → decoded=false → can't score → Unspecified (policy fail-closes),
+        // not a false Safe for a video we never decoded.
+        let a = VideoAnalyzer::new();
         let req = AnalysisRequest {
             request_id: "v".into(),
             media_kind: MediaKind::Video as i32,
@@ -472,7 +475,7 @@ mod tests {
             ..Default::default()
         };
         let v = a.analyze(req).await.unwrap();
-        assert_eq!(v.action, Action::Allow as i32);
+        assert_eq!(v.category, Category::Unspecified as i32);
     }
 
     #[tokio::test]
