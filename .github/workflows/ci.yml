@@ -75,6 +75,9 @@ jobs:
       # proven — it pulls whisper.cpp (C++), which can't build on the Windows dev box.
       - run: cargo build -p bulwark-server --features whisper
         continue-on-error: true
+      # The deploy also ships `ffmpeg` (real video decode + blur/mute remediation).
+      # ffmpeg-sidecar is pure Rust (shells out at runtime), so this build is blocking.
+      - run: cargo build -p bulwark-server --features ffmpeg
 
   windows-build:
     name: windows-gated crates (windows)
