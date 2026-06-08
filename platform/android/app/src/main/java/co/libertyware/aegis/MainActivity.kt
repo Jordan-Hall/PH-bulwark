@@ -68,7 +68,7 @@ private val Sky = Color(0xFF3AA0DC)
 private val Mist = Color(0xFFF5F7F1)
 private val Ink = Color(0xFF13212B)
 private val Slate = Color(0xFF5B6670)
-private val Good = Color(0xFF1B8A5A)
+private val Good = Color(0xFF57A639)
 private val Warn = Color(0xFF996D14)
 private val Danger = Color(0xFFC0392B)
 
@@ -226,17 +226,14 @@ private fun Dashboard(
 
 @Composable
 private fun Header() {
-    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Box(Modifier.size(84.dp).clip(CircleShape).background(Navy), contentAlignment = Alignment.Center) {
-            Image(
-                painter = painterResource(R.drawable.ic_shield_foreground),
-                contentDescription = "PH Bulwark shield",
-                modifier = Modifier.size(84.dp),
-                colorFilter = ColorFilter.tint(Color.White),
-            )
-        }
-        Text("PH Bulwark", color = Navy, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold)
-        Text("Child device setup", color = Slate, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Image(
+            painter = painterResource(R.drawable.bulwark_logo),
+            contentDescription = "PH Bulwark Shield",
+            modifier = Modifier.size(96.dp).clip(RoundedCornerShape(20.dp)),
+        )
+        Text("PH Bulwark Shield", color = Navy, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
+        Text("Let's set up protection — about two minutes", color = Slate, fontSize = 13.sp, fontWeight = FontWeight.Medium)
     }
 }
 
