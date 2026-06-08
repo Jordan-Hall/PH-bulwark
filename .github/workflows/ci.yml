@@ -65,6 +65,9 @@ jobs:
       - run: cargo test  -p aegis-alert --features push
       - run: cargo build -p aegis-server --features push
       - run: cargo build -p aegis-server --features classifier
+      # The deploy ships --features onnx (real image scoring + the bundled NSFW
+      # model). Verify the full server onnx build (embeds the model) on Linux.
+      - run: cargo build -p aegis-server --features onnx
 
   windows-build:
     name: windows-gated crates (windows)
