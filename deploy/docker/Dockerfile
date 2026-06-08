@@ -16,7 +16,7 @@ FROM ubuntu:24.04 AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        curl ca-certificates build-essential pkg-config \
+        curl ca-certificates build-essential pkg-config libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 # Pinned-channel stable Rust via rustup (matches the workspace rust-toolchain).
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
