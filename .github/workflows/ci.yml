@@ -56,6 +56,10 @@ jobs:
       - run: cargo build -p bulwark-text --features classifier
       - run: cargo build -p bulwark-vision --features onnx
       - run: cargo build -p bulwark-video --features ffmpeg
+      # whisper STT pulls whisper.cpp (C++/cmake). Non-blocking for now — it can't
+      # compile on the Windows dev box, so this CI run is where it's first verified.
+      - run: cargo build -p bulwark-audio --features whisper
+        continue-on-error: true
       - run: cargo build -p bulwark-ui --features llm-explain
       - run: cargo build -p bulwark-cluster --features gossip,quorum
       # FCM push fan-out (guardian alerts to a phone) — keep this path compiling

@@ -29,6 +29,7 @@ allow = [
     "MPL-2.0",
     "0BSD",                # quoted_printable (via lettre) — public-domain-equivalent
     "CDLA-Permissive-2.0", # webpki-roots cert bundle DATA license — permissive
+    "Unlicense",           # whisper-rs / whisper-rs-sys — public-domain dedication
 ]
 confidence-threshold = 0.9
 # `ring` is Apache-2.0/ISC/MIT-ish with a custom OpenSSL-derived notice; clarify if flagged.
