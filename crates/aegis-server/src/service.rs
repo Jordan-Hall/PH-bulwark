@@ -32,7 +32,9 @@ fn to_status(e: aegis_core::Error) -> Status {
 fn inconclusive(request_id: String) -> Verdict {
     Verdict {
         request_id,
-        category: Category::Safe as i32,
+        // Unspecified (not Safe) so policy can distinguish "couldn't score" from
+        // "scored safe" and fail-closed on the coverage gap.
+        category: Category::Unspecified as i32,
         action: Action::Allow as i32,
         severity: Severity::Info as i32,
         score: 0.0,

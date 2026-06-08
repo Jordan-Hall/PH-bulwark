@@ -201,6 +201,27 @@ impl Policy {
             return d;
         }
 
+        // --- Uncovered media: the analyzer could NOT score it (no model/coverage,
+        // e.g. no image/audio analyzer registered or a stub scorer). Fail CLOSED
+        // for child safety unless the deployment explicitly opts out. ---
+        if category == Category::Unspecified {
+            return if self.config.fail_closed_uncovered {
+                PolicyDecision::new(
+                    Action::Block,
+                    Some(AlertKind::Intervention),
+                    Severity::High,
+                    "content could not be analyzed (no coverage); blocked (fail-closed)",
+                )
+            } else {
+                PolicyDecision::new(
+                    Action::Allow,
+                    None,
+                    Severity::Info,
+                    "content could not be analyzed (no coverage); allowed (fail-open)",
+                )
+            };
+        }
+
         // --- SAFE: always allow, no alert. ---
         if category == Category::Safe {
             return PolicyDecision::new(Action::Allow, None, Severity::Info, "safe content");
@@ -612,6 +633,20 @@ mod tests {
         assert_eq!(flag.action, Action::Warn);
         let block = p.evaluate(&verdict(Category::Violence, 0.95), &ctx(AgeProfile::Teen));
         assert_eq!(block.action, Action::Block);
+    }
+
+    #[test]
+    fn uncovered_media_fails_closed_by_default() {
+        // Category::Unspecified = the analyzer could not score it (no model/coverage,
+        // e.g. no image/audio analyzer registered). Child-safety default: block +
+        // alert the guardian to the coverage gap, never silently allow.
+        let p = Policy::default();
+        let d = p.evaluate(&verdict(Category::Unspecified, 0.0), &ctx(AgeProfile::Teen));
+        assert_eq!(d.action, Action::Block, "uncovered media must fail closed");
+        assert!(
+            d.raise_alert.is_some(),
+            "coverage gap must alert the guardian"
+        );
     }
 
     // ---- CSAM critical path ---------------------------------------------
