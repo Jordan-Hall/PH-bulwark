@@ -5,7 +5,7 @@ transparent child-safety surfaces Android allows, and hosts the Rust bridge used
 by the on-device analysis/VPN paths.
 
 ## What's here
-- `app/src/main/java/co/libertyware/aegis/`
+- `app/src/main/java/co/predatorhunters/aegis/`
   - `MainActivity.kt` — child setup: choose UK/US/self-hosted server, redeem a
     parent-generated pair code, show local enrollment/protection state.
   - `vpn/AegisVpnService.kt` — the `VpnService`: builds the TUN and hands its fd
@@ -23,11 +23,11 @@ The app loads `libaegis_client.so`, built from
 functions declared in `RustBridge.kt`:
 
 ```
-Java_co_libertyware_aegis_core_RustBridge_startVpn(env, _, vpnService, tunFd: jint, configJson: jstring) -> jlong
-Java_co_libertyware_aegis_core_RustBridge_stopVpn(env, _, handle: jlong)
-Java_co_libertyware_aegis_core_RustBridge_analyzeText(env, _, app, threadId, text) -> jstring
-Java_co_libertyware_aegis_core_RustBridge_redeemPairCode(env, _, endpoint, code, deviceId) -> jstring
-Java_co_libertyware_aegis_core_RustBridge_nextAlert(env, _) -> jstring
+Java_co_predatorhunters_aegis_core_RustBridge_startVpn(env, _, vpnService, tunFd: jint, configJson: jstring) -> jlong
+Java_co_predatorhunters_aegis_core_RustBridge_stopVpn(env, _, handle: jlong)
+Java_co_predatorhunters_aegis_core_RustBridge_analyzeText(env, _, app, threadId, text) -> jstring
+Java_co_predatorhunters_aegis_core_RustBridge_redeemPairCode(env, _, endpoint, code, deviceId) -> jstring
+Java_co_predatorhunters_aegis_core_RustBridge_nextAlert(env, _) -> jstring
 ```
 
 `redeemPairCode` calls the shared `Accounts.RedeemPairCode` gRPC service used by

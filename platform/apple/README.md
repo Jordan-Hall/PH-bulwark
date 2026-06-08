@@ -163,7 +163,7 @@ swift test \
   bundle id, and regenerate provisioning profiles that include
   `com.apple.developer.networking.networkextension` with the
   `content-filter-provider` value (see `AegisFilter.entitlements`).
-- **App Group** (`group.co.uk.libertyware.aegis`) lets the container app and the
+- **App Group** (`group.co.uk.predatorhunters.aegis`) lets the container app and the
   extension share config (on/off, age band). Replace the id with your team's.
 - **Distribution:** content filters require a provisioning profile and, for the
   App Store, an approved use case (MDM/parental-control). For development, a

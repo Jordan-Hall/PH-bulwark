@@ -1,4 +1,4 @@
-package co.libertyware.aegis.admin
+package co.predatorhunters.aegis.admin
 
 import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
@@ -13,7 +13,7 @@ import android.util.Log
  * on a factory-reset device via QR / zero-touch / NFC, or in dev with:
  *
  *   adb shell dpm set-device-owner \
- *     co.libertyware.aegis/.admin.AegisDeviceAdminReceiver
+ *     co.predatorhunters.aegis/.admin.AegisDeviceAdminReceiver
  *
  * Each call is a safe no-op (logged) when the app is merely a device admin or
  * unprivileged, so callers don't have to branch.

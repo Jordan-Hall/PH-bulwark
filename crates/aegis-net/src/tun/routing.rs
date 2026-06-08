@@ -211,7 +211,7 @@ pub struct MacosRouting {
 impl Default for MacosRouting {
     fn default() -> Self {
         Self {
-            anchor: "com.libertyware.aegis".to_string(),
+            anchor: "com.predatorhunters.aegis".to_string(),
             interface: "utun0".to_string(),
             proxy_port: 8080,
         }

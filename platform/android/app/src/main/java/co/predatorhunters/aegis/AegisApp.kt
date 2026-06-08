@@ -1,7 +1,7 @@
-package co.libertyware.aegis
+package co.predatorhunters.aegis
 
 import android.app.Application
-import co.libertyware.aegis.admin.Lockdown
+import co.predatorhunters.aegis.admin.Lockdown
 
 /** Application entry point. Reserved for process-wide init (logging, config). */
 class AegisApp : Application() {

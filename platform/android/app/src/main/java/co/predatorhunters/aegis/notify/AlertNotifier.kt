@@ -1,4 +1,4 @@
-package co.libertyware.aegis.notify
+package co.predatorhunters.aegis.notify
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -25,8 +25,8 @@ import org.json.JSONObject
  */
 object AlertNotifier {
     private const val CHANNEL = "aegis_alerts"
-    const val ACTION_APPROVE = "co.libertyware.aegis.APPROVE"
-    const val ACTION_DENY = "co.libertyware.aegis.DENY"
+    const val ACTION_APPROVE = "co.predatorhunters.aegis.APPROVE"
+    const val ACTION_DENY = "co.predatorhunters.aegis.DENY"
     const val EXTRA_ALERT_ID = "alert_id"
 
     // aegis.v1.Category ordinals.

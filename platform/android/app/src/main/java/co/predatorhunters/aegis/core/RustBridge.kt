@@ -1,4 +1,4 @@
-package co.libertyware.aegis.core
+package co.predatorhunters.aegis.core
 
 /**
  * JNI bridge to the Rust core — `crates/aegis-client`, built as a C ABI shared
@@ -6,11 +6,11 @@ package co.libertyware.aegis.core
  * `app/src/main/jniLibs/<abi>/`.
  *
  * Division of labour:
- *  - [AegisVpnService][co.libertyware.aegis.vpn.AegisVpnService] hands the TUN
+ *  - [AegisVpnService][co.predatorhunters.aegis.vpn.AegisVpnService] hands the TUN
  *    file descriptor to [startVpn]; Rust runs the intercept → classify → policy
  *    → block/blur/mute + alert loop on it (offloading heavy media to the home
  *    cluster via aegis-infer).
- *  - [AegisAccessibilityService][co.libertyware.aegis.accessibility.AegisAccessibilityService]
+ *  - [AegisAccessibilityService][co.predatorhunters.aegis.accessibility.AegisAccessibilityService]
  *    pushes rendered on-screen text (the E2E / pinned-app path) into the same
  *    deterministic grooming pipeline via [analyzeText].
  *
@@ -74,7 +74,7 @@ object RustBridge {
      * Report a tamper / protection-downgrade event (an `aegis.v1.TamperKind`
      * ordinal) so it reaches the guardian as a redacted PROTECTION_DISABLED alert.
      * Content-free — only *which* protection changed. See
-     * [TamperReporter][co.libertyware.aegis.tamper.TamperReporter].
+     * [TamperReporter][co.predatorhunters.aegis.tamper.TamperReporter].
      */
     external fun reportTamper(kind: Int)
 }

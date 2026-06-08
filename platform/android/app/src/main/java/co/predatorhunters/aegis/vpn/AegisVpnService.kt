@@ -1,4 +1,4 @@
-package co.libertyware.aegis.vpn
+package co.predatorhunters.aegis.vpn
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -7,9 +7,9 @@ import android.content.Intent
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import android.util.Log
-import co.libertyware.aegis.admin.Enrollment
-import co.libertyware.aegis.core.RustBridge
-import co.libertyware.aegis.notify.AlertNotifier
+import co.predatorhunters.aegis.admin.Enrollment
+import co.predatorhunters.aegis.core.RustBridge
+import co.predatorhunters.aegis.notify.AlertNotifier
 import org.json.JSONObject
 
 /**
@@ -24,7 +24,7 @@ import org.json.JSONObject
  * HONEST COVERAGE (PLAN §0a): Android 7+ ignores user-installed CAs for most
  * apps, and end-to-end-encrypted / cert-pinned apps can't be read on the wire at
  * all. Those are handled on-device by
- * [AegisAccessibilityService][co.libertyware.aegis.accessibility.AegisAccessibilityService],
+ * [AegisAccessibilityService][co.predatorhunters.aegis.accessibility.AegisAccessibilityService],
  * not here.
  */
 class AegisVpnService : VpnService() {

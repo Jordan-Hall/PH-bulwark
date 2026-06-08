@@ -24,7 +24,7 @@
          configuration (age band, on/off). Replace with your team's group id. -->
     <key>com.apple.security.application-groups</key>
     <array>
-        <string>group.co.uk.libertyware.aegis</string>
+        <string>group.co.uk.predatorhunters.aegis</string>
     </array>
 
     <!-- macOS App Sandbox (ignored on iOS). The filter needs outbound/inbound

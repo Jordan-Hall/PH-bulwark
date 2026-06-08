@@ -1,4 +1,4 @@
-package co.libertyware.aegis
+package co.predatorhunters.aegis
 
 import android.content.Context
 import android.content.Intent
@@ -52,10 +52,10 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import co.libertyware.aegis.accessibility.AegisAccessibilityService
-import co.libertyware.aegis.admin.Enrollment
-import co.libertyware.aegis.admin.EnrollmentRecord
-import co.libertyware.aegis.core.RustBridge
+import co.predatorhunters.aegis.accessibility.AegisAccessibilityService
+import co.predatorhunters.aegis.admin.Enrollment
+import co.predatorhunters.aegis.admin.EnrollmentRecord
+import co.predatorhunters.aegis.core.RustBridge
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch

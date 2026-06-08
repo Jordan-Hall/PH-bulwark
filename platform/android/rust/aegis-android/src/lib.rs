@@ -1,10 +1,10 @@
-//! # aegis-android — JNI bridge for `co.libertyware.aegis.core.RustBridge`.
+//! # aegis-android — JNI bridge for `co.predatorhunters.aegis.core.RustBridge`.
 //!
 //! This is the Rust side of the contract declared in
-//! `platform/android/app/src/main/java/co/libertyware/aegis/core/RustBridge.kt`.
+//! `platform/android/app/src/main/java/co/predatorhunters/aegis/core/RustBridge.kt`.
 //! The Kotlin `object RustBridge` loads us via `System.loadLibrary("aegis_client")`
 //! and declares the `external fun`s. We export the matching
-//! `Java_co_libertyware_aegis_core_RustBridge_<method>` C-ABI symbols and forward
+//! `Java_co_predatorhunters_aegis_core_RustBridge_<method>` C-ABI symbols and forward
 //! the on-device-captured text into the LEGITIMATE, deterministic analyzers:
 //!
 //!   * [`aegis_text::TextAnalyzer`] — rules-first grooming / adult-text detector.
@@ -18,7 +18,7 @@
 //! PROTECTION_DISABLED events (an uninstall attempt, or a protection turned off) so
 //! the guardian is told. Anti-removal *enforcement* (device admin / Device Owner /
 //! always-on-VPN lockdown) lives in the consented Android policy layer
-//! (`co.libertyware.aegis.admin`), applied OPENLY on a managed child device — never
+//! (`co.predatorhunters.aegis.admin`), applied OPENLY on a managed child device — never
 //! covertly from here. This bridge still performs **no** screen mirroring, remote
 //! control/wipe, hidden location, or reading of other apps beyond the on-device
 //! safety check + the uninstall-guard the child app transparently runs.
@@ -333,7 +333,7 @@ fn verdict_json(verdict: &Verdict, decision: &PolicyDecision) -> String {
 // ---------------------------------------------------------------------------
 // JNI exports — one per `external fun` in RustBridge.kt. Symbol names are
 //   Java_<package with '.'->'_'>_<Class>_<method>
-// i.e. Java_co_libertyware_aegis_core_RustBridge_<method>.
+// i.e. Java_co_predatorhunters_aegis_core_RustBridge_<method>.
 // ---------------------------------------------------------------------------
 
 /// `external fun startVpn(vpnService: VpnService, tunFd: Int, configJson: String): Long`
@@ -348,7 +348,7 @@ fn verdict_json(verdict: &Verdict, decision: &PolicyDecision) -> String {
 /// any reference and is validated. Returns `0` on failure (Kotlin treats a `0`
 /// handle as "not started").
 #[no_mangle]
-pub extern "system" fn Java_co_libertyware_aegis_core_RustBridge_startVpn(
+pub extern "system" fn Java_co_predatorhunters_aegis_core_RustBridge_startVpn(
     mut env: JNIEnv,
     _class: JClass,
     vpn_service: JObject,
@@ -382,7 +382,7 @@ pub extern "system" fn Java_co_libertyware_aegis_core_RustBridge_startVpn(
 /// `handle` must be either `0` or a value previously returned by `startVpn` and
 /// not yet freed. We null-check and only reconstruct the `Box` once.
 #[no_mangle]
-pub extern "system" fn Java_co_libertyware_aegis_core_RustBridge_stopVpn(
+pub extern "system" fn Java_co_predatorhunters_aegis_core_RustBridge_stopVpn(
     _env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -407,7 +407,7 @@ pub extern "system" fn Java_co_libertyware_aegis_core_RustBridge_stopVpn(
 /// # Safety
 /// JNI entry point. Every jstring argument is null-/UTF-8-validated.
 #[no_mangle]
-pub extern "system" fn Java_co_libertyware_aegis_core_RustBridge_analyzeText(
+pub extern "system" fn Java_co_predatorhunters_aegis_core_RustBridge_analyzeText(
     mut env: JNIEnv,
     _class: JClass,
     app: JString,
@@ -477,7 +477,7 @@ pub extern "system" fn Java_co_libertyware_aegis_core_RustBridge_analyzeText(
 /// JNI entry point. Every jstring argument is null-/UTF-8-validated; invalid
 /// input returns an error JSON instead of panicking.
 #[no_mangle]
-pub extern "system" fn Java_co_libertyware_aegis_core_RustBridge_redeemPairCode(
+pub extern "system" fn Java_co_predatorhunters_aegis_core_RustBridge_redeemPairCode(
     mut env: JNIEnv,
     _class: JClass,
     endpoint: JString,
@@ -518,7 +518,7 @@ pub extern "system" fn Java_co_libertyware_aegis_core_RustBridge_redeemPairCode(
 /// # Safety
 /// JNI entry point with no pointer arguments.
 #[no_mangle]
-pub extern "system" fn Java_co_libertyware_aegis_core_RustBridge_nextAlert(
+pub extern "system" fn Java_co_predatorhunters_aegis_core_RustBridge_nextAlert(
     mut env: JNIEnv,
     _class: JClass,
 ) -> jstring {
@@ -543,7 +543,7 @@ pub extern "system" fn Java_co_libertyware_aegis_core_RustBridge_nextAlert(
 /// # Safety
 /// JNI entry point. `alert_id` is null-/UTF-8-validated; a bad value is ignored.
 #[no_mangle]
-pub extern "system" fn Java_co_libertyware_aegis_core_RustBridge_submitReviewDecision(
+pub extern "system" fn Java_co_predatorhunters_aegis_core_RustBridge_submitReviewDecision(
     mut env: JNIEnv,
     _class: JClass,
     alert_id: JString,
@@ -563,7 +563,7 @@ pub extern "system" fn Java_co_libertyware_aegis_core_RustBridge_submitReviewDec
 /// # Safety
 /// JNI entry point. `token` is null-/UTF-8-validated; a bad value is ignored.
 #[no_mangle]
-pub extern "system" fn Java_co_libertyware_aegis_core_RustBridge_registerParentPushToken(
+pub extern "system" fn Java_co_predatorhunters_aegis_core_RustBridge_registerParentPushToken(
     mut env: JNIEnv,
     _class: JClass,
     token: JString,
@@ -582,7 +582,7 @@ pub extern "system" fn Java_co_libertyware_aegis_core_RustBridge_registerParentP
 /// # Safety
 /// JNI entry point with a primitive `jint` argument only.
 #[no_mangle]
-pub extern "system" fn Java_co_libertyware_aegis_core_RustBridge_reportTamper(
+pub extern "system" fn Java_co_predatorhunters_aegis_core_RustBridge_reportTamper(
     _env: JNIEnv,
     _class: JClass,
     kind: jint,

@@ -1,11 +1,11 @@
-package co.libertyware.aegis.notify
+package co.predatorhunters.aegis.notify
 
 import android.app.NotificationManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.util.Log
-import co.libertyware.aegis.core.RustBridge
+import co.predatorhunters.aegis.core.RustBridge
 
 /**
  * Handles the **Approve** / **Keep blocked** taps on a guardian alert

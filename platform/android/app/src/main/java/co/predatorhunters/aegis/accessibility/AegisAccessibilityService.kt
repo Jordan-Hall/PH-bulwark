@@ -1,4 +1,4 @@
-package co.libertyware.aegis.accessibility
+package co.predatorhunters.aegis.accessibility
 
 import android.accessibilityservice.AccessibilityService
 import android.content.Context
@@ -15,8 +15,8 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.FrameLayout
 import android.widget.TextView
-import co.libertyware.aegis.core.RustBridge
-import co.libertyware.aegis.tamper.TamperReporter
+import co.predatorhunters.aegis.core.RustBridge
+import co.predatorhunters.aegis.tamper.TamperReporter
 
 /**
  * The end-to-end / cert-pinned answer.

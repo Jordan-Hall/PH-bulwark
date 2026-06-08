@@ -1,8 +1,8 @@
-# aegis-android — the JNI bridge that backs `co.libertyware.aegis.core.RustBridge`.
+# aegis-android — the JNI bridge that backs `co.predatorhunters.aegis.core.RustBridge`.
 #
 # This crate is the C-ABI shared library the Android app loads with
 # `System.loadLibrary("aegis_client")` (see RustBridge.kt). It exposes the
-# `Java_co_libertyware_aegis_core_RustBridge_*` symbols and forwards the
+# `Java_co_predatorhunters_aegis_core_RustBridge_*` symbols and forwards the
 # on-device-captured text into the LEGITIMATE, deterministic content analyzers:
 #
 #   * aegis-text   — the rules-first grooming / adult-text detector (TextAnalyzer)
@@ -12,7 +12,7 @@
 # on-device text and relays redacted PROTECTION_DISABLED events (uninstall attempt
 # / protection turned off) to the guardian. Anti-removal ENFORCEMENT (device admin
 # / Device Owner / always-on-VPN lockdown) lives in the consented Android policy
-# layer (co.libertyware.aegis.admin), applied openly on a managed child device —
+# layer (co.predatorhunters.aegis.admin), applied openly on a managed child device —
 # never covertly. No screen mirroring, no remote wipe, no hidden location, no
 # reading other apps beyond the transparent on-device safety check.
 #

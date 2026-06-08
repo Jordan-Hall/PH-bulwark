@@ -1,4 +1,4 @@
-package co.libertyware.aegis.admin
+package co.predatorhunters.aegis.admin
 
 import android.content.Context
 import android.os.PersistableBundle
@@ -8,7 +8,7 @@ import java.util.UUID
 /**
  * Records that this device has been provisioned as Device Owner and (optionally)
  * which family/child/cluster it was enrolled to. Idempotent. The POSITIVE
- * counterpart to [TamperReporter][co.libertyware.aegis.tamper.TamperReporter] —
+ * counterpart to [TamperReporter][co.predatorhunters.aegis.tamper.TamperReporter] —
  * "device is now managed + enrolled".
  *
  * Pair-code enrollment and Device Owner provisioning are deliberately separate:
@@ -25,9 +25,9 @@ object Enrollment {
 
     // Keys passed through PROVISIONING_ADMIN_EXTRAS_BUNDLE (see the QR JSON in
     // deploy/android/device-owner-provisioning.md).
-    const val EXTRA_FAMILY_ID = "co.libertyware.aegis.family_id"
-    const val EXTRA_CHILD_ID = "co.libertyware.aegis.child_id"
-    const val EXTRA_CLUSTER = "co.libertyware.aegis.cluster_endpoint"
+    const val EXTRA_FAMILY_ID = "co.predatorhunters.aegis.family_id"
+    const val EXTRA_CHILD_ID = "co.predatorhunters.aegis.child_id"
+    const val EXTRA_CLUSTER = "co.predatorhunters.aegis.cluster_endpoint"
 
     fun isProvisioned(ctx: Context): Boolean =
         prefs(ctx).getBoolean(KEY_PROVISIONED, false)
