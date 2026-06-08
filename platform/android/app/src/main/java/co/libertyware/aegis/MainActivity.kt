@@ -68,7 +68,7 @@ private val Sky = Color(0xFF3AA0DC)
 private val Mist = Color(0xFFF5F7F1)
 private val Ink = Color(0xFF13212B)
 private val Slate = Color(0xFF5B6670)
-private val Good = Color(0xFF1B8A5A)
+private val Good = Color(0xFF57A639)
 private val Warn = Color(0xFF996D14)
 private val Danger = Color(0xFFC0392B)
 
