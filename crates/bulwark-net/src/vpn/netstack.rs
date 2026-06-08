@@ -1,10 +1,11 @@
 //! Shared transparent-VPN bridge scaffolding.
 //!
 //! This is the permissive replacement seam for the removed GPL `tun2proxy`
-//! backend. The packet parser and flow-target logic are in place and unit-tested;
-//! the full smoltcp socket pump is deliberately still fail-closed until it has
-//! loopback and real-device validation.
-#![allow(dead_code)] // Parser is exercised by tests until the socket pump lands.
+//! backend. The packet parser, flow policy, and the proxy bridge (synthesise
+//! `CONNECT` → bidirectional `splice`) are in place and unit-tested; the smoltcp
+//! TCP-termination that wires a captured TUN flow into the bridge is the remaining
+//! device-validated spike, so `run_netstack` is deliberately still fail-closed.
+#![allow(dead_code)] // Bridge halves are exercised by tests until the pump lands.
 
 use std::net::{SocketAddr, ToSocketAddrs};
 
@@ -16,6 +17,9 @@ use crate::tun::TunDevice;
 use crate::{NetError, Result};
 
 use super::VpnConfig;
+
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Transport {
@@ -189,6 +193,84 @@ fn decide(summary: &PacketSummary) -> FlowAction {
     }
 }
 
+// ---- proxy bridge: synthesise CONNECT → splice (the permissive tun2proxy core) ----
+//
+// These are the proxy-side half of the pump: once the smoltcp netstack terminates a
+// captured TCP flow (the device-validated spike that remains in `run_netstack`), it
+// hands the flow's byte stream to `connect_via_proxy` + `splice`. They are pure
+// async over any stream so they are unit-tested here against a loopback fake proxy —
+// no TUN / device needed.
+
+/// Open a TCP tunnel to the MITM proxy via HTTP `CONNECT authority`, so the flow is
+/// decrypted + content-filtered. Returns the established stream once the proxy answers
+/// 2xx. `authority` is the `host:port` from [`FlowAction::ProxyConnect`].
+async fn connect_via_proxy(proxy: SocketAddr, authority: &str) -> Result<TcpStream> {
+    let mut stream = TcpStream::connect(proxy)
+        .await
+        .map_err(|e| NetError::tun(format!("VPN bridge: connect proxy {proxy}: {e}")))?;
+    let req = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n");
+    stream
+        .write_all(req.as_bytes())
+        .await
+        .map_err(|e| NetError::tun(format!("VPN bridge: write CONNECT: {e}")))?;
+    let status = read_connect_status(&mut stream).await?;
+    if !(200..300).contains(&status) {
+        return Err(NetError::tun(format!(
+            "VPN bridge: proxy refused CONNECT {authority} (HTTP {status})"
+        )));
+    }
+    Ok(stream)
+}
+
+/// Read the proxy's CONNECT response headers (up to CRLFCRLF) and return its status.
+async fn read_connect_status<S: AsyncRead + Unpin>(stream: &mut S) -> Result<u16> {
+    let mut buf = Vec::with_capacity(128);
+    let mut byte = [0u8; 1];
+    loop {
+        let n = stream
+            .read(&mut byte)
+            .await
+            .map_err(|e| NetError::tun(format!("VPN bridge: read CONNECT response: {e}")))?;
+        if n == 0 {
+            return Err(NetError::tun("VPN bridge: proxy closed during CONNECT"));
+        }
+        buf.push(byte[0]);
+        if buf.ends_with(b"\r\n\r\n") {
+            break;
+        }
+        if buf.len() > 8192 {
+            return Err(NetError::tun(
+                "VPN bridge: CONNECT response headers too large",
+            ));
+        }
+    }
+    parse_status_code(&buf)
+}
+
+/// Parse the HTTP status code from a response's status line (`HTTP/1.1 200 …`).
+fn parse_status_code(resp: &[u8]) -> Result<u16> {
+    let line = resp.split(|&b| b == b'\r').next().unwrap_or(resp);
+    let line = std::str::from_utf8(line)
+        .map_err(|_| NetError::tun("VPN bridge: non-UTF8 CONNECT status line"))?;
+    line.split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse::<u16>().ok())
+        .ok_or_else(|| NetError::tun(format!("VPN bridge: malformed status line {line:?}")))
+}
+
+/// Bidirectionally splice a captured client flow and its proxy tunnel until either
+/// half closes (half-close aware via `copy_bidirectional`).
+async fn splice<A, B>(client: &mut A, proxy: &mut B) -> Result<()>
+where
+    A: AsyncRead + AsyncWrite + Unpin,
+    B: AsyncRead + AsyncWrite + Unpin,
+{
+    tokio::io::copy_bidirectional(client, proxy)
+        .await
+        .map(|_| ())
+        .map_err(|e| NetError::tun(format!("VPN bridge: splice: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,5 +379,84 @@ mod tests {
         pkt[32..34].copy_from_slice(&0x5010u16.to_be_bytes()); // ACK, no SYN
         let summary = parse_packet(&pkt).expect("valid packet");
         assert!(tcp_connect_authority(&summary).is_none());
+    }
+
+    #[test]
+    fn parses_connect_status_codes() {
+        assert_eq!(
+            parse_status_code(b"HTTP/1.1 200 Connection established\r\n\r\n").unwrap(),
+            200
+        );
+        assert_eq!(
+            parse_status_code(b"HTTP/1.1 407 Proxy Auth Required\r\n").unwrap(),
+            407
+        );
+        assert!(parse_status_code(b"garbage").is_err());
+    }
+
+    #[tokio::test]
+    async fn connect_via_proxy_completes_on_200() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let proxy = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut byte = [0u8; 1];
+            let mut req = Vec::new();
+            loop {
+                s.read_exact(&mut byte).await.unwrap();
+                req.push(byte[0]);
+                if req.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            assert!(req.starts_with(b"CONNECT example.com:443 HTTP/1.1"));
+            s.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let stream = connect_via_proxy(addr, "example.com:443").await;
+        assert!(stream.is_ok(), "CONNECT should succeed: {:?}", stream.err());
+        proxy.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connect_via_proxy_errors_on_407() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut byte = [0u8; 1];
+            let mut req = Vec::new();
+            while s.read(&mut byte).await.unwrap_or(0) != 0 {
+                req.push(byte[0]);
+                if req.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let _ = s
+                .write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n")
+                .await;
+        });
+        assert!(connect_via_proxy(addr, "example.com:443").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn splice_is_bidirectional() {
+        let (mut client_ext, mut client_int) = tokio::io::duplex(64);
+        let (mut proxy_int, mut proxy_ext) = tokio::io::duplex(64);
+        let spliced = tokio::spawn(async move {
+            let _ = splice(&mut client_int, &mut proxy_int).await;
+        });
+        client_ext.write_all(b"hello").await.unwrap();
+        let mut got = [0u8; 5];
+        proxy_ext.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"hello");
+        proxy_ext.write_all(b"world").await.unwrap();
+        let mut back = [0u8; 5];
+        client_ext.read_exact(&mut back).await.unwrap();
+        assert_eq!(&back, b"world");
+        drop(client_ext);
+        drop(proxy_ext);
+        let _ = spliced.await;
     }
 }
