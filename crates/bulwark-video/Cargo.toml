@@ -25,7 +25,10 @@ ffmpeg-sidecar = { workspace = true, optional = true }
 # Re-encode the raw RGB24 frames ffmpeg emits into JPEG so bulwark-vision (which
 # decodes via the `image` crate) can actually score them.
 image = { version = "0.25", optional = true, default-features = false, features = ["jpeg"] }
+# Split the extracted 16 kHz-mono audio track into timecoded WAV windows that the
+# audio analyzer (whisper → bulwark-text) can transcribe + score per window.
+hound = { version = "3", optional = true }
 
 [features]
 default = []
-ffmpeg = ["dep:ffmpeg-sidecar", "dep:image"]
+ffmpeg = ["dep:ffmpeg-sidecar", "dep:image", "dep:hound"]

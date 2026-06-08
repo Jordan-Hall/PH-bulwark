@@ -145,6 +145,13 @@ impl AnalyzerRegistry {
         if let Some(store) = store {
             video = video.with_segment_store(store);
         }
+        // Transcribe the video's OWN audio track with whisper (same model as the
+        // standalone audio analyzer). Needs `ffmpeg` to extract the windows; without a
+        // model the video audio stays fail-CLOSED.
+        #[cfg(feature = "whisper")]
+        if let Some(stt) = bulwark_audio::whisper::WhisperTranscriber::from_env() {
+            video = video.with_audio_transcriber(Box::new(stt));
+        }
         r.register(Arc::new(video));
         // Real on-worker image NSFW scoring when built with `onnx` + a pinned model
         // (BULWARK_NSFW_MODEL). Without a model the vision analyzer emits Unspecified,
