@@ -423,9 +423,73 @@ pub mod ffmpeg {
         Some(jpeg.into_inner())
     }
 
+    // ---- remediation: soften flagged timecodes instead of blocking the whole clip ----
+
+    /// `between(t,a,b)+between(t,c,d)…` for ffmpeg's `enable=` (None if no ranges).
+    fn enable_expr(ranges: &[(f32, f32)]) -> Option<String> {
+        if ranges.is_empty() {
+            return None;
+        }
+        Some(
+            ranges
+                .iter()
+                .map(|(a, b)| format!("between(t,{a:.3},{b:.3})"))
+                .collect::<Vec<_>>()
+                .join("+"),
+        )
+    }
+
+    /// Blur the video only where a frame was flagged NSFW.
+    fn blur_filter(ranges: &[(f32, f32)]) -> Option<String> {
+        enable_expr(ranges).map(|e| format!("boxblur=20:enable='{e}'"))
+    }
+
+    /// Mute the audio only where speech was flagged adult/grooming.
+    fn mute_filter(ranges: &[(f32, f32)]) -> Option<String> {
+        enable_expr(ranges).map(|e| format!("volume=0:enable='{e}'"))
+    }
+
+    impl FfmpegDemuxer {
+        /// Re-encode `segment`, blurring the video during `blur_ranges` and muting the
+        /// audio during `mute_ranges` (seconds). Returns the remediated bytes, or
+        /// `None` if there is nothing to do or ffmpeg is unavailable. Softens the
+        /// offending timecodes rather than dropping the whole clip.
+        pub fn remediate(
+            &self,
+            segment: &[u8],
+            blur_ranges: &[(f32, f32)],
+            mute_ranges: &[(f32, f32)],
+        ) -> Option<Vec<u8>> {
+            if segment.is_empty() || (blur_ranges.is_empty() && mute_ranges.is_empty()) {
+                return None;
+            }
+            let input = TempInput::write(segment).ok()?;
+            let output = TempInput::reserve("mp4");
+            let in_path = input.path().to_string_lossy().into_owned();
+            let out_path = output.path().to_string_lossy().into_owned();
+            let mut cmd = self.command();
+            cmd.hide_banner();
+            cmd.input(&in_path);
+            if let Some(vf) = blur_filter(blur_ranges) {
+                cmd.arg("-vf").arg(vf);
+            }
+            if let Some(af) = mute_filter(mute_ranges) {
+                cmd.arg("-af").arg(af);
+            }
+            cmd.arg("-y").arg(&out_path); // overwrite the reserved output path
+            let mut child = cmd.spawn().ok()?;
+            if let Ok(iter) = child.iter() {
+                for _ in iter {} // drain events so ffmpeg runs to completion
+            }
+            let _ = child.wait();
+            let bytes = std::fs::read(output.path()).ok()?;
+            (!bytes.is_empty()).then_some(bytes)
+        }
+    }
+
     #[cfg(test)]
     mod ffmpeg_tests {
-        use super::rgb24_to_jpeg;
+        use super::{blur_filter, mute_filter, rgb24_to_jpeg};
 
         #[test]
         fn rgb24_converts_to_decodable_jpeg() {
@@ -440,6 +504,22 @@ pub mod ffmpeg {
         #[test]
         fn wrong_size_buffer_is_rejected() {
             assert!(rgb24_to_jpeg(2, 2, &[0u8; 5]).is_none());
+        }
+
+        #[test]
+        fn filters_build_enable_expressions() {
+            let blur = blur_filter(&[(1.0, 2.0), (5.0, 6.0)]).expect("blur");
+            assert!(blur.starts_with("boxblur="));
+            assert!(blur.contains("between(t,1.000,2.000)+between(t,5.000,6.000)"));
+            let mute = mute_filter(&[(3.0, 4.0)]).expect("mute");
+            assert!(mute.contains("volume=0"));
+            assert!(mute.contains("between(t,3.000,4.000)"));
+        }
+
+        #[test]
+        fn empty_ranges_yield_no_filter() {
+            assert!(blur_filter(&[]).is_none());
+            assert!(mute_filter(&[]).is_none());
         }
     }
 
@@ -475,6 +555,16 @@ pub mod ffmpeg {
             f.write_all(bytes)?;
             f.flush()?;
             Ok(Self { path })
+        }
+        /// Reserve a temp path (no file written) for ffmpeg to write its output to;
+        /// self-deletes on drop like a staged input.
+        fn reserve(ext: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let mut path = std::env::temp_dir();
+            path.push(format!("bulwark-video-out-{}-{}.{ext}", std::process::id(), n));
+            Self { path }
         }
         fn path(&self) -> &Path {
             &self.path

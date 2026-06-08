@@ -42,7 +42,7 @@ RUN if [ -n "$FEATURES" ]; then \
 # Ubuntu 24.04 too, so the binary's glibc/libstdc++ match the builder.
 FROM ubuntu:24.04 AS runtime
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -r -u 10001 -m -d /var/lib/bulwark bulwark
 COPY --from=builder /out/bulwark-server /usr/local/bin/bulwark-server

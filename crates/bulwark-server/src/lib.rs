@@ -132,6 +132,15 @@ impl AnalyzerRegistry {
     /// review needs a clip-fetch API — tracked as a follow-up).
     pub fn with_text_and_video(store: Option<bulwark_video::SegmentStore>) -> Self {
         let mut r = Self::with_text();
+        // Decode + score real video frames/audio with the ffmpeg demuxer when built
+        // with `ffmpeg` (the binary is provisioned at deploy); otherwise the
+        // NullDemuxer leaves video undecoded → policy fail-CLOSES.
+        #[cfg(feature = "ffmpeg")]
+        let mut video = bulwark_video::VideoAnalyzer::with_demuxer(
+            bulwark_video::VideoConfig::default(),
+            bulwark_video::ffmpeg::FfmpegDemuxer::new(),
+        );
+        #[cfg(not(feature = "ffmpeg"))]
         let mut video = bulwark_video::VideoAnalyzer::new();
         if let Some(store) = store {
             video = video.with_segment_store(store);
