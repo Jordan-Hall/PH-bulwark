@@ -14,8 +14,14 @@ async-trait.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 ring.workspace = true
+# whisper STT (open-source, MIT) behind the `whisper` feature: whisper.cpp via
+# whisper-rs; `hound` reads the 16 kHz-mono WAV the demuxer/client provides.
+anyhow = { workspace = true, optional = true }
+whisper-rs = { version = "0.13", optional = true }
+hound = { version = "3", optional = true }
 
 [features]
 default = []
-# `whisper` (next): on-device STT via whisper.cpp (whisper-rs) supplying a real
-# Transcriber. Until injected, the analyzer fail-CLOSES (no false "safe").
+# Real STT supplying a Transcriber (transcribe → bulwark-text). The ggml model is
+# provisioned at BULWARK_WHISPER_MODEL; until then the analyzer fail-CLOSES.
+whisper = ["dep:whisper-rs", "dep:hound", "dep:anyhow"]
