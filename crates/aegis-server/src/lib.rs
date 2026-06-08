@@ -137,6 +137,14 @@ impl AnalyzerRegistry {
             video = video.with_segment_store(store);
         }
         r.register(Arc::new(video));
+        // Real on-worker image NSFW scoring when built with `onnx` + a pinned model
+        // (AEGIS_NSFW_MODEL). Without a model the vision analyzer emits Unspecified,
+        // which policy fail-CLOSES — so IMAGE is never silently allowed. Without the
+        // feature, IMAGE stays unregistered → also fail-closed via `inconclusive`.
+        #[cfg(feature = "onnx")]
+        r.register(Arc::new(aegis_vision::VisionAnalyzer::from_env(
+            aegis_vision::VisionConfig::default(),
+        )));
         r
     }
 }

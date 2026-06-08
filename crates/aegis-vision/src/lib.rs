@@ -247,6 +247,20 @@ impl<S: Scorer> Analyzer for VisionAnalyzer<S> {
     }
 
     async fn analyze(&self, req: AnalysisRequest) -> Result<Verdict> {
+        // No real model loaded (stub scorer): we CANNOT judge this image. Emit
+        // Unspecified ("couldn't score") so policy fails CLOSED rather than reading
+        // an unscored image as Safe (see aegis-policy `fail_closed_uncovered`).
+        if self.scorer.model_id() == "stub-noop" {
+            return Ok(Verdict {
+                request_id: req.request_id,
+                category: Category::Unspecified as i32,
+                action: Action::Allow as i32, // policy is the authority and fail-closes
+                severity: Severity::Info as i32,
+                score: 0.0,
+                rationale: "no NSFW model loaded; image not scored (coverage gap)".into(),
+                ..Default::default()
+            });
+        }
         let Some(bytes) = extract_bytes(&req) else {
             return Ok(Verdict {
                 request_id: req.request_id,
@@ -333,19 +347,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stub_fails_open_safe() {
+    async fn stub_emits_uncovered_for_fail_closed() {
+        // No real model: the stub must NOT read as Safe — it emits Unspecified so
+        // policy fails CLOSED on the coverage gap (aegis-policy fail_closed_uncovered).
         let a = VisionAnalyzer::new();
         let v = a.analyze(img_req(vec![9, 9])).await.unwrap();
-        assert_eq!(v.category, Category::Safe as i32);
-        assert_eq!(v.action, Action::Allow as i32);
+        assert_eq!(v.category, Category::Unspecified as i32);
     }
 
     #[tokio::test]
-    async fn from_env_without_model_fails_open() {
-        // No `onnx` feature and/or no model → stub → SAFE/Allow.
+    async fn from_env_without_model_emits_uncovered() {
+        // No `onnx` feature and/or no model → stub → Unspecified (fail-closed),
+        // never a false "Safe" for an image we could not actually score.
         let a = VisionAnalyzer::from_env(VisionConfig::default());
         let v = a.analyze(img_req(vec![4, 5, 6])).await.unwrap();
-        assert_eq!(v.category, Category::Safe as i32);
-        assert_eq!(v.action, Action::Allow as i32);
+        assert_eq!(v.category, Category::Unspecified as i32);
     }
 }
