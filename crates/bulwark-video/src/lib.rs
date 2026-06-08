@@ -396,13 +396,50 @@ pub mod ffmpeg {
         fn sample(&self, segment: &[u8], fps: f32) -> DecodedSegment {
             match self.decode_segment_frames(segment, fps) {
                 Some(frames) => DecodedSegment {
-                    frames: frames.into_iter().map(|f| f.data).collect(),
+                    // Re-encode each raw RGB24 frame to JPEG so bulwark-vision (which
+                    // decodes via the `image` crate) can actually score it.
+                    frames: frames
+                        .into_iter()
+                        .filter_map(|f| rgb24_to_jpeg(f.width, f.height, &f.data))
+                        .collect(),
                     audio_windows: Vec::new(),
                     decoded: true,
                 },
                 // ffmpeg unavailable → not decoded → conservative handling upstream.
                 None => DecodedSegment::default(),
             }
+        }
+    }
+
+    /// Encode a raw RGB24 frame (as ffmpeg emits via `-pix_fmt rgb24`) to JPEG so
+    /// bulwark-vision's image-crate decoder can read it. `None` if the buffer size
+    /// doesn't match `width*height*3` (e.g. a truncated frame at EOF).
+    fn rgb24_to_jpeg(width: u32, height: u32, rgb: &[u8]) -> Option<Vec<u8>> {
+        let img = image::RgbImage::from_raw(width, height, rgb.to_vec())?;
+        let mut jpeg = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut jpeg, image::ImageFormat::Jpeg)
+            .ok()?;
+        Some(jpeg.into_inner())
+    }
+
+    #[cfg(test)]
+    mod ffmpeg_tests {
+        use super::rgb24_to_jpeg;
+
+        #[test]
+        fn rgb24_converts_to_decodable_jpeg() {
+            // 2x2 RGB24 (12 bytes) → JPEG that the image crate can re-decode.
+            let rgb = vec![255u8, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255];
+            let jpeg = rgb24_to_jpeg(2, 2, &rgb).expect("convert");
+            let decoded = image::load_from_memory(&jpeg).expect("re-decode jpeg");
+            assert_eq!(decoded.width(), 2);
+            assert_eq!(decoded.height(), 2);
+        }
+
+        #[test]
+        fn wrong_size_buffer_is_rejected() {
+            assert!(rgb24_to_jpeg(2, 2, &[0u8; 5]).is_none());
         }
     }
 
