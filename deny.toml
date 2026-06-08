@@ -5,11 +5,12 @@
 [advisories]
 version = 2
 yanked = "deny"
-# `paste` (RUSTSEC-2024-0436) is flagged ONLY as *unmaintained* — no vulnerability.
-# It's a ubiquitous transitive proc-macro dependency we can't realistically drop.
-# We still deny real vulnerabilities + yanked crates; this ignores only the
-# unmaintained notice for that one crate.
-ignore = ["RUSTSEC-2024-0436"]
+# Unmaintained-ONLY notices (no vulnerability, no safe upgrade): ubiquitous
+# transitive proc-macro deps we can't realistically drop. We still deny real
+# vulnerabilities + yanked crates; this ignores only the unmaintained notices.
+# - RUSTSEC-2024-0436: `paste`
+# - RUSTSEC-2026-0173: `proc-macro-error2` (via age -> i18n-embed-fl; no safe upgrade)
+ignore = ["RUSTSEC-2024-0436", "RUSTSEC-2026-0173"]
 
 [licenses]
 version = 2
