@@ -173,29 +173,46 @@ fn aegis_config_dir() -> Option<PathBuf> {
 }
 
 /// Selects the scorer for the current build/config, logging the fallback once.
+/// The bundled, license-pinned NSFW image model: AdamCodd/vit-base-nsfw-detector
+/// (Apache-2.0), int8-quantized ONNX — ViT, 384×384, [-1,1] (half) normalization,
+/// 2-class logits (index 1 = nsfw). Compiled in so `onnx` builds always have a model.
+#[cfg(feature = "onnx")]
+const BUNDLED_NSFW_MODEL: &[u8] = include_bytes!("../models/nsfw_detector.onnx");
+#[cfg(feature = "onnx")]
+const BUNDLED_NSFW_INPUT_SIZE: u32 = 384;
+
 fn build_scorer(cfg: &VisionConfig) -> Box<dyn Scorer> {
     #[cfg(feature = "onnx")]
     {
+        // 1. An explicit operator-supplied model (AEGIS_NSFW_MODEL / cfg.model_path) wins.
         if let Some(path) = cfg.model_path.as_deref() {
-            // Honours AEGIS_NSFW_MODEL_CLASS (vit|mobilenet) + AEGIS_NSFW_EP
-            // (auto|cpu|gpu): MobileNet-class models load with ImageNet norm, and
-            // `auto` benchmarks GPU vs CPU at load, keeping the faster.
             match onnx::OnnxScorer::from_path_env(path, cfg.input_size) {
                 Ok(s) => {
                     tracing::info!(model = %path, "aegis-vision: loaded ONNX NSFW model");
                     return Box::new(s);
                 }
-                Err(e) => {
-                    log_fallback_once(&format!(
-                        "failed to load ONNX model from {path}: {e}; failing OPEN (stub)"
-                    ));
-                    return Box::new(StubScorer);
-                }
+                Err(e) => log_fallback_once(&format!(
+                    "failed to load ONNX model from {path}: {e}; trying the bundled model"
+                )),
             }
         }
-        log_fallback_once(&format!(
-            "no NSFW model configured ({MODEL_PATH_ENV} unset and {MODEL_PATH_CONFIG_FILE} missing / model_path None); failing OPEN (stub)"
-        ));
+        // 2. No override → the BUNDLED model, so an `onnx` build always scores for real
+        //    (no external file/env needed). Only if the ONNX Runtime itself is missing
+        //    do we fall to the stub, which emits Unspecified → policy fail-CLOSES.
+        match onnx::OnnxScorer::load_from_bytes(
+            BUNDLED_NSFW_MODEL,
+            BUNDLED_NSFW_INPUT_SIZE,
+            crate::preprocess::Normalization::half(),
+        ) {
+            Ok(s) => {
+                tracing::info!("aegis-vision: loaded bundled NSFW model");
+                return Box::new(s);
+            }
+            Err(e) => log_fallback_once(&format!(
+                "bundled NSFW model failed to load (ONNX Runtime unavailable?): {e}; \
+                 falling back to stub → emits Unspecified → policy fail-CLOSES"
+            )),
+        }
     }
     #[cfg(not(feature = "onnx"))]
     {
@@ -347,5 +364,27 @@ mod tests {
         let v = a.analyze(img_req(vec![4, 5, 6])).await.unwrap();
         assert_eq!(v.category, Category::Safe as i32);
         assert_eq!(v.action, Action::Allow as i32);
+    }
+
+    #[cfg(feature = "onnx")]
+    #[test]
+    fn bundled_model_loads_and_scores_a_real_image() {
+        use image::Rgb;
+        // A valid PNG so decode→preprocess→inference runs end-to-end on the bundled
+        // model directly (bypassing any local AEGIS_NSFW_MODEL override).
+        let buf = image::ImageBuffer::from_pixel(48, 48, Rgb([130u8, 110, 90]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(buf)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let scorer = onnx::OnnxScorer::load_from_bytes(
+            BUNDLED_NSFW_MODEL,
+            BUNDLED_NSFW_INPUT_SIZE,
+            crate::preprocess::Normalization::half(),
+        )
+        .expect("bundled model must load");
+        assert!(scorer.model_id().contains("bundled"));
+        let score = scorer.score(&png.into_inner());
+        assert!((0.0..=1.0).contains(&score), "score out of range: {score}");
     }
 }

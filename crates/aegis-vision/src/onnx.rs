@@ -114,6 +114,23 @@ impl OnnxScorer {
         })
     }
 
+    /// Load from in-memory ONNX bytes — the bundled, license-pinned model embedded
+    /// via `include_bytes!`, so an `onnx` build always has a model with no external
+    /// file or env var. CPU EP (the bundled model is int8 and fast on CPU).
+    pub fn load_from_bytes(
+        bytes: &[u8],
+        input_size: u32,
+        norm: Normalization,
+    ) -> anyhow::Result<Self> {
+        let session = build_session_from_bytes(bytes, cpu_only())?;
+        Ok(Self {
+            model_id: format!("nsfw-onnx:bundled:{input_size}"),
+            input_size,
+            norm,
+            session: Mutex::new(session),
+        })
+    }
+
     /// Construct from `AEGIS_NSFW_MODEL`, picking the model class
     /// (`AEGIS_NSFW_MODEL_CLASS`), normalization (`AEGIS_NSFW_NORM` override), and
     /// execution provider (`AEGIS_NSFW_EP`) from the environment. If the env var
@@ -188,6 +205,26 @@ fn build_session(
         .map_err(|e| anyhow::anyhow!("ort: intra threads: {e}"))?
         .commit_from_file(model_path)
         .map_err(|e| anyhow::anyhow!("ort: load model {model_path}: {e}"))
+}
+
+/// Like [`build_session`] but from in-memory model bytes (the bundled model).
+fn build_session_from_bytes(
+    bytes: &[u8],
+    providers: Vec<ort::ep::ExecutionProviderDispatch>,
+) -> anyhow::Result<Session> {
+    let intra_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    Session::builder()
+        .map_err(|e| anyhow::anyhow!("ort: session builder: {e}"))?
+        .with_execution_providers(providers)
+        .map_err(|e| anyhow::anyhow!("ort: execution providers: {e}"))?
+        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .map_err(|e| anyhow::anyhow!("ort: optimization level: {e}"))?
+        .with_intra_threads(intra_threads)
+        .map_err(|e| anyhow::anyhow!("ort: intra threads: {e}"))?
+        .commit_from_memory(bytes)
+        .map_err(|e| anyhow::anyhow!("ort: load bundled model from bytes: {e}"))
 }
 
 /// CPU-only dispatch.
