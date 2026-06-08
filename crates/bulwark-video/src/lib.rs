@@ -82,7 +82,9 @@ impl VideoAnalyzer<NullDemuxer> {
             cfg: VideoConfig::default(),
             demux: NullDemuxer,
             vision: VisionAnalyzer::from_env(VisionConfig::default()),
-            audio: AudioAnalyzer::with_transcriber(Box::new(StubTranscriber) as Box<dyn Transcriber>),
+            audio: AudioAnalyzer::with_transcriber(
+                Box::new(StubTranscriber) as Box<dyn Transcriber>
+            ),
             segment_store: None,
         }
     }
@@ -98,7 +100,9 @@ impl<D: Demuxer> VideoAnalyzer<D> {
             cfg,
             demux,
             vision: VisionAnalyzer::from_env(VisionConfig::default()),
-            audio: AudioAnalyzer::with_transcriber(Box::new(StubTranscriber) as Box<dyn Transcriber>),
+            audio: AudioAnalyzer::with_transcriber(
+                Box::new(StubTranscriber) as Box<dyn Transcriber>
+            ),
             segment_store: None,
         }
     }
@@ -206,7 +210,8 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
                 .analyze(audio_req(&format!("{}-a{i}", req.request_id), win.clone()))
                 .await?;
             // Flag the clip on adult OR grooming speech in any window.
-            if v.category == Category::AdultAudio as i32 || v.category == Category::Grooming as i32 {
+            if v.category == Category::AdultAudio as i32 || v.category == Category::Grooming as i32
+            {
                 take(v);
             }
         }
@@ -479,7 +484,10 @@ pub mod ffmpeg {
             Err(_) => return Vec::new(),
         };
         let spec = reader.spec();
-        let samples: Vec<i16> = reader.into_samples::<i16>().filter_map(Result::ok).collect();
+        let samples: Vec<i16> = reader
+            .into_samples::<i16>()
+            .filter_map(Result::ok)
+            .collect();
         let per_window = spec.sample_rate as usize * window_secs as usize * spec.channels as usize;
         if per_window == 0 {
             return Vec::new();
