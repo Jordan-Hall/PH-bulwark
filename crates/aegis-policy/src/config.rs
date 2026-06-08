@@ -204,6 +204,13 @@ pub struct PolicyConfig {
     /// archive). On by default and should essentially never be disabled; exposed
     /// only so a test/eval harness can isolate it.
     pub csam_report_flag: bool,
+
+    /// Fail-CLOSED on uncovered media (child-safety posture). When true (default),
+    /// a verdict the analyzer could NOT score — `Category::Unspecified`, e.g. no
+    /// image/audio model registered or a stub scorer — is surfaced as a WARN +
+    /// intervention alert (a coverage gap the guardian must see) instead of being
+    /// silently allowed. When false, uncovered media is allowed (legacy behaviour).
+    pub fail_closed_uncovered: bool,
 }
 
 impl Default for PolicyConfig {
@@ -219,6 +226,7 @@ impl Default for PolicyConfig {
             age_bands,
             grooming_alert_not_block: true,
             csam_report_flag: true,
+            fail_closed_uncovered: true,
         }
     }
 }
