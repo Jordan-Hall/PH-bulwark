@@ -27,6 +27,16 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # cannot load onnxruntime.dll still get a green default build.
 ort = { workspace = true, optional = true }
 
+# On LINUX, statically linking onnxruntime drags undefined abseil symbols into the
+# final link (ort_sys) — fails in the slim Docker builder. Use `load-dynamic` there
+# so ort dlopens the downloaded .so at runtime instead (the server image sets
+# ORT_DYLIB_PATH). Windows/macOS keep the direct download-binaries link — using
+# load-dynamic there risks the OS loader grabbing an ABI-mismatched system
+# onnxruntime.dll and hanging (see the workspace Cargo.toml note). Cargo unifies ort
+# features across the build graph, so this also covers the aegis-server onnx build.
+[target.'cfg(target_os = "linux")'.dependencies]
+ort = { workspace = true, optional = true, features = ["load-dynamic"] }
+
 [features]
 default = []
 onnx = ["dep:ort"]
