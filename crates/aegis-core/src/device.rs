@@ -171,7 +171,10 @@ fn detect_ram_mb(sys: &System) -> u64 {
 /// GPU. Over-optimistic is safe — `ort` tries the GPU provider and silently falls
 /// back to CPU (see [`exec_providers_for`]).
 fn detect_gpu() -> String {
-    let env = std::env::var("AEGIS_GPU").unwrap_or_default().trim().to_owned();
+    let env = std::env::var("AEGIS_GPU")
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
     if !env.is_empty() {
         return env;
     }
