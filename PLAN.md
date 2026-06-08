@@ -2,7 +2,7 @@
 
 **Working name:** Aegis
 **License intent:** Free / open source (permissive deps only — MIT/Apache/BSD/LGPL-with-isolation)
-**Status:** Planning + scaffolding. Wave A agents launching.
+**Status:** Core built & merged; product surface in progress. Live London deployment, DistilBERT detector wired + parity-verified, child + manager apps (Dioxus 0.8) running on a real device. Remaining product work (get-started flow, native grants, features, model release) is tracked as workflows in **[docs/finish-plan.md](docs/finish-plan.md)**.
 
 A cross-platform, Rust **client/server** content-filtering VPN + on-device agent that blocks
 non-child-safe content **in real time** (not whole-site blocking), detects signs of grooming
