@@ -427,8 +427,7 @@ impl Pipeline {
                 action: Action::Allow as i32, // policy is the authority and fail-closes
                 severity: Severity::Info as i32,
                 score: 0.0,
-                rationale: "no local NSFW model; image not scored on-device (coverage gap)"
-                    .into(),
+                rationale: "no local NSFW model; image not scored on-device (coverage gap)".into(),
                 ..Default::default()
             };
         }
