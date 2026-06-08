@@ -81,6 +81,20 @@ impl<S: AudioScorer> Analyzer for AudioAnalyzer<S> {
     }
 
     async fn analyze(&self, req: AnalysisRequest) -> Result<Verdict> {
+        // No real model loaded (stub scorer): we CANNOT judge this audio. Emit
+        // Unspecified ("couldn't score") so policy fails CLOSED rather than reading
+        // unscored audio as Safe (see aegis-policy `fail_closed_uncovered`).
+        if self.scorer.model_id() == "stub-noop" {
+            return Ok(Verdict {
+                request_id: req.request_id,
+                category: Category::Unspecified as i32,
+                action: Action::Allow as i32, // policy is the authority and fail-closes
+                severity: Severity::Info as i32,
+                score: 0.0,
+                rationale: "no audio model loaded; audio not scored (coverage gap)".into(),
+                ..Default::default()
+            });
+        }
         let bytes = match req.media.as_ref() {
             Some(Media::InlineMedia(m)) => m.data.clone(),
             _ => {
@@ -180,5 +194,23 @@ mod tests {
         let v = a.analyze(req).await.unwrap();
         assert_eq!(v.action, Action::Mute as i32);
         assert_eq!(v.category, Category::AdultAudio as i32);
+    }
+
+    #[tokio::test]
+    async fn stub_audio_fails_closed_uncovered() {
+        // No real model: the stub must NOT read as Safe — it emits Unspecified so
+        // policy fails CLOSED on the coverage gap (aegis-policy fail_closed_uncovered).
+        let a = AudioAnalyzer::default();
+        let req = AnalysisRequest {
+            request_id: "a".into(),
+            media_kind: MediaKind::Audio as i32,
+            media: Some(Media::InlineMedia(InlineMedia {
+                data: vec![1, 2, 3, 4],
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let v = a.analyze(req).await.unwrap();
+        assert_eq!(v.category, Category::Unspecified as i32);
     }
 }
