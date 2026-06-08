@@ -1,24 +1,19 @@
 name: deploy
 
-# Redeploy / update a running PH Bulwark server from CI WITHOUT inbound SSH:
-# GitHub calls AWS SSM Run Command, and the SSM agent on the instance runs the
-# redeploy (git pull -> rebuild image -> restart). The EC2 keeps its SSH port
-# locked to the operator's IP; CI never connects to it directly.
+# Build the PH Bulwark server image in CI (where there's RAM for the ORT/release
+# build), push it to GHCR, then have the EC2 instance docker-PULL + run it via AWS
+# SSM. The instance NEVER builds — so the small (t3.small / 2 GB) box can't OOM on
+# the heavy onnx build; it only runs the prebuilt image (~0.5 GB at runtime).
 #
-# Gated on the GitHub Environment named `production`. Required secrets/vars:
-#   secret AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY  the SCOPED deploy IAM user
+# Gated on the GitHub Environment `production`. Required secrets/vars:
+#   secret AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY  scoped deploy IAM user
 #                                                     (ph-bulwark-deployer; ssm:SendCommand)
 #   var    AWS_REGION        e.g. eu-west-2
-#   var    AWS_INSTANCE_ID   the EC2 instance id (must have the ph-bulwark-ssm role)
-#   var    AEGIS_PORT        optional, default 8443 (must match the server's port)
-#
-# The instance needs an SSM instance profile (AmazonSSMManagedInstanceCore) — a
-# one-time setup, see docs/release.md §5. Triggers: published Release or manual run.
+#   var    AWS_INSTANCE_ID   the EC2 instance id (SSM-managed)
+#   var    AEGIS_PORT        optional, default 8443
+# The instance needs SSM (AmazonSSMManagedInstanceCore) + outbound HTTPS to ghcr.io.
 
 on:
-  # TESTING PHASE: continuously deploy every merge to master to the London server,
-  # alongside the rolling pre-release (prerelease.yml). Switch to release-only
-  # (drop the push trigger) once we cut production releases.
   push:
     branches: [master]
   release:
@@ -29,11 +24,56 @@ concurrency:
   group: deploy-server
   cancel-in-progress: true
 
+env:
+  # GHCR image, lowercase (GHCR requires it). Built with FEATURES=onnx so it carries
+  # real image scoring + the bundled NSFW model; the instance just runs it.
+  IMAGE: ghcr.io/jordan-hall/aegis-server
+
 jobs:
+  build-image:
+    name: build + push onnx server image (CI has the RAM)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build (FEATURES=onnx, embeds the bundled NSFW model)
+        run: |
+          set -euo pipefail
+          docker build --build-arg FEATURES=onnx -f deploy/docker/Dockerfile \
+            -t "$IMAGE:${GITHUB_SHA}" -t "$IMAGE:latest" .
+      - name: Smoke test — server boots + loads the ONNX model (.so resolves)
+        run: |
+          set -euo pipefail
+          docker run -d --name smoke -e AEGIS_ACCOUNTS=1 "$IMAGE:${GITHUB_SHA}" --role all-in-one
+          sleep 12
+          if [ "$(docker inspect -f '{{.State.Running}}' smoke 2>/dev/null)" != "true" ]; then
+            echo "::error::server did not stay up — ONNX runtime .so missing or model load failed"
+            docker logs smoke || true; docker rm -f smoke || true; exit 1
+          fi
+          echo "server is up; recent logs:"; docker logs smoke 2>&1 | tail -15
+          docker rm -f smoke
+      - name: Push to GHCR (only a booting image is published)
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE:${GITHUB_SHA}"
+          docker push "$IMAGE:latest"
+
   deploy-server:
-    name: redeploy server via SSM (no SSH)
+    name: redeploy server via SSM (pull, no build, no SSH)
+    needs: build-image
     runs-on: ubuntu-latest
     environment: production
+    permissions:
+      contents: read
+      packages: read
     steps:
       - name: Configure AWS credentials (scoped deploy user)
         uses: aws-actions/configure-aws-credentials@v4
@@ -42,33 +82,36 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.AWS_REGION }}
 
-      - name: Redeploy via SSM Run Command
+      - name: Redeploy via SSM Run Command (docker pull the prebuilt image)
         env:
           IID: ${{ vars.AWS_INSTANCE_ID }}
           AEGIS_PORT: ${{ vars.AEGIS_PORT }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           PORT="${AEGIS_PORT:-8443}"
-          # One command per array element. SSM runs these as root on the instance.
+          REF="${IMAGE}:${GITHUB_SHA}"
+          # `set -eu` (NOT -eux) on the instance so the GHCR token isn't echoed into
+          # the SSM command log. The login cred is removed again with `docker logout`.
           cat > params.json <<JSON
           {"commands":[
-            "set -eux",
-            "cd /opt/aegis-src",
-            "git pull --ff-only",
+            "set -eu",
             "df -h / || true",
             "docker system prune -af || true",
-            "df -h / || true",
-            "echo 'NOTE: onnx (real image scoring + bundled model) is NOT built on the instance — the ORT+release build OOMs this box. Activate via a larger instance or build-in-CI + docker pull (tracked in docs/production-readiness.md). Fail-CLOSED posture means unscored images are blocked, not allowed.'",
-            "docker build -f deploy/docker/Dockerfile -t aegis-server:local .",
+            "echo '${GHCR_TOKEN}' | docker login ghcr.io -u '${GHCR_USER}' --password-stdin",
+            "docker pull '${REF}'",
             "docker rm -f aegis-server || true",
-            "docker run -d --name aegis-server --restart unless-stopped -p ${PORT}:${PORT} -v /var/lib/aegis:/var/lib/aegis -e AEGIS_BIND=0.0.0.0:${PORT} -e AEGIS_ACCOUNTS=1 -e AEGIS_STATE_DIR=/var/lib/aegis aegis-server:local --role all-in-one"
+            "docker run -d --name aegis-server --restart unless-stopped -p ${PORT}:${PORT} -v /var/lib/aegis:/var/lib/aegis -e AEGIS_BIND=0.0.0.0:${PORT} -e AEGIS_ACCOUNTS=1 -e AEGIS_STATE_DIR=/var/lib/aegis '${REF}' --role all-in-one",
+            "docker logout ghcr.io || true",
+            "docker image prune -f || true"
           ]}
           JSON
           CID=$(aws ssm send-command --instance-ids "$IID" \
-            --document-name AWS-RunShellScript --comment "PH Bulwark redeploy" \
+            --document-name AWS-RunShellScript --comment "PH Bulwark redeploy (pull)" \
             --parameters file://params.json --query Command.CommandId --output text)
           echo "SSM command: $CID"
-          for i in $(seq 1 90); do
+          for i in $(seq 1 60); do
             ST=$(aws ssm get-command-invocation --command-id "$CID" --instance-id "$IID" --query Status --output text 2>/dev/null || echo Pending)
             echo "status: $ST"
             case "$ST" in
