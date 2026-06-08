@@ -416,6 +416,21 @@ impl Pipeline {
     /// category unconditionally so the guarantee holds for any future scorer too.
     fn analyze_image(&self, media: &InlineMedia) -> Verdict {
         let bytes = &media.data;
+        // No local NSFW model: we cannot judge this image on-device. Emit Unspecified
+        // ("couldn't score") so policy fails CLOSED (fail_closed_uncovered) rather than
+        // returning a false Safe. Real scoring needs the `onnx` feature + a model, or
+        // the router offloading to a cluster worker that has one.
+        if self.nsfw.model_id() == "stub-noop" {
+            return Verdict {
+                request_id: format!("{}-img-{}", self.cfg.device_id, short_hash_hex(bytes)),
+                category: Category::Unspecified as i32,
+                action: Action::Allow as i32, // policy is the authority and fail-closes
+                severity: Severity::Info as i32,
+                score: 0.0,
+                rationale: "no local NSFW model; image not scored on-device (coverage gap)".into(),
+                ..Default::default()
+            };
+        }
         let hash = sha256_array(bytes);
 
         // SEAM: a persisted, parent-APPROVED allowlist (aegis-policy::allowlist,
