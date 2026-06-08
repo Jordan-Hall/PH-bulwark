@@ -21,6 +21,9 @@ bulwark-video = { path = "../bulwark-video" }
 # Without onnx+model it fail-CLOSES (emits Unspecified), so registering it only
 # under the feature keeps default builds lean and the no-model path safe.
 bulwark-vision = { path = "../bulwark-vision", optional = true }
+# Audio analyzer (MediaKind::AUDIO) via transcription, behind `whisper`. Transcribes
+# speech and judges it with bulwark-text; without a model it fail-CLOSES.
+bulwark-audio = { path = "../bulwark-audio", optional = true }
 tonic.workspace = true
 # Standard gRPC health service (grpc.health.v1.Health) for readiness probes.
 tonic-health = "0.14"
@@ -49,6 +52,9 @@ classifier = ["bulwark-text/classifier"]
 # Enable real on-worker image NSFW scoring (bulwark-vision + its ONNX runtime).
 # Requires a pinned model (BULWARK_NSFW_MODEL); without one, vision fail-CLOSES.
 onnx = ["dep:bulwark-vision", "bulwark-vision/onnx"]
+# Enable real on-worker AUDIO analysis (transcribe → bulwark-text) via whisper.cpp.
+# Model provisioned at BULWARK_WHISPER_MODEL; without one, audio fail-CLOSES.
+whisper = ["dep:bulwark-audio", "bulwark-audio/whisper"]
 # Enable the FCM push fan-out sink (forwards to bulwark-alert's push feature). OFF
 # by default so the default server build + host CI stay byte-identical.
 push = ["bulwark-alert/push"]

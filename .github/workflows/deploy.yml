@@ -47,7 +47,7 @@ jobs:
       - name: Build (FEATURES=onnx, embeds the bundled NSFW model)
         run: |
           set -euo pipefail
-          docker build --build-arg FEATURES=onnx -f deploy/docker/Dockerfile \
+          docker build --build-arg FEATURES=onnx,whisper -f deploy/docker/Dockerfile \
             -t "$IMAGE:${GITHUB_SHA}" -t "$IMAGE:latest" .
       - name: Smoke test — server boots + loads the ONNX model (.so dlopens)
         run: |

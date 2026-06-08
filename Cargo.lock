@@ -664,6 +664,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bulwark-alert",
+ "bulwark-audio",
  "bulwark-cluster",
  "bulwark-core",
  "bulwark-policy",

@@ -71,6 +71,10 @@ jobs:
       # The deploy ships --features onnx (real image scoring + the bundled NSFW
       # model). Verify the full server onnx build (embeds the model) on Linux.
       - run: cargo build -p bulwark-server --features onnx
+      # The deploy also ships `whisper` (audio = transcribe→text). Non-blocking until
+      # proven — it pulls whisper.cpp (C++), which can't build on the Windows dev box.
+      - run: cargo build -p bulwark-server --features whisper
+        continue-on-error: true
 
   windows-build:
     name: windows-gated crates (windows)
