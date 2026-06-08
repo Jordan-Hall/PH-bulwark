@@ -271,7 +271,8 @@ impl ClusterMember for Cluster {
                 let expired: Vec<String> = q
                     .leased
                     .iter()
-                    .filter_map(|(id, (_, dl))| (*dl <= now).then(|| id.clone()))
+                    .filter(|(_, (_, dl))| *dl <= now)
+                    .map(|(id, _)| id.clone())
                     .collect();
                 for id in expired {
                     if let Some((mut item, _)) = q.leased.remove(&id) {
@@ -422,9 +423,18 @@ mod tests {
     #[tokio::test]
     async fn expired_lease_is_requeued() {
         let c = Cluster::new(ClusterConfig::default());
-        c.enqueue(EnqueueRequest { item: Some(work("w1")) }).await.unwrap();
+        c.enqueue(EnqueueRequest {
+            item: Some(work("w1")),
+        })
+        .await
+        .unwrap();
         let d = c
-            .dequeue(DequeueRequest { node_id: "w".into(), max_items: 1, provides: vec![], wait_ms: 50 })
+            .dequeue(DequeueRequest {
+                node_id: "w".into(),
+                max_items: 1,
+                provides: vec![],
+                wait_ms: 50,
+            })
             .await
             .unwrap();
         assert_eq!(d.items.len(), 1);
@@ -437,7 +447,12 @@ mod tests {
             }
         }
         let d2 = c
-            .dequeue(DequeueRequest { node_id: "w".into(), max_items: 1, provides: vec![], wait_ms: 50 })
+            .dequeue(DequeueRequest {
+                node_id: "w".into(),
+                max_items: 1,
+                provides: vec![],
+                wait_ms: 50,
+            })
             .await
             .unwrap();
         assert_eq!(d2.items.len(), 1, "expired lease must be requeued");
@@ -447,13 +462,25 @@ mod tests {
     #[tokio::test]
     async fn complete_clears_lease() {
         let c = Cluster::new(ClusterConfig::default());
-        c.enqueue(EnqueueRequest { item: Some(work("w2")) }).await.unwrap();
+        c.enqueue(EnqueueRequest {
+            item: Some(work("w2")),
+        })
+        .await
+        .unwrap();
         let d = c
-            .dequeue(DequeueRequest { node_id: "w".into(), max_items: 1, provides: vec![], wait_ms: 50 })
+            .dequeue(DequeueRequest {
+                node_id: "w".into(),
+                max_items: 1,
+                provides: vec![],
+                wait_ms: 50,
+            })
             .await
             .unwrap();
         c.complete(&d.items[0].work_id).await;
-        assert!(c.queue.lock().await.leased.is_empty(), "ack must clear the lease");
+        assert!(
+            c.queue.lock().await.leased.is_empty(),
+            "ack must clear the lease"
+        );
     }
 
     #[tokio::test]
