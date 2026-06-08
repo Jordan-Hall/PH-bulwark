@@ -163,19 +163,63 @@ fn detect_ram_mb(sys: &System) -> u64 {
     sys.total_memory() / (1024 * 1024)
 }
 
-/// Best-effort GPU model string. `sysinfo` has no GPU API, so this is a hook for
-/// platform-specific detection wired in by `aegis-net`/`aegis-infer` later
-/// (DXGI on Windows, Metal on macOS, `/sys`/NVML on Linux). For now it honours an
-/// explicit `AEGIS_GPU` override so operators and tests can pin a value without
-/// pulling a heavy GPU-enumeration dependency into this foundational crate.
+/// GPU model string (empty = "no GPU" sentinel → CPU-only exec providers).
 ///
-/// Returns an empty string when no GPU is known (the documented `DeviceProfile`
-/// "no GPU" sentinel), which keeps the exec-provider list CPU-only.
+/// An explicit `AEGIS_GPU` override always wins (operators/tests). Otherwise it
+/// probes per-platform with **no heavy dependency**: Linux reads the NVIDIA driver
+/// sysfs / DRM render nodes; macOS and Windows always have a Metal/DirectML-capable
+/// GPU. Over-optimistic is safe — `ort` tries the GPU provider and silently falls
+/// back to CPU (see [`exec_providers_for`]).
 fn detect_gpu() -> String {
-    std::env::var("AEGIS_GPU")
-        .unwrap_or_default()
-        .trim()
-        .to_owned()
+    let env = std::env::var("AEGIS_GPU").unwrap_or_default().trim().to_owned();
+    if !env.is_empty() {
+        return env;
+    }
+    detect_gpu_native()
+}
+
+#[cfg(target_os = "linux")]
+fn detect_gpu_native() -> String {
+    use std::path::Path;
+    // NVIDIA: read the discovered GPU's product name from the driver's sysfs.
+    if let Ok(entries) = std::fs::read_dir("/proc/driver/nvidia/gpus") {
+        for e in entries.flatten() {
+            if let Ok(s) = std::fs::read_to_string(e.path().join("information")) {
+                for line in s.lines() {
+                    if let Some(model) = line.strip_prefix("Model:") {
+                        let m = model.trim();
+                        if !m.is_empty() {
+                            return m.to_owned();
+                        }
+                    }
+                }
+                return "nvidia".to_owned();
+            }
+        }
+    }
+    // Any DRM render node means a usable GPU exists (integrated or discrete).
+    if Path::new("/dev/dri/renderD128").exists() {
+        return "gpu".to_owned();
+    }
+    String::new()
+}
+
+#[cfg(target_os = "macos")]
+fn detect_gpu_native() -> String {
+    // Every supported Mac has a Metal-capable GPU (Apple Silicon, or AMD/Intel).
+    "apple-metal".to_owned()
+}
+
+#[cfg(target_os = "windows")]
+fn detect_gpu_native() -> String {
+    // DirectML runs on any DX12 GPU, which every Windows machine has (at minimum
+    // integrated). The presence signal is enough for exec-provider ordering.
+    "directml-gpu".to_owned()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn detect_gpu_native() -> String {
+    String::new()
 }
 
 #[cfg(test)]
