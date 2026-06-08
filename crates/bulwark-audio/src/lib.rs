@@ -193,12 +193,15 @@ pub mod whisper {
             let reader = hound::WavReader::new(std::io::Cursor::new(audio))?;
             let spec = reader.spec();
             let samples: Vec<f32> = match spec.sample_format {
-                hound::SampleFormat::Float => {
-                    reader.into_samples::<f32>().filter_map(Result::ok).collect()
-                }
+                hound::SampleFormat::Float => reader
+                    .into_samples::<f32>()
+                    .filter_map(Result::ok)
+                    .collect(),
                 hound::SampleFormat::Int => {
-                    let ints: Vec<i16> =
-                        reader.into_samples::<i16>().filter_map(Result::ok).collect();
+                    let ints: Vec<i16> = reader
+                        .into_samples::<i16>()
+                        .filter_map(Result::ok)
+                        .collect();
                     let mut floats = vec![0.0f32; ints.len()];
                     convert_integer_to_float_audio(&ints, &mut floats)
                         .map_err(|e| anyhow::anyhow!("whisper: int->float: {e}"))?;
