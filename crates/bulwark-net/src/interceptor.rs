@@ -418,6 +418,7 @@ mod tests {
             is_response: true,
             content_type: Some("video/mp2t".to_owned()),
             image_body: None,
+            video_body: None,
         };
         let cf = NetInterceptor::convert(pf);
         assert_eq!(cf.flow_id, 7);
@@ -450,6 +451,7 @@ mod tests {
             is_response: true,
             content_type: Some("image/jpeg".to_owned()),
             image_body: Some(jpeg.clone()),
+            video_body: None,
         };
         let cf = NetInterceptor::convert(pf);
         match cf.payload {
@@ -477,6 +479,7 @@ mod tests {
             is_response: false,
             content_type: None,
             image_body: None,
+            video_body: None,
         })
         .await
         .unwrap();
