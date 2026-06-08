@@ -1,9 +1,9 @@
-# Aegis — Data Handling & Classification
+# Bulwark — Data Handling & Classification
 
 > Author: agent **B2** (Wave B). Inputs: `PLAN.md` §0b, §0c, §5; `docs/research/model-research.md`;
 > `docs/research/platform-feasibility.md`. Companion docs: `threat-model.md`, `legal-consent.md`.
 >
-> Defines **what data Aegis touches, how it's classified, how it's handled, retained, encrypted, and
+> Defines **what data Bulwark touches, how it's classified, how it's handled, retained, encrypted, and
 > reported**. Binding rules use **MUST / MUST NOT** and are enforceable review-checklist items.
 >
 > **Not legal advice.** CSAM/PII obligations are jurisdiction-specific — see `legal-consent.md`.
@@ -39,8 +39,8 @@
 | **C4 — Non-sensitive** | App version, model registry checksums, public config defaults | Yes | Optional | n/a | n/a |
 
 **Hard rule:** if data is **C0**, no code path may write it anywhere persistent or send it anywhere.
-This is reviewed in every crate that touches media or decrypted content (`aegis-net`, `aegis-flow`,
-`aegis-vision`, `aegis-audio`, `aegis-video`, `aegis-agent`, `aegis-store`, `aegis-alert`).
+This is reviewed in every crate that touches media or decrypted content (`bulwark-net`, `bulwark-flow`,
+`bulwark-vision`, `bulwark-audio`, `bulwark-video`, `bulwark-agent`, `bulwark-store`, `bulwark-alert`).
 
 ---
 
@@ -69,10 +69,10 @@ This is reviewed in every crate that touches media or decrypted content (`aegis-
 - Only over **mTLS** to the **owner's own cluster** (`threat-model.md` Asset 2). C0 may transit in-memory
   to an owner-controlled worker for analysis but is **never persisted** there.
 - **No telemetry, no analytics, no third-party endpoints.** The only outbound is: verdicts → owner's
-  devices, alerts → guardian (§`aegis-alert`), model fetch (checksum-pinned, TLS).
+  devices, alerts → guardian (§`bulwark-alert`), model fetch (checksum-pinned, TLS).
 
 ### Persist (C1/C3 only)
-- Client: **encrypted SQLite via SQLCipher** (`aegis-store`). Cluster shared state: **Postgres with
+- Client: **encrypted SQLite via SQLCipher** (`bulwark-store`). Cluster shared state: **Postgres with
   at-rest encryption** + restricted access. Exports/backups: **`age`-encrypted**, keys in the owner's
   control.
 - Encryption keys in the **OS keystore** (DPAPI / Keychain / Android Keystore / TPM where present),
@@ -100,18 +100,18 @@ This is reviewed in every crate that touches media or decrypted content (`aegis-
 
 ## 5. CSAM policy (critical)
 
-Aegis may encounter child sexual abuse material. **Mishandling it is both a child-safety failure and a
+Bulwark may encounter child sexual abuse material. **Mishandling it is both a child-safety failure and a
 serious crime.** Rules:
 
-1. **Detect → flag, do NOT archive.** On suspected CSAM, Aegis **blocks/redacts** and records **derived
+1. **Detect → flag, do NOT archive.** On suspected CSAM, Bulwark **blocks/redacts** and records **derived
    evidence only** (hash, redacted/blurred non-explicit thumbnail or hash-only, reason code). The
    **explicit bytes are C0 — never persisted, never transmitted off owner hardware, zeroized after
    analysis.** (`PLAN.md` §0c, §5.)
 2. **Documented legal-reporting path.** The system **flags to the guardian** and surfaces a **documented
    reporting path** to the appropriate authority — **NCMEC CyberTipline** (US) or the **local/national
-   authority** for the jurisdiction (e.g. IWF/NCA in the UK, national hotlines elsewhere). Aegis provides
+   authority** for the jurisdiction (e.g. IWF/NCA in the UK, national hotlines elsewhere). Bulwark provides
    the **path and the derived evidence**; the **reporting decision/action is the guardian's / the
-   appropriate authority's**, per jurisdiction. Aegis does not silently transmit content to third parties.
+   appropriate authority's**, per jurisdiction. Bulwark does not silently transmit content to third parties.
 3. **Known-hash matching = Google CSAI Match.** For matching against **known** CSAM, use the **Google
    CSAI Match API** (the redistributable/licensable option per `model-research.md`). Hash matching, not
    content storage.
@@ -134,7 +134,7 @@ serious crime.** Rules:
   + right to erasure. Engineering hooks: C-class minimization, short retention/auto-purge, encryption at
   rest, documented erasure, audit log of processing categories. Special-category/child data → highest care.
 - **COPPA** (US, under-13): in the commercial path, verifiable parental consent and minimization; no
-  behavioral advertising; no selling data (Aegis has **no** ad/analytics/telemetry path by design).
+  behavioral advertising; no selling data (Bulwark has **no** ad/analytics/telemetry path by design).
 - **Age-appropriate design** (UK AADC / "Children's Code" and analogues): data minimization, privacy by
   default, no profiling/nudging beyond the safety purpose, transparency appropriate to the child's age,
   data-protection-impact-assessment expectation for high-risk child-data processing.

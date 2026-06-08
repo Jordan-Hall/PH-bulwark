@@ -19,334 +19,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aegis-agent"
-version = "0.0.0"
-dependencies = [
- "aegis-core",
- "aegis-proto",
- "anyhow",
- "async-trait",
- "leptess",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "windows 0.60.0",
-]
-
-[[package]]
-name = "aegis-alert"
-version = "0.0.0"
-dependencies = [
- "aegis-proto",
- "anyhow",
- "async-trait",
- "jsonwebtoken",
- "lettre",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "aegis-audio"
-version = "0.0.0"
-dependencies = [
- "aegis-core",
- "aegis-proto",
- "anyhow",
- "async-trait",
- "ort",
- "ring",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "aegis-client"
-version = "0.0.0"
-dependencies = [
- "aegis-alert",
- "aegis-core",
- "aegis-flow",
- "aegis-infer",
- "aegis-net",
- "aegis-policy",
- "aegis-proto",
- "aegis-store",
- "aegis-text",
- "aegis-video",
- "aegis-vision",
- "anyhow",
- "async-trait",
- "bytes",
- "image",
- "ring",
- "thiserror 2.0.18",
- "tokio",
- "tonic",
- "tracing",
- "windows-service",
-]
-
-[[package]]
-name = "aegis-cluster"
-version = "0.0.0"
-dependencies = [
- "aegis-core",
- "aegis-proto",
- "anyhow",
- "async-trait",
- "foca",
- "futures-core",
- "futures-util",
- "prost 0.14.3",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "tonic",
- "tracing",
-]
-
-[[package]]
-name = "aegis-core"
-version = "0.0.0"
-dependencies = [
- "aegis-proto",
- "anyhow",
- "async-trait",
- "bytes",
- "figment",
- "serde",
- "serde_json",
- "sysinfo",
- "thiserror 2.0.18",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "aegis-flow"
-version = "0.0.0"
-dependencies = [
- "aegis-core",
- "aegis-proto",
- "anyhow",
- "async-trait",
- "bytes",
- "serde",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "aegis-infer"
-version = "0.0.0"
-dependencies = [
- "aegis-core",
- "aegis-proto",
- "anyhow",
- "async-trait",
- "futures-core",
- "futures-util",
- "ort",
- "thiserror 2.0.18",
- "tokio",
- "tonic",
- "tracing",
-]
-
-[[package]]
-name = "aegis-net"
-version = "0.0.0"
-dependencies = [
- "aegis-core",
- "aegis-proto",
- "anyhow",
- "async-trait",
- "bytes",
- "http-body-util",
- "hudsucker",
- "jni",
- "libc",
- "rcgen",
- "rustls",
- "serde",
- "smoltcp",
- "thiserror 2.0.18",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "tracing",
- "tun-rs",
- "windows 0.60.0",
- "wintun",
-]
-
-[[package]]
-name = "aegis-policy"
-version = "0.0.0"
-dependencies = [
- "aegis-proto",
- "anyhow",
- "figment",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
-name = "aegis-proto"
-version = "0.0.0"
-dependencies = [
- "prost 0.14.3",
- "protox",
- "serde",
- "tonic",
- "tonic-prost",
- "tonic-prost-build",
-]
-
-[[package]]
-name = "aegis-server"
-version = "0.0.0"
-dependencies = [
- "aegis-alert",
- "aegis-cluster",
- "aegis-core",
- "aegis-policy",
- "aegis-proto",
- "aegis-text",
- "aegis-video",
- "aegis-vision",
- "anyhow",
- "async-trait",
- "futures-core",
- "futures-util",
- "prost 0.14.3",
- "ring",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tonic",
- "tonic-health",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "aegis-store"
-version = "0.0.0"
-dependencies = [
- "aegis-core",
- "aegis-proto",
- "age",
- "anyhow",
- "async-trait",
- "ring",
- "rusqlite",
- "serde",
- "serde_json",
- "sqlx",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "aegis-supervision"
-version = "0.0.0"
-dependencies = [
- "aegis-core",
- "aegis-proto",
- "anyhow",
- "async-trait",
- "serde",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "aegis-text"
-version = "0.0.0"
-dependencies = [
- "aegis-core",
- "aegis-proto",
- "aho-corasick",
- "anyhow",
- "async-trait",
- "futures-core",
- "futures-util",
- "ort",
- "regex",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokenizers",
- "tokio",
- "toml 0.8.23",
- "tracing",
-]
-
-[[package]]
-name = "aegis-ui"
-version = "0.0.0"
-dependencies = [
- "aegis-core",
- "aegis-proto",
- "aegis-store",
- "anyhow",
- "axum",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "aegis-video"
-version = "0.0.0"
-dependencies = [
- "aegis-audio",
- "aegis-core",
- "aegis-proto",
- "aegis-vision",
- "anyhow",
- "async-trait",
- "ffmpeg-sidecar",
- "ring",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "aegis-vision"
-version = "0.0.0"
-dependencies = [
- "aegis-core",
- "aegis-proto",
- "anyhow",
- "async-trait",
- "image",
- "ort",
- "ring",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "age"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -765,6 +437,334 @@ dependencies = [
  "memchr",
  "regex-automata",
  "serde",
+]
+
+[[package]]
+name = "bulwark-agent"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bulwark-core",
+ "bulwark-proto",
+ "leptess",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "windows 0.60.0",
+]
+
+[[package]]
+name = "bulwark-alert"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bulwark-proto",
+ "jsonwebtoken",
+ "lettre",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "bulwark-audio"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bulwark-core",
+ "bulwark-proto",
+ "ort",
+ "ring",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "bulwark-client"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bulwark-alert",
+ "bulwark-core",
+ "bulwark-flow",
+ "bulwark-infer",
+ "bulwark-net",
+ "bulwark-policy",
+ "bulwark-proto",
+ "bulwark-store",
+ "bulwark-text",
+ "bulwark-video",
+ "bulwark-vision",
+ "bytes",
+ "image",
+ "ring",
+ "thiserror 2.0.18",
+ "tokio",
+ "tonic",
+ "tracing",
+ "windows-service",
+]
+
+[[package]]
+name = "bulwark-cluster"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bulwark-core",
+ "bulwark-proto",
+ "foca",
+ "futures-core",
+ "futures-util",
+ "prost 0.14.3",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tonic",
+ "tracing",
+]
+
+[[package]]
+name = "bulwark-core"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bulwark-proto",
+ "bytes",
+ "figment",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "bulwark-flow"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bulwark-core",
+ "bulwark-proto",
+ "bytes",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "bulwark-infer"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bulwark-core",
+ "bulwark-proto",
+ "futures-core",
+ "futures-util",
+ "ort",
+ "thiserror 2.0.18",
+ "tokio",
+ "tonic",
+ "tracing",
+]
+
+[[package]]
+name = "bulwark-net"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bulwark-core",
+ "bulwark-proto",
+ "bytes",
+ "http-body-util",
+ "hudsucker",
+ "jni",
+ "libc",
+ "rcgen",
+ "rustls",
+ "serde",
+ "smoltcp",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tracing",
+ "tun-rs",
+ "windows 0.60.0",
+ "wintun",
+]
+
+[[package]]
+name = "bulwark-policy"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "bulwark-proto",
+ "figment",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "bulwark-proto"
+version = "0.0.0"
+dependencies = [
+ "prost 0.14.3",
+ "protox",
+ "serde",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+]
+
+[[package]]
+name = "bulwark-server"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bulwark-alert",
+ "bulwark-cluster",
+ "bulwark-core",
+ "bulwark-policy",
+ "bulwark-proto",
+ "bulwark-text",
+ "bulwark-video",
+ "bulwark-vision",
+ "futures-core",
+ "futures-util",
+ "prost 0.14.3",
+ "ring",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-health",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "bulwark-store"
+version = "0.0.0"
+dependencies = [
+ "age",
+ "anyhow",
+ "async-trait",
+ "bulwark-core",
+ "bulwark-proto",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "bulwark-supervision"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bulwark-core",
+ "bulwark-proto",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "bulwark-text"
+version = "0.0.0"
+dependencies = [
+ "aho-corasick",
+ "anyhow",
+ "async-trait",
+ "bulwark-core",
+ "bulwark-proto",
+ "futures-core",
+ "futures-util",
+ "ort",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokenizers",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+]
+
+[[package]]
+name = "bulwark-ui"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bulwark-core",
+ "bulwark-proto",
+ "bulwark-store",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "bulwark-video"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bulwark-audio",
+ "bulwark-core",
+ "bulwark-proto",
+ "bulwark-vision",
+ "ffmpeg-sidecar",
+ "ring",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "bulwark-vision"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bulwark-core",
+ "bulwark-proto",
+ "image",
+ "ort",
+ "ring",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

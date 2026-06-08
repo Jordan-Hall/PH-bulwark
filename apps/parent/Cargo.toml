@@ -1,9 +1,9 @@
 [package]
-name = "aegis-parent"
+name = "bulwark-parent"
 version = "0.0.0"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
-description = "Aegis parent console — all-Rust Dioxus UI over the shared core."
+description = "Bulwark parent console — all-Rust Dioxus UI over the shared core."
 
 [dependencies]
 # All-Rust UI, migrated to the Dioxus 0.8 line (shared with the labeling app), so
@@ -16,7 +16,7 @@ dioxus = { version = "0.8.0-alpha.0", features = ["desktop"] }
 # the SAME gRPC contract the cluster serves (no FFI bridge). It only uses the
 # LEGITIMATE services — AlertRelay (guardian alerts) + Review (approve/deny) +
 # read-only coverage. It does NOT import any device-control surface.
-aegis-proto = { path = "../../crates/aegis-proto" }
+bulwark-proto = { path = "../../crates/bulwark-proto" }
 tonic = { version = "0.14", features = ["tls-ring"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 anyhow = "1"

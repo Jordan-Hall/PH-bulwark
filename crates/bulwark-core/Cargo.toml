@@ -1,0 +1,26 @@
+[package]
+name = "bulwark-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bulwark-proto = { path = "../bulwark-proto" }
+
+serde.workspace = true
+figment = { workspace = true, features = ["toml", "env"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+bytes.workspace = true # shared flow vocabulary (CapturedFlow/FlowPayload body handles)
+async-trait.workspace = true # canonical Analyzer trait
+
+# Best-effort device-capability detection (CPU/RAM/host). Pinned explicitly here
+# (not a workspace dep yet) — orchestrator should stage `sysinfo = "0.33"` in the
+# workspace allowlist + cargo-deny. MIT licensed.
+sysinfo = "0.33"
+
+[dev-dependencies]
+figment = { workspace = true, features = ["toml", "env", "test"] }
+serde_json.workspace = true

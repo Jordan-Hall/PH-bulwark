@@ -1,0 +1,24 @@
+[package]
+name = "bulwark-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bulwark-proto = { path = "../bulwark-proto" }
+bulwark-core = { path = "../bulwark-core" }
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+ring.workspace = true
+
+# Small explicit-audio classifier = a custom head on a YAMNet/PANNs backbone
+# (must be trained — see model-research.md). Runs via `ort` behind `onnx`;
+# default build is a deterministic stub that fails open.
+ort = { workspace = true, optional = true }
+
+[features]
+default = []
+onnx = ["dep:ort"]

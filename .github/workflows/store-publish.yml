@@ -53,7 +53,7 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
       - name: Build JNI lib (release) into jniLibs
-        working-directory: platform/android/rust/aegis-android
+        working-directory: platform/android/rust/bulwark-android
         run: cargo ndk -t arm64-v8a -t armeabi-v7a -o ../../app/src/main/jniLibs build --release
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -69,7 +69,7 @@ jobs:
         uses: r0adkll/upload-google-play@v1
         with:
           serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
-          packageName: co.predatorhunters.aegis
+          packageName: co.predatorhunters.bulwark
           releaseFiles: platform/android/app/build/outputs/bundle/release/*.aab
           track: internal
           status: draft

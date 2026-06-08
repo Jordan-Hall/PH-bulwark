@@ -4,7 +4,7 @@ name: ci
 # compiler (GitHub Actions). This is the verification that cannot run in the
 # offline dev sandbox — pushing this repo makes it run automatically.
 #
-# Note: aegis-proto's build.rs compiles the .proto hermetically via `protox`
+# Note: bulwark-proto's build.rs compiles the .proto hermetically via `protox`
 # (pure Rust), so NO system `protoc` install is needed in CI.
 
 on:
@@ -53,21 +53,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Each optional feature compiles on its own. ort (onnx) and ffmpeg-sidecar
       # build without the model/ffmpeg binary present (those are runtime only).
-      - run: cargo build -p aegis-text --features classifier
-      - run: cargo build -p aegis-vision --features onnx
-      - run: cargo build -p aegis-audio --features onnx
-      - run: cargo build -p aegis-video --features ffmpeg
-      - run: cargo build -p aegis-ui --features llm-explain
-      - run: cargo build -p aegis-cluster --features gossip,quorum
+      - run: cargo build -p bulwark-text --features classifier
+      - run: cargo build -p bulwark-vision --features onnx
+      - run: cargo build -p bulwark-audio --features onnx
+      - run: cargo build -p bulwark-video --features ffmpeg
+      - run: cargo build -p bulwark-ui --features llm-explain
+      - run: cargo build -p bulwark-cluster --features gossip,quorum
       # FCM push fan-out (guardian alerts to a phone) — keep this path compiling
       # + tested so it can't rot; it's off by default in the server build.
-      - run: cargo build -p aegis-alert --features push
-      - run: cargo test  -p aegis-alert --features push
-      - run: cargo build -p aegis-server --features push
-      - run: cargo build -p aegis-server --features classifier
+      - run: cargo build -p bulwark-alert --features push
+      - run: cargo test  -p bulwark-alert --features push
+      - run: cargo build -p bulwark-server --features push
+      - run: cargo build -p bulwark-server --features classifier
       # The deploy ships --features onnx (real image scoring + the bundled NSFW
       # model). Verify the full server onnx build (embeds the model) on Linux.
-      - run: cargo build -p aegis-server --features onnx
+      - run: cargo build -p bulwark-server --features onnx
 
   windows-build:
     name: windows-gated crates (windows)
@@ -76,8 +76,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # aegis-net's Wintun + DPAPI + cert-store FFI only compiles on Windows.
-      - run: cargo build -p aegis-net -p aegis-client
+      # bulwark-net's Wintun + DPAPI + cert-store FFI only compiles on Windows.
+      - run: cargo build -p bulwark-net -p bulwark-client
 
   deny:
     name: cargo-deny (licenses + advisories + bans)

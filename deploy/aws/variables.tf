@@ -34,18 +34,18 @@ variable "ssh_cidr" {
 }
 
 variable "app_cidr" {
-  description = "CIDR allowed to reach the Aegis gRPC port."
+  description = "CIDR allowed to reach the Bulwark gRPC port."
   type        = string
   default     = "0.0.0.0/0"
 }
 
-variable "aegis_image" {
+variable "bulwark_image" {
   description = "Container image to run (build from deploy/docker/Dockerfile + push to a registry your instance can pull)."
   type        = string
-  default     = "ghcr.io/your-org/aegis-server:latest"
+  default     = "ghcr.io/your-org/bulwark-server:latest"
 }
 
-variable "aegis_port" {
+variable "bulwark_port" {
   description = "gRPC port the server listens on / the SG opens."
   type        = number
   default     = 8443
@@ -75,7 +75,7 @@ variable "ssm_instance_profile" {
 }
 
 variable "build_on_instance" {
-  description = "Build the image ON the instance from source (no registry needed). Slower first boot (~10 min Rust build); recommend instance_type >= t3.medium so it doesn't OOM (a swapfile is also added). When false, pull var.aegis_image."
+  description = "Build the image ON the instance from source (no registry needed). Slower first boot (~10 min Rust build); recommend instance_type >= t3.medium so it doesn't OOM (a swapfile is also added). When false, pull var.bulwark_image."
   type        = bool
   default     = false
 }

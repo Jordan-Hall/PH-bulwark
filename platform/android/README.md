@@ -1,38 +1,38 @@
-# Aegis — Android child app
+# Bulwark — Android child app
 
 The Android child shell pairs the device to a guardian account, runs the
 transparent child-safety surfaces Android allows, and hosts the Rust bridge used
 by the on-device analysis/VPN paths.
 
 ## What's here
-- `app/src/main/java/co/predatorhunters/aegis/`
+- `app/src/main/java/co/predatorhunters/bulwark/`
   - `MainActivity.kt` — child setup: choose UK/US/self-hosted server, redeem a
     parent-generated pair code, show local enrollment/protection state.
-  - `vpn/AegisVpnService.kt` — the `VpnService`: builds the TUN and hands its fd
+  - `vpn/BulwarkVpnService.kt` — the `VpnService`: builds the TUN and hands its fd
     plus the saved enrollment config to the Rust core for the filtering loop.
-  - `accessibility/AegisAccessibilityService.kt` — reads rendered chat text +
+  - `accessibility/BulwarkAccessibilityService.kt` — reads rendered chat text +
     notifications for E2E / cert-pinned apps (the network can't read those) and
     feeds the **same** grooming pipeline. Conventional capture, **not** a vision-LLM.
-  - `core/RustBridge.kt` — JNI surface to `libaegis_client.so`.
+  - `core/RustBridge.kt` — JNI surface to `libbulwark_client.so`.
 - `app/src/main/AndroidManifest.xml` — VpnService + AccessibilityService + perms.
 - `app/src/main/res/xml/accessibility_service_config.xml` — capture config.
 
 ## The Rust bridge
-The app loads `libaegis_client.so`, built from
-`platform/android/rust/aegis-android` as a C-ABI `cdylib`. It exports the JNI
+The app loads `libbulwark_client.so`, built from
+`platform/android/rust/bulwark-android` as a C-ABI `cdylib`. It exports the JNI
 functions declared in `RustBridge.kt`:
 
 ```
-Java_co_predatorhunters_aegis_core_RustBridge_startVpn(env, _, vpnService, tunFd: jint, configJson: jstring) -> jlong
-Java_co_predatorhunters_aegis_core_RustBridge_stopVpn(env, _, handle: jlong)
-Java_co_predatorhunters_aegis_core_RustBridge_analyzeText(env, _, app, threadId, text) -> jstring
-Java_co_predatorhunters_aegis_core_RustBridge_redeemPairCode(env, _, endpoint, code, deviceId) -> jstring
-Java_co_predatorhunters_aegis_core_RustBridge_nextAlert(env, _) -> jstring
+Java_co_predatorhunters_bulwark_core_RustBridge_startVpn(env, _, vpnService, tunFd: jint, configJson: jstring) -> jlong
+Java_co_predatorhunters_bulwark_core_RustBridge_stopVpn(env, _, handle: jlong)
+Java_co_predatorhunters_bulwark_core_RustBridge_analyzeText(env, _, app, threadId, text) -> jstring
+Java_co_predatorhunters_bulwark_core_RustBridge_redeemPairCode(env, _, endpoint, code, deviceId) -> jstring
+Java_co_predatorhunters_bulwark_core_RustBridge_nextAlert(env, _) -> jstring
 ```
 
 `redeemPairCode` calls the shared `Accounts.RedeemPairCode` gRPC service used by
 the parent app and E2E workflow harness. `analyzeText` runs the deterministic
-`aegis-text` grooming engine locally and returns content-free/redacted verdict
+`bulwark-text` grooming engine locally and returns content-free/redacted verdict
 JSON. `startVpn` currently receives the Android TUN fd and serialized child
 config; the full forwarding data path is still tracked separately.
 
@@ -42,12 +42,12 @@ config; the full forwarding data path is still tracked separately.
    ```bash
    cargo install cargo-ndk
    rustup target add aarch64-linux-android armv7-linux-androideabi
-   cd platform/android/rust/aegis-android
+   cd platform/android/rust/bulwark-android
    cargo ndk -t arm64-v8a -t armeabi-v7a \
      -o ../../app/src/main/jniLibs \
      build --release
    ```
-   (produces `app/src/main/jniLibs/<abi>/libaegis_client.so`)
+   (produces `app/src/main/jniLibs/<abi>/libbulwark_client.so`)
 2. **Build the app** in Android Studio (open `platform/android/`) or with Gradle:
    ```bash
    cd platform/android
@@ -60,7 +60,7 @@ config; the full forwarding data path is still tracked separately.
    and create a pair code for the child.
 2. Install the APK on the child device, choose the same server, and enter the
    pair code. The app stores `device_id`, `child_id`, `family_id`, and endpoint.
-3. Tap **Turn on protection** and enable Aegis in Android Accessibility settings.
+3. Tap **Turn on protection** and enable Bulwark in Android Accessibility settings.
 4. Device Owner provisioning remains the stronger managed-device path for
    anti-removal lockdown; pairing alone does not claim that state.
 

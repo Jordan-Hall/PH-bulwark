@@ -1,7 +1,7 @@
-# Build the Aegis CHILD Android APK (VpnService filter + enrollment).
+# Build the Bulwark CHILD Android APK (VpnService filter + enrollment).
 #
 # The dev host has no full Android toolchain, so APKs build here on a Linux
-# runner. Flow: build the Rust JNI lib (libaegis_client.so) for both ABIs with
+# runner. Flow: build the Rust JNI lib (libbulwark_client.so) for both ABIs with
 # cargo-ndk into the app's jniLibs, then assemble the debug APK with Gradle and
 # upload it as an artifact.
 #
@@ -22,8 +22,8 @@ on:
   pull_request:
     paths:
       - "platform/android/**"
-      # aegis-android depends on the root crates via ../../../../crates/...,
-      # so a PR that only touches a crate (aegis-text/policy/core/proto) — or the
+      # bulwark-android depends on the root crates via ../../../../crates/...,
+      # so a PR that only touches a crate (bulwark-text/policy/core/proto) — or the
       # root manifest/lockfile those crates inherit workspace deps from — can
       # break the JNI/APK build; mirror the push filter to catch it pre-merge.
       - "crates/**"
@@ -78,14 +78,14 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            platform/android/rust/aegis-android/target
-          key: ${{ runner.os }}-cargo-ndk-${{ hashFiles('platform/android/rust/aegis-android/Cargo.lock') }}
+            platform/android/rust/bulwark-android/target
+          key: ${{ runner.os }}-cargo-ndk-${{ hashFiles('platform/android/rust/bulwark-android/Cargo.lock') }}
 
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
 
       - name: Build JNI lib (arm64-v8a + armeabi-v7a) into jniLibs
-        working-directory: platform/android/rust/aegis-android
+        working-directory: platform/android/rust/bulwark-android
         run: |
           cargo ndk \
             -t arm64-v8a \
@@ -104,6 +104,6 @@ jobs:
       - name: Upload child debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: aegis-child-debug-apk
+          name: bulwark-child-debug-apk
           path: platform/android/app/build/outputs/apk/**/*-debug.apk
           if-no-files-found: error

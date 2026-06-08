@@ -1,0 +1,32 @@
+[package]
+name = "bulwark-vision"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bulwark-proto = { path = "../bulwark-proto" }
+bulwark-core = { path = "../bulwark-core" }
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+ring.workspace = true # sha256 for evidence hashing
+
+# Image decode + resize for preprocessing. Used by the always-compiled
+# `preprocess` module (so its unit test runs with no model/ort), and by the
+# `onnx` scorer to build the model input tensor. Default features cover the
+# common decoders (JPEG/PNG/GIF/WebP/BMP) we expect on intercepted media.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp"] }
+
+# Small dedicated NSFW classifier (NudeNet/Falconsai ONNX) — runs only with the
+# `onnx` feature; the default build is a deterministic stub (fails OPEN) so the
+# crate links and tests run without a model artifact or the ONNX Runtime native
+# library present. `ort` is OPTIONAL and gated so Smart App Control hosts that
+# cannot load onnxruntime.dll still get a green default build.
+ort = { workspace = true, optional = true }
+
+[features]
+default = []
+onnx = ["dep:ort"]

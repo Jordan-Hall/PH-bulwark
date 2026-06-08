@@ -1,6 +1,6 @@
-# Aegis — Real-Time Child-Safety Filtering VPN (clustered client/server)
+# Bulwark — Real-Time Child-Safety Filtering VPN (clustered client/server)
 
-**Working name:** Aegis
+**Working name:** Bulwark
 **License intent:** Free / open source (permissive deps only — MIT/Apache/BSD/LGPL-with-isolation)
 **Status:** Core built & merged; product surface in progress. Live London deployment, DistilBERT detector wired + parity-verified, child + manager apps (Dioxus 0.8) running on a real device. Remaining product work (get-started flow, native grants, features, model release) is tracked as workflows in **[docs/finish-plan.md](docs/finish-plan.md)**.
 
@@ -33,7 +33,7 @@ traffic falls back to inspectable TCP — configurable, documented.
 
 ### 0b. AI-usage principle (per your steer: *use AI sparingly*)
 
-Aegis is **rules-first, small-model-second, big-AI-rarely**:
+Bulwark is **rules-first, small-model-second, big-AI-rarely**:
 
 - **Conventional OCR, not AI vision-LLMs** — Tesseract / OS-native engines (`Windows.Media.Ocr`,
   Android Text Recognition, macOS Vision). Deterministic, fast, offline, cheap.
@@ -62,12 +62,12 @@ Aegis is **rules-first, small-model-second, big-AI-rarely**:
 ```
         Devices (thin clients)                       Server cluster (scales horizontally)
  ┌───────────────────────────────┐            ┌──────────────────────────────────────────┐
- │ aegis-client                  │   gRPC     │  Load balancer / gateway (aegis-server LB) │
- │  • aegis-net  (TUN+MITM+CA)   │  (mTLS)    │        │                │                 │
- │  • aegis-agent (manual OCR)   │ ─────────► │  worker-1        worker-2        worker-N  │
- │  • aegis-flow (buffer/delay)  │ ◄───────── │  (aegis-server: vision/audio/video/text)   │
- │  • tiny first-pass models     │  verdicts  │        \________ aegis-cluster ________/   │
- │  • aegis-infer (route local/  │            │     membership · health · LB · work queue  │
+ │ bulwark-client                  │   gRPC     │  Load balancer / gateway (bulwark-server LB) │
+ │  • bulwark-net  (TUN+MITM+CA)   │  (mTLS)    │        │                │                 │
+ │  • bulwark-agent (manual OCR)   │ ─────────► │  worker-1        worker-2        worker-N  │
+ │  • bulwark-flow (buffer/delay)  │ ◄───────── │  (bulwark-server: vision/audio/video/text)   │
+ │  • tiny first-pass models     │  verdicts  │        \________ bulwark-cluster ________/   │
+ │  • bulwark-infer (route local/  │            │     membership · health · LB · work queue  │
  │     remote, offload on mobile)│            │              shared state (Postgres)       │
  └───────────────────────────────┘            └──────────────────────────────────────────┘
 ```
@@ -75,13 +75,13 @@ Aegis is **rules-first, small-model-second, big-AI-rarely**:
 - **Client (every device):** intercepts/captures, runs *tiny* latency-critical first-pass checks
   locally, and for anything heavy (video frames, audio, full classification) calls the server
   cluster. On mobile/low-power, almost everything offloads; on a capable desktop/gateway it can run
-  more locally. `aegis-infer` makes the local-vs-remote decision from detected device capability.
+  more locally. `bulwark-infer` makes the local-vs-remote decision from detected device capability.
 - **Server cluster:** stateless analysis **workers** behind a load balancer, sharing a work queue
-  and state. Add nodes → add throughput. `aegis-cluster` provides node membership (SWIM-style
+  and state. Add nodes → add throughput. `bulwark-cluster` provides node membership (SWIM-style
   gossip), health checks, load balancing, and work distribution; shared state in Postgres; bus via
   gRPC (and optionally NATS for fan-out). A single binary runs as **LB / worker / all-in-one** by
   role flag, so a home user runs one node and a deployment runs many.
-- **Transport:** `tonic` gRPC over **mTLS**; `aegis-proto` holds the shared protobuf contracts so
+- **Transport:** `tonic` gRPC over **mTLS**; `bulwark-proto` holds the shared protobuf contracts so
   client and server never drift. The home gateway can BE the single-node cluster (your "ideally
   on-device, but mobile offloads" answer).
 
@@ -90,44 +90,44 @@ Aegis is **rules-first, small-model-second, big-AI-rarely**:
 ## 2. Workspace (Cargo) — crate map
 
 ```
-aegis/crates/
-  aegis-proto        # protobuf/gRPC contracts (tonic/prost) — client ⇄ server ⇄ node
-  aegis-core         # shared types, config, device-capability detection, IPC
-  aegis-client       # device orchestrator: wires net + agent + flow + infer
-  aegis-server       # clusterable analysis backend (roles: lb | worker | all-in-one)
-  aegis-cluster      # membership, health, load balancing, work queue, shared state
-  aegis-net          # TUN/VpnService + MITM proxy + per-install CA
-  aegis-flow         # protocol/flow classify + stream demux + buffering/delay
-  aegis-vision       # small dedicated NSFW image/frame classifier (ONNX, quantized)
-  aegis-audio        # small dedicated explicit-audio classifier (ONNX)
-  aegis-video        # ffmpeg decode/sample/blur/mute/re-mux pipeline
-  aegis-text         # rules+lexicon engine FIRST, small classifier SECOND (no hot-path LLM)
-  aegis-agent        # on-device CONVENTIONAL OCR + accessibility (Win/Android/macOS)
-  aegis-supervision  # Google/Microsoft/Apple/Meta family-API connectors
-  aegis-policy       # thresholds, age profiles, block/blur/mute/warn/log actions
-  aegis-alert        # email (SMTP/Gmail), rate-limit/digest, redacted evidence
-  aegis-store        # encrypted SQLite (client) + Postgres adapter (server)
-  aegis-infer        # local-vs-cluster routing; mobile offload
-  aegis-ui           # local dashboard + cluster admin (axum + Tauri/web)
+bulwark/crates/
+  bulwark-proto        # protobuf/gRPC contracts (tonic/prost) — client ⇄ server ⇄ node
+  bulwark-core         # shared types, config, device-capability detection, IPC
+  bulwark-client       # device orchestrator: wires net + agent + flow + infer
+  bulwark-server       # clusterable analysis backend (roles: lb | worker | all-in-one)
+  bulwark-cluster      # membership, health, load balancing, work queue, shared state
+  bulwark-net          # TUN/VpnService + MITM proxy + per-install CA
+  bulwark-flow         # protocol/flow classify + stream demux + buffering/delay
+  bulwark-vision       # small dedicated NSFW image/frame classifier (ONNX, quantized)
+  bulwark-audio        # small dedicated explicit-audio classifier (ONNX)
+  bulwark-video        # ffmpeg decode/sample/blur/mute/re-mux pipeline
+  bulwark-text         # rules+lexicon engine FIRST, small classifier SECOND (no hot-path LLM)
+  bulwark-agent        # on-device CONVENTIONAL OCR + accessibility (Win/Android/macOS)
+  bulwark-supervision  # Google/Microsoft/Apple/Meta family-API connectors
+  bulwark-policy       # thresholds, age profiles, block/blur/mute/warn/log actions
+  bulwark-alert        # email (SMTP/Gmail), rate-limit/digest, redacted evidence
+  bulwark-store        # encrypted SQLite (client) + Postgres adapter (server)
+  bulwark-infer        # local-vs-cluster routing; mobile offload
+  bulwark-ui           # local dashboard + cluster admin (axum + Tauri/web)
 ```
 
 Heavy/untrusted media parsers run as **sandboxed worker processes** (they ingest hostile input).
 
 ### Key per-crate notes
-- **aegis-net:** `wintun` (Win), `tun` (Linux/macOS), Android `VpnService` via JNI; MITM via
+- **bulwark-net:** `wintun` (Win), `tun` (Linux/macOS), Android `VpnService` via JNI; MITM via
   `hudsucker` (hyper+rustls+rcgen); **per-install CA** (never shared/baked-in), key in TPM/keystore;
   QUIC downgrade; pinning detection → flag for on-device.
-- **aegis-vision / aegis-audio:** runtime `ort` (CPU + CUDA/TensorRT/DirectML/CoreML/NNAPI). Small
+- **bulwark-vision / bulwark-audio:** runtime `ort` (CPU + CUDA/TensorRT/DirectML/CoreML/NNAPI). Small
   OSS single-purpose models, INT8-quantized for client/mobile, full precision on GPU workers.
-- **aegis-video:** `ffmpeg-sidecar` (shell out → keeps GPL/LGPL out of our binary, OSS-clean license).
+- **bulwark-video:** `ffmpeg-sidecar` (shell out → keeps GPL/LGPL out of our binary, OSS-clean license).
   Scene-aware frame sampling; live = ring buffer + delay; WebRTC = block-only.
-- **aegis-text:** deterministic indicator rules + multilingual lexicon → score; small classifier for
+- **bulwark-text:** deterministic indicator rules + multilingual lexicon → score; small classifier for
   nuance; conversation-level state machine; consumes network text AND on-device OCR text.
-- **aegis-agent:** conventional OCR only — `Windows.Media.Ocr`/Tesseract, Android Text Recognition,
+- **bulwark-agent:** conventional OCR only — `Windows.Media.Ocr`/Tesseract, Android Text Recognition,
   macOS Vision; accessibility tree read for messaging apps; this is the E2E answer.
-- **aegis-cluster/server:** `tonic` gRPC, SWIM membership (crate TBD by Wave A — e.g. `foca`/`chitchat`),
+- **bulwark-cluster/server:** `tonic` gRPC, SWIM membership (crate TBD by Wave A — e.g. `foca`/`chitchat`),
   Postgres shared state (`sqlx`), role-based single binary, health + graceful drain + horizontal scale.
-- **aegis-alert:** `lettre` SMTP + optional Gmail API; two triggers (*blocker intervened*, *grooming
+- **bulwark-alert:** `lettre` SMTP + optional Gmail API; two triggers (*blocker intervened*, *grooming
   suspected*); redacted context, **no explicit media**; rate-limit + digest.
 
 ---
@@ -145,11 +145,11 @@ local-only by default, offload only to the user's own cluster, **no telemetry** 
 
 | Phase | Deliverable |
 |---|---|
-| **0 Foundations** | Workspace, CI, `cargo-deny`/`audit`, threat model, legal/consent docs, per-install CA, policy schema, **`aegis-proto` contracts + single-node `aegis-server`/`aegis-client` skeleton over gRPC**, device-capability detection |
+| **0 Foundations** | Workspace, CI, `cargo-deny`/`audit`, threat model, legal/consent docs, per-install CA, policy schema, **`bulwark-proto` contracts + single-node `bulwark-server`/`bulwark-client` skeleton over gRPC**, device-capability detection |
 | **1 Web + text** | MITM proxy, DNS/SNI/page filtering, **rule+lexicon grooming engine** + small text classifier on web/non-E2E, alerting MVP |
 | **2 Images** | Small NSFW image model on web images; blur/block |
 | **3 Video + audio** | ffmpeg pipeline (progressive + HLS/DASH); frame sampling + audio muting |
-| **4 Live + GPU + cluster scale** | Buffered-delay live filtering, GPU re-encode/blur, **multi-node `aegis-cluster` (membership/LB/work queue)**, WebRTC block |
+| **4 Live + GPU + cluster scale** | Buffered-delay live filtering, GPU re-encode/blur, **multi-node `bulwark-cluster` (membership/LB/work queue)**, WebRTC block |
 | **5 On-device agent** | Windows then Android **conventional OCR**/accessibility → grooming engine on E2E social |
 | **6 Supervision APIs** | Family-platform connectors |
 | **7 Ship** | Gateway image, Windows MSI, Android app, cluster deploy manifests; hardening; UX; threshold tuning |

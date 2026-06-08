@@ -1,7 +1,7 @@
 # Accounts + per-child guardians
 
-How Aegis knows *which* parent to alert. Implemented in `aegis-proto` (the
-`Accounts` service) and `aegis-server/src/accounts.rs`; the same store scopes the
+How Bulwark knows *which* parent to alert. Implemented in `bulwark-proto` (the
+`Accounts` service) and `bulwark-server/src/accounts.rs`; the same store scopes the
 guardian review stream.
 
 ## Model
@@ -58,6 +58,6 @@ self-hosting UX plan.
 
 ## Status / SEAMs
 
-State is persisted as JSON when `AEGIS_STATE_DIR` is configured; otherwise it is
-in-memory for dev/single-home runs. Deliberately **no** `aegis-store`/rusqlite
+State is persisted as JSON when `BULWARK_STATE_DIR` is configured; otherwise it is
+in-memory for dev/single-home runs. Deliberately **no** `bulwark-store`/rusqlite
 dependency here (it fails to build on the Windows host, os error 4551).

@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-  Provision ffmpeg and an optional checksum-pinned NSFW ONNX model for Aegis.
+  Provision ffmpeg and an optional checksum-pinned NSFW ONNX model for Bulwark.
 
 .DESCRIPTION
-  Writes stable per-user config under %LOCALAPPDATA%\Aegis so double-clicked
-  parent-app launches can pass the same paths to aegis_proxy/aegis_vpn.
+  Writes stable per-user config under %LOCALAPPDATA%\Bulwark so double-clicked
+  parent-app launches can pass the same paths to bulwark_proxy/bulwark_vpn.
 
   ffmpeg is spawned as a child process, not linked. Model download is optional and
   must be paired with a SHA-256 when used for production provisioning.
@@ -15,13 +15,13 @@ param(
     [string]$FfmpegPath,
     [string]$ModelUrl,
     [string]$ModelSha256,
-    [string]$ModelPath = (Join-Path $env:LOCALAPPDATA 'Aegis\models\nsfw.onnx')
+    [string]$ModelPath = (Join-Path $env:LOCALAPPDATA 'Bulwark\models\nsfw.onnx')
 )
 
 $ErrorActionPreference = 'Stop'
 
 function Write-ConfigValue([string]$Name, [string]$Value) {
-    $dir = Join-Path $env:LOCALAPPDATA 'Aegis'
+    $dir = Join-Path $env:LOCALAPPDATA 'Bulwark'
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     Set-Content -LiteralPath (Join-Path $dir $Name) -NoNewline -Value $Value
 }
@@ -57,7 +57,7 @@ $resolvedFfmpeg = Resolve-Ffmpeg $FfmpegPath
 if ($resolvedFfmpeg) {
     Write-ConfigValue 'ffmpeg_binary.txt' $resolvedFfmpeg
     [Environment]::SetEnvironmentVariable('FFMPEG_BINARY', $resolvedFfmpeg, 'User')
-    [Environment]::SetEnvironmentVariable('AEGIS_FFMPEG_BINARY', $resolvedFfmpeg, 'User')
+    [Environment]::SetEnvironmentVariable('BULWARK_FFMPEG_BINARY', $resolvedFfmpeg, 'User')
     Write-Host "ffmpeg: $resolvedFfmpeg"
 } else {
     Write-Warning 'ffmpeg not found; video analysis will fail open until ffmpeg is installed or FFMPEG_BINARY is set.'
@@ -82,7 +82,7 @@ if (Test-Path -LiteralPath $ModelPath) {
     }
     $resolvedModel = (Get-Item -LiteralPath $ModelPath).FullName
     Write-ConfigValue 'nsfw_model.txt' $resolvedModel
-    [Environment]::SetEnvironmentVariable('AEGIS_NSFW_MODEL', $resolvedModel, 'User')
+    [Environment]::SetEnvironmentVariable('BULWARK_NSFW_MODEL', $resolvedModel, 'User')
     Write-Host "NSFW model: $resolvedModel"
 } else {
     Write-Warning 'NSFW model not configured; ONNX image/video scoring will fail open until a model is provisioned.'

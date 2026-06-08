@@ -1,4 +1,4 @@
-//! PH Bulwark Manager — the guardian console (all-Rust Dioxus UI). "aegis" is
+//! PH Bulwark Manager — the guardian console (all-Rust Dioxus UI). "bulwark" is
 //! the internal engineering codename; the product is Predator Hunters Bulwark.
 //!
 //! LEGITIMATE features only: review guardian alerts, **approve / keep-blocked**
@@ -6,7 +6,7 @@
 //! cluster over the SAME gRPC contract the engine serves (`Review` carries the
 //! pending-review stream and the approve/deny decision). There is deliberately
 //! **no** device-control / screen / location / remote-command surface here —
-//! Aegis is a transparent content-safety tool, not a remote-administration
+//! Bulwark is a transparent content-safety tool, not a remote-administration
 //! console.
 //!
 //! GUARDIAN-TRANSPARENCY MODEL: the console now shows guardians the FULL flagged
@@ -34,9 +34,9 @@ use std::time::Duration;
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use aegis_proto::v1::accounts_client::AccountsClient;
-use aegis_proto::v1::review_client::ReviewClient;
-use aegis_proto::v1::{
+use bulwark_proto::v1::accounts_client::AccountsClient;
+use bulwark_proto::v1::review_client::ReviewClient;
+use bulwark_proto::v1::{
     AccountAck, AlertEvent, AlertKind, Category, Child as ProtoChild, CreateAccountRequest,
     CreatePairCodeRequest, DeviceFilter, ListChildrenRequest, LoginRequest, PairCode,
     ReviewDecision, ReviewRequest, ReviewScope, Session,
@@ -58,7 +58,7 @@ const PROXY_HOST: &str = "127.0.0.1";
 const PROXY_PORT: u16 = 8080;
 const PROXY_ADDR: &str = "127.0.0.1:8080";
 
-/// Locate a bundled filter binary `name` (e.g. `aegis_proxy.exe`): an explicit
+/// Locate a bundled filter binary `name` (e.g. `bulwark_proxy.exe`): an explicit
 /// `env_key` override first, else next to THIS executable (where a packaged
 /// release ships the filter binaries beside the console). `None` → the caller
 /// falls back to a dev `cargo run`. No machine-specific path is ever hard-coded.
@@ -73,21 +73,21 @@ fn sibling_exe(env_key: &str, name: &str) -> Option<std::path::PathBuf> {
     beside.exists().then_some(beside)
 }
 
-/// The bundled content-filtering proxy (`AEGIS_PROXY_EXE` override, else beside us).
+/// The bundled content-filtering proxy (`BULWARK_PROXY_EXE` override, else beside us).
 fn proxy_exe() -> Option<std::path::PathBuf> {
-    sibling_exe("AEGIS_PROXY_EXE", "aegis_proxy.exe")
+    sibling_exe("BULWARK_PROXY_EXE", "bulwark_proxy.exe")
 }
 
-/// The bundled transparent-VPN binary (`AEGIS_VPN_EXE` override, else beside us).
-/// VPN mode captures ALL traffic via a TUN and needs Administrator; `aegis_vpn`
+/// The bundled transparent-VPN binary (`BULWARK_VPN_EXE` override, else beside us).
+/// VPN mode captures ALL traffic via a TUN and needs Administrator; `bulwark_vpn`
 /// self-checks elevation and exits immediately if not elevated.
 fn vpn_exe() -> Option<std::path::PathBuf> {
-    sibling_exe("AEGIS_VPN_EXE", "aegis_vpn.exe")
+    sibling_exe("BULWARK_VPN_EXE", "bulwark_vpn.exe")
 }
 
-/// Repo root for the dev `cargo run` fallback only: `AEGIS_REPO_ROOT` or the cwd.
+/// Repo root for the dev `cargo run` fallback only: `BULWARK_REPO_ROOT` or the cwd.
 fn repo_root() -> std::path::PathBuf {
-    std::env::var_os("AEGIS_REPO_ROOT")
+    std::env::var_os("BULWARK_REPO_ROOT")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()))
 }
@@ -95,13 +95,13 @@ fn repo_root() -> std::path::PathBuf {
 fn app_config_dir() -> std::path::PathBuf {
     use std::path::PathBuf;
     if let Some(local) = std::env::var_os("LOCALAPPDATA").filter(|s| !s.is_empty()) {
-        PathBuf::from(local).join("Aegis")
+        PathBuf::from(local).join("Bulwark")
     } else if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|s| !s.is_empty()) {
-        PathBuf::from(xdg).join("aegis")
+        PathBuf::from(xdg).join("bulwark")
     } else if let Some(home) = std::env::var_os("HOME").filter(|s| !s.is_empty()) {
-        PathBuf::from(home).join(".config/aegis")
+        PathBuf::from(home).join(".config/bulwark")
     } else {
-        std::env::temp_dir().join("aegis")
+        std::env::temp_dir().join("bulwark")
     }
 }
 
@@ -123,19 +123,19 @@ fn env_or_config(env: &str, file: &str) -> Option<String> {
 /// The NSFW model path to hand the filter. Unset means the filter runs its
 /// fail-open stub; we never invent a model path.
 fn nsfw_model() -> Option<String> {
-    env_or_config("AEGIS_NSFW_MODEL", "nsfw_model.txt")
+    env_or_config("BULWARK_NSFW_MODEL", "nsfw_model.txt")
 }
 
 /// Human-readable model status for the diagnostics panel.
 fn nsfw_model_display() -> String {
     nsfw_model()
-        .unwrap_or_else(|| "(unset — set AEGIS_NSFW_MODEL; filter runs fail-open)".to_string())
+        .unwrap_or_else(|| "(unset — set BULWARK_NSFW_MODEL; filter runs fail-open)".to_string())
 }
 
 /// Optional pinned ffmpeg binary to hand the video pipeline.
 fn ffmpeg_binary() -> Option<String> {
     env_or_config("FFMPEG_BINARY", "ffmpeg_binary.txt")
-        .or_else(|| env_or_config("AEGIS_FFMPEG_BINARY", "ffmpeg_binary.txt"))
+        .or_else(|| env_or_config("BULWARK_FFMPEG_BINARY", "ffmpeg_binary.txt"))
 }
 
 fn ffmpeg_display() -> String {
@@ -165,7 +165,7 @@ const CLOUD_REGIONS: &[(&str, &str, &str)] = &[
 const DEFAULT_REGION_ID: &str = "uk";
 
 /// Where the chosen server is persisted (one line: a region id, or a self-hosted
-/// URL). Per-user config dir (Windows `%LOCALAPPDATA%\Aegis`, else
+/// URL). Per-user config dir (Windows `%LOCALAPPDATA%\Bulwark`, else
 /// `$XDG_CONFIG_HOME`/`$HOME/.config`, else temp).
 fn server_config_path() -> std::path::PathBuf {
     app_config_dir().join("server.txt")
@@ -222,7 +222,7 @@ fn saved_token_for_endpoint(endpoint: &str) -> String {
 }
 
 fn guardian_token() -> String {
-    std::env::var("AEGIS_GUARDIAN_TOKEN")
+    std::env::var("BULWARK_GUARDIAN_TOKEN")
         .ok()
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
@@ -452,11 +452,11 @@ fn server_settings_initial_state(saved: &str) -> (String, String) {
     (selected, url)
 }
 
-/// The cluster endpoint to dial: `AEGIS_CLUSTER_ENDPOINT` (advanced/ops override)
+/// The cluster endpoint to dial: `BULWARK_CLUSTER_ENDPOINT` (advanced/ops override)
 /// wins; otherwise the user's saved country / self-hosted choice (default UK). The
 /// single source of truth for the console's review channel AND the filter it spawns.
 fn cluster_endpoint() -> String {
-    if let Ok(env) = std::env::var("AEGIS_CLUSTER_ENDPOINT") {
+    if let Ok(env) = std::env::var("BULWARK_CLUSTER_ENDPOINT") {
         let env = env.trim().to_string();
         if !env.is_empty() {
             return env;
@@ -466,7 +466,7 @@ fn cluster_endpoint() -> String {
 }
 
 fn active_server_label() -> String {
-    if std::env::var("AEGIS_CLUSTER_ENDPOINT")
+    if std::env::var("BULWARK_CLUSTER_ENDPOINT")
         .ok()
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false)
@@ -525,7 +525,7 @@ struct PairCodeUi {
 
 /// Build a tonic [`Channel`] to the cluster.
 ///
-/// * If `AEGIS_CLUSTER_CA` is set (path to a PEM CA cert), pin it via
+/// * If `BULWARK_CLUSTER_CA` is set (path to a PEM CA cert), pin it via
 ///   [`ClientTlsConfig`] (tonic `tls-ring` feature). The cluster authenticates
 ///   itself with a cert chaining to this root.
 /// * Otherwise dial in the clear — a dev/plaintext convenience only.
@@ -534,7 +534,7 @@ struct PairCodeUi {
 /// caller falls back to OFFLINE sample data.
 async fn connect_channel() -> anyhow::Result<Channel> {
     let endpoint = cluster_endpoint();
-    let ca_path = std::env::var("AEGIS_CLUSTER_CA")
+    let ca_path = std::env::var("BULWARK_CLUSTER_CA")
         .ok()
         .filter(|p| !p.trim().is_empty())
         .or_else(|| {
@@ -1344,8 +1344,8 @@ fn request_with_bearer(req: ReviewRequest, token: &str) -> tonic::Request<Review
 fn ca_pem_path() -> std::path::PathBuf {
     let base = std::env::var("LOCALAPPDATA").unwrap_or_default();
     std::path::Path::new(&base)
-        .join("Aegis")
-        .join("aegis-root-ca.pem")
+        .join("Bulwark")
+        .join("bulwark-root-ca.pem")
 }
 
 /// True when the CA pem exists on disk (i.e. the proxy has a root to trust).
@@ -1363,9 +1363,9 @@ fn ca_trust_command() -> String {
 
 /// Spawn the content-filtering proxy.
 ///
-/// Prefers the prebuilt `aegis_proxy.exe`; if that's missing, falls back to
-/// `cargo run -p aegis-client --features onnx --bin aegis_proxy` from the repo
-/// root. Either way the proxy gets `AEGIS_NSFW_MODEL` + `AEGIS_CLUSTER_ENDPOINT`.
+/// Prefers the prebuilt `bulwark_proxy.exe`; if that's missing, falls back to
+/// `cargo run -p bulwark-client --features onnx --bin bulwark_proxy` from the repo
+/// root. Either way the proxy gets `BULWARK_NSFW_MODEL` + `BULWARK_CLUSTER_ENDPOINT`.
 /// Returns the `Child` so the caller can kill it on Disconnect / shutdown.
 ///
 /// Blocking (it touches the filesystem and spawns a process) — call from an
@@ -1382,7 +1382,7 @@ fn filter_command(exe: Option<std::path::PathBuf>, bin: &str) -> std::process::C
             c.args([
                 "run",
                 "-p",
-                "aegis-client",
+                "bulwark-client",
                 "--features",
                 "onnx,ffmpeg",
                 "--bin",
@@ -1392,9 +1392,9 @@ fn filter_command(exe: Option<std::path::PathBuf>, bin: &str) -> std::process::C
             c
         }
     };
-    cmd.env("AEGIS_CLUSTER_ENDPOINT", cluster_endpoint());
+    cmd.env("BULWARK_CLUSTER_ENDPOINT", cluster_endpoint());
     if let Some(model) = nsfw_model() {
-        cmd.env("AEGIS_NSFW_MODEL", model);
+        cmd.env("BULWARK_NSFW_MODEL", model);
     }
     if let Some(ffmpeg) = ffmpeg_binary() {
         cmd.env("FFMPEG_BINARY", ffmpeg);
@@ -1403,14 +1403,14 @@ fn filter_command(exe: Option<std::path::PathBuf>, bin: &str) -> std::process::C
 }
 
 fn spawn_proxy() -> std::io::Result<Child> {
-    filter_command(proxy_exe(), "aegis_proxy").spawn()
+    filter_command(proxy_exe(), "bulwark_proxy").spawn()
 }
 
-/// Spawn the transparent-VPN binary (`aegis_vpn.exe`). Like [`spawn_proxy`] it
+/// Spawn the transparent-VPN binary (`bulwark_vpn.exe`). Like [`spawn_proxy`] it
 /// passes the model + cluster endpoint, but VPN mode is currently disabled by
 /// the VPN binary while the transparent data path is being rebuilt.
 fn spawn_vpn() -> std::io::Result<Child> {
-    filter_command(vpn_exe(), "aegis_vpn").spawn()
+    filter_command(vpn_exe(), "bulwark_vpn").spawn()
 }
 
 /// Is the proxy actually accepting connections right now? This is the source of
@@ -1495,10 +1495,10 @@ fn disable_system_proxy() -> anyhow::Result<()> {
 /// Which local filter the Connect control launches.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
-    /// Explicit per-user system proxy (no admin): spawns `aegis_proxy` and points
+    /// Explicit per-user system proxy (no admin): spawns `bulwark_proxy` and points
     /// the Windows system proxy at it.
     Proxy,
-    /// Transparent, system-wide TUN VPN (needs admin): spawns `aegis_vpn`. The TUN
+    /// Transparent, system-wide TUN VPN (needs admin): spawns `bulwark_vpn`. The TUN
     /// captures everything, so no system-proxy change is made.
     Vpn,
 }
@@ -1636,7 +1636,7 @@ fn ProtectionPanel() -> Element {
                                         proxy_set.set(true);
                                     }
                                 }
-                                // VPN mode: no system-proxy change. aegis_vpn exits
+                                // VPN mode: no system-proxy change. bulwark_vpn exits
                                 // fast if not elevated — detect that and hint admin.
                                 Mode::Vpn => {
                                     let probe = proxy_handle.clone();
@@ -1760,7 +1760,7 @@ fn ProtectionPanel() -> Element {
 
 /// Server / country picker: choose which PH Bulwark Cloud region (your data routes
 /// only through that country) or self-host. Persisted; drives the console's review
-/// channel AND the filter it spawns. `AEGIS_CLUSTER_ENDPOINT` overrides for ops use.
+/// channel AND the filter it spawns. `BULWARK_CLUSTER_ENDPOINT` overrides for ops use.
 #[component]
 fn ServerSettings() -> Element {
     rsx! {
@@ -1981,8 +1981,8 @@ fn AlertCard(alert: Alert, on_decide: EventHandler<bool>) -> Element {
 }
 
 /// Plays a blocked video segment for guardian review. The `blob://<sha>` URI is
-/// resolved from the per-user segment store on disk (`%LOCALAPPDATA%/Aegis/
-/// segments/<sha>.blob`, written by `aegis-video::SegmentStore`) when the parent is
+/// resolved from the per-user segment store on disk (`%LOCALAPPDATA%/Bulwark/
+/// segments/<sha>.blob`, written by `bulwark-video::SegmentStore`) when the parent is
 /// co-located with the server; otherwise it falls back to pulling the clip from the
 /// cluster over `Review.FetchSegment`. Bytes are shown via a data URI in the desktop
 /// webview's `<video>`. The caller only mounts this for NON-CSAM alerts (CSAM is
@@ -2056,7 +2056,7 @@ fn load_segment_from_disk(uri: &str) -> Result<Option<Vec<u8>>, String> {
 /// the chunks and reassembles. Authenticated via the guardian token in accounts mode
 /// (CSAM is never retained, so it can never be fetched).
 async fn fetch_segment_remote(uri: &str) -> Result<Vec<u8>, String> {
-    use aegis_proto::v1::SegmentRequest;
+    use bulwark_proto::v1::SegmentRequest;
     let channel = connect_channel().await.map_err(|e| e.to_string())?;
     let mut client = ReviewClient::new(channel);
     let token = guardian_token();
@@ -2083,23 +2083,23 @@ async fn fetch_segment_remote(uri: &str) -> Result<Vec<u8>, String> {
 }
 
 /// The per-user segment store directory. MUST mirror
-/// `aegis_video::store::default_segments_dir()` exactly — the child writes blobs
-/// there; this lean parent UI deliberately does NOT depend on `aegis-video` (it
+/// `bulwark_video::store::default_segments_dir()` exactly — the child writes blobs
+/// there; this lean parent UI deliberately does NOT depend on `bulwark-video` (it
 /// would drag the whole video/vision/ONNX tree into the desktop app), so the
 /// resolution is duplicated here. Keep the two in sync: Windows `%LOCALAPPDATA%`,
 /// then `$XDG_DATA_HOME`, then `$HOME/.local/share`, else the temp dir.
 fn segments_dir() -> std::path::PathBuf {
     use std::path::PathBuf;
     if let Some(local) = std::env::var_os("LOCALAPPDATA").filter(|s| !s.is_empty()) {
-        return PathBuf::from(local).join("Aegis").join("segments");
+        return PathBuf::from(local).join("Bulwark").join("segments");
     }
     if let Some(xdg) = std::env::var_os("XDG_DATA_HOME").filter(|s| !s.is_empty()) {
-        return PathBuf::from(xdg).join("aegis").join("segments");
+        return PathBuf::from(xdg).join("bulwark").join("segments");
     }
     if let Some(home) = std::env::var_os("HOME").filter(|s| !s.is_empty()) {
-        return PathBuf::from(home).join(".local/share/aegis/segments");
+        return PathBuf::from(home).join(".local/share/bulwark/segments");
     }
-    std::env::temp_dir().join("aegis-segments")
+    std::env::temp_dir().join("bulwark-segments")
 }
 
 // ---------------------------------------------------------------------------
@@ -2317,8 +2317,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use aegis_proto::v1::review_server::{Review, ReviewServer};
-    use aegis_proto::v1::{
+    use bulwark_proto::v1::review_server::{Review, ReviewServer};
+    use bulwark_proto::v1::{
         Evidence, PushAck, PushTarget, ReviewAck, SegmentChunk, SegmentRequest, Severity,
     };
     use futures_util::Stream;

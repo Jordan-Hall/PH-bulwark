@@ -1,0 +1,27 @@
+[package]
+name = "bulwark-alert"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# OFF by default so the normal build (email-only) is completely unchanged.
+# Enables the Firebase Cloud Messaging (FCM HTTP v1) push AlertSink.
+default = []
+push = ["dep:reqwest", "dep:jsonwebtoken", "dep:serde_json"]
+
+[dependencies]
+bulwark-proto = { path = "../bulwark-proto" }
+
+lettre.workspace = true
+serde.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+
+# --- push feature (FCM HTTP v1) — optional, gated by `push` -----------------
+reqwest = { workspace = true, optional = true }
+jsonwebtoken = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }

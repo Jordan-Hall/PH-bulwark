@@ -35,7 +35,7 @@
    source-of-truth to avoid split-brain (stop accepting work if heartbeat lost). `tonic` + `tonic-health`
    + `ginepro` for LB. **Per-device client cert** (`rcgen`, key in DPAPI/Keystore/Keychain) → mTLS;
    worker↔worker mTLS via cluster CA. Stateless workers (no sticky routing → clean drain). Offload
-   decision in `aegis-infer`: device caps + queue backpressure + RTT>100 ms → prefer local. Cluster sees
+   decision in `bulwark-infer`: device caps + queue backpressure + RTT>100 ms → prefer local. Cluster sees
    plaintext analysis intermediates → in-memory only, audit logs, deploy on owned hardware.
 
 ## Spike priority (do Tier-1 first)
@@ -43,7 +43,7 @@
 2. **Android AccessibilityService capture** of a real chat app + Play Store/MASA path.
 3. **QUIC downgrade** validation on real devices.
 4. **2-node `foca` + `tonic` mTLS cluster** — gossip, health, graceful drain, partition behavior.
-Tier-2 (parallel): `aegis-infer` latency/offload heuristic; pinning detection; Linux nftables+systemd.
+Tier-2 (parallel): `bulwark-infer` latency/offload heuristic; pinning detection; Linux nftables+systemd.
 
 ## Unresolved → routed elsewhere
 - Grooming model accuracy/bias on-device → A2 (train + eval).

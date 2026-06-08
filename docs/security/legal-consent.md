@@ -1,4 +1,4 @@
-# Aegis — Legal Basis, Consent & Disclosure
+# Bulwark — Legal Basis, Consent & Disclosure
 
 > Author: agent **B2** (Wave B). Inputs: `PLAN.md` §0c, §5; `docs/research/platform-feasibility.md`
 > §3/§"Unresolved"; `docs/research/model-research.md`. Companion docs: `threat-model.md`,
@@ -15,17 +15,17 @@
 
 ## 1. Intended lawful basis
 
-Aegis's intended, defensible use:
+Bulwark's intended, defensible use:
 
 > **A legal guardian monitoring their own minor child, on devices the guardian owns or lawfully
 > controls, for the child's safety.**
 
 This is the basis on which mainstream parental-control products (Bark, Net Nanny, Qustodio, Apple/Google
-Family) operate. Aegis is built to stay within it (`PLAN.md` §0c):
+Family) operate. Bulwark is built to stay within it (`PLAN.md` §0c):
 
 - **Guardian + minor + owned/controlled device** — all three required. Remove any one and the lawful
   basis is in doubt.
-- **Safety purpose only** — not general surveillance, not profiling, not data resale (Aegis has no
+- **Safety purpose only** — not general surveillance, not profiling, not data resale (Bulwark has no
   telemetry/analytics path — `data-handling.md`).
 - Built-in guardrails enforce the posture: minimization, local-only-by-default, short retention,
   redaction, no archival of explicit content.
@@ -33,7 +33,7 @@ Family) operate. Aegis is built to stay within it (`PLAN.md` §0c):
 **Out of scope / disallowed uses** (the build, docs, and consent flow must discourage and not facilitate):
 monitoring **adults** (partners/employees) without their consent; monitoring a child the deployer is **not**
 guardian of; deployment on devices the deployer does **not** own/control; covert stalkerware. These uses can
-be **criminal** (wiretap, computer-misuse, stalking laws). Aegis is not a stalkerware toolkit.
+be **criminal** (wiretap, computer-misuse, stalking laws). Bulwark is not a stalkerware toolkit.
 
 ---
 
@@ -72,7 +72,7 @@ Key tensions for legal review:
 
 ## 3. Transparency & disclosure
 
-- **To the guardian:** clear documentation of exactly what Aegis captures, what it cannot (E2E/pinned/QUIC
+- **To the guardian:** clear documentation of exactly what Bulwark captures, what it cannot (E2E/pinned/QUIC
   gaps, coverage dashboard), where data goes (local / owner cluster only, no telemetry), and retention.
 - **To the child (age-appropriate):** transparency is both an ethical duty and, under **age-appropriate
   design** regimes (UK AADC / "Children's Code", EU), a likely legal expectation. Covert monitoring of
@@ -98,7 +98,7 @@ adds duties (`PLAN.md` §0c):
   child safeguarding, with the special-category/child considerations), DPIA for high-risk child-data
   processing, data-subject rights (access/erasure — hooks in `data-handling.md`), records of processing.
 - **COPPA** (US under-13): verifiable parental consent, minimization, no behavioral ads, no data sale
-  (Aegis has none of those paths by design), and a clear privacy policy.
+  (Bulwark has none of those paths by design), and a clear privacy policy.
 - **Age-appropriate design** (UK AADC and analogues): privacy by default, minimization, no profiling beyond
   the safety purpose, transparency, best-interests-of-the-child assessment.
 
@@ -106,7 +106,7 @@ adds duties (`PLAN.md` §0c):
 **allowed** but require:
 - **VPN disclosure** and use of `VpnService` for its stated purpose.
 - **Data Safety** declaration consistent with behavior — and crucially **no plaintext exfiltration** off
-  the device beyond the owner's control (Aegis: local/owner-cluster only, no telemetry — supports this).
+  the device beyond the owner's control (Bulwark: local/owner-cluster only, no telemetry — supports this).
 - **AccessibilityService** use justified for the disclosed safety purpose (Google scrutinizes accessibility
   use heavily; misuse → removal).
 - A **MASA Level 2** (Mobile Application Security Assessment) by an authorized lab — budget **~12 weeks +

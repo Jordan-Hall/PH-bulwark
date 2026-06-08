@@ -7,11 +7,11 @@ plugins {
 }
 
 android {
-    namespace = "co.predatorhunters.aegis"
+    namespace = "co.predatorhunters.bulwark"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "co.predatorhunters.aegis"
+        applicationId = "co.predatorhunters.bulwark"
         minSdk = 26          // modern VpnService + foreground-service APIs
         targetSdk = 34
         versionCode = 1
@@ -35,8 +35,8 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
 
-    // The Rust core (crates/aegis-client, built as a cdylib by cargo-ndk →
-    // libaegis_client.so) is placed under src/main/jniLibs/<abi>/. See README.md.
+    // The Rust core (crates/bulwark-client, built as a cdylib by cargo-ndk →
+    // libbulwark_client.so) is placed under src/main/jniLibs/<abi>/. See README.md.
     sourceSets["main"].jniLibs.srcDirs("src/main/jniLibs")
 
     // Release signing is configured ONLY when the keystore is provided via env

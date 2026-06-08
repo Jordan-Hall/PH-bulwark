@@ -11,7 +11,7 @@ channels first.
 
 ## 1. Channels by platform
 
-### Android — `co.predatorhunters.aegis`
+### Android — `co.predatorhunters.bulwark`
 | Channel | Use | Notes |
 |---|---|---|
 | **Direct APK** | testers now | Built by CI; signed with the release key. Easiest for a testing cohort. |
@@ -22,7 +22,7 @@ channels first.
 ### Desktop
 | OS | Channel | Signing |
 |---|---|---|
-| **Windows** | direct download (`aegis_proxy.exe`/`aegis_vpn.exe`/console) | **Must be code-signed** — Smart App Control blocks unsigned binaries (os error 4551). An EV/OV cert is needed for clean SmartScreen. |
+| **Windows** | direct download (`bulwark_proxy.exe`/`bulwark_vpn.exe`/console) | **Must be code-signed** — Smart App Control blocks unsigned binaries (os error 4551). An EV/OV cert is needed for clean SmartScreen. |
 | **macOS** | direct download `.dmg` | **Sign + notarize** with an Apple Developer ID, else Gatekeeper blocks it. |
 | **Linux** | `.deb` / AppImage / direct binary | No mandatory signing; provide a checksum + (optional) GPG sig. |
 
@@ -47,7 +47,7 @@ git tag v0.1.0-test.1 && git push origin v0.1.0-test.1
 ```
 
 - `.github/workflows/release.yml` (tag `v*` or manual dispatch) builds the **Linux
-  server binaries** (`aegis-server`, `aegis_admin`) and attaches them to the GitHub
+  server binaries** (`bulwark-server`, `bulwark_admin`) and attaches them to the GitHub
   Release. The **container image** ships via `docker.yml` / your registry.
 - The **Android signed APK** is produced by extending the existing `android.yml`
   build with `assembleRelease` + an `apksigner` step keyed on repo **secrets**
@@ -91,7 +91,7 @@ a GitHub **Environment** `production`:
 | secret | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | the scoped `ph-bulwark-deployer` IAM user (needs `ssm:SendCommand`) |
 | var | `AWS_REGION` | e.g. `eu-west-2` |
 | var | `AWS_INSTANCE_ID` | the EC2 id (must carry the `ph-bulwark-ssm` instance profile) |
-| var | `AEGIS_PORT` | optional, default `8443` — MUST match the server's port (Terraform `aegis_port`) |
+| var | `BULWARK_PORT` | optional, default `8443` — MUST match the server's port (Terraform `bulwark_port`) |
 
 **One-time SSM enablement** (admin/root, once): create role `ph-bulwark-ssm` with
 `AmazonSSMManagedInstanceCore` (EC2 trust), attach it to the instance, and grant the

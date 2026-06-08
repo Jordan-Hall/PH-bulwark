@@ -1,0 +1,14 @@
+// Module map exposing the Rust static library's C ABI to Swift.
+//
+// The header lives in the Rust crate (single source of truth). The relative
+// path reaches up to platform/apple/bulwark-apple-ffi/include/bulwark_apple.h.
+//
+// You must ALSO add the built static archive (libbulwark_apple_ffi.a) to the
+// linker for whatever target consumes this module — SwiftPM cannot locate the
+// prebuilt .a on its own. In Xcode this is the NE target's "Link Binary With
+// Libraries"; for `swift build`, pass -Xlinker -L<dir> -Xlinker -lbulwark_apple_ffi.
+
+module CBulwarkApple {
+    header "../../../bulwark-apple-ffi/include/bulwark_apple.h"
+    export *
+}

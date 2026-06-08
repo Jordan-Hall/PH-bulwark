@@ -1,0 +1,32 @@
+# Bulwark child-safety filter — systemd unit (tamper resistance, item 5).
+#
+# Install (guardian, root) so it runs at boot and a non-root child user cannot
+# stop or remove it:
+#
+#   sudo cp bulwark-proxy.service /etc/systemd/system/
+#   sudo cp bulwark_proxy /usr/local/bin/        # the built binary
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now bulwark-proxy.service
+#
+# THE MODEL (docs/design/tamper-protection.md §5): the child is a normal (non-sudo)
+# user; the guardian holds root. A system unit can only be stopped/disabled or its
+# files removed by root, so the child cannot turn it off. The tamper heartbeat
+# reports to the guardian if it is ever stopped.
+
+[Unit]
+Description=Bulwark child-safety content filter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/bulwark_proxy
+# Keep it running: restart on any exit (crash or kill).
+Restart=always
+RestartSec=5
+# Harden: the child user can't tamper with the running process.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target

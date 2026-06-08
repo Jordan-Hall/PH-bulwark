@@ -1,7 +1,7 @@
-# Aegis — Interface Contracts (B1)
+# Bulwark — Interface Contracts (B1)
 
 The Rust **trait contracts** every builder codes against. They are expressed in
-`aegis-proto` (`aegis.v1`) types so the in-process boundaries and the on-the-wire
+`bulwark-proto` (`bulwark.v1`) types so the in-process boundaries and the on-the-wire
 boundaries use one vocabulary. Builders **implement the trait for their crate;
 they do not invent new public APIs** (workflow hand-off rule #1).
 
@@ -9,9 +9,9 @@ Conventions:
 - `async fn` in traits via **`async-trait`** (workspace dep) — used wherever the
   call does I/O (network, disk, model session) or may block.
 - Pure CPU/in-memory predicates are **sync**.
-- Errors use a shared `aegis_core::Error` (`thiserror`); shown here as
-  `aegis_core::Result<T>`.
-- `use aegis_proto::v1::*;` and helper newtypes (`DeviceId`, `NodeId`,
+- Errors use a shared `bulwark_core::Error` (`thiserror`); shown here as
+  `bulwark_core::Result<T>`.
+- `use bulwark_proto::v1::*;` and helper newtypes (`DeviceId`, `NodeId`,
   `GroomingRule`) are assumed in scope.
 
 These signatures are the **contract**; exact lifetimes/streams may be refined by
@@ -23,19 +23,19 @@ C0 when the proto compiles, but names, arguments, and ownership must hold.
 
 | Trait | Implemented by | Async? | Purpose |
 |---|---|---|---|
-| `Interceptor` | **aegis-net** | yes | TUN/MITM capture; CA; QUIC downgrade; pinning detection |
-| `FlowClassifier` | **aegis-flow** | yes | classify flow, demux streams, buffer/delay |
-| `Analyzer` | **aegis-vision / -audio / -video / -text / -supervision** (server) and **aegis-infer** (local) | yes | `AnalysisRequest → Verdict` |
-| `OcrSource` | **aegis-agent** | yes | on-device conventional OCR / accessibility → `TextSpan` |
-| `OffloadRouter` | **aegis-infer** | yes | local-vs-cluster routing; offload negotiation |
-| `PolicyEngine` | **aegis-policy** | no | `Verdict → Action`; alert-worthiness |
-| `AlertSink` | **aegis-alert** | yes | raise `AlertEvent` (rate-limit/digest, redacted) |
-| `Store` | **aegis-store** | yes | persist redacted events/verdicts (SQLite client / Postgres server) |
-| `ClusterMember` | **aegis-cluster** | yes | membership, health, work queue, drain |
+| `Interceptor` | **bulwark-net** | yes | TUN/MITM capture; CA; QUIC downgrade; pinning detection |
+| `FlowClassifier` | **bulwark-flow** | yes | classify flow, demux streams, buffer/delay |
+| `Analyzer` | **bulwark-vision / -audio / -video / -text / -supervision** (server) and **bulwark-infer** (local) | yes | `AnalysisRequest → Verdict` |
+| `OcrSource` | **bulwark-agent** | yes | on-device conventional OCR / accessibility → `TextSpan` |
+| `OffloadRouter` | **bulwark-infer** | yes | local-vs-cluster routing; offload negotiation |
+| `PolicyEngine` | **bulwark-policy** | no | `Verdict → Action`; alert-worthiness |
+| `AlertSink` | **bulwark-alert** | yes | raise `AlertEvent` (rate-limit/digest, redacted) |
+| `Store` | **bulwark-store** | yes | persist redacted events/verdicts (SQLite client / Postgres server) |
+| `ClusterMember` | **bulwark-cluster** | yes | membership, health, work queue, drain |
 
 ---
 
-## `Interceptor` — aegis-net
+## `Interceptor` — bulwark-net
 
 Captures and (where possible) decrypts device traffic, surfacing inspectable
 units. Owns the per-install CA and the QUIC-downgrade / pinning-detection logic.
@@ -60,26 +60,26 @@ pub enum InterceptDecision {
 #[async_trait::async_trait]
 pub trait Interceptor: Send + Sync {
     /// Bring the TUN/VpnService + MITM proxy up; install/load the per-install CA.
-    async fn start(&self) -> aegis_core::Result<()>;
+    async fn start(&self) -> bulwark_core::Result<()>;
 
     /// Stream of decrypted (or pinning-flagged) flows for classification.
-    async fn next_flow(&self) -> aegis_core::Result<Option<CapturedFlow>>;
+    async fn next_flow(&self) -> bulwark_core::Result<Option<CapturedFlow>>;
 
     /// Apply a policy decision back onto a live flow (forward/rewrite/drop).
     async fn apply(&self, flow_id: u64, decision: InterceptDecision)
-        -> aegis_core::Result<()>;
+        -> bulwark_core::Result<()>;
 
     /// True if a flow was rejected by cert pinning (→ OCR fallback path).
     fn is_pinned(&self, app_or_host: &str) -> bool;
 
     /// Graceful teardown (MUST restore routing/nftables; see platform feasibility §2).
-    async fn shutdown(&self) -> aegis_core::Result<()>;
+    async fn shutdown(&self) -> bulwark_core::Result<()>;
 }
 ```
 
 ---
 
-## `FlowClassifier` — aegis-flow
+## `FlowClassifier` — bulwark-flow
 
 Turns a `CapturedFlow` into analysis-ready units: text spans, image frames,
 audio spans, or buffered video segments — applying the ring-buffer/delay for
@@ -101,7 +101,7 @@ pub trait FlowClassifier: Send + Sync {
     /// For streaming media this drives the buffer; units are released as the
     /// delay window permits.
     async fn classify(&self, flow: CapturedFlow)
-        -> aegis_core::Result<Vec<AnalysisUnit>>;
+        -> bulwark_core::Result<Vec<AnalysisUnit>>;
 
     /// How far behind live the play-out buffer currently sits (live budget).
     fn current_delay_ms(&self) -> u32;
@@ -113,8 +113,8 @@ pub trait FlowClassifier: Send + Sync {
 ## `Analyzer` — server analyzers + local first-pass
 
 The core analysis contract. The **same trait** is implemented server-side by
-`aegis-vision`/`-audio`/`-video`/`-text`/`-supervision` (heavy models) and
-client-side by `aegis-infer` (tiny first-pass models). `aegis-server` dispatches
+`bulwark-vision`/`-audio`/`-video`/`-text`/`-supervision` (heavy models) and
+client-side by `bulwark-infer` (tiny first-pass models). `bulwark-server` dispatches
 to the right analyzer by `AnalysisRequest.media_kind`.
 
 ```rust
@@ -125,11 +125,11 @@ pub trait Analyzer: Send + Sync {
 
     /// Analyse one request → one verdict. MUST NOT return raw explicit media in
     /// `Verdict.evidence` (hashes / safe thumbnail / redacted snippet only).
-    async fn analyze(&self, req: AnalysisRequest) -> aegis_core::Result<Verdict>;
+    async fn analyze(&self, req: AnalysisRequest) -> bulwark_core::Result<Verdict>;
 
     /// Batched analyse (sampled video frames). Default = sequential `analyze`.
     async fn analyze_batch(&self, batch: AnalysisBatch)
-        -> aegis_core::Result<VerdictBatch> {
+        -> bulwark_core::Result<VerdictBatch> {
         let mut verdicts = Vec::with_capacity(batch.requests.len());
         for req in batch.requests {
             verdicts.push(self.analyze(req).await?);
@@ -141,17 +141,17 @@ pub trait Analyzer: Send + Sync {
     async fn analyze_stream(
         &self,
         requests: futures_core::stream::BoxStream<'static, AnalysisRequest>,
-    ) -> aegis_core::Result<
-        futures_core::stream::BoxStream<'static, aegis_core::Result<Verdict>>,
+    ) -> bulwark_core::Result<
+        futures_core::stream::BoxStream<'static, bulwark_core::Result<Verdict>>,
     >;
 }
 ```
 
-`aegis-text` additionally exposes the deterministic rule layer so the verdict is
+`bulwark-text` additionally exposes the deterministic rule layer so the verdict is
 explainable; this is a crate-local detail layered under `Analyzer`:
 
 ```rust
-/// aegis-text internal: deterministic rules FIRST, classifier SECOND.
+/// bulwark-text internal: deterministic rules FIRST, classifier SECOND.
 pub trait GroomingRules {
     /// Run the eight indicator rules + context multipliers (no model).
     fn evaluate(&self, span: &TextSpan, thread: &ThreadState) -> GroomingSignal;
@@ -160,7 +160,7 @@ pub trait GroomingRules {
 
 ---
 
-## `OcrSource` — aegis-agent
+## `OcrSource` — bulwark-agent
 
 The E2E / cert-pinned answer: **conventional OCR** (never a vision-LLM) plus the
 accessibility tree and notification text, emitting `TextSpan`s into the same
@@ -170,22 +170,22 @@ text pipeline as network chat.
 #[async_trait::async_trait]
 pub trait OcrSource: Send + Sync {
     /// Begin capturing on-screen / notification text for the supervised apps.
-    async fn start(&self, device: &DeviceId) -> aegis_core::Result<()>;
+    async fn start(&self, device: &DeviceId) -> bulwark_core::Result<()>;
 
     /// Next OCR'd / accessibility-extracted text span (tagged with app + thread).
     /// `source_channel` is OCR_ONSCREEN or NOTIFICATION.
-    async fn next_text(&self) -> aegis_core::Result<Option<TextSpan>>;
+    async fn next_text(&self) -> bulwark_core::Result<Option<TextSpan>>;
 
     /// Engines available on this device (OS-native first, Tesseract fallback).
     fn engines(&self) -> &[&'static str];
 
-    async fn shutdown(&self) -> aegis_core::Result<()>;
+    async fn shutdown(&self) -> bulwark_core::Result<()>;
 }
 ```
 
 ---
 
-## `OffloadRouter` — aegis-infer
+## `OffloadRouter` — bulwark-infer
 
 Decides local vs. cluster per unit, negotiates and caches the `OffloadPolicy`,
 and is the client's single door to the `Analysis`/`Offload` gRPC services.
@@ -199,9 +199,9 @@ pub enum Route {
 #[async_trait::async_trait]
 pub trait OffloadRouter: Send + Sync {
     /// Negotiate an offload policy from this device's capabilities
-    /// (`DeviceProfile` built by aegis-core). Caches until TTL / RefreshOffload.
+    /// (`DeviceProfile` built by bulwark-core). Caches until TTL / RefreshOffload.
     async fn negotiate(&self, profile: DeviceProfile)
-        -> aegis_core::Result<OffloadPolicy>;
+        -> bulwark_core::Result<OffloadPolicy>;
 
     /// Decide where a given unit runs, honouring the cached policy + live RTT
     /// + cluster backpressure (see latency budget in architecture.md §4).
@@ -209,17 +209,17 @@ pub trait OffloadRouter: Send + Sync {
 
     /// Analyse a unit, transparently running locally or calling the cluster
     /// `Analysis` service per `route`.
-    async fn analyze(&self, req: AnalysisRequest) -> aegis_core::Result<Verdict>;
+    async fn analyze(&self, req: AnalysisRequest) -> bulwark_core::Result<Verdict>;
 
     /// Re-negotiate after TTL or a material capability change (battery, RTT).
     async fn refresh(&self, req: RefreshOffloadRequest)
-        -> aegis_core::Result<OffloadPolicy>;
+        -> bulwark_core::Result<OffloadPolicy>;
 }
 ```
 
 ---
 
-## `PolicyEngine` — aegis-policy
+## `PolicyEngine` — bulwark-policy
 
 Maps a `Verdict` to an `Action` for the age profile, and decides whether an alert
 should fire. **Sync** — pure thresholds/profiles, no I/O.
@@ -236,7 +236,7 @@ pub trait PolicyEngine: Send + Sync {
     fn decide(&self, verdict: &Verdict, ctx: &PolicyContext) -> Action;
 
     /// Whether (and how) this verdict+action should raise a guardian alert.
-    /// `None` = no alert (e.g. plain LOG). Builds the kind; aegis-alert dedupes.
+    /// `None` = no alert (e.g. plain LOG). Builds the kind; bulwark-alert dedupes.
     fn alert_for(&self, verdict: &Verdict, action: Action, ctx: &PolicyContext)
         -> Option<AlertKind>;
 }
@@ -244,7 +244,7 @@ pub trait PolicyEngine: Send + Sync {
 
 ---
 
-## `AlertSink` — aegis-alert
+## `AlertSink` — bulwark-alert
 
 Raises guardian alerts with **redacted context only**, rate-limited / digested.
 Hosts the `AlertRelay` gRPC service server-side; the client calls it through this
@@ -255,17 +255,17 @@ trait.
 pub trait AlertSink: Send + Sync {
     /// Raise one alert (rate-limited / deduped). MUST carry redacted_context +
     /// hash/safe-thumbnail Evidence only — never explicit media.
-    async fn raise(&self, event: AlertEvent) -> aegis_core::Result<AlertAck>;
+    async fn raise(&self, event: AlertEvent) -> bulwark_core::Result<AlertAck>;
 
     /// Flush a digest batch (periodic roll-up of LOG-level events).
     async fn raise_batch(&self, batch: AlertBatch)
-        -> aegis_core::Result<AlertAckBatch>;
+        -> bulwark_core::Result<AlertAckBatch>;
 }
 ```
 
 ---
 
-## `Store` — aegis-store
+## `Store` — bulwark-store
 
 Persists redacted events/verdicts. **Encrypted SQLite** on the client
 (`rusqlite` + `age`/SQLCipher), **Postgres** on the server (`sqlx`). The same
@@ -282,24 +282,24 @@ pub struct StoredEvent {
 
 #[async_trait::async_trait]
 pub trait Store: Send + Sync {
-    async fn record(&self, event: StoredEvent) -> aegis_core::Result<()>;
+    async fn record(&self, event: StoredEvent) -> bulwark_core::Result<()>;
 
     /// Recent events for the dashboard / coverage matrix (paged).
     async fn recent(&self, device: &DeviceId, limit: u32)
-        -> aegis_core::Result<Vec<StoredEvent>>;
+        -> bulwark_core::Result<Vec<StoredEvent>>;
 
     /// Conversation state for the grooming state machine (thread-scoped).
     async fn thread_state(&self, thread_id: &str)
-        -> aegis_core::Result<Option<Vec<u8>>>;
+        -> bulwark_core::Result<Option<Vec<u8>>>;
 
     async fn put_thread_state(&self, thread_id: &str, state: &[u8])
-        -> aegis_core::Result<()>;
+        -> bulwark_core::Result<()>;
 }
 ```
 
 ---
 
-## `ClusterMember` — aegis-cluster
+## `ClusterMember` — bulwark-cluster
 
 SWIM membership, health, work queue, and graceful drain. Hosts the
 `ClusterControl` gRPC service; Postgres is the quorum source-of-truth.
@@ -308,29 +308,29 @@ SWIM membership, health, work queue, and graceful drain. Hosts the
 #[async_trait::async_trait]
 pub trait ClusterMember: Send + Sync {
     /// Join the cluster (gossip seeds) → current member view.
-    async fn join(&self, req: JoinRequest) -> aegis_core::Result<JoinResponse>;
+    async fn join(&self, req: JoinRequest) -> bulwark_core::Result<JoinResponse>;
 
-    async fn leave(&self, req: LeaveRequest) -> aegis_core::Result<LeaveResponse>;
+    async fn leave(&self, req: LeaveRequest) -> bulwark_core::Result<LeaveResponse>;
 
     /// Current health for a node (or aggregate when node_id empty).
-    async fn health(&self, req: HealthRequest) -> aegis_core::Result<HealthStatus>;
+    async fn health(&self, req: HealthRequest) -> bulwark_core::Result<HealthStatus>;
 
     /// Push health updates (feeds LB + offload backpressure).
     async fn watch_health(&self, req: WatchHealthRequest)
-        -> aegis_core::Result<
-            futures_core::stream::BoxStream<'static, aegis_core::Result<HealthStatus>>,
+        -> bulwark_core::Result<
+            futures_core::stream::BoxStream<'static, bulwark_core::Result<HealthStatus>>,
         >;
 
     /// Enqueue a work item; `accepted=false` under backpressure → caller runs local.
     async fn enqueue(&self, req: EnqueueRequest)
-        -> aegis_core::Result<EnqueueResponse>;
+        -> bulwark_core::Result<EnqueueResponse>;
 
     /// Claim work (long-poll, capability-filtered).
     async fn dequeue(&self, req: DequeueRequest)
-        -> aegis_core::Result<DequeueResponse>;
+        -> bulwark_core::Result<DequeueResponse>;
 
     /// Stop taking new work, finish in-flight within deadline, then go DEAD.
-    async fn drain(&self, req: DrainRequest) -> aegis_core::Result<DrainResponse>;
+    async fn drain(&self, req: DrainRequest) -> bulwark_core::Result<DrainResponse>;
 }
 ```
 
@@ -338,7 +338,7 @@ pub trait ClusterMember: Send + Sync {
 
 ## Notes for builders
 
-- **Code to the trait + `aegis-proto`.** Do not widen these signatures without
+- **Code to the trait + `bulwark-proto`.** Do not widen these signatures without
   flagging the orchestrator (workflow hand-off rule #1).
 - `futures_core::stream::BoxStream` is used for the streaming methods; the exact
   stream type will be finalized by **C0** once tonic codegen exists (tonic uses

@@ -16,16 +16,16 @@ if [ ! -f /swapfile ]; then
   echo '/swapfile none swap sw 0 0' >> /etc/fstab
 fi
 
-mkdir -p /var/lib/aegis
-rm -rf /opt/aegis-src
-git clone --depth 1 ${repo_url} /opt/aegis-src
-cd /opt/aegis-src
-docker build -f deploy/docker/Dockerfile -t aegis-server:local .
+mkdir -p /var/lib/bulwark
+rm -rf /opt/bulwark-src
+git clone --depth 1 ${repo_url} /opt/bulwark-src
+cd /opt/bulwark-src
+docker build -f deploy/docker/Dockerfile -t bulwark-server:local .
 
-docker run -d --name aegis-server --restart unless-stopped \
-  -p ${aegis_port}:${aegis_port} \
-  -v /var/lib/aegis:/var/lib/aegis \
-  -e AEGIS_BIND=0.0.0.0:${aegis_port} \
-  -e AEGIS_ACCOUNTS=1 \
-  -e AEGIS_STATE_DIR=/var/lib/aegis \
-  aegis-server:local --role all-in-one
+docker run -d --name bulwark-server --restart unless-stopped \
+  -p ${bulwark_port}:${bulwark_port} \
+  -v /var/lib/bulwark:/var/lib/bulwark \
+  -e BULWARK_BIND=0.0.0.0:${bulwark_port} \
+  -e BULWARK_ACCOUNTS=1 \
+  -e BULWARK_STATE_DIR=/var/lib/bulwark \
+  bulwark-server:local --role all-in-one

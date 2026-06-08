@@ -26,14 +26,14 @@ data "aws_ami" "ubuntu" {
   }
 }
 
-resource "aws_security_group" "aegis" {
+resource "aws_security_group" "bulwark" {
   name_prefix = "ph-bulwark-"
   description = "PH Bulwark server: gRPC + SSH"
 
   ingress {
-    description = "Aegis gRPC"
-    from_port   = var.aegis_port
-    to_port     = var.aegis_port
+    description = "Bulwark gRPC"
+    from_port   = var.bulwark_port
+    to_port     = var.bulwark_port
     protocol    = "tcp"
     cidr_blocks = [var.app_cidr]
   }
@@ -68,11 +68,11 @@ resource "aws_security_group" "aegis" {
   tags = { Name = "ph-bulwark-${var.region}" }
 }
 
-resource "aws_instance" "aegis" {
+resource "aws_instance" "bulwark" {
   ami                    = data.aws_ami.ubuntu.id
   instance_type          = var.instance_type
   key_name               = var.key_name
-  vpc_security_group_ids = [aws_security_group.aegis.id]
+  vpc_security_group_ids = [aws_security_group.bulwark.id]
   # SSM-managed: lets GitHub deploy via `aws ssm send-command` with NO inbound SSH.
   # The role/profile is created out-of-band (one-time admin step, see docs/release.md
   # §5); declared here so a later apply doesn't strip it. Pre-existing = no-op on apply.
@@ -82,10 +82,10 @@ resource "aws_instance" "aegis" {
   # (no registry needed — set build_on_instance = true).
   user_data = var.build_on_instance ? templatefile("${path.module}/user_data_build.sh.tftpl", {
     repo_url   = var.repo_url
-    aegis_port = var.aegis_port
+    bulwark_port = var.bulwark_port
     }) : templatefile("${path.module}/user_data.sh.tftpl", {
-    aegis_image = var.aegis_image
-    aegis_port  = var.aegis_port
+    bulwark_image = var.bulwark_image
+    bulwark_port  = var.bulwark_port
   })
 
   root_block_device {

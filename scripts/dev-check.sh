@@ -5,12 +5,12 @@
 # Mirrors .github/workflows/ci.yml (rustfmt, clippy -D warnings, test) across the
 # main workspace PLUS the two DETACHED workspaces that main CI builds separately:
 #   - apps/parent                      (the Dioxus console)
-#   - platform/android/rust/aegis-android (the JNI bridge; clippy only — needs NDK to build)
+#   - platform/android/rust/bulwark-android (the JNI bridge; clippy only — needs NDK to build)
 #
 # Windows note: Smart App Control blocks executing fresh build-script/test binaries
 # (os error 4551). fmt + clippy on the non-SQLite crates usually pass; full `cargo
-# test` and the SQLite crates (aegis-store/client/ui) need Linux/WSL/CI. The `touch`
-# forces a fresh aegis-proto build-script binary past SAC. For the full suite, run
+# test` and the SQLite crates (bulwark-store/client/ui) need Linux/WSL/CI. The `touch`
+# forces a fresh bulwark-proto build-script binary past SAC. For the full suite, run
 # this on Linux or in CI.
 #
 # Usage:  bash scripts/dev-check.sh            # full
@@ -22,7 +22,7 @@ fail=0
 section() { echo; echo "──────── $1 ────────"; }
 run() { local name="$1"; shift; section "$name"; if "$@"; then echo "  ✓ $name"; else echo "  ✗ $name"; fail=1; fi; }
 
-touch crates/aegis-proto/build.rs 2>/dev/null || true  # SAC (os error 4551) workaround
+touch crates/bulwark-proto/build.rs 2>/dev/null || true  # SAC (os error 4551) workaround
 
 run "workspace: rustfmt"  cargo fmt --all --check
 run "workspace: clippy"   cargo clippy --workspace --all-targets -- -D warnings
@@ -33,9 +33,9 @@ fi
 run "parent console: rustfmt"  cargo fmt --manifest-path apps/parent/Cargo.toml --check
 run "parent console: clippy"   cargo clippy --manifest-path apps/parent/Cargo.toml --all-targets -- -D warnings
 
-run "android jni: rustfmt"  cargo fmt --manifest-path platform/android/rust/aegis-android/Cargo.toml --check
+run "android jni: rustfmt"  cargo fmt --manifest-path platform/android/rust/bulwark-android/Cargo.toml --check
 # clippy for the android crate needs the NDK target; skip the build, lint host-side.
-run "android jni: clippy"   cargo clippy --manifest-path platform/android/rust/aegis-android/Cargo.toml -- -D warnings
+run "android jni: clippy"   cargo clippy --manifest-path platform/android/rust/bulwark-android/Cargo.toml -- -D warnings
 
 echo
 if [ "$fail" = 0 ]; then

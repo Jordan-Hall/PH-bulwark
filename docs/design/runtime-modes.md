@@ -1,11 +1,11 @@
 # Runtime modes — Proxy vs VPN
 
-Aegis filters a device's traffic in one of two desktop modes. Both decrypt
+Bulwark filters a device's traffic in one of two desktop modes. Both decrypt
 HTTPS with the **per-install root CA** (generated on first run, key wrapped by the
 OS keystore, never shipped) and run the same classification pipeline; they differ
 only in how traffic reaches the filter.
 
-## 1. Explicit Proxy — `aegis_proxy` (no admin)
+## 1. Explicit Proxy — `bulwark_proxy` (no admin)
 
 - A `hudsucker` MITM proxy on `127.0.0.1:8080`.
 - The per-user **system proxy** (Windows `Internet Settings`, HKCU — no admin) is
@@ -14,7 +14,7 @@ only in how traffic reaches the filter.
   (or use their own cert store, e.g. Firefox/Zen) need extra config and are the
   documented gap this mode can't fully close.
 
-## 2. Transparent VPN — `aegis_vpn` (admin)
+## 2. Transparent VPN — `bulwark_vpn` (admin)
 
 - A layer-3 **TUN** captures *all* traffic; `tun2proxy` (smoltcp userspace
   netstack) redirects captured **TCP → the local MITM proxy**, NATs other UDP
@@ -22,7 +22,7 @@ only in how traffic reaches the filter.
 - No per-app/proxy settings — every app is covered.
 - `setup(true)` installs the default route and **restores host routing on
   teardown** (no-blackhole contract).
-- Requires **Administrator/root** (TUN adapter + default route). `aegis_vpn`
+- Requires **Administrator/root** (TUN adapter + default route). `bulwark_vpn`
   self-checks elevation and exits with the exact relaunch command if not elevated.
 
 ### Per-platform VPN mechanism
@@ -35,7 +35,7 @@ only in how traffic reaches the filter.
 | Android         | native **VpnService** (not tun2proxy)       |
 | iOS             | native **NetworkExtension** (not tun2proxy) |
 
-Desktop shares one code path (`aegis-net::vpn`); mobile uses the OS-mandated
+Desktop shares one code path (`bulwark-net::vpn`); mobile uses the OS-mandated
 native VPN APIs in `platform/android` + `platform/apple`.
 
 ## Shared requirements

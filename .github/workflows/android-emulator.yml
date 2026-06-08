@@ -3,7 +3,7 @@ name: android-emulator
 # A "real Android box" in CI: builds the child APK (incl. an x86_64 native lib so
 # the JNI loads on the emulator), boots an Android emulator, installs the app, and
 # launches it — proving the app actually RUNS on a real Android runtime (loads
-# libaegis_client.so, starts MainActivity) and doesn't crash on launch.
+# libbulwark_client.so, starts MainActivity) and doesn't crash on launch.
 #
 # Non-blocking (not a required check): the emulator is slow (~10-15 min) and can be
 # flaky, so it informs without gating merges. Runs on Android changes + manual.
@@ -47,7 +47,7 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
       - name: Build JNI libs (arm64 + armv7 + x86_64) into jniLibs
-        working-directory: platform/android/rust/aegis-android
+        working-directory: platform/android/rust/bulwark-android
         run: cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o ../../app/src/main/jniLibs build --release
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -76,18 +76,18 @@ jobs:
             sleep 5
             # 1) Install must succeed (proves the APK + native ABIs are valid for Android).
             adb install -r platform/android/app/build/outputs/apk/debug/app-debug.apk
-            adb shell pm list packages 2>/dev/null | tr -d "\r" | grep -q "package:co.predatorhunters.aegis" \
+            adb shell pm list packages 2>/dev/null | tr -d "\r" | grep -q "package:co.predatorhunters.bulwark" \
               || { echo "::error::APK did not install"; exit 1; }
             echo "✓ APK installed on Android $(adb shell getprop ro.build.version.release | tr -d '\r')"
             # 2) Best-effort launch, then assert NO native crash (the key signal:
-            #    libaegis_client.so loads + no uncaught exception). Launch timing /
+            #    libbulwark_client.so loads + no uncaught exception). Launch timing /
             #    activity lifecycle are NOT asserted (they flake on a headless emulator).
             adb logcat -c || true
-            adb shell monkey -p co.predatorhunters.aegis -c android.intent.category.LAUNCHER 1 || true
+            adb shell monkey -p co.predatorhunters.bulwark -c android.intent.category.LAUNCHER 1 || true
             sleep 8
             echo "=== app logcat ==="
-            adb logcat -d 2>/dev/null | grep -iE "aegis|libaegis|RustBridge" | tail -20 || true
+            adb logcat -d 2>/dev/null | grep -iE "bulwark|libbulwark|RustBridge" | tail -20 || true
             if adb logcat -d 2>/dev/null | grep -E "UnsatisfiedLinkError|FATAL EXCEPTION"; then
               echo "::error::native crash / uncaught exception on launch"; adb logcat -d | tail -60; exit 1
             fi
-            echo "✓ launched + libaegis_client loaded, no crash on Android"
+            echo "✓ launched + libbulwark_client loaded, no crash on Android"

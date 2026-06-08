@@ -1,16 +1,16 @@
 [package]
-name = "aegis-labeling-server"
+name = "bulwark-labeling-server"
 version = "0.0.0"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
 description = "PH Bulwark labeling service — serves prioritized labeling tasks to trusted volunteers and records corrections for the retrain loop (rom pipeline/retrain.py)."
 
 [lib]
-name = "aegis_labeling_server"
+name = "bulwark_labeling_server"
 path = "src/lib.rs"
 
 [[bin]]
-name = "aegis-labeling-server"
+name = "bulwark-labeling-server"
 path = "src/main.rs"
 required-features = ["server"]
 
