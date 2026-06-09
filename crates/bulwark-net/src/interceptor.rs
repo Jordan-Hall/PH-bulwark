@@ -184,9 +184,12 @@ impl NetInterceptor {
         // When the proxy captured a WHOLE still-image body for NSFW scoring, that
         // becomes the classifier's body so the (image) magic bytes AND the full
         // pixels reach the analyzer. Otherwise we carry the bounded peek as before.
-        let body = match flow.image_body {
-            Some(img) => bytes::Bytes::from(img),
-            None => bytes::Bytes::from(flow.body),
+        // Prefer the WHOLE captured media body — a still image OR an HLS/DASH video
+        // segment — so the analyzer gets full pixels/frames, not just the peek.
+        let body = match (flow.image_body, flow.video_body) {
+            (Some(img), _) => bytes::Bytes::from(img),
+            (None, Some(seg)) => bytes::Bytes::from(seg),
+            (None, None) => bytes::Bytes::from(flow.body),
         };
 
         CapturedFlow {
@@ -458,6 +461,39 @@ mod tests {
             FlowPayload::Http(h) => {
                 assert_eq!(h.content_type().as_deref(), Some("image/jpeg"));
                 assert_eq!(h.body_peek.as_ref(), jpeg.as_slice(), "full image surfaced");
+            }
+            _ => panic!("expected Http payload"),
+        }
+    }
+
+    #[test]
+    fn convert_surfaces_full_video_segment_body() {
+        // An HLS/DASH segment: the WHOLE segment (not the peek) becomes the body so
+        // the video analyzer can decode frames + audio; content-type tags VideoStream.
+        let seg = vec![7u8; 4096];
+        let pf = ProxyFlow {
+            flow_id: 13,
+            source: proxy::FlowSource::VideoStream,
+            app_or_host: String::new(),
+            readable: true,
+            method: String::new(),
+            uri: "status:200".to_owned(),
+            body: vec![1, 2, 3], // peek only
+            is_response: true,
+            content_type: Some("video/mp2t".to_owned()),
+            image_body: None,
+            video_body: Some(seg.clone()),
+        };
+        let cf = NetInterceptor::convert(pf);
+        assert_eq!(cf.source_channel, SourceChannel::VideoStream);
+        match cf.payload {
+            FlowPayload::Http(h) => {
+                assert_eq!(h.content_type().as_deref(), Some("video/mp2t"));
+                assert_eq!(
+                    h.body_peek.len(),
+                    seg.len(),
+                    "full segment surfaced, not peek"
+                );
             }
             _ => panic!("expected Http payload"),
         }
