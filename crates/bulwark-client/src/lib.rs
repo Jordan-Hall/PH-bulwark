@@ -528,6 +528,11 @@ impl Pipeline {
         for unit in &units {
             let verdict = self.analyze(unit).await;
 
+            // The analyzer may have produced a remediated (blurred/muted, same-format)
+            // body — serve THAT instead of blocking. Empty = nothing to swap.
+            let rewrite: Option<Vec<u8>> =
+                (!verdict.remediated_media.is_empty()).then(|| verdict.remediated_media.clone());
+
             let ctx = bulwark_policy::PolicyContext {
                 device: self.cfg.device_id.clone().into(),
                 source_channel,
@@ -537,7 +542,7 @@ impl Pipeline {
             let alert_kind = self.policy.alert_for(&verdict, action, &ctx);
 
             interceptor
-                .apply(flow_id, action_to_decision(action, None))
+                .apply(flow_id, action_to_decision(action, rewrite.clone()))
                 .await?;
 
             // A buffered video segment carries a DelayBuffer ticket; apply the
@@ -549,7 +554,10 @@ impl Pipeline {
                 ..
             } = unit
             {
-                if let Err(e) = self.classifier.apply(*sid, action, None) {
+                if let Err(e) =
+                    self.classifier
+                        .apply(*sid, action, rewrite.clone().map(|v| v.into()))
+                {
                     tracing::warn!(error = %e, segment_id = sid,
                         "failed to release buffered video segment");
                 }
