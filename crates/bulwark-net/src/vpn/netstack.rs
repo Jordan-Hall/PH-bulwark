@@ -9,10 +9,13 @@
 
 use std::net::{SocketAddr, ToSocketAddrs};
 
+use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
+use smoltcp::socket::tcp;
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{
-    IpAddress, IpProtocol, IpVersion, Ipv4Packet, Ipv6Packet, TcpPacket, UdpPacket,
+    HardwareAddress, IpAddress, IpCidr, IpEndpoint, IpProtocol, IpVersion, Ipv4Packet, Ipv6Packet,
+    TcpPacket, UdpPacket,
 };
 
 use crate::tun::TunDevice;
@@ -345,6 +348,38 @@ impl TxToken for TunTxToken<'_> {
     }
 }
 
+// ---- smoltcp interface + transparent per-flow listener (the accept side) ----
+
+/// TCP socket buffer per flow, each direction (64 KiB).
+const FLOW_BUF: usize = 64 * 1024;
+
+/// Build the smoltcp interface over `device` for TRANSPARENT capture: `any_ip` so it
+/// accepts packets addressed to ANY destination (the device's real traffic), with a
+/// dummy in-subnet address as the netstack's own identity.
+fn build_interface(device: &mut TunPhy) -> Interface {
+    let config = Config::new(HardwareAddress::Ip);
+    let mut iface = Interface::new(config, device, SmolInstant::now());
+    iface.set_any_ip(true);
+    iface.update_ip_addrs(|addrs| {
+        let _ = addrs.push(IpCidr::new(IpAddress::v4(10, 64, 0, 1), 24));
+    });
+    iface
+}
+
+/// Open a transparent TCP listener bound to the flow's ORIGINAL destination so the
+/// captured SYN is accepted by smoltcp (which, with `any_ip`, answers AS that dst).
+/// The accepted byte stream is then spliced to the proxy (`connect_via_proxy`).
+fn open_proxy_listener(sockets: &mut SocketSet, dst: IpEndpoint) -> Result<SocketHandle> {
+    let mut socket = tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0u8; FLOW_BUF]),
+        tcp::SocketBuffer::new(vec![0u8; FLOW_BUF]),
+    );
+    socket
+        .listen(dst)
+        .map_err(|e| NetError::tun(format!("VPN bridge: listen {dst}: {e}")))?;
+    Ok(sockets.add(socket))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,6 +589,49 @@ mod tests {
         fn backend(&self) -> &'static str {
             "fake"
         }
+    }
+
+    #[test]
+    fn proxy_listener_binds_to_original_dst() {
+        // A captured SYN to dst:port → a smoltcp socket LISTENing on that exact dst,
+        // so (with any_ip) smoltcp accepts the flow as the original server.
+        let mut sockets = SocketSet::new(Vec::new());
+        let dst = IpEndpoint::new(IpAddress::v4(93, 184, 216, 34), 443);
+        let h = open_proxy_listener(&mut sockets, dst).expect("listener opens");
+        let sock = sockets.get::<tcp::Socket>(h);
+        assert_eq!(
+            sock.state(),
+            tcp::State::Listen,
+            "socket must LISTEN on the original destination"
+        );
+    }
+
+    #[test]
+    fn builds_any_ip_interface_over_a_fake_tun() {
+        // The interface builds over the TUN phy device without panicking; any_ip is
+        // on so it will accept packets to arbitrary destinations (transparent capture).
+        struct Dummy;
+        impl crate::tun::TunDevice for Dummy {
+            fn up(&mut self, _c: &crate::tun::TunConfig) -> crate::Result<()> {
+                Ok(())
+            }
+            fn recv(&self, _b: &mut [u8]) -> crate::Result<usize> {
+                Ok(0)
+            }
+            fn send(&self, p: &[u8]) -> crate::Result<usize> {
+                Ok(p.len())
+            }
+            fn close(&mut self) -> crate::Result<()> {
+                Ok(())
+            }
+            fn backend(&self) -> &'static str {
+                "dummy"
+            }
+        }
+        let dummy = Dummy;
+        let mut phy = TunPhy::new(&dummy, 1500);
+        let iface = build_interface(&mut phy);
+        assert!(iface.any_ip(), "transparent capture needs any_ip enabled");
     }
 
     #[test]
