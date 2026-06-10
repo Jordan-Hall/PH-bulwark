@@ -90,7 +90,7 @@ pub enum FlowPayload {
     },
 }
 
-/// A captured, MITM-decrypted (or marked-unreadable) network unit handed up from
+/// A captured, inspection-decrypted (or marked-unreadable) network unit handed up from
 /// `bulwark-net` for classification. (interfaces.md `CapturedFlow`.)
 #[derive(Clone, Debug)]
 pub struct CapturedFlow {

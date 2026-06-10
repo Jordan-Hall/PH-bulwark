@@ -1,7 +1,7 @@
 //! QUIC / HTTP-3 downgrade.
 //!
 //! QUIC runs over **UDP/443** and is end-to-end encrypted with no on-path
-//! decryption point, so it bypasses our TCP MITM entirely. The threat model's
+//! decryption point, so it bypasses our TCP TLS inspection entirely. The threat model's
 //! fail-safe table mandates **downgrade**: block UDP/443 so apps fall back to
 //! inspectable TCP/HTTP-2 (~85–90% do — platform-feasibility §4). A small number
 //! of apps won't fall back; those go on a per-app allowlist and the failure is

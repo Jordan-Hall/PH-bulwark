@@ -1,7 +1,7 @@
 //! Platform TUN abstraction.
 //!
 //! The interception layer needs a layer-3 virtual interface so OS traffic can be
-//! captured and redirected to the in-process MITM proxy. Each platform offers a
+//! captured and redirected to the in-process TLS-inspecting proxy. Each platform offers a
 //! different primitive:
 //!   * **Windows** → `wintun` (WireGuard's pre-signed driver) — **real** here.
 //!   * **Linux/macOS** → `tun-rs` device plumbing, with routing still fail-closed

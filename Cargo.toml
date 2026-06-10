@@ -67,7 +67,7 @@ ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
 
 # VPN data path — PERMISSIVE ONLY (productise + open-source; NO GPL).
 #   * smoltcp (0BSD): userspace TCP/IP netstack for TUN capture + redirect to the
-#     local MITM proxy, with full control of UDP/QUIC/WebRTC + raw sockets.
+#     local TLS-inspecting proxy, with full control of UDP/QUIC/WebRTC + raw sockets.
 #   * boringtun (BSD-3, Cloudflare): industry-standard userspace WireGuard for the
 #     secure device<->filter-node transport leg.
 # (Replaced `tun2proxy`, which pulled `socks5-impl` = GPL-3.0-or-later — copyleft,

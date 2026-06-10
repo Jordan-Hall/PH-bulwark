@@ -31,7 +31,7 @@ async-trait.workspace = true # FlowClassifier is an async trait
 bytes = "1"
 
 # NOTE: `httparse` was considered for raw HTTP header parsing but is NOT used:
-# `bulwark-net`'s `hudsucker` MITM already delivers parsed request/response heads,
+# `bulwark-net`'s `hudsucker` TLS inspection already delivers parsed request/response heads,
 # so `bulwark-flow` receives a structured `HttpHead` and only reads its fields.
 # Left documented here so the orchestrator knows it was evaluated and dropped.
 

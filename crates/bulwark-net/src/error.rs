@@ -38,7 +38,7 @@ pub enum NetError {
     KeyStore(String),
 
     /// Installing or removing our root from the OS trust store failed. A failed
-    /// *uninstall* is security-relevant (orphaned root = latent MITM backdoor).
+    /// *uninstall* is security-relevant (orphaned root = latent TLS inspection backdoor).
     #[error("trust store error: {0}")]
     TrustStore(String),
 
@@ -46,8 +46,8 @@ pub enum NetError {
     #[error("TUN device error: {0}")]
     Tun(String),
 
-    /// The MITM proxy (hudsucker / rustls) failed to start, bind, or run.
-    #[error("MITM proxy error: {0}")]
+    /// The TLS-inspecting proxy (hudsucker / rustls) failed to start, bind, or run.
+    #[error("TLS-inspecting proxy error: {0}")]
     Proxy(String),
 
     /// A QUIC-downgrade firewall rule could not be applied or removed.

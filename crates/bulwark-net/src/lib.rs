@@ -9,14 +9,14 @@
 //! * A platform **TUN** abstraction ([`tun::TunDevice`]) — real on Windows via
 //!   `wintun` (WireGuard's pre-signed driver); Linux (`tun-rs`) / Android
 //!   (`VpnService`) are stubbed behind `cfg` with documented `todo!()`s.
-//! * A transparent **MITM proxy** ([`proxy`]) over `hudsucker` (hyper + rustls +
+//! * A transparent **TLS-inspecting proxy** ([`proxy`]) over `hudsucker` (hyper + rustls +
 //!   rcgen leaf certs) that decrypts HTTP(S) and emits flows for classification.
 //! * **Per-install CA management** ([`ca`]): generates a unique root CA on first
 //!   run (`rcgen`); the key is wrapped by an OS keystore ([`ca::CaKeyStore`] —
 //!   DPAPI on Windows) and **never shipped, baked-in, or transmitted**.
 //! * **QUIC downgrade** ([`quic`]): block UDP/443 so apps fall back to
 //!   inspectable TCP.
-//! * **Cert-pinning detection** ([`pinning`]): a rejected MITM handshake emits a
+//! * **Cert-pinning detection** ([`pinning`]): a rejected TLS inspection handshake emits a
 //!   signal to route that host to the on-device agent (OCR); **fail-open + log**
 //!   by default, configurable.
 //!
@@ -28,7 +28,7 @@
 //! * A missing/unusable CA key is **fail-CLOSED** (block + alert), never a silent
 //!   pass-through. A cert-pinned host is **fail-OPEN + log** (documented gap).
 //! * **Uninstall removes our root from the trust store** ([`truststore::
-//!   uninstall_root`]) — an orphaned root is a latent MITM backdoor.
+//!   uninstall_root`]) — an orphaned root is a latent TLS inspection backdoor.
 //!
 //! ## Safety / FFI policy
 //! `#![forbid(unsafe_code)]` is set crate-wide. The unavoidable FFI lives in
@@ -59,9 +59,15 @@ pub mod proxy;
 pub mod quic;
 pub mod truststore;
 pub mod tun;
-// VPN mode is DESKTOP (Windows/Linux/macOS) — tun2proxy-backed. Mobile uses the
-// native VpnService / NetworkExtension shells instead.
-#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+// VPN mode. DESKTOP (Windows/Linux/macOS) drives its own TUN; ANDROID reuses the
+// same transparent smoltcp pump (`vpn::run_netstack`) over the VpnService fd handed
+// in via `open_tun_from_fd`. iOS uses the native NetworkExtension shell instead.
+#[cfg(any(
+    windows,
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "android"
+))]
 pub mod vpn;
 
 // --- Curated public API -----------------------------------------------------

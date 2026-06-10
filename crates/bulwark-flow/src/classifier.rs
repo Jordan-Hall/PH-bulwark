@@ -203,7 +203,7 @@ impl DefaultFlowClassifier {
     /// Build a `TextSpan` from a flow's textual body (page text / web chat).
     /// We carry the host as `app` and the flow id (stringified) as a thread hint;
     /// the text analyzer's own thread correlation refines this. No raw secrets —
-    /// this is page/chat text the MITM layer already decrypted.
+    /// this is page/chat text the TLS inspection layer already decrypted.
     fn text_span(&self, flow: &CapturedFlow) -> TextSpan {
         let text = match &flow.payload {
             FlowPayload::Http(head) => String::from_utf8_lossy(&head.body_peek).into_owned(),
