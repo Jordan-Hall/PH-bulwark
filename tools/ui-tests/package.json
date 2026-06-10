@@ -1,0 +1,30 @@
+{
+  "name": "ph-bulwark-ui-tests",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Midscene AI-driven, cross-platform UI smoke tests for the PH Bulwark Dioxus apps (child onboarding + parent console). Web path is primary/always-runnable; Android path drives a real device/emulator over adb.",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "serve:child": "dx serve --platform web --port 8111 --open false",
+    "serve:parent": "dx serve --platform web --port 8112 --open false",
+    "test:child:web": "vitest run tests/child-onboarding.web.test.ts",
+    "test:parent:web": "vitest run tests/parent-console.web.test.ts",
+    "test:web": "vitest run tests/child-onboarding.web.test.ts tests/parent-console.web.test.ts",
+    "test:child:android": "vitest run tests/child-onboarding.android.test.ts",
+    "smoke:child:web": "tsx smoke.ts",
+    "devices": "adb devices -l",
+    "test": "npm run test:web"
+  },
+  "devDependencies": {
+    "@midscene/android": "1.9.3",
+    "@midscene/web": "1.9.3",
+    "dotenv": "^16.4.7",
+    "puppeteer": "^24.6.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  }
+}
