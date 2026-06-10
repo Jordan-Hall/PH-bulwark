@@ -189,7 +189,9 @@ pub async fn run_android_data_path(
 
     // In-process TLS-inspecting proxy on the loopback port the pump CONNECTs to. The
     // dev/in-memory keystore avoids any platform-keystore dependency on Android;
-    // a fresh per-install CA is generated in-process.
+    // a fresh CA is generated per VPN SESSION (in-memory keystore — not yet
+    // persisted per-install on Android, so user-trusted-CA flows and pinning
+    // learning reset each session; persistence is follow-up work).
     let net_cfg = NetConfig {
         proxy_listen: "127.0.0.1:8080".to_string(),
         ..Default::default()

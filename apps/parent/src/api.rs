@@ -112,8 +112,6 @@ pub async fn open_pending_review_stream() -> anyhow::Result<Streaming<AlertEvent
     open_pending_review_stream_on(channel, &token).await
 }
 
-/// Filtering regions a guardian can point a child's VPN at (region id, label,
-
 /// Push a child's desired VPN config to `ChildControl.SetChildConfig` (the parent
 /// owns the switch): region/server, filtering on/off, strictness band. Returns the
 /// server-assigned monotonic `config_version`.

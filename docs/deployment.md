@@ -180,7 +180,7 @@ defeats software-only prevention short of zero-touch/ABM — detection still fir
 | `BULWARK_SESSION_TTL_SECS` | server | guardian session-token lifetime (seconds) | 43200 (12h) | tune session expiry |
 | `BULWARK_LOGIN_MAX_FAILS` | server | failed logins per email before lockout | 5 | tune brute-force throttle |
 | `BULWARK_LOGIN_WINDOW_SECS` | server | login-throttle / lockout window (seconds) | 900 (15m) | tune brute-force throttle |
-| `BULWARK_STATE_DIR` | server | persist guardian state — accounts/push/pending/allowlist (JSON) | unset (in-memory) | durable state |
+| `BULWARK_STATE_DIR` | server | persist guardian state — accounts/push/pending/allowlist + child configs/applied-acks (JSON) | unset (in-memory) | durable state |
 | `BULWARK_ADMIN_ENDPOINT` | bulwark_admin | Accounts service endpoint for the CLI | `http://127.0.0.1:8443` | remote/TLS provisioning |
 | `BULWARK_UI_BIND` | bulwark-ui | dashboard host:port | 127.0.0.1:8080 | non-loopback UI |
 | `BULWARK_SMTP_HOST` | bulwark-alert | SMTP host (email on-switch) | unset | with FROM+RECIPIENTS |

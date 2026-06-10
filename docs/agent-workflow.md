@@ -92,6 +92,7 @@ workaround, framing glossary, proven code patterns):
 | `grpc-contract` | `bulwark.proto` + server services | ChildControl-style contracts (Workflow B) |
 | `midscene-qa` | `tools/ui-tests` harness | UI journeys web/android, smoke, devices |
 | `framing-review` | language only | protective-framing audit before every PR |
+| `code-review` | the diff (gatekeeper) | pre-commit + pre-merge review: invariants, CI parity, tests; APPROVE / REQUEST-CHANGES verdict |
 | `plan-sync` | PLAN.md + docs/design + finish-plan | mark DONE, flag drift, draft next increment |
 
 **House rule:** spawned agents cannot write files in this environment — every agent
@@ -101,7 +102,9 @@ loaded by every agent and carries the shared constraints.
 
 Standard loop per increment: `plan-sync` (where are we) → specialist agent(s) in
 parallel (design + exact edits) → main session applies + `cargo check`/tests →
-`framing-review` on the diff → `plan-sync` edits to mark DONE → PR with `@codex review`.
+`code-review` + `framing-review` on the diff (fix until **APPROVE**) → commit →
+`plan-sync` edits to mark DONE → PR (`@codex review` when credits allow) →
+`code-review` once more on the branch-vs-master diff → merge when clean + CI green.
 
 ## Mapping to the six requirements
 

@@ -43,6 +43,11 @@ pub struct PinningSignal {
 /// inferred from the *absence* of a decrypt across this many attempts. A threshold
 /// (not 1) guards against a single transient handshake failure permanently flipping
 /// a host to pinned; any successful decrypt resets the count (decay).
+///
+/// HONEST LIMIT: once a host is recorded `Pinned` it is sticky for the process
+/// lifetime — under fail-open it is passthrough'd, so no decrypt can ever clear
+/// it (and 3 abandoned CONNECTs can deliberately trip it). The coverage matrix
+/// shows the classification honestly; time-based re-probe/expiry is follow-up.
 const PIN_STRIKE_THRESHOLD: u32 = 3;
 
 /// Learns and records which hosts are TLS inspection-able vs pinned. Cheap, in-memory,

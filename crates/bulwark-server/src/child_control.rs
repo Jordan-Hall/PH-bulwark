@@ -181,6 +181,16 @@ impl ChildConfigStore {
                 "caller is not a guardian of this child",
             ));
         }
+        // SCOPING (device): the device the config routes to must also be one of
+        // this guardian's supervised devices — otherwise a guardian could point
+        // `device_to_child` at ANOTHER family's enrolled device and hijack that
+        // device's child-facing reads (Get/Stream resolve by device_id).
+        let device_id = config.device_id.trim().to_string();
+        if !device_id.is_empty() && !scope.device_ids.contains(&device_id) {
+            return Err(Status::permission_denied(
+                "device_id is not a supervised device of this guardian",
+            ));
+        }
 
         let updated_by = accounts.account_for_session(token).unwrap_or_default();
 
@@ -201,10 +211,15 @@ impl ChildConfigStore {
         config.updated_by = updated_by;
 
         // Maintain the device→child index so the child can resolve by device id.
-        if !config.device_id.trim().is_empty() {
+        // Re-pointing a child to a new device retires the old mapping, so a
+        // replaced/stale device can no longer fetch this child's config.
+        if !device_id.is_empty() {
             inner
                 .device_to_child
-                .insert(config.device_id.trim().to_string(), child_id.clone());
+                .retain(|d, c| c != &child_id || d == &device_id);
+            inner
+                .device_to_child
+                .insert(device_id.clone(), child_id.clone());
         }
 
         // Publish to the live stream (and create the watch channel on first set).
@@ -262,6 +277,17 @@ impl ChildConfigStore {
         if !inner.device_to_child.contains_key(device_id) {
             return; // unknown device: nothing to attribute the report to
         }
+        // Get/Stream are not yet device-identity authenticated, so never record
+        // a version HIGHER than the guardian's desired one — a spoofed
+        // `have_version: 999` would otherwise permanently mask real acks
+        // (the recorded version is monotonic by design).
+        let desired = inner
+            .device_to_child
+            .get(device_id)
+            .and_then(|cid| inner.by_child.get(cid))
+            .map(|e| e.tx.borrow().config_version)
+            .unwrap_or(0);
+        let version = version.min(desired);
         let now = Self::now_ms();
         let entry = inner
             .applied_by_device
@@ -753,5 +779,58 @@ mod tests {
         assert_eq!(st.applied_version, 1, "applied version survived restart");
         assert_eq!(st.last_report_ts, 0, "last-seen honestly resets on restart");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn foreign_device_id_cannot_be_hijacked_by_another_guardian() {
+        // Family A enrolls dev-1. Guardian B (own family, own device) must NOT
+        // be able to point THEIR child's config at family A's device — that
+        // would hijack dev-1's child-facing Get/Stream resolution.
+        let (accounts, token_a, child_a) = accounts_with_child("dev-1");
+        let store = ChildConfigStore::new();
+        store
+            .set_config(&accounts, &token_a, proto_config(&child_a, "dev-1"))
+            .unwrap();
+
+        accounts
+            .create_account("other-parent@x.com", "password123", "B")
+            .unwrap();
+        let (token_b, _aid, _) = accounts.login("other-parent@x.com", "password123").unwrap();
+        let child_b = accounts.add_child(&token_b, "KidB", "dev-B").unwrap();
+
+        let err = store
+            .set_config(
+                &accounts,
+                &token_b,
+                proto_config(&child_b.child_id, "dev-1"),
+            )
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        // dev-1 still resolves to family A's child.
+        assert_eq!(store.get_by_device("dev-1").unwrap().child_id, child_a);
+    }
+
+    #[test]
+    fn spoofed_applied_report_is_clamped_to_desired_version() {
+        // Get/Stream carry no device-identity auth yet, so a spoofed
+        // have_version=999 must never mask real acks: the recorded applied
+        // version is clamped to the guardian's desired version.
+        let (accounts, token, child_id) = accounts_with_child("dev-1");
+        let store = ChildConfigStore::new();
+        store
+            .set_config(&accounts, &token, proto_config(&child_id, "dev-1"))
+            .unwrap(); // desired v1
+
+        store.record_applied_report("dev-1", 999);
+        let st = store.child_status(&accounts, &token, &child_id).unwrap();
+        assert_eq!(st.applied_version, 1, "spoofed ack clamped to desired");
+
+        // A later real bump still lands: desired v2, child acks v2.
+        store
+            .set_config(&accounts, &token, proto_config(&child_id, "dev-1"))
+            .unwrap();
+        store.record_applied_report("dev-1", 2);
+        let st = store.child_status(&accounts, &token, &child_id).unwrap();
+        assert_eq!(st.applied_version, 2, "real ack not masked");
     }
 }

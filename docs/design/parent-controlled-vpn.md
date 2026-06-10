@@ -107,9 +107,13 @@ no-content invariant obvious by message shape.
   can't re-push an old "filtering_disabled" config).
 - `SetChildConfig` is authorized like every other mutation: a valid guardian session
   **assigned to that child** (same scoping as `Review.StreamPendingReviews`).
-- `StreamChildConfig`/`GetChildConfig` are authenticated by the child's **device
-  identity** (mTLS client cert subject = `device_id`); a device only ever receives its
-  own config.
+- `StreamChildConfig`/`GetChildConfig` **will be** authenticated by the child's
+  **device identity** (mTLS client cert subject = `device_id`) — **NOT YET
+  WIRED**: today the server trusts the claimed `device_id`, mitigated by (a) the
+  config being content-free, (b) `device_to_child` only mapping devices a
+  guardian explicitly enrolled + scoped, and (c) the applied-version ack being
+  clamped to the desired version so a spoofed report can't mask real acks.
+  Device-identity binding is tracked in §7's remaining work.
 - The control plane is **content-free** — it carries policy + routing, never any
   message/media. Same privacy invariant as the rest of `bulwark.proto`.
 
@@ -244,8 +248,9 @@ strictness + `filtering_enabled = true`, so the child comes up **already protect
    `profile` live-updates the on-device `AgeProfile` policy global used by
    `analyzeText` (version-gated, no service restart; re-seeded from
    `deviceConfigJson()` after a process restart). Host-tested. Remaining:
-   `StreamChildConfig` push and `server_endpoint` reconcile (reconnect the pump
-   to a new region endpoint).
+   `StreamChildConfig` push, `server_endpoint` reconcile (reconnect the pump
+   to a new region endpoint), and device-identity (mTLS-subject) binding for
+   the child-facing Get/Stream reads.
 3. **Parent UX — ✅ DONE (2026-06-10) for the control row + applied-ack.**
    `ChildVpnRow` in `apps/parent`: per-child region/server picker, filtering
    on/off, strictness band; Apply pushes `SetChildConfig`, shows the acked

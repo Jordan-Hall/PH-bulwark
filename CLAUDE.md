@@ -54,7 +54,10 @@ error 4551) — it builds on CI/Linux; keep it out of android/local-only dep tre
 - **Subagents cannot write files here** — use them read-only; they return exact
   edits (path + old→new) and the main session applies them. Un-HTML-escape any
   `&amp;`/`&lt;`/`&gt;` in agent-returned code before applying.
-- PR loop: comment what changed on every push, then `@codex review`, iterate until clean.
+- Review gate: run the `code-review` agent on the diff BEFORE committing and
+  again on the branch-vs-master diff before merging; fix until it returns
+  APPROVE. PR loop: comment what changed on every push, then `@codex review`
+  (when account credits allow), iterate until clean.
 - Commits end with `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
 - Keep PLAN.md §6 + the matching `docs/design/*.md` updated when a step ships (mark DONE with date).
 - Chat style: terse — edit/create files rather than narrating.

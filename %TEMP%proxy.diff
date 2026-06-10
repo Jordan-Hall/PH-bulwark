@@ -1,0 +1,206 @@
+diff --git a/crates/bulwark-net/src/proxy.rs b/crates/bulwark-net/src/proxy.rs
+index bcf574f..a7d30c1 100644
+--- a/crates/bulwark-net/src/proxy.rs
++++ b/crates/bulwark-net/src/proxy.rs
+@@ -1,4 +1,4 @@
+-//! The transparent MITM proxy (`hudsucker` = hyper + rustls + rcgen).
++//! The transparent TLS-inspecting proxy (`hudsucker` = hyper + rustls + rcgen).
+ //!
+ //! TUN-redirected TCP lands here; `hudsucker` terminates TLS using a leaf cert
+ //! minted by our per-install CA ([`crate::ca::CaManager`]), decrypts the
+@@ -91,7 +91,7 @@ const MIN_SCORABLE_IMAGE_BYTES: usize = 16 * 1024;
+ /// the orchestrator maps it onto the wire type).
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub enum FlowSource {
+-    /// MITM'd HTTP(S) page / web chat.
++    /// inspected HTTP(S) page / web chat.
+     Web,
+     /// Progressive / HLS / DASH video (buffered).
+     VideoStream,
+@@ -99,7 +99,7 @@ pub enum FlowSource {
+     LiveStream,
+ }
+ 
+-/// A captured, MITM-decrypted (or marked-unreadable) network unit handed up to
++/// A captured, inspection-decrypted (or marked-unreadable) network unit handed up to
+ /// `bulwark-flow`. Mirrors `CapturedFlow` in interfaces.md; the orchestrator
+ /// converts this into the proto/in-process `CapturedFlow` the `Interceptor`
+ /// trait yields. Kept proxy-local so this module needn't depend on the trait's
+@@ -218,7 +218,7 @@ impl DecisionGate {
+     }
+ }
+ 
+-/// Handle to a running MITM proxy; dropping it / calling [`MitmProxy::stop`]
++/// Handle to a running TLS-inspecting proxy; dropping it / calling [`MitmProxy::stop`]
+ /// shuts the proxy down.
+ pub struct MitmProxy {
+     shutdown: Option<oneshot::Sender<()>>,
+@@ -270,7 +270,7 @@ impl MitmProxy {
+     }
+ }
+ 
+-/// Start the MITM proxy on `listen` using `ca` to mint leaves, emitting captured
++/// Start the TLS-inspecting proxy on `listen` using `ca` to mint leaves, emitting captured
+ /// flows on `flow_tx`. Returns once the listener is bound.
+ ///
+ /// The `hudsucker`-specific wiring is intentionally contained in [`run_hudsucker`].
+@@ -282,9 +282,9 @@ pub async fn spawn(
+ ) -> Result<MitmProxy> {
+     // Bind first so we can report the actual address (port 0 → ephemeral) and so
+     // a bind failure surfaces here rather than inside the spawned task.
+-    let listener = tokio::net::TcpListener::bind(listen)
+-        .await
+-        .map_err(|e| NetError::proxy(format!("binding MITM listener on {listen}: {e}")))?;
++    let listener = tokio::net::TcpListener::bind(listen).await.map_err(|e| {
++        NetError::proxy(format!("binding TLS-inspecting listener on {listen}: {e}"))
++    })?;
+     let listen_addr = listener
+         .local_addr()
+         .map_err(|e| NetError::proxy(format!("resolving bound addr: {e}")))?;
+@@ -309,7 +309,7 @@ pub async fn spawn(
+         run_hudsucker(listener, authority, handler, shutdown_rx).await;
+     });
+ 
+-    tracing::info!(%listen_addr, %ca_fp, "MITM proxy started (hudsucker 0.24)");
++    tracing::info!(%listen_addr, %ca_fp, "TLS-inspecting proxy started (hudsucker 0.24)");
+     Ok(MitmProxy {
+         shutdown: Some(shutdown_tx),
+         join: Some(join),
+@@ -386,12 +386,12 @@ async fn run_hudsucker(
+     if let Err(e) = proxy.start().await {
+         tracing::error!("hudsucker proxy exited with error: {e}");
+     } else {
+-        tracing::info!("MITM proxy shut down");
++        tracing::info!("TLS-inspecting proxy shut down");
+     }
+ }
+ 
+ /// hudsucker [`HttpHandler`]: turns decrypted requests/responses into
+-/// [`CapturedFlow`]s on the channel, records MITM success, and applies the
++/// [`CapturedFlow`]s on the channel, records TLS inspection success, and applies the
+ /// per-`flow_id` policy decision to responses.
+ ///
+ /// Must be `Clone + Send + Sync + 'static` (hudsucker clones it per connection),
+@@ -457,6 +457,39 @@ impl FlowHandler {
+         sig.failed_open
+     }
+ 
++    /// Decide whether to TLS-intercept a CONNECT tunnel to `host`, recording a
++    /// pinning strike for an as-yet-unclassified host.
++    ///
++    /// hudsucker calls `should_intercept` once per CONNECT, just after the client
++    /// sends its TLS ClientHello but BEFORE we accept it with our minted leaf — and
++    /// it exposes no callback for the accept failing when a pinned client rejects
++    /// that leaf. So we infer pinning indirectly: every successful decrypt marks a
++    /// host mitmable (clearing strikes); a host whose CONNECTs never decrypt piles
++    /// up strikes until the threshold, at which point it is recorded pinned.
++    ///
++    /// Returns whether hudsucker should attempt interception:
++    /// * unknown host below threshold -> true (attempt interception);
++    /// * the strike that crosses the threshold, or an already-pinned host ->
++    ///   fail-OPEN: false (tunnel through, the documented default) / fail-CLOSED:
++    ///   true (keep intercepting so the rejected handshake keeps the host blocked);
++    /// * unidentifiable host -> true (attempt interception).
++    fn decide_intercept(&self, host: &str) -> bool {
++        if host.is_empty() {
++            return true;
++        }
++        if self.pinning.is_pinned(host) {
++            return !self.pinning.fail_open();
++        }
++        if self.pinning.record_intercept_attempt(host).is_some() {
++            // Just crossed the threshold -> now pinned. Fail-open tunnels through;
++            // fail-closed keeps intercepting (the doomed accept blocks the host).
++            !self.pinning.fail_open()
++        } else {
++            // Still below threshold -> keep attempting interception.
++            true
++        }
++    }
++
+     /// Access the CA (e.g. to mint a leaf for a specific host directly).
+     pub fn ca(&self) -> &CaManager {
+         &self.ca
+@@ -467,6 +500,15 @@ impl FlowHandler {
+ /// **not** `#[async_trait]`. We implement `handle_request` (emit-only, always
+ /// forward) and `handle_response` (emit + decision rendezvous).
+ impl HttpHandler for FlowHandler {
++    /// Gate CONNECT interception on the learned pinning state (see
++    /// `FlowHandler::decide_intercept`). This is the hook that finally makes pinning
++    /// detection LIVE: hudsucker invokes it for every CONNECT tunnel, so a host whose
++    /// TLS ClientHellos never decrypt is recorded pinned here (-> OCR route + honest
++    /// coverage gap), instead of `on_pinned` only ever firing in tests.
++    async fn should_intercept(&mut self, _ctx: &HttpContext, req: &Request<Body>) -> bool {
++        self.decide_intercept(&host_of_request(req))
++    }
++
+     async fn handle_request(
+         &mut self,
+         _ctx: &HttpContext,
+@@ -780,6 +822,66 @@ mod tests {
+         assert!(h.pinning.is_pinned("signal.org"));
+     }
+ 
++    // NOTE: these assume PIN_STRIKE_THRESHOLD == 3 (pinning.rs); 2 sub-threshold
++    // attempts then the crossing strike.
++    #[test]
++    fn repeated_intercept_attempts_flip_host_to_pinned_then_passthrough() {
++        // A pinned host's CONNECTs keep arriving (client sends a ClientHello) but
++        // never decrypt. Below threshold we keep intercepting (true); the crossing
++        // strike records the host pinned and — under the default fail-OPEN policy —
++        // stops interception (false = tunnel through), the OCR-route hand-off.
++        let (tx, _rx) = mpsc::channel(4);
++        let h = test_handler(tx, DecisionGate::default()); // fail_open = true
++        assert!(h.decide_intercept("signal.org"));
++        assert!(h.decide_intercept("signal.org"));
++        assert!(
++            !h.pinning.is_pinned("signal.org"),
++            "must not pin on transient strikes"
++        );
++        assert!(!h.decide_intercept("signal.org")); // crossing strike -> passthrough
++        assert!(
++            h.pinning.is_pinned("signal.org"),
++            "crossing the threshold marks pinned"
++        );
++        assert!(!h.decide_intercept("signal.org")); // stays pinned + passthrough
++    }
++
++    #[test]
++    fn successful_decrypt_resets_intercept_strikes() {
++        // A burst of transient handshake failures must NOT pin a host that then
++        // proves inspectable: a single successful decrypt clears the strikes.
++        let (tx, _rx) = mpsc::channel(4);
++        let h = test_handler(tx, DecisionGate::default());
++        assert!(h.decide_intercept("api.example"));
++        assert!(h.decide_intercept("api.example"));
++        h.pinning.record_mitmable("api.example"); // a flow decrypted -> reset
++        assert!(h.decide_intercept("api.example"));
++        assert!(h.decide_intercept("api.example"));
++        assert!(!h.pinning.is_pinned("api.example"));
++    }
++
++    #[test]
++    fn fail_closed_keeps_intercepting_pinned_host_to_block_it() {
++        // Under fail-CLOSED the proxy keeps "intercepting" a pinned host (returns
++        // true) so the rejected handshake keeps the connection blocked.
++        let (tx, _rx) = mpsc::channel(4);
++        let h = FlowHandler {
++            flow_tx: tx,
++            pinning: Arc::new(PinningRegistry::new(false)), // fail-closed
++            ca: test_ca(),
++            gate: DecisionGate::default(),
++            next_flow_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
++        };
++        assert!(h.decide_intercept("bank.example"));
++        assert!(h.decide_intercept("bank.example"));
++        assert!(h.decide_intercept("bank.example")); // crossing strike pins it
++        assert!(h.pinning.is_pinned("bank.example"));
++        assert!(
++            h.decide_intercept("bank.example"),
++            "fail-closed keeps blocking"
++        );
++    }
++
+     #[tokio::test]
+     async fn decision_gate_rendezvous_delivers_decision() {
+         let gate = DecisionGate::default();

@@ -221,12 +221,8 @@ impl Drop for Waker {
     }
 }
 
-// SAFETY: a `Waker` is just an owned pipe fd; `write`/`close` on it are atomic and
-// safe to call from any thread. We share it across the loop + async tasks via `Arc`.
-#[cfg(unix)]
-unsafe impl Send for Waker {}
-#[cfg(unix)]
-unsafe impl Sync for Waker {}
+// (`Waker` is just an owned `RawFd` (i32), so it is auto-`Send + Sync`; the
+// pipe `write`/`close` are atomic and safe from any thread.)
 
 /// One captured TCP flow being terminated by smoltcp and bridged to the proxy.
 #[cfg(unix)]
@@ -238,8 +234,10 @@ struct Flow {
     authority: String,
     /// client → proxy bytes (None until the flow establishes / after client FIN).
     up_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
-    /// proxy → client bytes.
-    down_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+    /// proxy → client bytes. BOUNDED so a stalled client (closed smoltcp send
+    /// window) backpressures the proxy task's upstream reads instead of
+    /// buffering an entire download in RAM on the supervised device.
+    down_rx: Option<tokio::sync::mpsc::Receiver<Vec<u8>>>,
     /// proxy bytes staged for smoltcp's send window.
     to_client: std::collections::VecDeque<u8>,
     /// set by the proxy task when its upstream half is finished/failed.
@@ -484,7 +482,7 @@ fn pump_tcp_flows(
         // On establish, open the proxy CONNECT bridge for this destination.
         if !flow.spawned && sock.state() == tcp::State::Established {
             let (up_tx, up_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(PROXY_UP_CHANNEL);
-            let (down_tx, down_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+            let (down_tx, down_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
             handle.spawn(proxy_flow(
                 proxy,
                 flow.authority.clone(),
@@ -515,7 +513,7 @@ fn pump_tcp_flows(
         }
 
         // proxy -> staging buffer (bounded).
-        if let Some(down_rx) = &flow.down_rx {
+        if let Some(down_rx) = &mut flow.down_rx {
             while flow.to_client.len() < TO_CLIENT_CAP {
                 match down_rx.try_recv() {
                     Ok(v) => flow.to_client.extend(v),
@@ -575,7 +573,7 @@ async fn proxy_flow(
     proxy: SocketAddr,
     authority: String,
     mut up_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
-    down_tx: std::sync::mpsc::Sender<Vec<u8>>,
+    down_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
     done: std::sync::Arc<std::sync::atomic::AtomicBool>,
     waker: std::sync::Arc<Waker>,
 ) {
@@ -605,7 +603,9 @@ async fn proxy_flow(
         match rd.read(&mut buf).await {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                if down_tx.send(buf[..n].to_vec()).is_err() {
+                // Bounded: this awaits when the pump's staging buffer is full,
+                // which backpressures our upstream reads (no unbounded RAM).
+                if down_tx.send(buf[..n].to_vec()).await.is_err() {
                     break;
                 }
                 waker.wake();

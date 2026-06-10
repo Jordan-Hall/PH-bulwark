@@ -59,6 +59,10 @@ bulwark-net = { path = "../../../../crates/bulwark-net" }
 # explicitly as a normal dep.)
 serde_json = "1"
 
+# Structured logging — already in the tree via bulwark-net; used to record a
+# data-path exit alongside the guardian-facing protection-status alert.
+tracing = "0.1"
+
 # Child enrollment talks to the same Accounts gRPC service as the parent app.
 # Keep this in Rust so Android does not need a second generated gRPC client.
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }

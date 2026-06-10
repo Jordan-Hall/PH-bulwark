@@ -111,6 +111,29 @@ fn tamper_queue() -> &'static Mutex<VecDeque<String>> {
     Q.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
+/// Enqueue a content-free PROTECTION_DISABLED alert so the existing Kotlin
+/// alert poller (`nextAlert`) surfaces it to the guardian. Used by
+/// `reportTamper` and by the VPN data path when it exits with an error (a
+/// captive TUN with a dead pump would otherwise be a silent blackhole).
+fn enqueue_protection_alert(tag: &str, message: &str) {
+    let now_s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // AlertKind::PROTECTION_DISABLED == 3; category 0 (a status signal, not content).
+    let obj = serde_json::json!({
+        "alert_id": format!("{tag}-{now_s}"),
+        "kind": 3,
+        "category": 0,
+        "redacted_context": message,
+    });
+    if let Ok(mut q) = tamper_queue().lock() {
+        if q.len() < TAMPER_QUEUE_CAP {
+            q.push_back(obj.to_string());
+        }
+    }
+}
+
 /// Guardian-facing, content-free description for an `bulwark.v1.TamperKind` ordinal.
 fn tamper_message(kind: i32) -> &'static str {
     match kind {
@@ -541,8 +564,19 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_startVpn(
     let token = shutdown.clone();
     #[cfg(target_os = "android")]
     runtime.spawn(async move {
-        // Fail-silent + content-free: a filter must never take down the host.
-        let _ = bulwark_net::vpn::run_android_data_path(fd, token).await;
+        // Never panic across the host (a filter must not take down the device),
+        // but NEVER fail silent either: if the data path exits with an error
+        // while the VpnService still owns the TUN, every packet would route
+        // into an fd nobody reads (a blackhole). Surface it as a content-free
+        // protection-status alert so the guardian learns filtering is down.
+        if let Err(e) = bulwark_net::vpn::run_android_data_path(fd, token).await {
+            tracing::error!(error = %e, "VPN data path exited with an error");
+            enqueue_protection_alert(
+                "vpn-datapath",
+                "The filtering VPN on the child's device stopped unexpectedly. \
+                 Protection may be off until the app restarts it.",
+            );
+        }
     });
 
     let session = Box::new(VpnSession {
@@ -839,22 +873,7 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_reportTam
     _class: JClass,
     kind: jint,
 ) {
-    let now_s = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    // AlertKind::PROTECTION_DISABLED == 3; category 0 (a status signal, not content).
-    let obj = serde_json::json!({
-        "alert_id": format!("tamper-{kind}-{now_s}"),
-        "kind": 3,
-        "category": 0,
-        "redacted_context": tamper_message(kind),
-    });
-    if let Ok(mut q) = tamper_queue().lock() {
-        if q.len() < TAMPER_QUEUE_CAP {
-            q.push_back(obj.to_string());
-        }
-    }
+    enqueue_protection_alert(&format!("tamper-{kind}"), tamper_message(kind));
 }
 
 // ---------------------------------------------------------------------------
