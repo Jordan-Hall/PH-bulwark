@@ -1,0 +1,142 @@
+//! Media + encoding helpers: pairing QR (payload -> SVG), segment disk loads,
+//! data-URI assembly, and MIME sniffing for evidence previews.
+
+use qrcode::render::svg;
+use qrcode::{EcLevel, QrCode};
+
+use crate::config::segments_dir;
+use crate::servers::cluster_endpoint;
+
+/// Build the compact pairing payload the child device can scan, as a documented
+/// custom scheme: `bulwark://pair?code=<PAIR_CODE>&server=<cluster endpoint>`.
+/// The child reads `code` to redeem the pairing and `server` so it points at the
+/// SAME backend the guardian minted the code on (the console's resolved
+/// `cluster_endpoint()`), so the QR always matches the active server.
+pub fn pair_payload(code: &str) -> String {
+    format!(
+        "bulwark://pair?code={}&server={}",
+        encode_query_value(code.trim()),
+        encode_query_value(cluster_endpoint().trim()),
+    )
+}
+
+/// Minimal `application/x-www-form-urlencoded`-style escaping for a query value:
+/// keep unreserved chars, percent-encode the rest. Enough for our pair code
+/// (alnum) and an `http(s)://host:port` endpoint; no external dep needed.
+pub fn encode_query_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for b in value.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Render `payload` as a self-contained SVG QR string for inline display via
+/// `dangerous_inner_html` (the SVG is produced locally from a controlled payload).
+/// Colours match the console's calm dark theme. `None` if the payload can't be
+/// encoded, so the caller falls back to the typed code alone.
+pub fn pair_qr_svg(payload: &str) -> Option<String> {
+    let code = QrCode::with_error_correction_level(payload.as_bytes(), EcLevel::M).ok()?;
+    Some(
+        code.render::<svg::Color>()
+            .min_dimensions(180, 180)
+            .quiet_zone(true)
+            .dark_color(svg::Color("#10110f"))
+            .light_color(svg::Color("#eceee8"))
+            .build(),
+    )
+}
+
+/// Resolve a `blob://<sha256>` URI to the per-user segment store path and read
+/// the bytes. `Ok(None)` = missing/purged; `Err` = malformed URI or read error.
+pub fn load_segment_from_disk(uri: &str) -> Result<Option<Vec<u8>>, String> {
+    let sha = uri
+        .strip_prefix("blob://")
+        .ok_or_else(|| "not a blob:// URI".to_string())?;
+    if sha.len() != 64 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("malformed segment id".to_string());
+    }
+    let path = segments_dir().join(format!("{sha}.blob"));
+    match std::fs::read(&path) {
+        Ok(b) => Ok(Some(b)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Inline image preview helpers (no heavy deps — hand-rolled base64 + sniff)
+// ---------------------------------------------------------------------------
+
+/// Build a `data:` URI for inline `<img src=...>` rendering from raw image
+/// bytes, sniffing the format from magic bytes (JPEG default).
+pub fn image_data_uri(bytes: &[u8]) -> String {
+    let mime = sniff_image_mime(bytes);
+    format!("data:{};base64,{}", mime, base64_encode(bytes))
+}
+
+/// Best-effort image MIME sniff from leading magic bytes. Defaults to
+/// `image/jpeg` (the common safe-thumbnail format) when nothing matches.
+pub fn sniff_image_mime(bytes: &[u8]) -> &'static str {
+    if bytes.len() >= 8 && bytes[..8] == [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A] {
+        "image/png"
+    } else if bytes.len() >= 6 && (&bytes[..6] == b"GIF87a" || &bytes[..6] == b"GIF89a") {
+        "image/gif"
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        // JPEG (FF D8 FF) and everything else default to jpeg.
+        "image/jpeg"
+    }
+}
+
+/// Best-effort video-container MIME sniff for a stored review clip. The segment
+/// store keeps bytes as-is, so a clip may be MP4/fMP4, DASH `.m4s`, HLS `.ts`, or
+/// WebM. Defaults to `video/mp4` (the common case) when nothing matches.
+pub fn sniff_video_mime(bytes: &[u8]) -> &'static str {
+    if bytes.len() >= 8 && (&bytes[4..8] == b"ftyp" || &bytes[4..8] == b"styp") {
+        // ISO-BMFF: MP4, fragmented MP4, and DASH `.m4s` all carry a ftyp/styp box.
+        "video/mp4"
+    } else if bytes.len() >= 4 && bytes[..4] == [0x1A, 0x45, 0xDF, 0xA3] {
+        // EBML header → WebM / Matroska.
+        "video/webm"
+    } else if bytes.len() >= 4 && &bytes[..4] == b"OggS" {
+        "video/ogg"
+    } else if bytes.len() > 188 && bytes[0] == 0x47 && bytes[188] == 0x47 {
+        // MPEG-TS (HLS `.ts`): 188-byte packets, each starting with the 0x47 sync.
+        "video/mp2t"
+    } else {
+        "video/mp4"
+    }
+}
+
+/// Minimal standard-alphabet base64 encoder (RFC 4648, with `=` padding).
+/// Hand-rolled so the console needs no extra dependency for the data URI.
+pub fn base64_encode(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[((n >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[((n >> 6) & 0x3F) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[(n & 0x3F) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}

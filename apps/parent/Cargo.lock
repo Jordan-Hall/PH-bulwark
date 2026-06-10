@@ -9,35 +9,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "bulwark-parent"
-version = "0.0.0"
-dependencies = [
- "bulwark-proto",
- "anyhow",
- "dioxus",
- "futures-util",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tonic",
- "windows 0.60.0",
- "winreg",
-]
-
-[[package]]
-name = "bulwark-proto"
-version = "0.0.0"
-dependencies = [
- "prost 0.14.3",
- "protox",
- "serde",
- "tonic",
- "tonic-prost",
- "tonic-prost-build",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -235,6 +206,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "base16"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d27c3610c36aee21ce8ac510e6224498de4228ad772a171ed65643a24693a5a8"
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -314,6 +291,36 @@ name = "built"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5c0e531d93d39c34eef561e929e8a7f86d77a5af08aac4f6d6e39976c51858e9"
+
+[[package]]
+name = "bulwark-parent"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "bulwark-proto",
+ "dioxus",
+ "futures-util",
+ "qrcode",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "windows 0.60.0",
+ "winreg",
+]
+
+[[package]]
+name = "bulwark-proto"
+version = "0.0.0"
+dependencies = [
+ "prost 0.14.3",
+ "protox",
+ "serde",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+]
 
 [[package]]
 name = "bumpalo"
@@ -757,6 +764,7 @@ dependencies = [
  "dioxus-hooks",
  "dioxus-html",
  "dioxus-logger",
+ "dioxus-router",
  "dioxus-signals",
  "dioxus-stores",
  "dioxus-web",
@@ -1050,6 +1058,41 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tracing-wasm",
+]
+
+[[package]]
+name = "dioxus-router"
+version = "0.8.0-alpha.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b233f3ba7bae4b8abf428269daa0644020a629d393ea24d68b7e608f847dbb3"
+dependencies = [
+ "dioxus-cli-config",
+ "dioxus-core",
+ "dioxus-core-macro",
+ "dioxus-history",
+ "dioxus-hooks",
+ "dioxus-html",
+ "dioxus-router-macro",
+ "dioxus-signals",
+ "percent-encoding",
+ "rustversion",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "dioxus-router-macro"
+version = "0.8.0-alpha.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "196720f6ae26cf0cf53c9fef390bd94c5787697c556deadb89e7ebe22294614a"
+dependencies = [
+ "base16",
+ "digest",
+ "proc-macro2",
+ "quote",
+ "sha2",
+ "slab",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -3658,6 +3701,12 @@ checksum = "7f6d64c71eb498fe9eae14ce4ec935c555749aef511cca85b5568910d6e48001"
 dependencies = [
  "bytemuck",
 ]
+
+[[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
 
 [[package]]
 name = "quick-error"

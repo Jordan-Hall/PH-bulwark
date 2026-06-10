@@ -19,7 +19,13 @@ web = ["dioxus/web"]
 # Dioxus 0.8 (alpha) — same multiplatform line as the parent + labeling apps.
 # Keep dioxus' default features (the rsx!/#[component] macros, hooks, signals);
 # the RENDERER is added by the platform features above, not hard-enabled here.
-dioxus = { version = "0.8.0-alpha.0" }
+# Dioxus 0.8 (alpha) — matches the installed dx CLI (0.8.0-alpha.0).
+# NATIVE-RENDERER NOTE: `--renderer native` (Blitz) is unbuildable on this toolchain —
+# the published 0.8.0-alpha.0 `dioxus-native` pulls Blitz 0.3.0-alpha.4 with an internal
+# `image` conflict (blitz-dom =0.25.6 vs anyrender_svg 0.25.10). The fix PRs (#5507/#5563)
+# are on newer dioxus that needs a newer dx CLI. Revisit native after upgrading BOTH the
+# dx CLI and dioxus to a consistent post-fix release; until then the renderer is webview.
+dioxus = { version = "0.8.0-alpha.0", features = ["router"] }
 
 # Detached from the core cargo workspace (like apps/parent) so the engine build
 # stays lean and isn't blocked by the UI tree.
