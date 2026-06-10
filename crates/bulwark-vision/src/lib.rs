@@ -30,6 +30,7 @@ use bulwark_proto::v1::{
 };
 use std::path::PathBuf;
 
+pub mod postprocess;
 pub mod preprocess;
 
 /// Environment variable holding the filesystem path to the ONNX NSFW model.
@@ -246,15 +247,8 @@ fn extract_bytes(req: &AnalysisRequest) -> Option<&[u8]> {
     }
 }
 
-fn severity_for(score: f32) -> Severity {
-    if score >= 0.9 {
-        Severity::High
-    } else if score >= 0.7 {
-        Severity::Medium
-    } else {
-        Severity::Low
-    }
-}
+// Severity ladder + score postprocessing live in `postprocess` (shared with
+// bulwark-infer's local first-pass seam).
 
 #[async_trait]
 impl<S: Scorer> Analyzer for VisionAnalyzer<S> {
@@ -306,7 +300,7 @@ impl<S: Scorer> Analyzer for VisionAnalyzer<S> {
             // Blur the frame rather than hard-drop, so non-flagged context survives.
             action: if nsfw { Action::Blur } else { Action::Allow } as i32,
             severity: if nsfw {
-                severity_for(score)
+                postprocess::severity_for(score)
             } else {
                 Severity::Info
             } as i32,

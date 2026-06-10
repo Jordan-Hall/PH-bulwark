@@ -64,7 +64,7 @@ pub struct ClientConfig {
     /// `None` → no client identity provisioned, so heavy non-local media fails
     /// OPEN exactly as the default build does. Operator-provisioned PEM files
     /// (the client does NOT mint its own cluster identity — the per-install
-    /// `bulwark-net` CA is the MITM proxy CA, a different PKI).
+    /// `bulwark-net` CA is the TLS-inspecting proxy CA, a different PKI).
     pub tls: Option<ClientTlsIdentity>,
 }
 

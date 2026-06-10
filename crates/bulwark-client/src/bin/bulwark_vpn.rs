@@ -3,14 +3,14 @@
 //!
 //! Unlike `bulwark_proxy` (which needs each app pointed at `127.0.0.1:8080`), this
 //! captures **all** traffic at layer 3 via a TUN and routes it through the same
-//! MITM filter — no per-app proxy settings. It:
+//! TLS inspection filter — no per-app proxy settings. It:
 //!   1. Refuses to run un-elevated (TUN + default route need admin/root) and
 //!      prints the exact elevation command.
 //!   2. Checks the TUN driver is available (`wintun.dll` on Windows).
-//!   3. Brings up the in-process MITM proxy (`bulwark-net`) on `127.0.0.1:8080`,
+//!   3. Brings up the in-process TLS-inspecting proxy (`bulwark-net`) on `127.0.0.1:8080`,
 //!      writing + printing the per-install CA to trust.
 //!   4. Starts the TUN redirect (`bulwark_net::run_vpn` → tun2proxy): all captured
-//!      TCP → the MITM proxy, UDP NAT'd out, QUIC blocked, default route installed
+//!      TCP → the TLS-inspecting proxy, UDP NAT'd out, QUIC blocked, default route installed
 //!      and restored on exit.
 //!   5. Runs the device-side [`Pipeline`] (text rules + local NSFW image scoring)
 //!      over every decrypted flow, printing each block and relaying a redacted
@@ -74,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| DEFAULT_CLUSTER_ENDPOINT.to_string());
 
-    // --- 1. MITM proxy (the TUN redirects captured TCP here). -----------------
+    // --- 1. TLS-inspecting proxy (the TUN redirects captured TCP here). -----------------
     let net_cfg = bulwark_net::NetConfig {
         proxy_listen: PROXY_LISTEN.to_owned(),
         ..bulwark_net::NetConfig::default()
@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
     let ca_path = write_ca_cert(net.ca_cert_pem())?;
     println!("=================================================================");
     println!(" Bulwark VPN (transparent, system-wide)");
-    println!(" MITM proxy:    http://{PROXY_LISTEN}  (TUN redirects all TCP here)");
+    println!(" TLS-inspecting proxy:    http://{PROXY_LISTEN}  (TUN redirects all TCP here)");
     println!(" Root CA cert:  {}", ca_path.display());
     println!(" CA fingerprint: {}", net.ca_fingerprint());
     println!(" Trust it (Windows):");

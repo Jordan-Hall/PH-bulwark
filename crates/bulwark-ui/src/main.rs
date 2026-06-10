@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use bulwark_ui::{router, AppState};
+use bulwark_ui::{serve, AppState, NoCoverage};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -16,9 +16,15 @@ async fn main() -> anyhow::Result<()> {
     let store: Arc<dyn bulwark_store::Store> = bulwark_store::open_in_memory()?;
 
     let bind = std::env::var("BULWARK_UI_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
-    let app = router(AppState { store });
-    let listener = tokio::net::TcpListener::bind(&bind).await?;
-    tracing::info!(%bind, "bulwark-ui dashboard listening");
-    axum::serve(listener, app).await?;
-    Ok(())
+    // Standalone dashboard: no network engine in this process → empty coverage
+    // source. The embedded host (bulwark_proxy) injects the live pinning
+    // snapshot instead.
+    serve(
+        AppState {
+            store,
+            coverage: Arc::new(NoCoverage),
+        },
+        &bind,
+    )
+    .await
 }
