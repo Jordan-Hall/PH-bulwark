@@ -20,12 +20,14 @@ use bulwark_proto::v1::{
 };
 
 pub mod accounts;
+pub mod child_control;
 pub mod persist;
 pub mod relay;
 pub mod service;
 pub mod tamper;
 
 pub use accounts::{AccountStore, AccountsService};
+pub use child_control::{ChildConfigStore, ChildControlService};
 pub use relay::{AlertHub, ReviewService};
 pub use tamper::TamperService;
 

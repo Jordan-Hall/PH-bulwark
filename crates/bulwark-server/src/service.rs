@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use bulwark_proto::v1::accounts_server::AccountsServer;
 use bulwark_proto::v1::alert_relay_server::{AlertRelay, AlertRelayServer};
+use bulwark_proto::v1::child_control_server::ChildControlServer;
 use bulwark_proto::v1::analysis_server::{Analysis, AnalysisServer};
 use bulwark_proto::v1::offload_server::{Offload, OffloadServer};
 use bulwark_proto::v1::review_server::ReviewServer;
@@ -19,6 +20,7 @@ use futures_util::StreamExt;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::accounts::{AccountStore, AccountsService};
+use crate::child_control::{ChildConfigStore, ChildControlService};
 use crate::relay::{AlertHub, ReviewService};
 use crate::tamper::{self, TamperService};
 use crate::{default_offload_policy, AnalyzerRegistry, ServerConfig, ServerRole};
@@ -368,8 +370,21 @@ pub async fn run(
                 ReviewService::with_accounts(hub, accounts.clone())
                     .with_segment_store(review_store.clone()),
             ));
+            // ChildControl (parent-set, child-applied runtime config) shares the
+            // SAME accounts store so guardian→child scoping is one source of truth.
+            // Persisted alongside accounts when a state dir is configured.
+            let child_config = match &cfg.state_dir {
+                Some(dir) => ChildConfigStore::with_state_dir(dir)?,
+                None => ChildConfigStore::new(),
+            };
+            router = router.add_service(ChildControlServer::new(ChildControlService::new(
+                child_config,
+                accounts.clone(),
+            )));
             router = router.add_service(AccountsServer::new(AccountsService::new(accounts)));
-            tracing::info!("accounts mode ENABLED — Review requires a guardian session token");
+            tracing::info!(
+                "accounts mode ENABLED — Review + ChildControl require a guardian session token"
+            );
         } else {
             router = router.add_service(ReviewServer::new(
                 ReviewService::new(hub).with_segment_store(review_store),
