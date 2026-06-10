@@ -54,8 +54,8 @@ use bulwark_policy::{AgeProfile, Policy, PolicyContext, PolicyDecision};
 use bulwark_proto::v1::accounts_client::AccountsClient;
 use bulwark_proto::v1::child_control_client::ChildControlClient;
 use bulwark_proto::v1::{
-    Category, ChildConfig, ChildConfigFilter, FilteringProfile, PairResult,
-    RedeemPairCodeRequest, SourceChannel, TextSpan, Verdict,
+    Category, ChildConfig, ChildConfigFilter, FilteringProfile, PairResult, RedeemPairCodeRequest,
+    SourceChannel, TextSpan, Verdict,
 };
 use bulwark_proto::DeviceId;
 use bulwark_text::TextAnalyzer;
@@ -722,7 +722,10 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_fetchChil
     let endpoint = match jstring_to_string(&mut env, &endpoint) {
         Some(s) => s,
         None => {
-            return string_to_jstring(&mut env, &err_child_config_json("server address is missing"))
+            return string_to_jstring(
+                &mut env,
+                &err_child_config_json("server address is missing"),
+            )
         }
     };
     let device_id = jstring_to_string(&mut env, &device_id).unwrap_or_default();

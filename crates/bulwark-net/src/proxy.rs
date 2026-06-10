@@ -282,9 +282,9 @@ pub async fn spawn(
 ) -> Result<MitmProxy> {
     // Bind first so we can report the actual address (port 0 → ephemeral) and so
     // a bind failure surfaces here rather than inside the spawned task.
-    let listener = tokio::net::TcpListener::bind(listen)
-        .await
-        .map_err(|e| NetError::proxy(format!("binding TLS-inspecting listener on {listen}: {e}")))?;
+    let listener = tokio::net::TcpListener::bind(listen).await.map_err(|e| {
+        NetError::proxy(format!("binding TLS-inspecting listener on {listen}: {e}"))
+    })?;
     let listen_addr = listener
         .local_addr()
         .map_err(|e| NetError::proxy(format!("resolving bound addr: {e}")))?;

@@ -166,7 +166,13 @@ async fn events(State(st): State<AppState>, Query(q): Query<EventsQuery>) -> Jso
 /// on-device OCR. The network cannot distinguish cert-pinning from E2E (both
 /// reject our leaf at the handshake), so the note says so rather than guess.
 async fn coverage(State(st): State<AppState>) -> Json<Vec<CoverageRow>> {
-    Json(st.coverage.snapshot().into_iter().map(coverage_row).collect())
+    Json(
+        st.coverage
+            .snapshot()
+            .into_iter()
+            .map(coverage_row)
+            .collect(),
+    )
 }
 
 /// Map one learned host observation onto an honest matrix row.

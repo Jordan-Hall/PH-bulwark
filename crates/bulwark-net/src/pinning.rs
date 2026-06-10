@@ -255,7 +255,7 @@ mod tests {
         assert!(r.record_intercept_attempt("api.example").is_none());
         assert!(r.record_intercept_attempt("api.example").is_none());
         r.record_mitmable("api.example"); // decrypt succeeded -> decay strikes
-        // Counter reset + mitmable guard: the host can no longer be pinned.
+                                          // Counter reset + mitmable guard: the host can no longer be pinned.
         assert!(r.record_intercept_attempt("api.example").is_none());
         assert_eq!(r.capability("api.example"), HostCapability::Mitmable);
         assert!(!r.is_pinned("api.example"));

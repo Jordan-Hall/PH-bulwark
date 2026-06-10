@@ -406,7 +406,11 @@ pub mod onnx {
             };
 
             let v = analyzer.analyze(req).await.expect("analyze");
-            assert!((0.0..=1.0).contains(&v.score), "score in range: {}", v.score);
+            assert!(
+                (0.0..=1.0).contains(&v.score),
+                "score in range: {}",
+                v.score
+            );
             assert!(v.worker_id.starts_with("local:onnx:"), "{}", v.worker_id);
             let ev = v.evidence.expect("hash-only evidence");
             assert_eq!(ev.sha256.len(), 32);

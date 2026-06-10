@@ -25,9 +25,7 @@ use crate::servers::{
     save_server_choice, saved_choice, saved_token_for_endpoint, selected_server_id,
     server_inventory, upsert_custom_server, DEFAULT_REGION_ID,
 };
-use crate::state::{
-    pair_expiry_text, session_status_text, Alert, AppStatus, Console, PairCodeUi,
-};
+use crate::state::{pair_expiry_text, session_status_text, Alert, AppStatus, Console, PairCodeUi};
 
 #[component]
 pub fn ProtectionPanel() -> Element {

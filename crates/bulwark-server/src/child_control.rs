@@ -128,7 +128,9 @@ impl ChildConfigStore {
                     .insert(cfg.device_id.clone(), cfg.child_id.clone());
             }
             let (tx, _rx) = tokio::sync::watch::channel(cfg.clone());
-            inner.by_child.insert(cfg.child_id.clone(), ConfigEntry { tx });
+            inner
+                .by_child
+                .insert(cfg.child_id.clone(), ConfigEntry { tx });
         }
         Ok(Self {
             inner: Arc::new(Mutex::new(inner)),
@@ -523,7 +525,8 @@ impl ChildControl for ChildControlService {
         let f = req.into_inner();
         // The poll IS the child's ack: `have_version` = the version it last
         // applied. Recorded (monotonic, enrolled devices only) for GetChildStatus.
-        self.store.record_applied_report(&f.device_id, f.have_version);
+        self.store
+            .record_applied_report(&f.device_id, f.have_version);
         let cfg = self.store.get_by_device(&f.device_id)?;
         Ok(Response::new(cfg))
     }

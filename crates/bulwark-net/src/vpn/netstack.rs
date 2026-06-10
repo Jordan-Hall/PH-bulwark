@@ -120,7 +120,11 @@ fn is_private_v4(o: [u8; 4]) -> bool {
 
 /// Where to forward a captured DNS query whose original destination was `server`.
 fn resolver_for(server: [u8; 4]) -> SocketAddr {
-    let o = if is_private_v4(server) { [1, 1, 1, 1] } else { server };
+    let o = if is_private_v4(server) {
+        [1, 1, 1, 1]
+    } else {
+        server
+    };
     SocketAddr::new(
         std::net::IpAddr::V4(std::net::Ipv4Addr::new(o[0], o[1], o[2], o[3])),
         53,
@@ -150,10 +154,7 @@ fn build_dns_response_v4(
 ) -> Vec<u8> {
     let src_a = Ipv4Address::new(src[0], src[1], src[2], src[3]);
     let dst_a = Ipv4Address::new(dst[0], dst[1], dst[2], dst[3]);
-    let udp_repr = UdpRepr {
-        src_port,
-        dst_port,
-    };
+    let udp_repr = UdpRepr { src_port, dst_port };
     let ip_repr = Ipv4Repr {
         src_addr: src_a,
         dst_addr: dst_a,
@@ -296,6 +297,12 @@ fn drain_pipe(fd: std::os::fd::RawFd) {
     }
 }
 
+/// One DNS reply queued for injection back into the TUN:
+/// `(src_ip, src_port, dst_ip, dst_port, payload)` — sourced from the DNS
+/// server address the client originally queried, back to the client.
+#[cfg(unix)]
+type DnsReply = ([u8; 4], u16, [u8; 4], u16, Vec<u8>);
+
 #[cfg(unix)]
 fn netstack_loop(
     tun: &dyn TunDevice,
@@ -314,7 +321,7 @@ fn netstack_loop(
 
     let (wake_rd, wake_wr) = make_pipe()?;
     let waker = std::sync::Arc::new(Waker { fd: wake_wr });
-    let (dns_tx, dns_rx) = std::sync::mpsc::channel::<([u8; 4], u16, [u8; 4], u16, Vec<u8>)>();
+    let (dns_tx, dns_rx) = std::sync::mpsc::channel::<DnsReply>();
 
     tracing::info!(proxy = %cfg.proxy_addr, "VPN pump: transparent netstack up");
 
@@ -402,7 +409,7 @@ fn handle_inbound(
     flows: &mut Vec<Flow>,
     handle: &tokio::runtime::Handle,
     waker: &std::sync::Arc<Waker>,
-    dns_tx: &std::sync::mpsc::Sender<([u8; 4], u16, [u8; 4], u16, Vec<u8>)>,
+    dns_tx: &std::sync::mpsc::Sender<DnsReply>,
 ) {
     let Some(summary) = parse_packet(pkt) else {
         return;
@@ -621,7 +628,7 @@ async fn dns_query(
     client_port: u16,
     server: [u8; 4],
     server_port: u16,
-    resp_tx: std::sync::mpsc::Sender<([u8; 4], u16, [u8; 4], u16, Vec<u8>)>,
+    resp_tx: std::sync::mpsc::Sender<DnsReply>,
     waker: std::sync::Arc<Waker>,
 ) {
     let sock = match tokio::net::UdpSocket::bind(("0.0.0.0", 0)).await {

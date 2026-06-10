@@ -185,7 +185,10 @@ async fn guardian_sets_config_child_fetches_and_streams() {
         .expect("stream did not hang")
         .expect("stream yielded an item")
         .expect("ok config");
-    assert_eq!(pushed.config_version, 2, "stale have_version gets the newer config");
+    assert_eq!(
+        pushed.config_version, 2,
+        "stale have_version gets the newer config"
+    );
     assert_eq!(pushed.server_region, "us");
 
     // (5b) Stream with an UP-TO-DATE have_version does NOT re-emit the current

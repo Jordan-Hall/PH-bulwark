@@ -36,7 +36,12 @@ impl Setup {
 
     /// The pair code has enough alphanumerics to attempt a connection.
     pub fn code_ok(&self) -> bool {
-        (self.code)().trim().chars().filter(|c| c.is_alphanumeric()).count() >= 6
+        (self.code)()
+            .trim()
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .count()
+            >= 6
     }
 
     /// Reset for a fresh run (the Done step's "Done" button).

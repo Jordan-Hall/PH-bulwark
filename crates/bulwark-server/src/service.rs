@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use bulwark_proto::v1::accounts_server::AccountsServer;
 use bulwark_proto::v1::alert_relay_server::{AlertRelay, AlertRelayServer};
-use bulwark_proto::v1::child_control_server::ChildControlServer;
 use bulwark_proto::v1::analysis_server::{Analysis, AnalysisServer};
+use bulwark_proto::v1::child_control_server::ChildControlServer;
 use bulwark_proto::v1::offload_server::{Offload, OffloadServer};
 use bulwark_proto::v1::review_server::ReviewServer;
 use bulwark_proto::v1::tamper_server::TamperServer;

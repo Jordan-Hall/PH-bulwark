@@ -12,7 +12,6 @@ use crate::state::{
     can_show_evidence, pair_expiry_text, seed, should_show_snippet, should_show_thumbnail, Alert,
 };
 
-
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -193,9 +192,9 @@ fn server_inventory_merges_builtins_custom_and_legacy_url() {
     assert!(rows.iter().any(|s| s.id == "uk" && s.builtin));
     assert!(rows.iter().any(|s| s.id == "us" && s.builtin));
     assert!(rows.iter().any(|s| s == &custom));
-    assert!(rows.iter().any(|s| {
-        s.endpoint == "https://legacy.example.test:8443" && s.label == "Self-hosted"
-    }));
+    assert!(rows
+        .iter()
+        .any(|s| { s.endpoint == "https://legacy.example.test:8443" && s.label == "Self-hosted" }));
 }
 
 #[test]

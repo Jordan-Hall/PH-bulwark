@@ -48,7 +48,11 @@ pub struct SavedServer {
 }
 
 impl SavedServer {
-    pub fn new(id: impl Into<String>, label: impl Into<String>, endpoint: impl Into<String>) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        endpoint: impl Into<String>,
+    ) -> Self {
         Self {
             id: id.into(),
             label: label.into(),
