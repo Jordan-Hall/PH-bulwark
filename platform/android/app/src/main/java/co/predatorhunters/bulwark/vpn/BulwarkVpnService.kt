@@ -32,8 +32,10 @@ class BulwarkVpnService : VpnService() {
     private var tun: ParcelFileDescriptor? = null
     private var rustHandle: Long = 0L
     @Volatile private var polling = false
+    @Volatile private var configPolling = false
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        running = true
         startForeground(NOTIF_ID, buildNotification())
         if (tun == null) establish()
         return START_STICKY
@@ -62,12 +64,17 @@ class BulwarkVpnService : VpnService() {
         rustHandle = RustBridge.startVpn(this, pfd.fd, deviceConfigJson())
         Log.i(TAG, "Bulwark VPN established (rustHandle=$rustHandle)")
         startAlertPoller()
+        startConfigPoller()
     }
 
     private fun deviceConfigJson(): String {
         val enrollment = Enrollment.record(this)
         val json = JSONObject()
             .put("device_id", Enrollment.stableDeviceId(this))
+            // The guardian's strictness band last applied by ChildConfigSync —
+            // seeds the Rust policy global so a process restart comes back up
+            // under the right band ("" = none yet -> Rust keeps its baseline).
+            .put("profile", ChildConfigSync.appliedProfile(this))
         if (enrollment != null) {
             json.put("cluster_endpoint", enrollment.clusterEndpoint)
                 .put("child_id", enrollment.childId)
@@ -94,8 +101,27 @@ class BulwarkVpnService : VpnService() {
         }, "bulwark-alert-poller").apply { isDaemon = true }.start()
     }
 
+    /**
+     * Workflow B step 2 (parent-controlled VPN): while filtering runs,
+     * periodically reconcile against the guardian's desired config. A guardian
+     * "filtering off" stops this service; the version gate and the actual
+     * apply live in [ChildConfigSync].
+     */
+    private fun startConfigPoller() {
+        if (configPolling) return
+        configPolling = true
+        Thread({
+            while (configPolling) {
+                runCatching { ChildConfigSync.fetchAndReconcile(this) }
+                runCatching { Thread.sleep(CONFIG_POLL_MS) }
+            }
+        }, "bulwark-config-poller").apply { isDaemon = true }.start()
+    }
+
     override fun onDestroy() {
+        running = false
         polling = false
+        configPolling = false
         if (rustHandle != 0L) {
             RustBridge.stopVpn(rustHandle)
             rustHandle = 0L
@@ -122,5 +148,10 @@ class BulwarkVpnService : VpnService() {
         private const val TAG = "BulwarkVpn"
         private const val CHANNEL = "bulwark_vpn"
         private const val NOTIF_ID = 1001
+        private const val CONFIG_POLL_MS = 60_000L
+
+        /** Live "the filtering service is up" flag for [ChildConfigSync]. */
+        @Volatile var running = false
+            private set
     }
 }
