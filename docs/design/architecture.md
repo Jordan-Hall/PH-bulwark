@@ -20,7 +20,7 @@ big-AI-rarely**; **mTLS on every node link**; **never persist explicit media**;
 ```
  ┌───────────────────────── CLIENT (every device) ─────────────────────────┐
  │ DATA PLANE                                CONTROL PLANE                   │
- │  bulwark-net  TUN/VpnService + MITM + CA      bulwark-core  config, caps,     │
+ │  bulwark-net  TUN/VpnService + TLS inspection + CA      bulwark-core  config, caps,     │
  │  bulwark-flow buffer / delay / demux                       device profile   │
  │  bulwark-agent OCR + accessibility (E2E)      bulwark-infer  local-vs-cluster  │
  │  tiny first-pass local models                            routing, offload  │
@@ -55,7 +55,7 @@ one reachable node.
 ### Client data plane
 | Crate | Responsibility | Implements (see interfaces.md) |
 |---|---|---|
-| **bulwark-net** | TUN (`wintun`/`tun-rs`/Android `VpnService`), `hudsucker` MITM, **per-install CA** (`rcgen`, key in DPAPI/TPM/Keystore), QUIC downgrade, pinning detection → mark flow for OCR fallback. | `Interceptor` |
+| **bulwark-net** | TUN (`wintun`/`tun-rs`/Android `VpnService`), `hudsucker` TLS inspection, **per-install CA** (`rcgen`, key in DPAPI/TPM/Keystore), QUIC downgrade, pinning detection → mark flow for OCR fallback. | `Interceptor` |
 | **bulwark-flow** | Protocol/flow classification, stream demux (HLS/DASH/progressive), ring-buffer + bounded delay for video/live, hands segments/frames/text up. | `FlowClassifier` |
 | **bulwark-agent** | On-device **conventional OCR** (`Windows.Media.Ocr`/`leptess`/ML Kit/macOS Vision) + accessibility-tree + notification capture — the E2E/pinned-app answer. Emits `TextSpan`. | `OcrSource` |
 | **bulwark-client** | Device orchestrator: wires net + flow + agent + infer + policy + alert; owns the per-device gRPC channel + client cert. | (composition root) |
@@ -88,8 +88,8 @@ one reachable node.
 
 ## 3. End-to-end data flow
 
-### 3a. Web image (MITM-able HTTPS page)
-1. `bulwark-net` MITM-decrypts the response; `bulwark-flow` classifies it as an image.
+### 3a. Web image (TLS inspection-able HTTPS page)
+1. `bulwark-net` inspection-decrypts the response; `bulwark-flow` classifies it as an image.
 2. `bulwark-infer` consults the cached `OffloadPolicy`. Capable desktop → run
    `bulwark-vision` locally; mobile/low-power → `Analysis.Analyze` to the cluster
    (`AnalysisRequest{ media_kind=IMAGE, inline_media | media_ref }`).
@@ -139,7 +139,7 @@ for E2 (`/verify`) to measure, not guarantees.
 | Path | Stage breakdown (target ms) | Total budget | Mode |
 |---|---|---|---|
 | **Web text** | OCR/extract 5 · rules 1 · classifier 8 (local) | **≤ 25 ms** | local-first; rules alone <2 ms |
-| **Web image** | MITM 5 · resize 3 · NSFW INT8 local 15 / offload (RTT 10 + queue 5 + infer 12) 27 | **≤ 40 ms** | local on desktop, offload on mobile |
+| **Web image** | TLS inspection 5 · resize 3 · NSFW INT8 local 15 / offload (RTT 10 + queue 5 + infer 12) 27 | **≤ 40 ms** | local on desktop, offload on mobile |
 | **Video segment (VOD)** | buffer fill (segment) + sample 10 · batch infer 40 · flagged re-encode 60 · re-mux 15 | **≤ 250 ms over segment** (hidden by buffering) | offload; delay acceptable |
 | **Live stream (delayed)** | play-out delay window **2–5 s** holds sample 10 · infer 40 · blur/mute 60 within budget | **delay window 2–5 s**, per-frame infer ≤ 120 ms | offload; client stays ≥1 window behind live |
 | **Mobile, offloaded (any heavy)** | capture 3 · RTT 10–40 · queue (backpressure-bounded) ≤ 30 · infer 12–40 · RTT back | **≤ 150 ms** typical; force-offload below `min_battery_pct` | `bulwark-infer` chooses offload from `DeviceProfile` |
@@ -158,7 +158,7 @@ Guard rails:
 
 - **mTLS everywhere.** Per-device client cert (`rcgen`, key in DPAPI/Keystore/
   Keychain) authenticates client⇄cluster; a cluster CA signs worker⇄worker.
-- **Crown-jewel CA key** (the per-install MITM CA) lives in TPM/keystore, never on
+- **Crown-jewel CA key** (the per-install TLS inspection CA) lives in TPM/keystore, never on
   the wire, never in `bulwark-proto`.
 - **Cluster sees plaintext analysis intermediates** → in-memory only, owned
   hardware, audit logs. `Evidence` on the wire is hashes / safe-thumbnail /

@@ -14,6 +14,9 @@ platform/android/local.properties
 /models
 *.onnx
 *.gguf
+# Live grooming-model training artifacts — NEVER published (decided: no public
+# release of the raw dataset or live weights).
+ph-bulwark-grooming-model*
 # ...except the small bundled models we DO vendor (compiled in via include_bytes!):
 !crates/bulwark-text/models/grooming_detector.onnx
 !crates/bulwark-vision/models/nsfw_detector.onnx
@@ -28,9 +31,10 @@ platform/android/local.properties
 .env
 secrets/
 
-# Local Claude Code settings (personal overrides) — never commit
-.claude/
-.claude/settings.local.json
+# Local Claude Code settings (personal overrides) — never commit —
+# EXCEPT the project agent roster (shared, not personal; docs/agent-workflow.md)
+.claude/*
+!.claude/agents/
 
 # OS / editor
 .DS_Store
@@ -42,3 +46,5 @@ deploy/aws/.terraform.lock.hcl
 deploy/aws/*.tfstate
 deploy/aws/*.tfstate.backup
 deploy/aws/tfplan
+
+**/node_modules/

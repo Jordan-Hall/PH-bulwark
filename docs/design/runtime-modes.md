@@ -7,7 +7,7 @@ only in how traffic reaches the filter.
 
 ## 1. Explicit Proxy — `bulwark_proxy` (no admin)
 
-- A `hudsucker` MITM proxy on `127.0.0.1:8080`.
+- A `hudsucker` TLS-inspecting proxy on `127.0.0.1:8080`.
 - The per-user **system proxy** (Windows `Internet Settings`, HKCU — no admin) is
   pointed at it. Browsers + apps that honour the system proxy are filtered.
 - Fallback for when elevation isn't available. Apps that ignore the system proxy
@@ -17,8 +17,8 @@ only in how traffic reaches the filter.
 ## 2. Transparent VPN — `bulwark_vpn` (admin)
 
 - A layer-3 **TUN** captures *all* traffic; `tun2proxy` (smoltcp userspace
-  netstack) redirects captured **TCP → the local MITM proxy**, NATs other UDP
-  out, and **downgrades QUIC/UDP-443** so HTTP/3 can't bypass the TCP MITM.
+  netstack) redirects captured **TCP → the local TLS-inspecting proxy**, NATs other UDP
+  out, and **downgrades QUIC/UDP-443** so HTTP/3 can't bypass the TCP TLS inspection.
 - No per-app/proxy settings — every app is covered.
 - `setup(true)` installs the default route and **restores host routing on
   teardown** (no-blackhole contract).

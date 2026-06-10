@@ -17,7 +17,7 @@ Status legend: ✅ done · 🚧 doing · ⏭️ next · ⛔ blocked/needs-decisi
 - **Detector:** rules-first grooming engine (incl. secrecy-isolation weighting fix) + sklearn TF-IDF (live, AUC 0.977) + **DistilBERT (AUC 0.9925) wired & parity-verified**. deberta-v3-small lost (fp16 fine-tune NaN; fp32 fix landed for a fair re-run). All merged.
 - **Apps (Dioxus 0.8):** child + manager + labeling migrated; **child + manager built for arm64, installed and running on a real Pixel 7.**
 - **Child app:** rebranded (navy/green/orange, real logo, no emoji, Plus Jakarta Sans), steps 2/3 layout fixed, verified on device.
-- **Manager app:** full light brand theme + logo + mobile-responsive + demo data removed; `style.rs` + `session.rs` extracted from the 2.7k-line main.rs (both compile).
+- **Manager app:** full light brand theme + logo + mobile-responsive + demo data removed. (An earlier `style.rs`/`session.rs` extraction lives only on the unmerged `feat/parent-dioxus-08` branch; superseded 2026-06-10 by the full module split — see Workflow A.)
 - **VPN:** flow-policy + QUIC/HTTP-3 block (closes the HTTP/3 filter-bypass) merged.
 - **Safety lines held:** no AI decoy, no AI-CSAM, **no public release of the raw grooming dataset or live model weights** (re-victimization / predator-playbook / evasion risk).
 
@@ -26,8 +26,14 @@ Status legend: ✅ done · 🚧 doing · ⏭️ next · ⛔ blocked/needs-decisi
 ## Workflow A — Manager get-started flow + modular split  🔴 the big one
 Goal: replace the one-page dump with a guided journey, in clean modules.
 
-- ✅ `style.rs` (theme), ✅ `session.rs` (token storage; biometric hooks here)
-- ⏭️ `api.rs` — extract the gRPC client calls (clean lift, no UI risk) — **do first**
+- ✅ **Full module split shipped (2026-06-10):** main.rs (2974 lines) → `router`/`theme`/
+  `state`/`servers`/`api`/`config`/`process`/`media`/`components`/`screens`/`tests`
+  (behaviour-preserving; `cargo check` warning-neutral vs baseline; 12/12 tests green
+  incl. the loopback FakeReview e2e). Dead `ServerSettings` wrapper dropped.
+  (The earlier `style.rs`/`session.rs` cut on `feat/parent-dioxus-08` is superseded.)
+- ✅ **`dioxus-router` adoption shipped (2026-06-10):** typed `Route` + `ConsoleLayout`
+  + six routed screens + shared `Console` context (all 16 root signals — form state
+  survives tab switches); `ActiveView`/`nav_class` deleted; check + 12/12 tests green.
 - ⏭️ `ui/get_started.rs` — the journey: **Welcome → Choose server → Account (sign in/create) → Pair child → Done**, one job per screen
 - ⏭️ `ui/dashboard.rs` — post-setup tabs (Alerts / Children / Protection)
 - ⏭️ App gate: first-run/!logged-in → get-started; else → dashboard

@@ -116,7 +116,7 @@ On first `bulwark-client` run (elevated), `bulwark-net`:
 2. wraps the private key with the OS keystore (**DPAPI** on Windows; non-exportable);
 3. installs the public root into the **current-user Trusted Root** store (one UAC prompt).
 
-**Uninstall must remove the root** (an orphaned root is a latent MITM backdoor): call the
+**Uninstall must remove the root** (an orphaned root is a latent TLS inspection backdoor): call the
 uninstall path (`NetInterceptor::set_remove_root_on_shutdown(true)` then `shutdown`).
 Inspect the CA fingerprint in the dashboard for verification.
 
@@ -130,7 +130,7 @@ that loses its lease stops accepting work). Every link is **mTLS** with per-node
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Some apps stop connecting | QUIC blocked (downgrade) or cert-pinned app rejecting the MITM cert | allowlist the app's QUIC, or accept it routes to the on-device OCR path; check the coverage matrix |
+| Some apps stop connecting | QUIC blocked (downgrade) or cert-pinned app rejecting the TLS inspection cert | allowlist the app's QUIC, or accept it routes to the on-device OCR path; check the coverage matrix |
 | A messaging app shows nothing filtered | it's E2E/pinned — network can't read it | enable `bulwark-agent` (OCR) for that app |
 | `bulwark-video` passes everything | built without `--features ffmpeg`, or ffmpeg not on PATH | install ffmpeg + rebuild with the feature |
 | NSFW never triggers | built without `--features onnx` or no model artifact | add the model + SHA-256 pin + rebuild |

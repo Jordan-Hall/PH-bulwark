@@ -6,7 +6,7 @@
 ## Verdict summary
 | Item | Verdict | Risk |
 |---|---|---|
-| 1. Windows Wintun + MITM + per-install CA | **GO** | Medium — needs admin; CA key is crown jewel |
+| 1. Windows Wintun + TLS inspection + per-install CA | **GO** | Medium — needs admin; CA key is crown jewel |
 | 2. Linux home-gateway (TUN + nftables TPROXY) | **GO** | Medium — routing loops / systemd cleanup |
 | 3. Android VpnService + AccessibilityService | **GO** | High — user-CA limit, Play Store/MASA, E2E only via OCR |
 | 4. QUIC/HTTP3 downgrade (block UDP/443) | **GO** | Low — most apps fall back to TCP |
@@ -21,14 +21,14 @@
    service with `CAP_NET_ADMIN`/`CAP_NET_BIND_SERVICE`. Must add `ExecStop` to tear down rules (else
    blackhole), and duplicate rules for **IPv6**. Test on a throwaway VM first.
 3. **Android (the hard one):** `VpnService` is the only device-wide intercept. **Android 7+ apps ignore
-   user CAs** unless they opt in → MITM works for maybe 30–50% of apps; pinned/E2E apps reject it.
+   user CAs** unless they opt in → TLS inspection works for maybe 30–50% of apps; pinned/E2E apps reject it.
    Commercial tools (Bark/mSpy/KidsGuard) **read plaintext via AccessibilityService + notification text
    AFTER the app decrypts** — they do NOT crack the wire. We do the same. AccessibilityService needs
    explicit user grant. Play Store **allows** parental-control VPNs but requires VPN disclosure, Data
    Safety declaration (no plaintext exfiltration), and a **MASA Level 2** assessment (~12 wks + fee).
 4. **QUIC:** block UDP/443 → apps fall back to inspectable TCP/HTTP2 (~85–90%). Cost: 1–3 s first-conn
    delay; a few apps won't fall back → need a per-app allowlist + a "failed to connect" dashboard.
-5. **Pinning:** discovered only on handshake failure → maintain a **per-app capability matrix** (MITM vs
+5. **Pinning:** discovered only on handshake failure → maintain a **per-app capability matrix** (TLS inspection vs
    route-to-OCR). Recommend **fail-open + log** for parental control (block is too disruptive). OCR only
    sees on-screen/notification text — document the loss honestly.
 6. **Cluster:** single binary, `--role lb|worker|all-in-one`. `foca` SWIM gossip; Postgres as quorum

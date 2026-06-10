@@ -113,7 +113,7 @@ adds duties (`PLAN.md` §0c):
   fee**. This is a **product/commercial gate**, routed here from `platform-feasibility.md` §3/§"Unresolved";
   it is a timeline and cost item for the commercial roadmap, not an engineering blocker for the OSS build.
 - **Apple/macOS/iOS** note: network-extension/content-filter entitlements and App Store review impose
-  parallel constraints; iOS device-wide MITM is far more restricted than Android/desktop — treat as a
+  parallel constraints; iOS device-wide TLS inspection is far more restricted than Android/desktop — treat as a
   separate per-platform legal+policy review.
 
 ---

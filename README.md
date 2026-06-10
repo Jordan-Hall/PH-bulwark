@@ -28,7 +28,7 @@ or suspects grooming. Thin device clients; a horizontally-scalable analysis back
 
 | Goal | How | Reachable by the network VPN? |
 |---|---|---|
-| Block adult **web pages/images** | MITM HTTPS via a per-install CA → small NSFW model / text rules | ✅ |
+| Block adult **web pages/images** | TLS inspection HTTPS via a per-install CA → small NSFW model / text rules | ✅ |
 | Block adult **video** (mp4 / HLS / DASH) | broadcast-delay buffer → ffmpeg sample → classify → blur/mute/block | ✅ (with delay) |
 | Block adult **live streams** | bounded delay + frame/audio sampling | ✅ (WebRTC = block-only) |
 | Detect **grooming** in chat | deterministic 8-category rule+lexicon engine (+ optional small classifier) | ✅ on readable text |
@@ -57,7 +57,7 @@ Thin **client** on each device ↔ a clusterable **server** backend (gRPC over m
 | `bulwark-client` | device orchestrator: intercept → classify → analyze → policy → act/alert/store |
 | `bulwark-server` | role-based backend (`lb` \| `worker` \| `all-in-one`); dispatches analyzers |
 | `bulwark-cluster` | SWIM membership, work queue, health, graceful drain |
-| `bulwark-net` | **(security-critical)** Wintun TUN + MITM proxy + per-install CA (DPAPI) |
+| `bulwark-net` | **(security-critical)** Wintun TUN + TLS-inspecting proxy + per-install CA (DPAPI) |
 | `bulwark-flow` | flow classification + HLS/DASH live-vs-VOD + broadcast-delay buffer |
 | `bulwark-vision` | small NSFW image/frame classifier (ONNX, `onnx` feature) |
 | `bulwark-audio` | small explicit-audio classifier (ONNX, `onnx` feature) |
