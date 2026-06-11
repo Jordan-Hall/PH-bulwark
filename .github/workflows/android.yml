@@ -11,6 +11,10 @@ name: android
 
 on:
   push:
+    # Branch pushes only: GitHub skips `paths` filters on tag pushes, so without
+    # this a `v*` tag would build the APK twice (standalone + the release.yml
+    # workflow_call). The release path comes solely through workflow_call.
+    branches: ["**"]
     paths:
       - "platform/android/**"
       - "crates/**"
@@ -31,6 +35,9 @@ on:
       - "Cargo.lock"
       - ".github/workflows/android.yml"
   workflow_dispatch: {}
+  # Reusable: release.yml calls this workflow on version tags so the release
+  # pipeline ships the SAME proven child-APK build instead of duplicating it.
+  workflow_call: {}
 
 # Harden cargo against the recurring transient crates.io download flake on the
 # runner ("curl failed [16] Error in the HTTP2 framing layer" while installing
@@ -47,16 +54,16 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Set up Android SDK + NDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Install NDK + export its path
         run: |
@@ -73,7 +80,7 @@ jobs:
           targets: aarch64-linux-android,armv7-linux-androideabi
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -94,7 +101,7 @@ jobs:
             build --release
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
 
       - name: Assemble debug APK
         working-directory: platform/android
@@ -102,7 +109,7 @@ jobs:
         run: gradle assembleDebug --no-daemon --stacktrace
 
       - name: Upload child debug APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: bulwark-child-debug-apk
           path: platform/android/app/build/outputs/apk/**/*-debug.apk
