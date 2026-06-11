@@ -39,6 +39,11 @@ pub enum KeyStoreTier {
     /// only unwrapped transiently in-process to sign. This is the Windows
     /// default tier today.
     OsWrappedAtRest,
+    /// Plaintext PKCS#8 DER file in an APP-PRIVATE directory (Android `filesDir`,
+    /// file `0600`, dir `0700`). Protection comes from the OS per-app sandbox
+    /// (per-UID isolation), NOT from key wrapping — an honest, documented weaker
+    /// tier; the Android Keystore/TEE-wrapped signer is the planned upgrade.
+    AppSandboxFile,
     /// Plaintext in process memory, nothing persisted securely. **TESTS ONLY.**
     InMemoryInsecure,
 }

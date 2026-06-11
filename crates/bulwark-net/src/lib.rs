@@ -16,6 +16,9 @@
 //!   DPAPI on Windows) and **never shipped, baked-in, or transmitted**.
 //! * **QUIC downgrade** ([`quic`]): block UDP/443 so apps fall back to
 //!   inspectable TCP.
+//! * **Guardian host blocklist** ([`blocklist`]): exact + suffix host rules
+//!   refused at CONNECT/request time with an inline block page (and literal-IP
+//!   destinations RST'd pre-CONNECT in the transparent pump).
 //! * **Cert-pinning detection** ([`pinning`]): a rejected TLS inspection handshake emits a
 //!   signal to route that host to the on-device agent (OCR); **fail-open + log**
 //!   by default, configurable.
@@ -50,6 +53,7 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod blocklist;
 pub mod ca;
 pub mod config;
 pub mod error;
@@ -72,7 +76,8 @@ pub mod vpn;
 
 // --- Curated public API -----------------------------------------------------
 
-pub use ca::{CaKeyStore, CaManager, DevInMemoryKeyStore, KeyStoreTier};
+pub use blocklist::HostBlocklist;
+pub use ca::{CaKeyStore, CaManager, DevInMemoryKeyStore, FileKeyStore, KeyStoreTier};
 pub use config::NetConfig;
 pub use error::{NetError, Result};
 pub use interceptor::{CapturedFlow, FlowPayload, InterceptDecision, Interceptor, NetInterceptor};

@@ -19,6 +19,7 @@ use tokio::sync::Mutex;
 use bulwark_core::Result as CoreResult;
 use bulwark_proto::SourceChannel;
 
+use crate::blocklist::HostBlocklist;
 use crate::ca::{select_keystore, CaManager, KeyStoreTier};
 use crate::config::NetConfig;
 use crate::pinning::PinningRegistry;
@@ -60,6 +61,8 @@ pub struct NetInterceptor {
     ca: Arc<CaManager>,
     pinning: Arc<PinningRegistry>,
     quic: QuicDowngrade,
+    /// Guardian host blocklist (config path / BULWARK_BLOCKLIST env; empty default).
+    blocklist: Arc<HostBlocklist>,
     /// TUN device (real on Windows; stub elsewhere). Created lazily in `start`
     /// (opening it can require the driver/admin), so construction stays cheap and
     /// testable. Behind a Mutex because the trait methods take `&self`.
@@ -90,9 +93,10 @@ impl NetInterceptor {
         Self::assemble(config, ca)
     }
 
-    /// Test/dev constructor allowing a caller-supplied keystore (e.g. the
-    /// in-memory dev store). Not for production — the in-memory store provides no
-    /// at-rest protection (see [`KeyStoreTier::InMemoryInsecure`]).
+    /// Constructor with a caller-supplied keystore: tests/dev (the in-memory
+    /// store) and platforms where [`select_keystore`] has no backend yet —
+    /// Android passes the file-persisted [`crate::ca::FileKeyStore`] here. The
+    /// CA load still fail-closes on a non-production tier outside tests.
     pub fn with_keystore(
         config: NetConfig,
         keystore: Arc<dyn crate::ca::CaKeyStore>,
@@ -106,12 +110,19 @@ impl NetInterceptor {
     fn assemble(config: NetConfig, ca: CaManager) -> crate::Result<Self> {
         let pinning = Arc::new(PinningRegistry::new(config.pinning_fail_open));
         let quic = QuicDowngrade::new(config.quic_downgrade, config.quic_allowlist.clone());
+        // Guardian host blocklist: explicit config path, else BULWARK_BLOCKLIST
+        // env (a file path), else empty (no behavior change). A configured-but-
+        // unreadable file fails CLOSED here so the list never silently vanishes.
+        let blocklist = Arc::new(HostBlocklist::from_env_or(
+            config.blocklist_path.as_deref(),
+        )?);
         let (tx, rx) = tokio::sync::mpsc::channel(config.flow_channel_capacity);
         Ok(NetInterceptor {
             config,
             ca: Arc::new(ca),
             pinning,
             quic,
+            blocklist,
             tun: Mutex::new(None), // opened lazily in `start`
             proxy: Mutex::new(None),
             flow_rx: Mutex::new(rx),
@@ -254,7 +265,14 @@ impl NetInterceptor {
             .take()
             .ok_or_else(|| NetError::proxy("proxy already started"))?;
 
-        let proxy = proxy::spawn(listen, self.ca.clone(), self.pinning.clone(), tx).await?;
+        let proxy = proxy::spawn(
+            listen,
+            self.ca.clone(),
+            self.pinning.clone(),
+            self.blocklist.clone(),
+            tx,
+        )
+        .await?;
         proxy.set_gating(true);
         tracing::info!(
             ca_fp = %self.ca.fingerprint_hex(),
@@ -299,9 +317,15 @@ impl Interceptor for NetInterceptor {
                 bulwark_core::Error::from(NetError::proxy("proxy already started"))
             })?;
 
-        let proxy = proxy::spawn(listen, self.ca.clone(), self.pinning.clone(), tx)
-            .await
-            .map_err(bulwark_core::Error::from)?;
+        let proxy = proxy::spawn(
+            listen,
+            self.ca.clone(),
+            self.pinning.clone(),
+            self.blocklist.clone(),
+            tx,
+        )
+        .await
+        .map_err(bulwark_core::Error::from)?;
         // Arm inline decision-gating: the orchestrator now wires `apply` (below)
         // to the proxy's per-flow decision sink, so the response handler awaits a
         // Forward/Drop/Rewrite for each emitted flow (bounded, fail-OPEN on

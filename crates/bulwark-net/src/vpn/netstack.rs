@@ -53,12 +53,20 @@ struct PacketSummary {
 #[derive(Clone, Debug)]
 pub(super) struct BridgeConfig {
     proxy_addr: SocketAddr,
+    /// Guardian host blocklist. Only literal-IP entries can match here (the
+    /// pump sees L3 packets, no names); name rules are enforced by the proxy,
+    /// which every pump flow traverses anyway.
+    blocklist: std::sync::Arc<crate::blocklist::HostBlocklist>,
 }
 
 impl BridgeConfig {
     pub(super) fn from_vpn(cfg: &VpnConfig) -> Result<Self> {
         Ok(Self {
             proxy_addr: parse_http_proxy_addr(cfg.proxy_url())?,
+            // VpnConfig carries no NetConfig, so the pump resolves the guardian
+            // blocklist from BULWARK_BLOCKLIST (the same file the proxy loads).
+            // Configured-but-unreadable fails CLOSED; unset = empty.
+            blocklist: std::sync::Arc::new(crate::blocklist::HostBlocklist::from_env_or(None)?),
         })
     }
 }
@@ -370,6 +378,7 @@ fn netstack_loop(
                             handle,
                             &waker,
                             &dns_tx,
+                            &cfg.blocklist,
                         );
                     }
                 }
@@ -408,6 +417,7 @@ fn handle_inbound(
     handle: &tokio::runtime::Handle,
     waker: &std::sync::Arc<Waker>,
     dns_tx: &std::sync::mpsc::Sender<DnsReply>,
+    blocklist: &crate::blocklist::HostBlocklist,
 ) {
     let Some(summary) = parse_packet(pkt) else {
         return;
@@ -423,7 +433,15 @@ fn handle_inbound(
             syn,
         } => {
             let key = (src, src_port, dst, dst_port);
-            if syn && !flows.iter().any(|f| f.key == key) {
+            // Guardian blocklist (literal-IP entry): open NO listener for a
+            // listed destination — smoltcp answers the staged SYN with RST, so
+            // the flow is actively refused before any CONNECT/TLS. Mirrors
+            // `decide()`'s FlowAction::Drop (the pure-tested policy).
+            let refused =
+                syn && !blocklist.is_empty() && blocklist.is_blocked(&format!("{dst}:{dst_port}"));
+            if refused {
+                tracing::debug!(%dst, dst_port, "guardian blocklist: TCP flow refused (RST)");
+            } else if syn && !flows.iter().any(|f| f.key == key) {
                 let endpoint = IpEndpoint::new(IpAddress::Ipv4(dst), dst_port);
                 if let Ok(h) = open_proxy_listener(sockets, endpoint) {
                     flows.push(Flow {
@@ -769,11 +787,22 @@ pub(super) enum FlowAction {
 
 /// Classify a parsed packet into the action the bridge must take. Pure + total;
 /// this is the policy the socket pump (same module) will enforce once it lands.
-fn decide(summary: &PacketSummary) -> FlowAction {
+fn decide(summary: &PacketSummary, blocklist: &crate::blocklist::HostBlocklist) -> FlowAction {
     match summary.transport {
-        Transport::Tcp { syn: true, .. } => tcp_connect_authority(summary)
-            .map(FlowAction::ProxyConnect)
-            .unwrap_or(FlowAction::Forward),
+        Transport::Tcp { syn: true, .. } => match tcp_connect_authority(summary) {
+            Some(authority) => {
+                // The pump sees L3 packets only, so `authority` is `ip:port` —
+                // a literal-IP blocklist entry refuses the flow pre-CONNECT.
+                // Name (SNI/Host) rules are enforced in the proxy, which every
+                // pump flow traverses anyway.
+                if blocklist.is_blocked(&authority) {
+                    FlowAction::Drop("destination on guardian blocklist (refused pre-CONNECT)")
+                } else {
+                    FlowAction::ProxyConnect(authority)
+                }
+            }
+            None => FlowAction::Forward,
+        },
         Transport::Udp { dst_port, .. } if dst_port == QUIC_UDP_PORT => {
             FlowAction::Drop("QUIC/HTTP-3 (UDP/443) blocked -> forces TCP/443 for TLS inspection")
         }
@@ -1017,11 +1046,30 @@ mod tests {
         assert!(tcp_connect_authority(&summary).is_none());
     }
 
+    /// Empty guardian blocklist for the policy tests (the default).
+    fn no_blocklist() -> crate::blocklist::HostBlocklist {
+        crate::blocklist::HostBlocklist::default()
+    }
+
     #[test]
     fn tcp_syn_decides_proxy_connect() {
         let s = parse_packet(&ipv4_tcp_syn(443)).expect("valid packet");
         assert_eq!(
-            decide(&s),
+            decide(&s, &no_blocklist()),
+            FlowAction::ProxyConnect("93.184.216.34:443".into())
+        );
+    }
+
+    #[test]
+    fn blocklisted_destination_ip_is_refused_pre_connect() {
+        // A literal-IP guardian-blocklist entry refuses the flow before any
+        // CONNECT/TLS; a non-listed destination still proxies normally.
+        let s = parse_packet(&ipv4_tcp_syn(443)).expect("valid packet");
+        let listed = crate::blocklist::HostBlocklist::parse("93.184.216.34");
+        assert!(matches!(decide(&s, &listed), FlowAction::Drop(_)));
+        let other = crate::blocklist::HostBlocklist::parse("10.9.9.9");
+        assert_eq!(
+            decide(&s, &other),
             FlowAction::ProxyConnect("93.184.216.34:443".into())
         );
     }
@@ -1031,14 +1079,14 @@ mod tests {
         // HTTP/3 over QUIC must be dropped so the browser falls back to TCP/443
         // (which the TLS inspection inspects) — otherwise it bypasses the content filter.
         let s = parse_packet(&ipv4_udp(443)).expect("valid packet");
-        assert!(matches!(decide(&s), FlowAction::Drop(_)));
+        assert!(matches!(decide(&s, &no_blocklist()), FlowAction::Drop(_)));
     }
 
     #[test]
     fn dns_udp_53_is_forwarded_not_dropped() {
         // Only QUIC (443) is dropped; DNS and other UDP must pass through.
         let s = parse_packet(&ipv4_udp(53)).expect("valid packet");
-        assert_eq!(decide(&s), FlowAction::Forward);
+        assert_eq!(decide(&s, &no_blocklist()), FlowAction::Forward);
     }
 
     #[test]
@@ -1046,7 +1094,7 @@ mod tests {
         let mut pkt = ipv4_tcp_syn(443);
         pkt[32..34].copy_from_slice(&0x5010u16.to_be_bytes()); // ACK, no SYN
         let s = parse_packet(&pkt).expect("valid packet");
-        assert_eq!(decide(&s), FlowAction::Forward);
+        assert_eq!(decide(&s, &no_blocklist()), FlowAction::Forward);
     }
 
     #[test]

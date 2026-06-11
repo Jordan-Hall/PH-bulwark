@@ -47,8 +47,11 @@ pub struct NetConfig {
 
     /// **Fail-open** on a cert-pinned / TLS inspection-rejected host (forward + log) vs.
     /// fail-closed (block). Default `true` (fail-open) per the threat model:
-    /// blocking every pinned app is too disruptive for parental control; the
-    /// coverage gap is surfaced honestly and the host is routed to on-device OCR.
+    /// blocking every pinned app is too disruptive for parental control. HONEST
+    /// LIMIT: such traffic currently passes through UNFILTERED — the on-device
+    /// OCR route is planned, not built (bulwark-agent has no capture loop); on
+    /// Android, supported messengers get an accessibility text check instead.
+    /// The coverage gap is surfaced in the dashboard, never hidden.
     pub pinning_fail_open: bool,
 
     /// **Fail-closed** when the CA key is missing / the keystore cannot sign.
@@ -60,6 +63,14 @@ pub struct NetConfig {
     /// Bounded capacity of the channel that surfaces decrypted flows up to
     /// `bulwark-flow`. Backpressure caps memory holding plaintext intermediates.
     pub flow_channel_capacity: usize,
+
+    /// Optional path to a guardian host-blocklist file (one host per line; `#`
+    /// comments; a leading `.`/`*.` makes a suffix rule covering the apex and
+    /// every subdomain). `None` → the `BULWARK_BLOCKLIST` env var is consulted;
+    /// unset → EMPTY list (no behavior change). A configured-but-unreadable
+    /// file is a **fail-CLOSED** start error — a guardian's blocklist must
+    /// never silently vanish. See [`crate::blocklist::HostBlocklist`].
+    pub blocklist_path: Option<PathBuf>,
 }
 
 impl Default for NetConfig {
@@ -74,6 +85,7 @@ impl Default for NetConfig {
             pinning_fail_open: true, // disruptive to block all pinned apps
             ca_missing_fail_closed: true, // crown-jewel: never pass unfiltered silently
             flow_channel_capacity: 1024,
+            blocklist_path: None, // env/file opt-in; empty = no behavior change
         }
     }
 }
@@ -115,6 +127,8 @@ mod tests {
         // QUIC downgraded by default so traffic stays inspectable.
         assert!(c.quic_downgrade);
         assert!(c.ca_validity_days > 0 && c.ca_validity_days <= 730);
+        // No blocklist by default — guardian opt-in via config path or env.
+        assert!(c.blocklist_path.is_none());
         c.validate().expect("defaults validate");
     }
 

@@ -21,13 +21,18 @@
 //! which:
 //!   * collects the (now-plaintext) request/response body,
 //!   * emits a [`CapturedFlow`] onto the bounded flow channel, and
-//!   * on **scorable image** responses only, blocks on a per-`flow_id`
+//!   * on **scorable image / video-segment** responses, blocks on a per-`flow_id`
 //!     rendezvous for the policy [`InterceptDecision`] (Forward / Rewrite / Drop)
 //!     supplied by [`MitmProxy::apply`] — bounded by a timeout that fails
 //!     **CLOSED** (Drop) so a slow/absent classifier blocks the image rather than
-//!     leaking it (owner directive: "block instantly by default"). Every other
-//!     response (html/js/css/json/text/non-image/tiny icon) forwards immediately
-//!     with no gate, so page-structural resources add zero latency.
+//!     leaking it (owner directive: "block instantly by default"). Bounded
+//!     **text/html pages** are gated too but fail **OPEN** (Forward) on a missed
+//!     window (`gate_policy` — a stalled classifier must not white-screen all
+//!     browsing). Every other response (js/css/json/plain text/event-stream/
+//!     non-image/tiny icon) forwards immediately with no gate, so page-structural
+//!     resources add zero latency.
+//!   * refuses any request whose host is on the guardian [`HostBlocklist`]
+//!     (a CONNECT is answered with the inline block page and never tunneled).
 //!
 //! WebSocket frames are passed through unchanged (hudsucker's default
 //! `NoopHandler` forwards every message both directions).
@@ -51,6 +56,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 use bulwark_core::flow::InterceptDecision;
 
+use crate::blocklist::HostBlocklist;
 use crate::ca::CaManager;
 use crate::pinning::PinningRegistry;
 use crate::{NetError, Result};
@@ -62,6 +68,18 @@ use crate::{NetError, Result};
 /// scorable image responses are ever gated; everything else forwards immediately
 /// with no wait, so this timeout never touches page-structural resources.
 const DECISION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long a gated **text/html** page waits for the policy verdict. Shorter
+/// than the media window: the text path is the local deterministic rule engine
+/// (sub-millisecond) plus channel scheduling, and — unlike media — a missing
+/// verdict here fails OPEN (Forward), so this bound is the worst-case latency
+/// added to a page when the classifier is stalled/absent (e.g. a shed flow).
+const HTML_DECISION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Upper bound on a text/html body eligible for response gating. Bigger pages
+/// forward ungated (the classifier still sees the bounded peek) — bounds the
+/// added latency and keeps unusually large/streaming-ish HTML out of the gate.
+const HTML_GATE_CAP: usize = 2 * 1024 * 1024;
 
 /// Max leaf-cert cache entries held by the `RcgenAuthority` (one per visited
 /// host). Bounds memory; evicted entries are simply re-minted on next visit.
@@ -278,6 +296,7 @@ pub async fn spawn(
     listen: std::net::SocketAddr,
     ca: Arc<CaManager>,
     pinning: Arc<PinningRegistry>,
+    blocklist: Arc<HostBlocklist>,
     flow_tx: FlowSender,
 ) -> Result<MitmProxy> {
     // Bind first so we can report the actual address (port 0 → ephemeral) and so
@@ -300,6 +319,7 @@ pub async fn spawn(
         flow_tx,
         pinning,
         ca: ca.clone(),
+        blocklist,
         gate: gate.clone(),
         next_flow_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
     };
@@ -401,16 +421,29 @@ pub struct FlowHandler {
     flow_tx: FlowSender,
     pinning: Arc<PinningRegistry>,
     ca: Arc<CaManager>,
+    /// Guardian host blocklist consulted on every request (empty = no-op).
+    blocklist: Arc<HostBlocklist>,
     gate: DecisionGate,
     next_flow_id: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl FlowHandler {
+    /// Allocate the next flow id. Split out of [`Self::emit`] so a gated
+    /// response can `gate.register(flow_id)` BEFORE the flow becomes visible to
+    /// the consumer — an instant `apply` on a not-yet-registered id would be
+    /// silently discarded and the gate would ride its timeout fallback.
+    fn next_id(&self) -> u64 {
+        self.next_flow_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Build a `CapturedFlow` and emit it (drops on backpressure — never blocks
-    /// the data path, never unbounded-buffers plaintext). Returns the flow id.
+    /// the data path, never unbounded-buffers plaintext). `flow_id` comes from
+    /// [`Self::next_id`] (allocated by the caller so gating can register first).
     #[allow(clippy::too_many_arguments)]
     pub fn emit(
         &self,
+        flow_id: u64,
         source: FlowSource,
         app_or_host: &str,
         method: &str,
@@ -420,10 +453,7 @@ impl FlowHandler {
         content_type: Option<String>,
         image_body: Option<Vec<u8>>,
         video_body: Option<Vec<u8>>,
-    ) -> u64 {
-        let flow_id = self
-            .next_flow_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    ) {
         let flow = CapturedFlow {
             flow_id,
             source,
@@ -447,7 +477,6 @@ impl FlowHandler {
         if !app_or_host.is_empty() {
             self.pinning.record_mitmable(app_or_host);
         }
-        flow_id
     }
 
     /// Record a pinned host (handshake rejected our leaf). Returns whether we
@@ -455,6 +484,32 @@ impl FlowHandler {
     pub fn on_pinned(&self, app_or_host: &str) -> bool {
         let sig = self.pinning.record_pinned(app_or_host);
         sig.failed_open
+    }
+
+    /// True when the request's host is on the guardian blocklist. BOTH the URI
+    /// authority and the `Host` header are checked: the transparent pump
+    /// CONNECTs by original-destination IP (so the restored URI authority is
+    /// `ip:port`) while the decrypted in-tunnel request carries the real name
+    /// in `Host`; the explicit-proxy path has the name in the authority.
+    fn is_request_blocked(&self, req: &Request<Body>) -> bool {
+        if self.blocklist.is_empty() {
+            return false;
+        }
+        if let Some(a) = req.uri().authority() {
+            if self.blocklist.is_blocked(a.host()) {
+                return true;
+            }
+        }
+        if let Some(h) = req
+            .headers()
+            .get(hudsucker::hyper::header::HOST)
+            .and_then(|v| v.to_str().ok())
+        {
+            if self.blocklist.is_blocked(h) {
+                return true;
+            }
+        }
+        false
     }
 
     /// Decide whether to TLS-intercept a CONNECT tunnel to `host`, recording a
@@ -514,6 +569,18 @@ impl HttpHandler for FlowHandler {
         _ctx: &HttpContext,
         req: Request<Body>,
     ) -> RequestOrResponse {
+        // Guardian host blocklist — the earliest gate, before any tunnel, TLS,
+        // or content analysis. A CONNECT to a listed host is answered with the
+        // block page INSTEAD of opening the tunnel (hudsucker short-circuits a
+        // Response returned from handle_request); a decrypted in-tunnel request
+        // to a listed host serves the same page over the inspected stream.
+        if self.is_request_blocked(&req) {
+            tracing::info!(
+                host = %host_of_request(&req),
+                "guardian blocklist: request refused (403 block page)"
+            );
+            return RequestOrResponse::Response(blocked_page_response());
+        }
         let host = host_of_request(&req);
         let method = req.method().to_string();
         let uri = req.uri().to_string();
@@ -522,7 +589,9 @@ impl HttpHandler for FlowHandler {
         // intact upstream and hand the classifier a bounded peek of it.
         let (parts, body) = req.into_parts();
         let full = collect_full(body).await;
+        let req_flow_id = self.next_id();
         self.emit(
+            req_flow_id,
             classify_source(&uri),
             &host,
             &method,
@@ -558,15 +627,36 @@ impl HttpHandler for FlowHandler {
         // the video analyzer can blur/mute the segment and the decision swaps in the
         // cleaned bytes. Decided BEFORE `emit` moves the bodies up the channel.
         let video_body = video_segment_body_for(content_type.as_deref(), &full);
-        let is_gatable = image_body.is_some() || video_body.is_some();
+        let media_gated = image_body.is_some() || video_body.is_some();
+        // Bounded text/html pages are ALSO decision-gated (fail-OPEN — see
+        // `gate_policy`) so a policy BLOCK on adult page text really swaps the
+        // page for the block page instead of being an alert-only no-op.
+        // Non-html text (json/js/css/event-stream) is never gated, so SSE and
+        // streaming APIs forward immediately exactly as before.
+        let html_gated = !media_gated && is_gatable_html(content_type.as_deref(), &full);
+        let is_gatable = media_gated || html_gated;
         let source = if video_body.is_some() {
             FlowSource::VideoStream
         } else {
             FlowSource::Web
         };
 
+        // Allocate the id and — for a gated response — REGISTER the waiter
+        // BEFORE the flow becomes visible on the channel. A consumer that
+        // answers instantly (the Android flow consumer does) would otherwise
+        // race `register`: `DecisionGate::resolve` on an unregistered id is a
+        // silent no-op and the response would ride the timeout fallback.
+        let flow_id = self.next_id();
+        let gated = self.gate.is_armed() && is_gatable;
+        let rx = if gated {
+            Some(self.gate.register(flow_id).await)
+        } else {
+            None
+        };
+
         // Emit the response flow for classification.
-        let flow_id = self.emit(
+        self.emit(
+            flow_id,
             source,
             "", // host is request-side; response carries none
             "", // no method on a response
@@ -578,26 +668,31 @@ impl HttpHandler for FlowHandler {
             video_body,
         );
 
-        // Forward IMMEDIATELY (no gate registration, no wait) when EITHER:
+        // Forward IMMEDIATELY (no gate wait) when EITHER:
         //   * inline gating is disarmed (default, until the interceptor wires
         //     `apply`), OR
-        //   * this is not a scorable image (html/js/css/json/text/icons/etc.).
-        // This is what removes the per-resource latency that was killing page
-        // loads — only the actual still images a guardian cares about are gated.
-        if !self.gate.is_armed() || !is_gatable {
+        //   * this is neither scorable media nor a gateable text/html page
+        //     (js/css/json/event-stream/plain text/icons/oversized bodies).
+        // Page-structural subresources still add zero latency; only media and
+        // bounded HTML documents are ever held for a verdict.
+        let Some(rx) = rx else {
             return Response::from_parts(parts, Body::from(full));
-        }
+        };
 
-        // Gated image: register the per-flow_id waiter, then await the policy
-        // decision bounded by DECISION_TIMEOUT. Owner directive — "block instantly
-        // by default": a timeout OR a dropped sender fails **CLOSED** (Drop), so a
-        // slow/absent classifier blocks the image rather than leaking it through.
-        let rx = self.gate.register(flow_id).await;
-        let decision = match tokio::time::timeout(DECISION_TIMEOUT, rx).await {
+        // Gated response: await the policy decision on the pre-registered
+        // waiter. Window + on-timeout fallback differ by class (`gate_policy`):
+        // media fails CLOSED (Drop — owner directive "block instantly by
+        // default"); text/html pages fail OPEN (Forward — every document is
+        // text/html, so a stalled/absent classifier must not white-screen all
+        // browsing; emit-only forward was the pre-gate behavior, and the
+        // guardian host blocklist still hard-blocks known-bad sites with no
+        // verdict at all).
+        let (window, fallback) = gate_policy(media_gated);
+        let decision = match tokio::time::timeout(window, rx).await {
             Ok(Ok(d)) => d,
             Ok(Err(_)) | Err(_) => {
                 self.gate.cancel(flow_id).await;
-                InterceptDecision::Drop
+                fallback
             }
         };
 
@@ -620,7 +715,13 @@ impl HttpHandler for FlowHandler {
             }
             InterceptDecision::Drop => {
                 tracing::debug!(flow_id, "decision: drop/block response");
-                blocked_response()
+                if html_gated {
+                    // A blocked page gets the inline HTML block page so the
+                    // child sees what happened (never the upstream bytes).
+                    blocked_page_response()
+                } else {
+                    blocked_response()
+                }
             }
         }
     }
@@ -750,6 +851,52 @@ fn blocked_response() -> Response<Body> {
         .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
+/// The small, self-contained HTML block page served for a refused host or a
+/// policy-blocked page. No external fetches, no scripts, content-free, and it
+/// never echoes upstream bytes.
+const BLOCK_PAGE_HTML: &str = "<!doctype html><html><head><meta charset=\"utf-8\">\
+<title>Blocked by PH Bulwark</title></head><body style=\"font-family:sans-serif;\
+text-align:center;margin-top:15vh\"><h1>Page blocked</h1>\
+<p>This page was blocked by PH Bulwark's content filter.</p>\
+<p>If you think this is a mistake, ask your parent or guardian to review it.</p>\
+</body></html>";
+
+/// 403 + the inline HTML block page (guardian blocklist hit, or a policy BLOCK
+/// on a gated text/html response).
+fn blocked_page_response() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::FORBIDDEN)
+        .header(
+            hudsucker::hyper::header::CONTENT_TYPE,
+            "text/html; charset=utf-8",
+        )
+        .body(Body::from(BLOCK_PAGE_HTML.as_bytes().to_vec()))
+        .unwrap_or_else(|_| Response::new(Body::empty()))
+}
+
+/// True when a response is a gateable HTML document: content-type `text/html`
+/// or `application/xhtml+xml`, non-empty, at most [`HTML_GATE_CAP`]. ONLY these
+/// are held for a page verdict — json/js/css/`text/event-stream`/plain text
+/// always forward immediately, so SSE/streaming APIs are never gated.
+fn is_gatable_html(content_type: Option<&str>, full: &[u8]) -> bool {
+    matches!(
+        content_type,
+        Some("text/html") | Some("application/xhtml+xml")
+    ) && !full.is_empty()
+        && full.len() <= HTML_GATE_CAP
+}
+
+/// Decision window + on-timeout fallback for a gated response class. Media
+/// fails CLOSED (Drop — "block instantly by default"); text/html pages fail
+/// OPEN (Forward — a stalled classifier must not white-screen all browsing).
+fn gate_policy(media_gated: bool) -> (std::time::Duration, InterceptDecision) {
+    if media_gated {
+        (DECISION_TIMEOUT, InterceptDecision::Drop)
+    } else {
+        (HTML_DECISION_TIMEOUT, InterceptDecision::Forward)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -764,6 +911,7 @@ mod tests {
             flow_tx,
             pinning: Arc::new(PinningRegistry::new(true)),
             ca: test_ca(),
+            blocklist: Arc::new(HostBlocklist::default()),
             gate,
             next_flow_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         }
@@ -774,9 +922,15 @@ mod tests {
         let ca = test_ca();
         let pinning = Arc::new(PinningRegistry::new(true));
         let (tx, _rx) = mpsc::channel(16);
-        let proxy = spawn("127.0.0.1:0".parse().unwrap(), ca, pinning, tx)
-            .await
-            .unwrap();
+        let proxy = spawn(
+            "127.0.0.1:0".parse().unwrap(),
+            ca,
+            pinning,
+            Arc::new(HostBlocklist::default()),
+            tx,
+        )
+        .await
+        .unwrap();
         // Bound to a real ephemeral loopback port.
         assert!(proxy.listen_addr().port() > 0);
         assert!(proxy.listen_addr().ip().is_loopback());
@@ -795,7 +949,9 @@ mod tests {
     async fn handler_emits_flow_and_marks_mitmable() {
         let (tx, mut rx) = mpsc::channel(4);
         let h = test_handler(tx, DecisionGate::default());
-        let id = h.emit(
+        let id = h.next_id();
+        h.emit(
+            id,
             FlowSource::Web,
             "example.com",
             "GET",
@@ -869,6 +1025,7 @@ mod tests {
             flow_tx: tx,
             pinning: Arc::new(PinningRegistry::new(false)), // fail-closed
             ca: test_ca(),
+            blocklist: Arc::new(HostBlocklist::default()),
             gate: DecisionGate::default(),
             next_flow_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         };
@@ -1042,5 +1199,88 @@ mod tests {
             FlowSource::VideoStream
         );
         assert_eq!(classify_source("https://x/page.html"), FlowSource::Web);
+    }
+
+    #[test]
+    fn blocked_page_response_is_403_html() {
+        let res = blocked_page_response();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let ct = res
+            .headers()
+            .get(hudsucker::hyper::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(ct.starts_with("text/html"), "block page must render: {ct}");
+    }
+
+    #[tokio::test]
+    async fn blocklisted_request_detected_by_uri_authority_connect_and_host_header() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut h = test_handler(tx, DecisionGate::default());
+        h.blocklist = Arc::new(HostBlocklist::parse("adult.example\n.tracker.example"));
+
+        // Absolute-form URI (explicit proxy / restored post-CONNECT authority).
+        let req = Request::builder()
+            .uri("http://adult.example/page")
+            .body(Body::empty())
+            .unwrap();
+        assert!(h.is_request_blocked(&req));
+
+        // CONNECT authority-form — refused BEFORE any tunnel/TLS.
+        let req = Request::builder()
+            .method("CONNECT")
+            .uri("adult.example:443")
+            .body(Body::empty())
+            .unwrap();
+        assert!(h.is_request_blocked(&req));
+
+        // Transparent-pump shape: URI authority is the original-destination IP,
+        // the real name only in the Host header (with a port + subdomain).
+        let req = Request::builder()
+            .uri("http://93.184.216.34/page")
+            .header("host", "www.tracker.example:443")
+            .body(Body::empty())
+            .unwrap();
+        assert!(h.is_request_blocked(&req));
+
+        // Unlisted host passes.
+        let req = Request::builder()
+            .uri("http://example.com/")
+            .body(Body::empty())
+            .unwrap();
+        assert!(!h.is_request_blocked(&req));
+    }
+
+    #[test]
+    fn html_pages_are_gateable_but_streams_and_oversize_are_not() {
+        let page = b"<!doctype html><html><body>hi</body></html>".to_vec();
+        assert!(is_gatable_html(Some("text/html"), &page));
+        assert!(is_gatable_html(Some("application/xhtml+xml"), &page));
+        // Never gate non-html text → SSE / streaming APIs forward immediately.
+        assert!(!is_gatable_html(Some("text/event-stream"), &page));
+        assert!(!is_gatable_html(Some("application/json"), &page));
+        assert!(!is_gatable_html(Some("text/plain"), &page));
+        assert!(!is_gatable_html(None, &page));
+        assert!(!is_gatable_html(Some("text/html"), &[]));
+        let over = vec![b'x'; HTML_GATE_CAP + 1];
+        assert!(!is_gatable_html(Some("text/html"), &over));
+        let at_cap = vec![b'x'; HTML_GATE_CAP];
+        assert!(is_gatable_html(Some("text/html"), &at_cap));
+    }
+
+    #[test]
+    fn gate_policy_media_fails_closed_html_fails_open() {
+        let (window, fallback) = gate_policy(true);
+        assert_eq!(window, DECISION_TIMEOUT);
+        assert!(
+            matches!(fallback, InterceptDecision::Drop),
+            "media must fail CLOSED"
+        );
+        let (window, fallback) = gate_policy(false);
+        assert_eq!(window, HTML_DECISION_TIMEOUT);
+        assert!(
+            matches!(fallback, InterceptDecision::Forward),
+            "pages must fail OPEN (a stalled classifier must not white-screen browsing)"
+        );
     }
 }

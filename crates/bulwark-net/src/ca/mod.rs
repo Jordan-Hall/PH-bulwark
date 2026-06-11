@@ -16,8 +16,10 @@
 //!     private key to the network. (`store_key` writes only DPAPI ciphertext.)
 
 pub mod dpapi;
+pub mod file;
 pub mod keystore;
 
+pub use file::FileKeyStore;
 pub use keystore::{CaKeyStore, DevInMemoryKeyStore, KeyStoreTier};
 
 use std::path::PathBuf;
