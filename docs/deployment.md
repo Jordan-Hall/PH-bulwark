@@ -94,7 +94,9 @@ child device                              home cluster                guardian
 ## 4. Client ↔ cluster mTLS (heavy-media offload)
 - Set **all four** on the child: `BULWARK_CLIENT_CERT`, `BULWARK_CLIENT_KEY`,
   `BULWARK_CLIENT_CA` (PEM paths) and `BULWARK_CLUSTER_DOMAIN` (SNI). `BULWARK_CLUSTER_ENDPOINT`
-  must be `https://…`. Any missing ⇒ offload silently off, audio fails **open**.
+  must be `https://…`. Any missing ⇒ offload silently off; heavy media falls back
+  to the local analyzers, where anything unscored fails **closed**
+  (`Category::Unspecified` → blocked).
 - The parent app uses `BULWARK_CLUSTER_CA` to pin the cluster server cert for the
   review channel (one-way TLS, no client cert there).
 - **Not-yet-wired (honest):** there is **no enrollment PKI**. Client certs are
@@ -103,21 +105,23 @@ child device                              home cluster                guardian
 
 ## 5. NSFW model & video
 - Build the child `--features onnx` and set `BULWARK_NSFW_MODEL` to an existing model
-  file; else the **fail-open stub** scores 0.0 (allows). Tunables:
+  file; else the **stub fails closed** (`Category::Unspecified` → policy blocks
+  unscored media; tiny/oversized images intentionally skip scoring). Tunables:
   `BULWARK_NSFW_MODEL_CLASS` (`vit`|`mobilenet`), `BULWARK_NSFW_NORM`, `BULWARK_NSFW_EP`
   (`auto`|`cpu`|`gpu`), `BULWARK_GPU`.
 - Video: build `--features ffmpeg` + install ffmpeg (or `FFMPEG_BINARY`); else the
-  NullDemuxer fails open (nothing sampled/stored). Pair `onnx`+`ffmpeg` for real
-  frame scoring.
+  NullDemuxer can't decode → segments fail closed via `Category::Unspecified`
+  (nothing sampled/stored). Pair `onnx`+`ffmpeg` for real frame scoring.
 - The parent console passes the model to the filter it spawns via `BULWARK_NSFW_MODEL`
-  (unset → the filter's fail-open stub). It locates the filter binaries via
+  (unset → the filter's fail-closed stub). It locates the filter binaries via
   `BULWARK_PROXY_EXE`/`BULWARK_VPN_EXE`, else beside its own exe (packaged release),
   else a dev `cargo run`.
 - **Remote video review:** an all-in-one server retains blocked/borderline clips and
   serves them over `Review.FetchSegment` (streamed, auth-gated in accounts mode), so a
   guardian on a **different device** than the server can pull a clip — not just a
   co-located parent reading `blob://` off local disk. CSAM is never retained, so it is
-  never fetchable. (The parent-app *playback* of fetched clips is the remaining wiring.)
+  never fetchable. The parent app plays fetched clips back in its review console —
+  shipped end-to-end.
 
 ## 6. Email (SMTP) alerts
 - On-switch **triple** (all or none, else startup error): `BULWARK_SMTP_HOST` +
@@ -158,11 +162,16 @@ child device                              home cluster                guardian
   signature checksum is that key's cert SHA-256. CI builds only a debug APK.
 
 ## 11. Tamper protection & detection backstop
-Prevent → detect → re-enroll (`tamper-protection.md`). The cross-platform guarantee
-is the **tamper heartbeat**: a stopped/removed filter ⇒ guardian `PROTECTION_DISABLED`
-alert. Prevention tiers (Device Admin → always-on-VPN lockdown → Device Owner) are
-Android; desktop relies on the standard-account model. Factory reset/recovery
-defeats software-only prevention short of zero-touch/ABM — detection still fires.
+Prevent → detect → re-enroll (`tamper-protection.md`). The heartbeat guarantee
+(a stopped/removed filter ⇒ guardian `PROTECTION_DISABLED` alert) holds on
+**desktop**, and on Android **while a VPN session runs** (startVpn spawns
+heartbeats + best-effort AlertRelay for tamper events; the local notification is
+the guaranteed copy). Honest caveat: relaying to a self-signed https region needs
+the pinned cluster CA on the device (`filesDir/cluster_ca.pem`, provisioned at
+pairing) — absent it, Android alerts stay local-only. Prevention tiers (Device
+Admin → always-on-VPN lockdown → Device Owner) are Android; desktop relies on the standard-account model. Factory
+reset/recovery defeats software-only prevention short of zero-touch/ABM — desktop
+heartbeat detection still fires.
 
 ## 12. Environment-variable reference
 
@@ -181,6 +190,10 @@ defeats software-only prevention short of zero-touch/ABM — detection still fir
 | `BULWARK_LOGIN_MAX_FAILS` | server | failed logins per email before lockout | 5 | tune brute-force throttle |
 | `BULWARK_LOGIN_WINDOW_SECS` | server | login-throttle / lockout window (seconds) | 900 (15m) | tune brute-force throttle |
 | `BULWARK_STATE_DIR` | server | persist guardian state — accounts/push/pending/allowlist + child configs/applied-acks (JSON) | unset (in-memory) | durable state |
+| `BULWARK_TLS_CERT` / `BULWARK_TLS_KEY` | server | server TLS leaf cert/key (PEM **file paths**) | unset | any real deployment (accounts mode refuses to start without them) |
+| `BULWARK_TLS_CLIENT_CA` | server | client-cert CA — also require client certs (mTLS) | unset | once device/guardian client certs exist |
+| `BULWARK_ALLOW_PLAINTEXT` | server + parent app | explicit dev-only opt-out of the no-plaintext refusal | off | local development only |
+| `BULWARK_BLOCKLIST` | child filter | guardian host-blocklist file (one host/line; `.x` = suffix rule) | unset (empty) | site blocking |
 | `BULWARK_ADMIN_ENDPOINT` | bulwark_admin | Accounts service endpoint for the CLI | `http://127.0.0.1:8443` | remote/TLS provisioning |
 | `BULWARK_UI_BIND` | bulwark-ui | dashboard host:port | 127.0.0.1:8080 | non-loopback UI |
 | `BULWARK_SMTP_HOST` | bulwark-alert | SMTP host (email on-switch) | unset | with FROM+RECIPIENTS |
@@ -217,8 +230,6 @@ defeats software-only prevention short of zero-touch/ABM — detection still fir
 - Provisioning is via the `bulwark_admin` CLI (§3); no web admin UI yet.
 - Multi-node gossip/quorum/Postgres unverified on the Windows host (rusqlite 4551).
 - Android release keystore + QR/zero-touch unverified in CI (debug APK only).
-- Remote-parent video review: server-side `Review.FetchSegment` is implemented; the
-  parent-app playback of fetched clips is the remaining wiring.
 - Desktop transparent VPN data path (smoltcp/boringtun) is fail-closed; proxy mode
   is the shipping path.
 - No real NSFW model artifact, FCM creds, SMTP creds, or code-signing keys ship in

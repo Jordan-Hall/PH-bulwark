@@ -16,27 +16,37 @@ only in how traffic reaches the filter.
 
 ## 2. Transparent VPN — `bulwark_vpn` (admin)
 
-- A layer-3 **TUN** captures *all* traffic; `tun2proxy` (smoltcp userspace
-  netstack) redirects captured **TCP → the local TLS-inspecting proxy**, NATs other UDP
-  out, and **downgrades QUIC/UDP-443** so HTTP/3 can't bypass the TCP TLS inspection.
-- No per-app/proxy settings — every app is covered.
-- `setup(true)` installs the default route and **restores host routing on
-  teardown** (no-blackhole contract).
+- A layer-3 **TUN** captures *all* traffic; the in-tree **smoltcp** userspace
+  netstack pump (`bulwark-net::vpn::netstack` — the GPL `tun2proxy` crate was
+  removed for licensing) terminates captured **TCP → CONNECTs to the local
+  TLS-inspecting proxy**, forwards DNS, and **downgrades QUIC/UDP-443** so HTTP/3
+  can't bypass the TCP TLS inspection.
+- No per-app/proxy settings — every app is covered *once the pump is enabled on
+  that platform* (table below).
+- Status (honest): the fd-driven pump is implemented + host-tested for
+  **unix/Android**; on-device validation is pending. **Desktop host routing is
+  disabled pending that validation**, so desktop transparent mode **fails
+  closed** (it never silently passes traffic) — explicit proxy mode is the
+  shipping desktop path today.
+- Routing contract: `Tun::install_routing` adds the redirect after `up()`;
+  `Tun::teardown_routing` reverses exactly what was added and is idempotent
+  (runs on the crash/`ExecStop` path too — no-blackhole contract).
 - Requires **Administrator/root** (TUN adapter + default route). `bulwark_vpn`
   self-checks elevation and exits with the exact relaunch command if not elevated.
 
 ### Per-platform VPN mechanism
 
-| Platform        | Mechanism                                   |
-|-----------------|---------------------------------------------|
-| Windows         | `tun2proxy` + **wintun** (WireGuard-signed) |
-| Linux           | `tun2proxy` + `/dev/net/tun`                |
-| macOS           | `tun2proxy` + utun                          |
-| Android         | native **VpnService** (not tun2proxy)       |
-| iOS             | native **NetworkExtension** (not tun2proxy) |
+| Platform | Mechanism | Status |
+|----------|-----------|--------|
+| Windows  | smoltcp pump + **wintun** (WireGuard-signed) | pump not enabled — **fails closed**; use explicit proxy mode |
+| Linux    | smoltcp pump + `/dev/net/tun` | pump implemented (host-tested); host routing disabled pending device validation — fails closed |
+| macOS    | smoltcp pump + utun | same as Linux |
+| Android  | native **VpnService** fd → the same smoltcp pump | capture pump wired to `startVpn`; classification consumer + on-device validation pending |
+| iOS      | native **NetworkExtension** (no TUN pump) | skeleton in `platform/apple`, unvalidated |
 
-Desktop shares one code path (`bulwark-net::vpn`); mobile uses the OS-mandated
-native VPN APIs in `platform/android` + `platform/apple`.
+Desktop and Android share one pump (`bulwark-net::vpn::netstack`); mobile uses the
+OS-mandated native VPN APIs in `platform/android` + `platform/apple` to obtain the
+device fd / filter hooks.
 
 ## Shared requirements
 

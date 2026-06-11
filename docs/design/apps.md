@@ -33,9 +33,9 @@ The on-device filter must be native because traffic capture is a kernel/OS featu
 | OS | Capture mechanism | Status / notes |
 |---|---|---|
 | **Windows** | Wintun TUN + TLS inspection (`bulwark-net`) | built |
-| **Android** | `VpnService` + accessibility (`platform/android`) | built (transparent) |
-| **macOS** | Network Extension — `NEFilterDataProvider` / Packet Tunnel + Rust core | to build (Swift shell) |
-| **iOS** | Network Extension content filter + Rust core | to build; **content-filtering + alerts only** |
+| **Android** | `VpnService` + accessibility (`platform/android`) | built (transparent pump implemented; **device validation pending**; HTTPS coverage limited — Android 7+ user-CA rules) |
+| **macOS** | Network Extension — `NEFilterDataProvider` / Packet Tunnel + Rust core | skeleton started in `platform/apple` (NEFilterDataProvider + FFI), unvalidated |
+| **iOS** | Network Extension content filter + Rust core | same `platform/apple` skeleton, unvalidated; **content-filtering + alerts only** |
 
 Each is a thin native shell (Kotlin / Swift / Rust) hosting the **same** Rust core
 (`cargo-ndk` for Android, a static lib + Swift for Apple, native on Windows).

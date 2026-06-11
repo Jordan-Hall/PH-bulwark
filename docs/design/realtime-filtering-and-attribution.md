@@ -59,15 +59,23 @@ identically (and share thread state shape, keyed by `thread_id`).
 The governing constraint is the owner directive **"block instantly by default"**:
 a scorable image/video is decision-gated and a *timeout or missing decision fails
 CLOSED (Drop)* — see `proxy.rs::DECISION_TIMEOUT` (5 s) and the `gated_image_*_fails_closed_to_drop`
-tests. Page-structural resources (html/js/css/json/text, icons, tiny/oversized
-images) are **never gated** and forward with zero added latency
-(`image_body_for`, `video_segment_body_for` return `None`).
+tests. Bounded **text/html documents** are decision-gated too but fail **OPEN**
+(Forward) after `HTML_DECISION_TIMEOUT` (2 s) — every page is text/html, so a
+stalled classifier must not white-screen all browsing (`gate_policy`); a BLOCK
+verdict landing inside the window swaps the page for the inline block page
+(`blocked_page_response`). Before any gating, the guardian **host blocklist**
+(`bulwark-net::blocklist`, `NetConfig.blocklist_path` / `BULWARK_BLOCKLIST`)
+refuses a listed host at CONNECT/request time (no tunnel, 403 block page) and
+the VPN pump RSTs listed literal-IP destinations pre-CONNECT. Page-structural
+subresources (js/css/json/event-streams, icons, tiny/oversized images, >2 MiB
+HTML) are **never gated** and forward with zero added latency (`image_body_for`,
+`video_segment_body_for`, `is_gatable_html`).
 
 **Latency tiers (fastest → heaviest):**
 
 | Tier | What runs | Where | Budget | Gating |
 |---|---|---|---|---|
-| 0 — text rules | `GroomingRuleEngine` + adult lexicon | always **local** (any phone) | sub-millisecond, pure CPU/in-memory | n/a (emit-only; text is not byte-gated in the proxy) |
+| 0 — text rules | `GroomingRuleEngine` + adult lexicon | always **local** (any phone) | sub-millisecond, pure CPU/in-memory | text/html pages **gated fail-open** (2 s window; BLOCK → inline block page); other text emit-only |
 | 1 — small NSFW image | `VisionAnalyzer` ONNX (CPU/NNAPI/DirectML) | local first; cluster on mobile/low-power | tens of ms/frame on int8 ViT | **gated** in proxy (fail-closed) |
 | 2 — audio | whisper STT → text rules | offload-preferred on mobile | STT-bound (windowed) | via flow buffer |
 | 3 — video segment | ffmpeg decode → sample frames + audio windows → tiers 1–2 | offload-preferred | broadcast-delay buffer (2–5 s live; relaxed VOD) | via `DelayBuffer` |
@@ -155,10 +163,15 @@ devices.
   - **Fail-CLOSED** (block) when we *could not score* media we should have:
     `Category::Unspecified` from a stub vision/audio/video analyzer → `Policy`
     blocks + alerts the coverage gap (`fail_closed_uncovered`, default on). The
-    image decision gate also fails closed on timeout/dropped sender (Drop).
+    image decision gate also fails closed on timeout/dropped sender (Drop), and
+    a configured-but-unreadable guardian blocklist file fails CLOSED at start
+    (the list must never silently vanish).
   - **Fail-OPEN** (forward) where blocking would harm usability with no safety
     win: page-structural resources, sub-16 KiB images, oversized images/segments
-    (size guard), pinned hosts that reject our leaf (`on_pinned` → `failed_open`
+    (size guard), the text/html page gate on a missed verdict window (a stalled
+    classifier must not white-screen all browsing — the host blocklist still
+    hard-blocks known-bad sites with no verdict at all), pinned hosts that
+    reject our leaf (`on_pinned` → `failed_open`
     per policy; those flows route to the OCR path instead), and the JNI bridge on
     bad input (a filter must never take down the host app).
 - **mTLS to cluster.** `bulwark-infer::OffloadClient` is the only outbound door and
@@ -186,9 +199,12 @@ evidence, optional `GroomingSignal`). They converge as follows:
      grooming defaults to **LOG + `GroomingSuspected` alert, NOT block** — it does
      not silently censor a child's whole conversation (only image-request/CSAM does).
 3. **Action → data plane.** `Action` is applied where the bytes live:
-   - TLS inspection image/video: `InterceptDecision` via the `DecisionGate` — `Forward` /
+   - TLS inspection image/video/html: `InterceptDecision` via the `DecisionGate` — `Forward` /
      `Rewrite(new_bytes)` (the remediated blurred/muted segment) / `Drop`
-     (`blocked_response` 403, original bytes never leak downstream).
+     (media: `blocked_response` 403; html: `blocked_page_response` inline block
+     page — original bytes never leak downstream). Blocklisted hosts never reach
+     the gate at all: refused at CONNECT/request (`is_request_blocked`) or RST'd
+     pre-CONNECT in the pump.
    - Video segments: `DelayBuffer::apply` — ALLOW/WARN/LOG forward, BLUR/MUTE
      forward rewritten bytes, BLOCK drop.
    - On-device (accessibility): high-confidence/CSAM → disruptive overlay +
