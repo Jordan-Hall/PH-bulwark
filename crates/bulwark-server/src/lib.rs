@@ -28,9 +28,9 @@ pub mod service;
 pub mod tamper;
 
 pub use accounts::{AccountStore, AccountsService};
-pub use reset_mailer::ResetMailer;
 pub use child_control::{ChildConfigStore, ChildControlService};
 pub use relay::{AlertHub, ReviewService};
+pub use reset_mailer::ResetMailer;
 pub use tamper::TamperService;
 
 /// Which role this process plays. Chosen by `--role` / `BULWARK_ROLE`.

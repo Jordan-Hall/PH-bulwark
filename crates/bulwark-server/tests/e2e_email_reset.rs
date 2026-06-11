@@ -56,7 +56,9 @@ struct TestServer {
 
 impl TestServer {
     async fn spawn() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind loopback");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
         let addr = listener.local_addr().expect("local addr");
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
 

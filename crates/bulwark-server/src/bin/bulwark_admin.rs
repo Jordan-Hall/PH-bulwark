@@ -356,7 +356,8 @@ async fn main() -> anyhow::Result<()> {
             let ack = client
                 .reset_password(ResetPasswordRequest {
                     email,
-                    recovery_code: recovery_code.expect("recovery code resolved for reset-password"),
+                    recovery_code: recovery_code
+                        .expect("recovery code resolved for reset-password"),
                     new_password: password.expect("new password resolved for reset-password"),
                 })
                 .await?
@@ -421,7 +422,10 @@ mod tests {
         assert_eq!(require_token(Some(" tok ".into())).unwrap(), "tok"); // trimmed
         assert!(require_token(None).is_err());
         assert!(require_token(Some("   ".into())).is_err()); // blank
-        assert_eq!(require_recovery_code(Some(" CODE ".into())).unwrap(), "CODE"); // trimmed
+        assert_eq!(
+            require_recovery_code(Some(" CODE ".into())).unwrap(),
+            "CODE"
+        ); // trimmed
         assert!(require_recovery_code(None).is_err());
         assert!(require_recovery_code(Some("  ".into())).is_err()); // blank
     }

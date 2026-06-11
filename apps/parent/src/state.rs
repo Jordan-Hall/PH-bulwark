@@ -98,7 +98,7 @@ impl AuthState {
     /// saved session for the selected server AND past the lock. The route guards
     /// gate every console screen on exactly this.
     pub fn console_reachable(&self) -> bool {
-        self.status.read().logged_in && (pin_is_set() == false || (self.unlocked)())
+        self.status.read().logged_in && (!pin_is_set() || (self.unlocked)())
     }
 }
 

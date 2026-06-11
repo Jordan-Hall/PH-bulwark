@@ -74,7 +74,10 @@ async fn change_then_self_service_reset_round_trip() {
     .into_inner();
     assert!(created.created);
     let recovery_code = created.recovery_code.clone();
-    assert!(!recovery_code.is_empty(), "fresh account gets a recovery code");
+    assert!(
+        !recovery_code.is_empty(),
+        "fresh account gets a recovery code"
+    );
 
     // Login, then change the password while authenticated.
     let session = timeout(

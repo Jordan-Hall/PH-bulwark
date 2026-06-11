@@ -389,8 +389,7 @@ pub async fn run(
             // Enable the EMAIL-based password-reset path automatically when SMTP is
             // configured (BULWARK_SMTP_*). Without it, guardians self-reset with their
             // saved recovery code (from_env logs which path is active).
-            router =
-                router.add_service(AccountsServer::new(AccountsService::from_env(accounts)));
+            router = router.add_service(AccountsServer::new(AccountsService::from_env(accounts)));
             tracing::info!(
                 "accounts mode ENABLED — Review + ChildControl require a guardian session token"
             );
