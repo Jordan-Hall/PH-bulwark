@@ -21,7 +21,7 @@ use crate::lock::{
     biometric_available, biometric_unlock, clear_pin, set_pin, validate_pin_shape, verify_pin,
     BiometricOutcome, PIN_MAX, PIN_MIN,
 };
-use crate::media::{pair_payload, pair_qr_svg};
+use crate::media::{pair_qr_svg, setup_payload_v2};
 use crate::process::{
     ca_present, ca_trust_command, disable_system_proxy, enable_system_proxy, kill_proxy,
     proxy_listening, spawn_proxy, spawn_vpn, Mode, ProxyHandle, PROXY_ADDR,
@@ -32,7 +32,7 @@ use crate::servers::{
     saved_choice, saved_token_for_endpoint, selected_server_id, server_inventory,
     upsert_custom_server, DEFAULT_REGION_ID,
 };
-use crate::state::{pair_expiry_text, Alert, AuthState, Console, PairCodeUi};
+use crate::state::{pair_expiry_text, segment_code, Alert, AuthState, Console, PairCodeUi};
 
 // ===========================================================================
 // GATE SCREENS — reachable BEFORE auth. Welcome → ChooseServer → Auth →
@@ -1329,7 +1329,7 @@ pub fn AddChildPanel() -> Element {
     rsx! {
         div { class: "box add-child",
             h3 { "Pair a new device" }
-            p { class: "sub", "Give the child a name, generate a short code, then enter it (or scan the QR) on their device using the same region. Nothing is installed without you." }
+            p { class: "sub", "Give the child a name and generate a setup code to paste or type on their device. Nothing is installed without you." }
             label { class: "field",
                 span { "Child's name" }
                 input {
@@ -1365,7 +1365,7 @@ pub fn AddChildPanel() -> Element {
                         }.await;
                         match result {
                             Ok(pair) => {
-                                setup_note.set(Some("Pair code created. Enter it on the child device using the same server.".to_string()));
+                                setup_note.set(Some("Setup code ready — copy and paste it on the child's device.".to_string()));
                                 pair_code.set(Some(pair));
                             }
                             Err(e) => setup_error.set(Some(e.to_string())),
@@ -1373,20 +1373,10 @@ pub fn AddChildPanel() -> Element {
                         setup_busy.set(false);
                     });
                 },
-                if setup_busy() { "Working…" } else { "Generate pair code" }
+                if setup_busy() { "Working…" } else { "Generate setup code" }
             }
             if let Some(pair) = pair_code() {
-                div { class: "pair-code",
-                    div { class: "preview-label", "Pair code for {pair.child_name}" }
-                    div { class: "code", "{pair.code}" }
-                    if let Some(qr) = pair_qr_svg(&pair_payload(&pair.code)) {
-                        div { class: "pair-qr",
-                            div { class: "pair-qr-img", dangerous_inner_html: "{qr}" }
-                            div { class: "hint", "Scan this on the child's device, or type the code above. Use the same region on both." }
-                        }
-                    }
-                    div { class: "meta", "{pair_expiry_text(pair.expires_ts)}" }
-                }
+                SetupCodePanel { pair: pair.clone() }
             }
             if let Some(note) = setup_note() {
                 div { class: "ok-note",
@@ -1398,6 +1388,85 @@ pub fn AddChildPanel() -> Element {
                 div { class: "err",
                     span { dangerous_inner_html: "{svg(\"alert\")}" }
                     "{err}"
+                }
+            }
+        }
+    }
+}
+
+/// The "Setup code" panel shown once a pair code is minted: the short code big
+/// and segmented (the type-it-by-hand fallback), a QR of the full v2 setup
+/// payload (rendered now; the child app's scanner is a coming increment — the
+/// copy/paste path is what works today), and a one-tap copy of the same JSON
+/// for the child app's paste field. The payload bundles the server address,
+/// this one-time code + expiry, the child's name, and — when the active server
+/// has a pinned CA — that public certificate, so the child device can make its
+/// first secure call. If the payload can't be built, the short code alone
+/// still pairs — never blocked.
+#[component]
+fn SetupCodePanel(pair: PairCodeUi) -> Element {
+    let mut copied = use_signal(|| false);
+    // Built fresh each render (a small file read), so the pinned-CA state for
+    // the active server is always current.
+    let payload = setup_payload_v2(&pair.child_name, &pair.code, pair.expires_ts, true);
+    // QR of the full payload; if a large pinned CA makes it too dense to encode,
+    // fall back to a QR without the CA (scanning still fills server + code —
+    // the copy button below always carries the complete payload).
+    let (qr, qr_is_complete) = match payload.as_deref().and_then(pair_qr_svg) {
+        Some(full) => (Some(full), true),
+        None => (
+            setup_payload_v2(&pair.child_name, &pair.code, pair.expires_ts, false)
+                .as_deref()
+                .and_then(pair_qr_svg),
+            false,
+        ),
+    };
+    rsx! {
+        div { class: "pair-code",
+            div { class: "preview-label", "Setup code for {pair.child_name}" }
+            div { class: "code-seg", role: "text", "aria-label": "Pairing code {pair.code}",
+                for (i, group) in segment_code(&pair.code).into_iter().enumerate() {
+                    span { key: "{i}", "{group}" }
+                }
+            }
+            div { class: "meta", "{pair_expiry_text(pair.expires_ts)}" }
+            if let Some(qr) = qr {
+                div { class: "pair-qr",
+                    div {
+                        class: "pair-qr-img setup-qr-img",
+                        role: "img",
+                        "aria-label": "Pairing QR code for {pair.child_name}",
+                        dangerous_inner_html: "{qr}",
+                    }
+                    div { class: "hint",
+                        if qr_is_complete {
+                            "Use \u{201c}Copy setup code\u{201d} and paste it into PH Bulwark on your child's phone — it carries the server address and this one-time pairing code. (QR scanning in the child app is coming soon.)"
+                        } else {
+                            "This server's pinned certificate doesn't fit in a QR — use \u{201c}Copy setup code\u{201d} and paste it into PH Bulwark on your child's phone instead."
+                        }
+                    }
+                }
+            }
+            if let Some(full) = payload {
+                div { class: "setup-row",
+                    button {
+                        class: "ghost copy-btn",
+                        "aria-label": "Copy setup code",
+                        onclick: move |_| {
+                            let _ = crate::media::copy_to_clipboard(&full);
+                            copied.set(true);
+                            spawn(async move {
+                                tokio::time::sleep(Duration::from_secs(2)).await;
+                                copied.set(false);
+                            });
+                        },
+                        span { dangerous_inner_html: "{svg(\"copy\")}" }
+                        if copied() { "Copied" } else { "Copy setup code" }
+                    }
+                }
+            } else {
+                div { class: "hint",
+                    "Type the code into PH Bulwark on your child's phone, choosing the same region."
                 }
             }
         }

@@ -63,6 +63,7 @@ object ChildConfigSync {
                 enrollment.deviceId,
                 appliedVersion(ctx),
                 RustBridge.clusterCaPath(ctx),
+                enrollment.deviceToken,
             )
         }.getOrNull() ?: return
         val obj = runCatching { JSONObject(json) }.getOrNull() ?: return

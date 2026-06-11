@@ -26,6 +26,7 @@ use bulwark_proto::v1::{
 };
 use tonic::{Request, Response, Status};
 
+use crate::accounts::AccountStore;
 use crate::relay::AlertHub;
 
 /// Cadence (seconds) the server asks child devices to heartbeat at.
@@ -50,6 +51,12 @@ pub struct TamperService {
     hub: AlertHub,
     liveness: Arc<Mutex<HashMap<String, DeviceLiveness>>>,
     grace_ms: i64,
+    /// `Some` (accounts mode) → heartbeats must present the per-device token
+    /// minted at pairing; `None` (legacy/dev, no accounts mounted) → open, as
+    /// before. Without this gate a forged heartbeat for a known device_id
+    /// could keep a removed device looking alive and suppress the
+    /// missed-check-in protection-status alert.
+    accounts: Option<AccountStore>,
 }
 
 impl TamperService {
@@ -59,7 +66,16 @@ impl TamperService {
             hub,
             liveness: Arc::new(Mutex::new(HashMap::new())),
             grace_ms: DEFAULT_GRACE_MS,
+            accounts: None,
         }
+    }
+
+    /// Require heartbeat device authentication against `accounts` (the store
+    /// that minted each device's token at pairing). Devices enrolled before
+    /// tokens existed pass under the store's legacy grace (empty stored digest).
+    pub fn with_accounts(mut self, accounts: AccountStore) -> Self {
+        self.accounts = Some(accounts);
+        self
     }
 
     /// Override the missed-heartbeat grace window (tests / tuning).
@@ -148,6 +164,23 @@ impl Tamper for TamperService {
                 "heartbeat requires status.device_id",
             ));
         }
+        // Devices authenticate (accounts mode): the heartbeat must carry the
+        // per-device token minted at pairing. Unknown device or wrong token →
+        // unauthenticated, so a spoofed heartbeat can't suppress the
+        // missed-check-in protection-status alert. Devices enrolled before
+        // tokens existed (no stored digest) pass under the store's grace.
+        if let Some(accounts) = &self.accounts {
+            let device_id = hb
+                .status
+                .as_ref()
+                .map(|s| s.device_id.trim().to_string())
+                .unwrap_or_default();
+            if !accounts.verify_device_token(&device_id, &hb.device_token) {
+                return Err(Status::unauthenticated(
+                    "unknown device or invalid device token",
+                ));
+            }
+        }
         for ev in self.ingest(&hb, now_ms()) {
             self.hub.publish(ev);
         }
@@ -229,7 +262,21 @@ mod tests {
                 ..Default::default()
             }),
             tamper_events: events.into_iter().map(|k| k as i32).collect(),
+            device_token: String::new(),
         }
+    }
+
+    /// Accounts store with one PAIRED device — returns the raw device token
+    /// exactly the way the device received it at redeem.
+    fn accounts_with_paired_device(device: &str) -> (AccountStore, String) {
+        let accounts = AccountStore::new();
+        accounts
+            .create_account("p@x.com", "password123", "P")
+            .unwrap();
+        let (tok, _aid, _) = accounts.login("p@x.com", "password123").unwrap();
+        let (code, _) = accounts.create_pair_code(&tok, "Kid").unwrap();
+        let (_child, _family, device_token) = accounts.redeem_pair_code(&code, device).unwrap();
+        (accounts, device_token)
     }
 
     #[test]
@@ -279,11 +326,82 @@ mod tests {
         let bad = Heartbeat {
             status: Some(ProtectionStatus::default()),
             tamper_events: vec![],
+            device_token: String::new(),
         };
         let err = svc
             .heartbeat(Request::new(bad))
             .await
             .expect_err("blank device_id rejected");
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_with_correct_device_token_is_accepted() {
+        let (accounts, device_token) = accounts_with_paired_device("kids-phone");
+        let svc = TamperService::new(AlertHub::new()).with_accounts(accounts);
+        let mut beat = hb("kids-phone", vec![]);
+        beat.device_token = device_token;
+        let ack = svc.heartbeat(Request::new(beat)).await.expect("accepted");
+        assert!(ack.into_inner().ok);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_with_wrong_or_missing_token_is_unauthenticated() {
+        let (accounts, _device_token) = accounts_with_paired_device("kids-phone");
+        let svc = TamperService::new(AlertHub::new()).with_accounts(accounts);
+
+        // Wrong token.
+        let mut wrong = hb("kids-phone", vec![]);
+        wrong.device_token = "not-the-token".to_string();
+        let err = svc
+            .heartbeat(Request::new(wrong))
+            .await
+            .expect_err("wrong token rejected");
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+
+        // Missing token (a paired device HAS a stored digest → no grace).
+        let err = svc
+            .heartbeat(Request::new(hb("kids-phone", vec![])))
+            .await
+            .expect_err("missing token rejected");
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+
+        // Unknown device id.
+        let err = svc
+            .heartbeat(Request::new(hb("never-enrolled", vec![])))
+            .await
+            .expect_err("unknown device rejected");
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_for_legacy_enrolled_device_passes_grace() {
+        // AddChild-enrolled device: empty stored digest → accepted (logged) so
+        // already-enrolled devices keep reporting until a device-removal/
+        // re-pair flow ships (re-pairing an enrolled device_id currently
+        // returns DeviceInUse — follow-up).
+        let accounts = AccountStore::new();
+        accounts
+            .create_account("p@x.com", "password123", "P")
+            .unwrap();
+        let (tok, _aid, _) = accounts.login("p@x.com", "password123").unwrap();
+        accounts.add_child(&tok, "Kid", "legacy-phone").unwrap();
+        let svc = TamperService::new(AlertHub::new()).with_accounts(accounts);
+        let ack = svc
+            .heartbeat(Request::new(hb("legacy-phone", vec![])))
+            .await
+            .expect("legacy grace accepts");
+        assert!(ack.into_inner().ok);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_without_accounts_mode_stays_open() {
+        // Legacy/dev deployments (no accounts mounted) are unchanged.
+        let svc = TamperService::new(AlertHub::new());
+        let ack = svc
+            .heartbeat(Request::new(hb("any-device", vec![])))
+            .await
+            .expect("open in non-accounts mode");
+        assert!(ack.into_inner().ok);
     }
 }

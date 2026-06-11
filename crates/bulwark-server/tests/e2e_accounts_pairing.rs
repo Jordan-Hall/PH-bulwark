@@ -107,6 +107,10 @@ async fn pairing_routes_alerts_and_decisions_to_assigned_guardian_only() {
     .into_inner();
     assert!(!paired.child_id.is_empty());
     assert!(!paired.family_id.is_empty());
+    assert!(
+        !paired.device_token.is_empty(),
+        "pairing delivers the per-device credential exactly once"
+    );
 
     let kids = timeout(
         accounts.list_children(ListChildrenRequest {

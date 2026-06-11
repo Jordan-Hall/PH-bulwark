@@ -81,13 +81,17 @@ class BulwarkVpnService : VpnService() {
             // on uninstall). Android Keystore/TEE wrapping is the follow-up tier.
             .put("ca_dir", File(filesDir, "ca").absolutePath)
             // Pinned CLUSTER CA (the region server's public ca.crt) for https
-            // relay/heartbeat/config RPCs — provisioned at pairing (follow-up:
-            // carried in the QR payload). Absent file -> https relay stays off.
+            // relay/heartbeat/config RPCs — provisioned at pairing by the full
+            // setup code (pairing payload v2, `cluster_ca_pem_b64`). Absent
+            // file -> https relay stays off.
             .put("cluster_ca", File(filesDir, "cluster_ca.pem").absolutePath)
         if (enrollment != null) {
             json.put("cluster_endpoint", enrollment.clusterEndpoint)
                 .put("child_id", enrollment.childId)
                 .put("family_id", enrollment.familyId)
+                // Per-device credential minted at pairing — the Rust relay
+                // sends it on heartbeats ("" = legacy token-less enrollment).
+                .put("device_token", enrollment.deviceToken)
         }
         return json.toString()
     }

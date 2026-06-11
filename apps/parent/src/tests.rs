@@ -4,12 +4,14 @@
 use crate::api::{
     open_pending_review_stream_from, request_with_bearer, review_request_at, submit_decision_to,
 };
+use crate::media::{build_setup_payload_v2, pair_qr_svg};
 use crate::servers::{
     custom_server_id, normalize_custom_servers, resolve_endpoint, server_for_choice_from,
     server_inventory_for_choice, server_session_key, server_settings_initial_state, SavedServer,
 };
 use crate::state::{
-    can_show_evidence, pair_expiry_text, seed, should_show_snippet, should_show_thumbnail, Alert,
+    can_show_evidence, pair_expiry_text, seed, segment_code, should_show_snippet,
+    should_show_thumbnail, Alert,
 };
 
 use std::pin::Pin;
@@ -247,7 +249,65 @@ fn pair_expiry_text_is_human_readable() {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
     assert!(pair_expiry_text(now + 30_000).contains("expires in"));
+    assert!(pair_expiry_text(now + 600_000).contains("minute"));
     assert_eq!(pair_expiry_text(0), "unknown expiry");
+}
+
+#[test]
+fn setup_payload_v2_matches_the_fixed_contract() {
+    let with_ca = build_setup_payload_v2(
+        "uk",
+        " https://family.example.test:8443 ",
+        " ABCD2345 ",
+        1_750_000_000_000,
+        " Ava ",
+        Some("QkVHSU4gQ0VSVA=="),
+    )
+    .expect("payload with CA builds");
+    let v: serde_json::Value = serde_json::from_str(&with_ca).expect("payload is valid JSON");
+    assert_eq!(v["v"], 2);
+    assert_eq!(v["server_region"], "uk");
+    assert_eq!(v["server_endpoint"], "https://family.example.test:8443");
+    assert_eq!(v["pair_code"], "ABCD2345");
+    assert_eq!(v["expires_ts"], 1_750_000_000_000_i64);
+    assert_eq!(v["child_name"], "Ava");
+    assert_eq!(v["cluster_ca_pem_b64"], "QkVHSU4gQ0VSVA==");
+
+    let without_ca = build_setup_payload_v2(
+        "uk",
+        "https://family.example.test:8443",
+        "ABCD2345",
+        1,
+        "Ava",
+        None,
+    )
+    .expect("payload without CA builds");
+    let v: serde_json::Value = serde_json::from_str(&without_ca).expect("payload is valid JSON");
+    assert!(
+        v.get("cluster_ca_pem_b64").is_none(),
+        "no pinned CA -> the field is omitted entirely"
+    );
+
+    // A realistic pinned CA (PEM ~1.8 KB -> base64 ~2.4 KB) still renders as a
+    // QR via the low-error-correction fallback; the copy path never depends on it.
+    let big_ca = "Q".repeat(2_400);
+    let dense = build_setup_payload_v2(
+        "uk",
+        "https://family.example.test:8443",
+        "ABCD2345",
+        1,
+        "Ava",
+        Some(&big_ca),
+    )
+    .expect("dense payload builds");
+    assert!(pair_qr_svg(&dense).is_some());
+}
+
+#[test]
+fn segment_code_groups_for_hand_typing() {
+    assert_eq!(segment_code(" ABCD2345 "), vec!["ABCD", "2345"]);
+    assert_eq!(segment_code("ABC234567"), vec!["ABC2", "3456", "7"]);
+    assert!(segment_code("  ").is_empty());
 }
 
 #[test]

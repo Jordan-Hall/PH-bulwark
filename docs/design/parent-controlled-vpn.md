@@ -81,6 +81,7 @@ message ChildConfigAck { bool applied = 1; uint64 config_version = 2; string det
 message ChildConfigFilter {
   string device_id = 1;   // child identifies by its device cert subject / device_id
   uint64 have_version = 2; // long-poll: return only when a newer config exists
+  string device_token = 3; // per-device credential minted at pairing (PairResult)
 }
 
 service ChildControl {
@@ -107,13 +108,19 @@ no-content invariant obvious by message shape.
   can't re-push an old "filtering_disabled" config).
 - `SetChildConfig` is authorized like every other mutation: a valid guardian session
   **assigned to that child** (same scoping as `Review.StreamPendingReviews`).
-- `StreamChildConfig`/`GetChildConfig` **will be** authenticated by the child's
-  **device identity** (mTLS client cert subject = `device_id`) — **NOT YET
-  WIRED**: today the server trusts the claimed `device_id`, mitigated by (a) the
-  config being content-free, (b) `device_to_child` only mapping devices a
-  guardian explicitly enrolled + scoped, and (c) the applied-version ack being
-  clamped to the desired version so a spoofed report can't mask real acks.
-  Device-identity binding is tracked in §7's remaining work.
+- `StreamChildConfig`/`GetChildConfig` **are device-authenticated** (DONE
+  2026-06-11): the caller must present the per-device `device_token` minted at
+  `RedeemPairCode` (returned exactly once; the server stores and compares only
+  its sha256 digest, never the raw value). Unknown device or wrong token →
+  `Unauthenticated`. Devices enrolled before tokens existed pass under a logged
+  legacy grace (empty stored digest) until a device-removal/re-pair flow ships
+  (re-pairing an enrolled device_id currently returns DeviceInUse — follow-up).
+  `Tamper.Heartbeat`
+  verifies the same token, so a spoofed heartbeat can't suppress the
+  missed-check-in protection-status alert; pair-code redemption itself is
+  rate-limited (the one unauthenticated guessing surface). The applied-version
+  ack stays clamped to the desired version as defense-in-depth. mTLS
+  client-cert binding remains a further hardening option in §7.
 - The control plane is **content-free** — it carries policy + routing, never any
   message/media. Same privacy invariant as the rest of `bulwark.proto`.
 

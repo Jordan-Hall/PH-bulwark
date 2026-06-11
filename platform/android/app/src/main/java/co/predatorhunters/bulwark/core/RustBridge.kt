@@ -62,7 +62,10 @@ object RustBridge {
     /**
      * Redeem the guardian-generated child pairing code against the selected
      * Accounts endpoint. Returns JSON:
-     * `{ ok: true, child_id, family_id }` or `{ ok: false, error }`.
+     * `{ ok: true, child_id, family_id, device_token }` or `{ ok: false, error }`.
+     * `device_token` is the per-device credential the server mints at redeem and
+     * returns exactly once — persist it (`Enrollment`) and send it on heartbeats
+     * and config fetches. Never shown in UI, never logged.
      */
     external fun redeemPairCode(endpoint: String, code: String, deviceId: String, caPath: String): String
 
@@ -86,9 +89,12 @@ object RustBridge {
      * fetched strictness band when the config is not older than it. Returns JSON:
      * `{ ok: true, filtering_enabled, server_region, server_endpoint, profile,
      *    require_always_on, config_version, updated_ts }` or `{ ok: false, error }`.
+     * [deviceToken] is the per-device credential minted at pairing
+     * (`PairResult.device_token`; "" for legacy token-less enrollments) — sent
+     * so the server can authenticate this device's config fetch.
      * See [ChildConfigSync][co.predatorhunters.bulwark.vpn.ChildConfigSync].
      */
-    external fun fetchChildConfig(endpoint: String, deviceId: String, appliedVersion: Long, caPath: String): String
+    external fun fetchChildConfig(endpoint: String, deviceId: String, appliedVersion: Long, caPath: String, deviceToken: String): String
 
     /**
      * Submit the guardian's review decision for a flagged item: `approve` = allow

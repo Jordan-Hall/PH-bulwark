@@ -137,13 +137,14 @@ class MainActivity : ComponentActivity() {
                             .putString(KEY_SELF_HOSTED, selfHosted.trim())
                             .apply()
                     },
-                    onSaveEnrollment = { familyId, childId, endpoint, deviceId ->
+                    onSaveEnrollment = { familyId, childId, endpoint, deviceId, deviceToken ->
                         Enrollment.savePairing(
                             this@MainActivity,
                             familyId = familyId,
                             childId = childId,
                             clusterEndpoint = endpoint,
                             deviceId = deviceId,
+                            deviceToken = deviceToken,
                         )
                         refreshLocalState()
                     },

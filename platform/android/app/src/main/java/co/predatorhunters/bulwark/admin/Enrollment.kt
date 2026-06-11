@@ -22,6 +22,7 @@ object Enrollment {
     private const val KEY_CHILD_ID = "child_id"
     private const val KEY_CLUSTER = "cluster_endpoint"
     private const val KEY_DEVICE_ID = "device_id"
+    private const val KEY_DEVICE_TOKEN = "device_token"
 
     // Keys passed through PROVISIONING_ADMIN_EXTRAS_BUNDLE (see the QR JSON in
     // deploy/android/device-owner-provisioning.md).
@@ -47,6 +48,7 @@ object Enrollment {
                 childId = childId,
                 clusterEndpoint = endpoint,
                 deviceId = stableDeviceId(ctx),
+                deviceToken = deviceToken(ctx),
                 deviceOwnerProvisioned = isProvisioned(ctx),
             )
         } else {
@@ -59,6 +61,15 @@ object Enrollment {
     fun childId(ctx: Context): String? = prefs(ctx).getString(KEY_CHILD_ID, null)
 
     fun clusterEndpoint(ctx: Context): String? = prefs(ctx).getString(KEY_CLUSTER, null)
+
+    /**
+     * Per-device credential minted by the server at pair-code redemption and
+     * returned exactly once (`PairResult.device_token`); sent on heartbeats and
+     * config fetches so the cluster can authenticate this device's reports.
+     * "" = enrolled before tokens existed (legacy). Never shown in UI, never
+     * logged.
+     */
+    fun deviceToken(ctx: Context): String = prefs(ctx).getString(KEY_DEVICE_TOKEN, "") ?: ""
 
     fun stableDeviceId(ctx: Context): String {
         val p = prefs(ctx)
@@ -85,6 +96,7 @@ object Enrollment {
         childId: String,
         clusterEndpoint: String,
         deviceId: String = stableDeviceId(ctx),
+        deviceToken: String = "",
     ) {
         prefs(ctx).edit()
             .putBoolean(KEY_ENROLLED, true)
@@ -92,6 +104,7 @@ object Enrollment {
             .putString(KEY_CHILD_ID, childId.trim())
             .putString(KEY_CLUSTER, clusterEndpoint.trim())
             .putString(KEY_DEVICE_ID, deviceId.trim())
+            .putString(KEY_DEVICE_TOKEN, deviceToken.trim())
             .apply()
     }
 
@@ -129,5 +142,7 @@ data class EnrollmentRecord(
     val childId: String,
     val clusterEndpoint: String,
     val deviceId: String,
+    /** Per-device credential from pairing ("" = legacy token-less enrollment). */
+    val deviceToken: String,
     val deviceOwnerProvisioned: Boolean,
 )

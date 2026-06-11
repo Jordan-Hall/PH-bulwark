@@ -1,5 +1,6 @@
 package co.predatorhunters.bulwark
 
+import android.util.Base64
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.animateFloatAsState
@@ -56,6 +57,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import co.predatorhunters.bulwark.admin.EnrollmentRecord
 import co.predatorhunters.bulwark.core.RustBridge
+import java.io.File
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -153,7 +155,7 @@ internal fun OnboardingJourney(
     savedServer: String,
     savedSelfHosted: String,
     onSaveServer: (String, String) -> Unit,
-    onSaveEnrollment: (String, String, String, String) -> Unit,
+    onSaveEnrollment: (String, String, String, String, String) -> Unit,
     onGrantAccessibility: () -> Unit,
     onGrantVpn: () -> Unit,
     onGrantAntiRemoval: () -> Unit,
@@ -446,24 +448,46 @@ private fun PairStep(
     savedServer: String,
     savedSelfHosted: String,
     onSaveServer: (String, String) -> Unit,
-    onEnrollment: (String, String, String, String) -> Unit,
+    onEnrollment: (String, String, String, String, String) -> Unit,
     onBack: () -> Unit,
     onNext: () -> Unit,
 ) {
     var selectedServer by remember(savedServer) { mutableStateOf(savedServer.ifBlank { DEFAULT_SERVER }) }
     var selfHosted by remember(savedSelfHosted) { mutableStateOf(savedSelfHosted) }
     var code by remember { mutableStateOf("") }
+    var fullSetupCode by remember { mutableStateOf("") }
     var state by remember {
         mutableStateOf<PairingState>(if (alreadyPaired) PairingState.Success("") else PairingState.Idle)
     }
     val scope = rememberCoroutineScope()
     val caPath = RustBridge.clusterCaPath(androidx.compose.ui.platform.LocalContext.current)
+    // Whether this device already holds the server's pinned certificate (from a
+    // previous setup code); refreshed after a successful pin below.
+    var caPinned by remember { mutableStateOf(File(caPath).exists()) }
 
-    val endpoint = resolveEndpoint(selectedServer, selfHosted)
-    val normalizedCode = normalizedPairCode(code)
+    // Full-setup-code path: the guardian copies the v2 pairing payload from the
+    // parent console and pastes it here. It carries the SAME single-use pair
+    // code plus the server address and (for https servers) the certificate this
+    // device must pin before connecting. Scanning the same payload as a QR code
+    // is a later increment — paste is the path that works today.
+    val payloadResult = remember(fullSetupCode) {
+        if (fullSetupCode.isBlank()) null else parseSetupPayload(fullSetupCode)
+    }
+    val payload = (payloadResult as? SetupPayloadResult.Parsed)?.payload
+    val payloadError = (payloadResult as? SetupPayloadResult.Invalid)?.message
+    val payloadExpired = payload?.isExpired() == true
+
+    val endpoint = payload?.serverEndpoint ?: resolveEndpoint(selectedServer, selfHosted)
+    val normalizedCode = payload?.pairCode ?: normalizedPairCode(code)
+    // An https server can only ever be contacted VERIFIED: it needs its
+    // certificate pinned first (carried by the full setup code). Be honest up
+    // front instead of letting the connection fail with a technical error.
+    val needsCa = endpoint.startsWith("https://") && !caPinned && payload?.clusterCaPem == null
     val endpointReady = endpoint.isNotBlank()
     val loading = state is PairingState.Loading
     val paired = alreadyPaired || state is PairingState.Success
+    val readyToPair = endpointReady && normalizedCode.length >= 4 &&
+        payloadError == null && !payloadExpired && !needsCa
 
     StepScaffold(
         primaryLabel = if (paired) "Continue" else "Pair this device",
@@ -472,12 +496,26 @@ private fun PairStep(
                 onNext()
             } else {
                 state = PairingState.Loading
+                val pairEndpoint = endpoint
+                val pairCode = normalizedCode
+                val caPem = payload?.clusterCaPem
+                val fromPayload = payload != null
                 scope.launch {
                     val outcome = withContext(Dispatchers.IO) {
+                        // Pin the server's certificate BEFORE the redeem call —
+                        // an https endpoint is only ever contacted verified.
+                        if (caPem != null) {
+                            val pinned = runCatching { File(caPath).writeText(caPem) }.isSuccess
+                            if (!pinned) {
+                                return@withContext PairingOutcome.Error(
+                                    "Could not save the server's certificate on this device. Nothing was sent — please try again.",
+                                )
+                            }
+                        }
                         runCatching {
                             RustBridge.ensureLoaded()
                             parsePairingResult(
-                                RustBridge.redeemPairCode(endpoint, normalizedCode, deviceId, caPath),
+                                RustBridge.redeemPairCode(pairEndpoint, pairCode, deviceId, caPath),
                             )
                         }.getOrElse {
                             PairingOutcome.Error(
@@ -485,9 +523,16 @@ private fun PairStep(
                             )
                         }
                     }
+                    if (caPem != null) caPinned = File(caPath).exists()
                     state = when (outcome) {
                         is PairingOutcome.Success -> {
-                            onEnrollment(outcome.familyId, outcome.childId, endpoint, deviceId)
+                            if (fromPayload) {
+                                // Keep the saved server choice consistent with
+                                // what the setup code actually paired against.
+                                val preset = Servers.firstOrNull { it.endpoint == pairEndpoint }
+                                onSaveServer(preset?.id ?: "self", if (preset == null) pairEndpoint else selfHosted)
+                            }
+                            onEnrollment(outcome.familyId, outcome.childId, pairEndpoint, deviceId, outcome.deviceToken)
                             PairingState.Success(outcome.childId)
                         }
                         is PairingOutcome.Error -> PairingState.Error(outcome.message)
@@ -495,7 +540,7 @@ private fun PairStep(
                 }
             }
         },
-        primaryEnabled = paired || (endpointReady && normalizedCode.length >= 4 && !loading),
+        primaryEnabled = paired || (readyToPair && !loading),
         primaryLoading = loading,
         secondaryLabel = "Back",
         onSecondary = onBack,
@@ -514,7 +559,7 @@ private fun PairStep(
             if (paired) {
                 "This device is linked to your family. Alerts will reach the guardian."
             } else {
-                "Pick your server, then enter the short code shown in the parent app."
+                "Paste the full setup code from the parent console, or pick a server and type the short code."
             },
             color = Slate,
             fontSize = 15.sp,
@@ -523,66 +568,117 @@ private fun PairStep(
 
         if (!paired) {
             Spacer(Modifier.height(20.dp))
-            Card(
-                Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = Color.White),
-                elevation = CardDefaults.cardElevation(1.dp),
-            ) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("Server", color = Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                    Servers.forEach { opt ->
-                        ServerRow(
-                            option = opt,
-                            selected = selectedServer == opt.id,
-                            onClick = {
-                                selectedServer = opt.id
-                                onSaveServer(opt.id, selfHosted)
-                            },
-                        )
-                    }
-                    if (selectedServer == "self") {
-                        OutlinedTextField(
-                            value = selfHosted,
-                            onValueChange = {
-                                selfHosted = it
-                                onSaveServer(selectedServer, it)
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            label = { Text("Self-hosted URL") },
-                            placeholder = { Text("https://your-server:8443") },
-                            keyboardOptions = KeyboardOptions(
-                                keyboardType = KeyboardType.Uri,
-                                imeAction = ImeAction.Done,
-                            ),
+            OutlinedTextField(
+                value = fullSetupCode,
+                onValueChange = { fullSetupCode = it },
+                modifier = Modifier.fillMaxWidth(),
+                minLines = 2,
+                maxLines = 4,
+                label = { Text("Full setup code") },
+                placeholder = { Text("Paste the setup code copied from the parent console") },
+            )
+            Spacer(Modifier.height(12.dp))
+            if (payload != null) {
+                Card(
+                    Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color.White),
+                    elevation = CardDefaults.cardElevation(1.dp),
+                ) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("From the parent console", color = Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                        if (payload.childName.isNotBlank()) DetailLine("Child", payload.childName)
+                        DetailLine("Server", payload.serverEndpoint)
+                        DetailLine("Code", payload.pairCode)
+                        DetailLine(
+                            "Certificate",
+                            if (payload.clusterCaPem != null) "Included — pinned before connecting" else "Not included",
                         )
                     }
                 }
+            } else {
+                Card(
+                    Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color.White),
+                    elevation = CardDefaults.cardElevation(1.dp),
+                ) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("Server", color = Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                        Servers.forEach { opt ->
+                            ServerRow(
+                                option = opt,
+                                selected = selectedServer == opt.id,
+                                onClick = {
+                                    selectedServer = opt.id
+                                    onSaveServer(opt.id, selfHosted)
+                                },
+                            )
+                        }
+                        if (selectedServer == "self") {
+                            OutlinedTextField(
+                                value = selfHosted,
+                                onValueChange = {
+                                    selfHosted = it
+                                    onSaveServer(selectedServer, it)
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true,
+                                label = { Text("Self-hosted URL") },
+                                placeholder = { Text("https://your-server:8443") },
+                                keyboardOptions = KeyboardOptions(
+                                    keyboardType = KeyboardType.Uri,
+                                    imeAction = ImeAction.Done,
+                                ),
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = code,
+                    onValueChange = { code = normalizedPairCode(it).take(12) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("Code from parent app") },
+                    keyboardOptions = KeyboardOptions(
+                        capitalization = KeyboardCapitalization.Characters,
+                        keyboardType = KeyboardType.Ascii,
+                        imeAction = ImeAction.Done,
+                    ),
+                )
             }
-            Spacer(Modifier.height(12.dp))
-            OutlinedTextField(
-                value = code,
-                onValueChange = { code = normalizedPairCode(it).take(12) },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                label = { Text("Code from parent app") },
-                keyboardOptions = KeyboardOptions(
-                    capitalization = KeyboardCapitalization.Characters,
-                    keyboardType = KeyboardType.Ascii,
-                    imeAction = ImeAction.Done,
-                ),
-            )
             Spacer(Modifier.height(8.dp))
-            when (val current = state) {
-                PairingState.Idle ->
-                    if (!endpointReady) Text("Enter a self-hosted URL first.", color = Warn, fontSize = 13.sp)
-                PairingState.Loading ->
+            val current = state
+            when {
+                payloadError != null ->
+                    Text(payloadError, color = Danger, fontSize = 13.sp)
+                payloadExpired ->
+                    Text(
+                        "This setup code has expired — ask for a new one from the parent console.",
+                        color = Warn,
+                        fontSize = 13.sp,
+                    )
+                needsCa && payload != null ->
+                    Text(
+                        "This setup code doesn't include the certificate this secure server needs. Ask for a new full setup code from the parent console.",
+                        color = Warn,
+                        fontSize = 13.sp,
+                    )
+                needsCa ->
+                    Text(
+                        "This server uses a secure connection that has to be verified first. Paste the full setup code from the parent console — the short code alone isn't enough here.",
+                        color = Warn,
+                        fontSize = 13.sp,
+                    )
+                current is PairingState.Loading ->
                     Text("Contacting selected server...", color = Slate, fontSize = 13.sp)
-                is PairingState.Success ->
+                current is PairingState.Success ->
                     Text("Paired. This device is ready.", color = Good, fontSize = 13.sp)
-                is PairingState.Error ->
+                current is PairingState.Error ->
                     Text(current.message, color = Danger, fontSize = 13.sp)
+                !endpointReady ->
+                    Text("Enter a self-hosted URL first.", color = Warn, fontSize = 13.sp)
             }
         } else {
             Spacer(Modifier.height(20.dp))
@@ -1084,15 +1180,23 @@ internal fun parsePairingResult(json: String): PairingOutcome {
     }
     val childId = obj.optString("child_id").takeIf { it.isNotBlank() }
     val familyId = obj.optString("family_id").takeIf { it.isNotBlank() }
+    // Per-device credential minted at redeem and returned exactly once; ""
+    // when pairing against an older server that doesn't mint tokens yet.
+    val deviceToken = obj.optString("device_token")
     return if (childId != null && familyId != null) {
-        PairingOutcome.Success(childId = childId, familyId = familyId)
+        PairingOutcome.Success(childId = childId, familyId = familyId, deviceToken = deviceToken)
     } else {
         PairingOutcome.Error("Enrollment response was missing account ids")
     }
 }
 
 internal sealed interface PairingOutcome {
-    data class Success(val childId: String, val familyId: String) : PairingOutcome
+    data class Success(
+        val childId: String,
+        val familyId: String,
+        /** Per-device credential from `PairResult.device_token` ("" = legacy server). */
+        val deviceToken: String = "",
+    ) : PairingOutcome
     data class Error(val message: String) : PairingOutcome
 }
 
@@ -1101,4 +1205,82 @@ internal sealed interface PairingState {
     data object Loading : PairingState
     data class Success(val childId: String) : PairingState
     data class Error(val message: String) : PairingState
+}
+
+// ===========================================================================
+// Full setup code — pairing payload v2 (docs/design/app-pairing-and-regions.md).
+// The copyable string the parent console shows alongside the QR code; pasting
+// it pre-fills server + pair code and (for https servers) carries the cluster
+// certificate this device pins BEFORE its first connection. The certificate is
+// public material — the single-use pair code inside remains the only credential.
+// ===========================================================================
+
+internal data class SetupPayload(
+    val version: Int,
+    val serverRegion: String,
+    val serverEndpoint: String,
+    val pairCode: String,
+    val expiresTs: Long,
+    val childName: String,
+    /** Decoded cluster CA PEM text, or null when the payload carried none. */
+    val clusterCaPem: String?,
+) {
+    /** Client-side expiry check so an expired code never even hits the server. */
+    fun isExpired(now: Long = System.currentTimeMillis()): Boolean =
+        expiresTs > 0 && now > expiresTs
+}
+
+internal sealed interface SetupPayloadResult {
+    data class Parsed(val payload: SetupPayload) : SetupPayloadResult
+    data class Invalid(val message: String) : SetupPayloadResult
+}
+
+/**
+ * Parse a pasted setup code (the v2 JSON payload; the certificate field is
+ * optional). Every failure is a calm, plain-language message — never a stack
+ * trace, and nothing from the pasted text is ever echoed back.
+ */
+internal fun parseSetupPayload(raw: String): SetupPayloadResult {
+    val obj = runCatching { JSONObject(raw.trim()) }.getOrElse {
+        return SetupPayloadResult.Invalid(
+            "That doesn't look like a setup code yet — paste the whole code copied from the parent console.",
+        )
+    }
+    val version = obj.optInt("v", 0)
+    if (version < 1) {
+        return SetupPayloadResult.Invalid(
+            "This setup code is incomplete — ask for a new one from the parent console.",
+        )
+    }
+    val endpoint = obj.optString("server_endpoint").trim()
+    if (!(endpoint.startsWith("http://") || endpoint.startsWith("https://"))) {
+        return SetupPayloadResult.Invalid("This setup code has no usable server address — ask for a new one.")
+    }
+    val pairCode = normalizedPairCode(obj.optString("pair_code"))
+    if (pairCode.length < 4) {
+        return SetupPayloadResult.Invalid("This setup code has no usable pair code — ask for a new one.")
+    }
+    val caB64 = obj.optString("cluster_ca_pem_b64").trim()
+    val caPem = if (caB64.isEmpty()) {
+        null
+    } else {
+        val decoded = runCatching { String(Base64.decode(caB64, Base64.DEFAULT), Charsets.UTF_8) }.getOrNull()
+        if (decoded == null || !decoded.contains("-----BEGIN CERTIFICATE-----")) {
+            return SetupPayloadResult.Invalid(
+                "The server certificate inside this setup code is unreadable — ask for a new one.",
+            )
+        }
+        decoded
+    }
+    return SetupPayloadResult.Parsed(
+        SetupPayload(
+            version = version,
+            serverRegion = obj.optString("server_region"),
+            serverEndpoint = endpoint,
+            pairCode = pairCode,
+            expiresTs = obj.optLong("expires_ts", 0L),
+            childName = obj.optString("child_name"),
+            clusterCaPem = caPem,
+        ),
+    )
 }

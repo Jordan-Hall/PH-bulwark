@@ -60,6 +60,15 @@ pub fn build_heartbeat(probe: &mut dyn ProtectionProbe) -> Heartbeat {
     Heartbeat {
         status: Some(status),
         tamper_events,
+        // Per-device credential minted at pairing. AddChild/pre-token
+        // enrollments pass the server's legacy grace with an empty token, but
+        // a desktop device enrolled via `bulwark_admin redeem-pair-code` MUST
+        // present the minted token or its heartbeats are refused (and the
+        // missed-check-in alert never arms) — set BULWARK_DEVICE_TOKEN to the
+        // value printed once at redeem. Android persists + wires it natively.
+        device_token: std::env::var("BULWARK_DEVICE_TOKEN")
+            .map(|t| t.trim().to_string())
+            .unwrap_or_default(),
     }
 }
 
@@ -149,5 +158,20 @@ mod tests {
         // Drained: the next beat is clean.
         let second = build_heartbeat(&mut p);
         assert!(second.tamper_events.is_empty());
+    }
+
+    #[test]
+    fn heartbeat_carries_the_device_token_from_env() {
+        let mut p = DesktopProbe {
+            device_id: "kids-pc".into(),
+            app_version: "0.0.0".into(),
+        };
+        // Unset → empty token (AddChild/pre-token enrollments, server grace).
+        std::env::remove_var("BULWARK_DEVICE_TOKEN");
+        assert_eq!(build_heartbeat(&mut p).device_token, "");
+        // Set → the redeem-minted credential rides every beat (trimmed).
+        std::env::set_var("BULWARK_DEVICE_TOKEN", "  tok-abc123  ");
+        assert_eq!(build_heartbeat(&mut p).device_token, "tok-abc123");
+        std::env::remove_var("BULWARK_DEVICE_TOKEN");
     }
 }
