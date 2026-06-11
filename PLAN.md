@@ -203,8 +203,15 @@ shippable in reviewable increments. Status as of **2026-06-10**.
   starts/stops the VPN service, strictly-older configs rejected (replay
   defense), applied version + strictness band persisted, and the fetched
   `profile` live-updates the on-device `AgeProfile` used by `analyzeText`;
-  polled every 60s + on app foreground. Remaining: stream push +
-  `server_endpoint` reconcile.
+  polled every 60s + on app foreground. **Pairing delivers trust + devices
+  authenticate (2026-06-11, PR #104):** the console's "Setup code" panel
+  copies/QRs the pairing payload v2 carrying the pinned cluster CA (the child
+  pins `cluster_ca.pem` BEFORE its first TLS call — the on-device pairing
+  blocker is closed), redeem mints a once-shown `device_token` (sha256 digest
+  at rest) verified on `Tamper.Heartbeat` + `Get/StreamChildConfig`, and
+  redemption shares the sign-in rate limit. Remaining: stream push,
+  `server_endpoint` reconcile, child QR-scanner + NFC (paste path works
+  today), device-removal/re-pair flow (tightens the legacy-token grace).
 - **Dioxus app suite on `dioxus-router`, BOTH apps (Workflow A)** — child: six
   modules (typed `Route`, `Outlet`, `JourneyLayout`). Parent (2026-06-10):
   2974-line main.rs → eleven modules (`router`/`theme`/`state`/`servers`/`api`/

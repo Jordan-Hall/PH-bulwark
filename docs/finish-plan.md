@@ -47,9 +47,15 @@ The child app's Grant buttons currently flip local state only — they must open
 - **Accept:** tapping Grant opens the actual Android screen; journey gates on real permission state.
 - Note: biometrics (Workflow A) + QR/NFC (Workflow C) ride the *same* JNI bridge — B unlocks them.
 
-## Workflow C — Auth & pairing upgrades  ⏭️
+## Workflow C — Auth & pairing upgrades  🚧
+- ✅ **Manager generates the pairing payload (2026-06-11, PR #104):** "Setup
+  code" panel — segmented code + QR + one-tap copy of payload v2 (endpoint +
+  one-time code + expiry + pinned cluster CA, so the child can make its first
+  verified TLS call). Child app gained the **paste-setup-code** path (pins the
+  CA before redeeming) and redeem now mints a per-device auth token verified
+  on heartbeats/config reads.
 - ⏭️ **Biometric "remember me"** — `BiometricPrompt` unlocks the saved guardian token in `session.rs`
-- ⏭️ **Pairing via QR + NFC** (not just typed code): manager *generates* code/QR/NFC payload; child *scans (camera)* / *taps (NfcAdapter)* / types
+- ⏭️ **Child-side QR scan (camera) + NFC tap** — both consume the SAME payload v2 the paste path already parses
 - **Accept:** pair a device by QR and by NFC; guardian re-entry via biometric.
 
 ## Workflow D — Safety features  ⏭️ (after A+B)
@@ -71,7 +77,15 @@ The child app's Grant buttons currently flip local state only — they must open
 - ⛔ Do NOT publish the **raw grooming dataset** or the **live deployed weights** (decided)
 - Optional: a **synthetic-data-only** research model as the public artifact
 
-## Workflow G — CI / release hardening  ⏭️
+## Workflow G — CI / release hardening  🚧
+- ✅ **Multi-platform release matrix (2026-06-11, PR #105):** release.yml ships
+  Linux server + Windows child/console + macOS/Linux console + child Android
+  APK (reuses android.yml via workflow_call) per tag, each with SHA256SUMS;
+  opt-in Apple FFI scaffold gated on repo var `APPLE_SIGNING_READY` (honest:
+  no installable iOS app yet — no Xcode project/provisioning). Parent
+  Android/iOS deliberately absent until apps/parent gets a mobile renderer
+  feature mapping. Node-24 action bumps across all workflows (gradle/actions
+  pinned to v5 — v6's caching is proprietary, permissive-only rule).
 - ⛔/⏭️ **`APK boots on emulator`** is red on master too → pre-existing GitHub-Actions emulator flakiness (build+install succeed; the *real* app boots clean on the Pixel 7). Harden `reactivecircus/android-emulator-runner` (retry/boot-timeout) or mark non-required; capture the real launch log to rule out a true crash.
 - ⏭️ Open PRs + merge the app-redesign branches (`feat/child-redesign`, the manager brand/light/modular commits on `feat/parent-dioxus-08`)
 - Existing workflows: `android`, `android-emulator`, `ci`, `deploy`, `prerelease`, `release`, `store-publish` — wire the new app artifacts into release/store-publish when A–E land.
