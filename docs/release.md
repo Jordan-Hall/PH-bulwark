@@ -46,9 +46,17 @@ then done with fastlane (or by hand during testing).
 git tag v0.1.0-test.1 && git push origin v0.1.0-test.1
 ```
 
-- `.github/workflows/release.yml` (tag `v*` or manual dispatch) builds the **Linux
-  server binaries** (`bulwark-server`, `bulwark_admin`) and attaches them to the GitHub
-  Release. The **container image** ships via `docker.yml` / your registry.
+- `.github/workflows/release.yml` (tag `v*` or manual dispatch) builds, per platform,
+  with a `SHA256SUMS-<platform>` checksum file each: the **Linux server binaries**
+  (`bulwark-server`, `bulwark_admin`), the **Windows child filter + adult console**
+  (`bulwark_proxy/vpn/svc.exe`, `bulwark-parent.exe`), the **adult console for
+  macOS/Linux** (`ph-bulwark-manager-macos` / `-linux`), and the **child Android APK**
+  (`ph-bulwark-child-android.apk`, reusing `android.yml` via `workflow_call`) — all
+  attached to the GitHub Release (unsigned for testing). An **opt-in Apple scaffold**
+  job (repo variable `APPLE_SIGNING_READY=true`) builds the `platform/apple` Rust FFI
+  staticlib/xcframework only — there is still no Xcode project/provisioning, so no
+  installable iOS/macOS app. The **container image** ships via `docker.yml` / your
+  registry.
 - The **Android signed APK** is produced by extending the existing `android.yml`
   build with `assembleRelease` + an `apksigner` step keyed on repo **secrets**
   (`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`,

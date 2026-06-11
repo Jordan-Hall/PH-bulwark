@@ -1,11 +1,29 @@
 name: release
 
 # Build the app binaries and attach them to the GitHub Release on a version tag
-# (or manual dispatch → artifacts): the Linux server, plus the Windows desktop
-# apps — the ADULT console (bulwark-parent) and the CHILD filter (bulwark_proxy /
-# bulwark_vpn / bulwark_svc). The CHILD Android APK is produced by android.yml.
+# (or manual dispatch -> workflow artifacts). Coverage is honest, not aspirational:
+#
+#   server  -> Linux (bulwark-server + bulwark_admin)
+#   child   -> Windows filter bins (bulwark_proxy / bulwark_vpn / bulwark_svc)
+#           -> Android APK (reuses the proven android.yml via workflow_call)
+#   adult   -> console (bulwark-parent) on Windows / macOS / Linux
+#   apple   -> OPT-IN scaffold (repo var APPLE_SIGNING_READY == 'true'): the Rust
+#              FFI staticlib/xcframework for the future NEFilterDataProvider child
+#              shell — NOT an installable app (no Xcode project / provisioning yet).
+#
+# NOT built here, deliberately:
+#   * adult console for Android/iOS — apps/parent hard-enables the dioxus
+#     `desktop` renderer (no `mobile` feature mapping), so `dx build --platform
+#     android/ios` cannot work for it yet. Add the feature wiring first; the
+#     0.8.0-alpha.0 dx CLI on a fresh runner is also slow/brittle, so when it
+#     lands it should start workflow_dispatch-gated, not on every tag.
+#   * child filter for macOS/Linux — bulwark-client is Windows-gated (Wintun /
+#     DPAPI / cert-store FFI); the Apple child path is the Network Extension shell.
+#
 # Code-signing (Windows/macOS/Android) is documented in docs/release.md (it needs
 # keystores/certs as secrets); these artifacts are unsigned for testing.
+# Every job stages dist/ + a per-platform SHA256SUMS-* file (unique names — all
+# assets land in ONE flat release file list, so they must not collide).
 
 on:
   push:
@@ -15,12 +33,17 @@ on:
 permissions:
   contents: write
 
+# Same transient-crates.io-download hardening as android.yml / prerelease.yml.
+env:
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_MULTIPLEXING: "false"
+
 jobs:
   linux-binaries:
     name: linux server binaries
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build release (bulwark-server + bulwark_admin)
@@ -29,15 +52,15 @@ jobs:
         run: |
           mkdir -p dist
           cp target/release/bulwark-server target/release/bulwark_admin dist/
-          (cd dist && sha256sum bulwark-server bulwark_admin > SHA256SUMS)
+          (cd dist && sha256sum bulwark-server bulwark_admin > SHA256SUMS-linux-server)
       - name: Attach to the GitHub Release (tag builds)
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*
       - name: Upload as a workflow artifact (manual dispatch)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: bulwark-server-linux
           path: dist/*
@@ -46,14 +69,20 @@ jobs:
     name: windows apps (adult console + child filter)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Two detached cargo workspaces build in this job: the engine (root)
+          # and the adult console (apps/parent) — cache both target dirs.
+          workspaces: |
+            .
+            apps/parent
       - name: Build child filter (bulwark_proxy / bulwark_vpn / bulwark_svc)
         run: cargo build --release -p bulwark-client
       - name: Build adult console (bulwark-parent)
         run: cargo build --release --manifest-path apps/parent/Cargo.toml
-      - name: Stage artifacts
+      - name: Stage artifacts + checksums
         shell: bash
         run: |
           mkdir -p dist
@@ -61,15 +90,195 @@ jobs:
             if [ -f "target/release/$b.exe" ]; then cp "target/release/$b.exe" dist/; fi
           done
           cp apps/parent/target/release/*.exe dist/ 2>/dev/null || true
+          (cd dist && sha256sum *.exe > SHA256SUMS-windows)
           ls -la dist/
       - name: Attach to the GitHub Release (tag builds)
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*
       - name: Upload as a workflow artifact (manual dispatch)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ph-bulwark-windows-apps
+          path: dist/*
+
+  macos-console:
+    name: adult console (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/parent
+      # Dioxus desktop on macOS renders in the system WKWebView — no extra
+      # system packages are needed (unlike Linux below).
+      - name: Build adult console (bulwark-parent)
+        run: cargo build --release --manifest-path apps/parent/Cargo.toml
+      - name: Stage artifacts + checksums
+        # Unsigned + un-notarized: Gatekeeper will warn (docs/release.md §1).
+        run: |
+          mkdir -p dist
+          cp apps/parent/target/release/bulwark-parent dist/ph-bulwark-manager-macos
+          (cd dist && shasum -a 256 ph-bulwark-manager-macos > SHA256SUMS-macos)
+      - name: Attach to the GitHub Release (tag builds)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+      - name: Upload as a workflow artifact (manual dispatch)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: ph-bulwark-manager-macos
+          path: dist/*
+
+  linux-console:
+    name: adult console (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Dioxus 0.8 desktop on Linux = WebKitGTK webview. Documented apt set
+      # (dioxuslabs.com Getting Started, Ubuntu): libwebkit2gtk-4.1-dev
+      # build-essential curl wget file libxdo-dev libssl-dev
+      # libayatana-appindicator3-dev librsvg2-dev. The runner image already
+      # ships build-essential/curl/wget/file/libssl-dev; install the rest
+      # (libgtk-3-dev is pulled in by webkit2gtk but kept explicit, matching
+      # prerelease.yml).
+      - name: Install WebKitGTK build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libxdo-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/parent
+      # Hard step on purpose (prerelease.yml keeps it advisory): a tagged
+      # release must not silently drop the Linux console from its assets.
+      - name: Build adult console (bulwark-parent)
+        run: cargo build --release --manifest-path apps/parent/Cargo.toml
+      - name: Stage artifacts + checksums
+        run: |
+          mkdir -p dist
+          cp apps/parent/target/release/bulwark-parent dist/ph-bulwark-manager-linux
+          (cd dist && sha256sum ph-bulwark-manager-linux > SHA256SUMS-linux-console)
+      - name: Attach to the GitHub Release (tag builds)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+      - name: Upload as a workflow artifact (manual dispatch)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: ph-bulwark-manager-linux
+          path: dist/*
+
+  child-android:
+    name: child APK (Android)
+    # Reuse the proven android.yml steps verbatim via workflow_call instead of
+    # duplicating the JDK/NDK/cargo-ndk/Gradle recipe here. The called workflow
+    # runs inside THIS run and uploads the `bulwark-child-debug-apk` artifact,
+    # which the attach job below turns into a release asset.
+    uses: ./.github/workflows/android.yml
+
+  child-android-attach:
+    name: attach child APK
+    needs: child-android
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the APK built by the android.yml call
+        uses: actions/download-artifact@v7
+        with:
+          name: bulwark-child-debug-apk
+          path: apk
+      - name: Stage + checksum (stable asset name)
+        # Debug-signed APK — the Play-store signing path is store-publish.yml
+        # (needs the ANDROID_* keystore secrets); this asset is for sideloading
+        # testers (docs/release.md §1).
+        run: |
+          mkdir -p dist
+          cp "$(find apk -name '*-debug.apk' | head -n1)" dist/ph-bulwark-child-android.apk
+          (cd dist && sha256sum ph-bulwark-child-android.apk > SHA256SUMS-android)
+      - name: Attach to the GitHub Release (tag builds)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+      - name: Upload as a workflow artifact (manual dispatch)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: ph-bulwark-child-android
+          path: dist/*
+
+  apple-ffi-scaffold:
+    name: apple child-shell FFI scaffold (opt-in)
+    # GATED OFF by default. GitHub does not expose `secrets` in a job-level
+    # `if:`, so the documented pattern is a repository VARIABLE: set
+    # APPLE_SIGNING_READY = 'true' (Settings -> Secrets and variables ->
+    # Actions -> Variables) once the Apple Developer cert/provisioning secrets
+    # exist; those secrets will be consumed INSIDE the future archive/sign steps.
+    #
+    # HONESTY: there is no installable Apple app yet. platform/apple holds the
+    # Rust FFI staticlib + SwiftPM bridge for the NEFilterDataProvider child
+    # shell (see platform/apple/README.md); there is NO Xcode project (container
+    # app + Network Extension target), NO provisioning profile
+    # (content-filter-provider entitlement), and NO parent iOS shell at all.
+    # This job compiles exactly what exists — per-target staticlibs, the
+    # xcframework, the Swift bridge tests — as an unsigned building block.
+    if: vars.APPLE_SIGNING_READY == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: platform/apple/bulwark-apple-ffi
+      - name: Build the FFI staticlib per Apple target
+        working-directory: platform/apple/bulwark-apple-ffi
+        run: |
+          cargo build --release --target aarch64-apple-ios
+          cargo build --release --target aarch64-apple-ios-sim
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+      - name: Swift bridge tests (link the macOS arm64 slice)
+        working-directory: platform/apple/BulwarkFilter
+        run: |
+          swift test \
+            -Xlinker -L../bulwark-apple-ffi/target/aarch64-apple-darwin/release \
+            -Xlinker -lbulwark_apple_ffi
+      - name: Package xcframework (iOS device + sim) + macOS universal lib
+        working-directory: platform/apple/bulwark-apple-ffi
+        run: |
+          lipo -create \
+            target/aarch64-apple-darwin/release/libbulwark_apple_ffi.a \
+            target/x86_64-apple-darwin/release/libbulwark_apple_ffi.a \
+            -output libbulwark_apple_ffi-macos.a
+          xcodebuild -create-xcframework \
+            -library target/aarch64-apple-ios/release/libbulwark_apple_ffi.a -headers include \
+            -library target/aarch64-apple-ios-sim/release/libbulwark_apple_ffi.a -headers include \
+            -output BulwarkAppleFFI.xcframework
+      - name: Stage artifacts + checksums
+        run: |
+          mkdir -p dist
+          ditto -c -k --keepParent platform/apple/bulwark-apple-ffi/BulwarkAppleFFI.xcframework dist/BulwarkAppleFFI.xcframework.zip
+          cp platform/apple/bulwark-apple-ffi/libbulwark_apple_ffi-macos.a dist/
+          (cd dist && shasum -a 256 BulwarkAppleFFI.xcframework.zip libbulwark_apple_ffi-macos.a > SHA256SUMS-apple-ffi)
+          echo "::notice::apple scaffold built the FFI staticlib/xcframework only — still missing: the Xcode container-app + Network Extension project, provisioning (content-filter-provider), and any parent iOS shell."
+      - name: Attach to the GitHub Release (tag builds)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+      - name: Upload as a workflow artifact (manual dispatch)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: ph-bulwark-apple-ffi
           path: dist/*

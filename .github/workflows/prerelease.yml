@@ -35,10 +35,10 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
         with: { distribution: temurin, java-version: "17" }
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
       - name: Install NDK
         run: |
           sdkmanager "ndk;26.3.11579264" "platforms;android-34" "build-tools;34.0.0"
@@ -50,7 +50,7 @@ jobs:
       - name: Build JNI libs
         working-directory: platform/android/rust/bulwark-android
         run: cargo ndk -t arm64-v8a -t armeabi-v7a -o ../../app/src/main/jniLibs build --release
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v5
       - name: Assemble debug APK
         working-directory: platform/android
         run: gradle assembleDebug --no-daemon --stacktrace
@@ -58,14 +58,14 @@ jobs:
         run: |
           mkdir -p out
           cp platform/android/app/build/outputs/apk/debug/*-debug.apk out/ph-bulwark-child-android.apk
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with: { name: android, path: out/* }
 
   windows:
     name: child filter + adult console (Windows)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p bulwark-client
@@ -79,14 +79,14 @@ jobs:
           done
           cp apps/parent/target/release/*.exe out/ 2>/dev/null || true
           ls -la out/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with: { name: windows, path: out/* }
 
   macos:
     name: adult console (macOS)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --manifest-path apps/parent/Cargo.toml
@@ -95,21 +95,23 @@ jobs:
           mkdir -p out
           cp apps/parent/target/release/bulwark-parent out/ph-bulwark-manager-macos 2>/dev/null || true
           ls -la out/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with: { name: macos, path: out/* }
 
   linux:
     name: server + adult console (Linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p bulwark-server
       - name: Adult console (needs webkit2gtk; non-fatal if deps drift)
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libxdo-dev libayatana-appindicator3-dev || true
+          # Keep this apt set in sync with release.yml's linux-console job so
+          # dependency drift surfaces here (advisory) instead of at tag time.
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libxdo-dev libayatana-appindicator3-dev librsvg2-dev || true
           cargo build --release --manifest-path apps/parent/Cargo.toml || echo "::warning::linux adult console build skipped"
       - name: Stage
         run: |
@@ -118,7 +120,7 @@ jobs:
           cp target/release/bulwark_admin out/ph-bulwark-admin-linux 2>/dev/null || true
           cp apps/parent/target/release/bulwark-parent out/ph-bulwark-manager-linux 2>/dev/null || true
           ls -la out/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with: { name: linux, path: out/* }
 
   publish:
@@ -128,13 +130,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Gather artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
       - run: ls -la dist/ || echo "no artifacts"
       - name: Publish / update the 'latest' pre-release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: prerelease-latest
           name: "PH Bulwark — latest pre-release"
