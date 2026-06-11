@@ -11,6 +11,7 @@ import co.predatorhunters.bulwark.admin.Enrollment
 import co.predatorhunters.bulwark.core.RustBridge
 import co.predatorhunters.bulwark.notify.AlertNotifier
 import org.json.JSONObject
+import java.io.File
 
 /**
  * The Bulwark filtering VPN client.
@@ -75,6 +76,14 @@ class BulwarkVpnService : VpnService() {
             // seeds the Rust policy global so a process restart comes back up
             // under the right band ("" = none yet -> Rust keeps its baseline).
             .put("profile", ChildConfigSync.appliedProfile(this))
+            // App-private dir where the Rust core persists the per-install
+            // inspection CA across sessions (key DER, 0600; wiped with the app
+            // on uninstall). Android Keystore/TEE wrapping is the follow-up tier.
+            .put("ca_dir", File(filesDir, "ca").absolutePath)
+            // Pinned CLUSTER CA (the region server's public ca.crt) for https
+            // relay/heartbeat/config RPCs — provisioned at pairing (follow-up:
+            // carried in the QR payload). Absent file -> https relay stays off.
+            .put("cluster_ca", File(filesDir, "cluster_ca.pem").absolutePath)
         if (enrollment != null) {
             json.put("cluster_endpoint", enrollment.clusterEndpoint)
                 .put("child_id", enrollment.childId)
@@ -138,7 +147,7 @@ class BulwarkVpnService : VpnService() {
         )
         return Notification.Builder(this, CHANNEL)
             .setContentTitle("PH Bulwark is protecting this device")
-            .setContentText("Filtering content and watching for grooming signals.")
+            .setContentText("Protective filtering is starting up. Text monitoring runs when enabled; full traffic filtering is being validated.")
             .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
             .setOngoing(true)
             .build()

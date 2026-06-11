@@ -68,6 +68,11 @@ tracing = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 tonic = { version = "0.14", features = ["transport", "tls-ring", "tls-webpki-roots"] }
 
+[dev-dependencies]
+# Host tests implement the bulwark-net `Interceptor` trait with a scripted stub
+# (the trait is #[async_trait]); test-only, never in the shipped cdylib.
+async-trait = "0.1"
+
 # Detached workspace — this crate builds on its own:
 #   cd platform/android/rust/bulwark-android && cargo build
 [workspace]

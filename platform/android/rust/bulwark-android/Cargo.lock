@@ -275,6 +275,7 @@ dependencies = [
 name = "bulwark-android"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "bulwark-core",
  "bulwark-net",
  "bulwark-policy",

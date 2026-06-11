@@ -61,6 +61,9 @@ use bulwark_proto::DeviceId;
 use bulwark_text::TextAnalyzer;
 use tonic::transport::Endpoint;
 
+pub mod flow;
+pub mod relay;
+
 // ---------------------------------------------------------------------------
 // The on-device engine: deterministic analyzer + policy. Built once per process.
 // ---------------------------------------------------------------------------
@@ -115,23 +118,41 @@ fn tamper_queue() -> &'static Mutex<VecDeque<String>> {
 /// alert poller (`nextAlert`) surfaces it to the guardian. Used by
 /// `reportTamper` and by the VPN data path when it exits with an error (a
 /// captive TUN with a dead pump would otherwise be a silent blackhole).
+/// Enqueue any guardian alert JSON for the Kotlin `nextAlert` poller. Bounded
+/// so a misbehaving caller can't grow the queue without limit.
+fn enqueue_alert_json(json: String) {
+    if let Ok(mut q) = tamper_queue().lock() {
+        if q.len() < TAMPER_QUEUE_CAP {
+            q.push_back(json);
+        }
+    }
+}
+
 fn enqueue_protection_alert(tag: &str, message: &str) {
     let now_s = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    let alert_id = format!("{tag}-{now_s}");
     // AlertKind::PROTECTION_DISABLED == 3; category 0 (a status signal, not content).
     let obj = serde_json::json!({
-        "alert_id": format!("{tag}-{now_s}"),
+        "alert_id": alert_id,
         "kind": 3,
         "category": 0,
         "redacted_context": message,
     });
-    if let Ok(mut q) = tamper_queue().lock() {
-        if q.len() < TAMPER_QUEUE_CAP {
-            q.push_back(obj.to_string());
-        }
-    }
+    enqueue_alert_json(obj.to_string());
+    // ALSO relay to the enrolled cluster (best-effort, content-free, never
+    // blocks or crashes) so a guardian on ANOTHER device learns of the
+    // downgrade. No-op until startVpn has seen an enrolled config.
+    relay::relay_alert_best_effort(bulwark_proto::v1::AlertEvent {
+        alert_id,
+        kind: bulwark_proto::v1::AlertKind::ProtectionDisabled as i32,
+        severity: bulwark_proto::v1::Severity::High as i32,
+        ts: relay::now_ms(),
+        redacted_context: message.to_string(),
+        ..Default::default()
+    });
 }
 
 /// Guardian-facing, content-free description for an `bulwark.v1.TamperKind` ordinal.
@@ -535,6 +556,18 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_startVpn(
     // Anything malformed is ignored (fail open) — never crashes the bridge.
     let config = jstring_to_string(&mut env, &config_json).unwrap_or_default();
     apply_profile_from_config_json(&config);
+    // Arm the cluster relay (alerts + heartbeats) with the enrolled endpoint
+    // and identity from the device config; no-op when not yet enrolled.
+    relay::set_target_from_config_json(&config);
+    // App-private directory (Kotlin filesDir/ca) where the per-install
+    // inspection CA persists across sessions. Absent -> no persisted CA.
+    let ca_dir = serde_json::from_str::<serde_json::Value>(&config)
+        .ok()
+        .and_then(|v| {
+            v.get("ca_dir")
+                .and_then(|p| p.as_str())
+                .map(std::path::PathBuf::from)
+        });
     let vpn_service = if vpn_service.is_null() {
         None
     } else {
@@ -557,27 +590,61 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_startVpn(
     // crate (unit tests on the dev machine) still compile + test the JSON/JNI
     // surface without it.
     #[cfg(not(target_os = "android"))]
-    let _ = tun_fd;
+    let _ = (tun_fd, ca_dir);
     #[cfg(target_os = "android")]
-    let fd = tun_fd as std::os::fd::RawFd;
-    #[cfg(target_os = "android")]
-    let token = shutdown.clone();
-    #[cfg(target_os = "android")]
-    runtime.spawn(async move {
-        // Never panic across the host (a filter must not take down the device),
-        // but NEVER fail silent either: if the data path exits with an error
-        // while the VpnService still owns the TUN, every packet would route
-        // into an fd nobody reads (a blackhole). Surface it as a content-free
-        // protection-status alert so the guardian learns filtering is down.
-        if let Err(e) = bulwark_net::vpn::run_android_data_path(fd, token).await {
-            tracing::error!(error = %e, "VPN data path exited with an error");
-            enqueue_protection_alert(
-                "vpn-datapath",
-                "The filtering VPN on the child's device stopped unexpectedly. \
-                 Protection may be off until the app restarts it.",
-            );
+    {
+        let fd = tun_fd as std::os::fd::RawFd;
+        match bulwark_net::vpn::build_interceptor(ca_dir) {
+            Ok(interceptor) => {
+                // Honest liveness for heartbeats: flipped false if the pump dies.
+                let vpn_up = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+                // 1. Flow consumer: classifies captured flows and ANSWERS the
+                //    proxy's decision gate (without it, every gated image/video
+                //    segment stalls 5s then drops). Ends when the proxy closes
+                //    the flow channel on shutdown.
+                runtime.spawn(flow::run_flow_consumer(interceptor.clone()));
+
+                // 2. Protection heartbeats to the enrolled cluster (no-op when
+                //    unenrolled); the server's missed-heartbeat sweep is the
+                //    backstop if this whole process dies.
+                runtime.spawn(relay::run_heartbeats(shutdown.clone(), vpn_up.clone()));
+
+                // 3. The transparent pump itself.
+                let token = shutdown.clone();
+                runtime.spawn(async move {
+                    // Never panic across the host (a filter must not take down
+                    // the device), but NEVER fail silent either: if the data
+                    // path exits with an error while the VpnService still owns
+                    // the TUN, every packet would route into an fd nobody reads
+                    // (a blackhole). Surface it as a content-free
+                    // protection-status alert so the guardian learns filtering
+                    // is down.
+                    if let Err(e) =
+                        bulwark_net::vpn::run_android_data_path(fd, interceptor, token).await
+                    {
+                        vpn_up.store(false, std::sync::atomic::Ordering::Relaxed);
+                        tracing::error!(error = %e, "VPN data path exited with an error");
+                        enqueue_protection_alert(
+                            "vpn-datapath",
+                            "The filtering VPN on the child's device stopped unexpectedly. \
+                             Protection may be off until the app restarts it.",
+                        );
+                    }
+                });
+            }
+            Err(e) => {
+                // Fail-closed on the crown jewel (no CA -> no inspection), but
+                // never silent: the guardian is told protection is down.
+                tracing::error!(error = %e, "VPN interceptor could not be built");
+                enqueue_protection_alert(
+                    "vpn-start",
+                    "The filtering VPN on the child's device could not start its \
+                     inspection engine. Protection may be off until the app restarts it.",
+                );
+            }
         }
-    });
+    }
 
     let session = Box::new(VpnSession {
         runtime,
