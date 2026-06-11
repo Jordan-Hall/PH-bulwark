@@ -83,7 +83,7 @@ child device                              home cluster                guardian
   the parent app).
   Tokens expire after `BULWARK_SESSION_TTL_SECS` (default 12h) and are dropped on
   restart, so a leaked token is short-lived — re-`login` to refresh.
-- **Brute-force lockout:** after `BULWARK_LOGIN_MAX_FAILS` (default 5) failed logins
+- **Repeated-wrong-password pause:** after `BULWARK_LOGIN_MAX_FAILS` (default 5) failed sign-ins
   for one email within `BULWARK_LOGIN_WINDOW_SECS` (default 15m), that email is locked
   out until the window elapses; a successful login clears the counter.
 - **Durable:** with `BULWARK_STATE_DIR` set, accounts + push targets + pending
@@ -211,8 +211,8 @@ heartbeat detection still fires.
 | `BULWARK_QUORUM_DSN` | server (cluster) | Postgres DSN for the lease store | unset | quorum (split-brain safety) |
 | `BULWARK_ACCOUNTS` | server | enable guardian accounts | off | provisioning guardians |
 | `BULWARK_SESSION_TTL_SECS` | server | guardian session-token lifetime (seconds) | 43200 (12h) | tune session expiry |
-| `BULWARK_LOGIN_MAX_FAILS` | server | failed logins per email before lockout | 5 | tune brute-force throttle |
-| `BULWARK_LOGIN_WINDOW_SECS` | server | login-throttle / lockout window (seconds) | 900 (15m) | tune brute-force throttle |
+| `BULWARK_LOGIN_MAX_FAILS` | server | failed sign-ins per email before a pause | 5 | tune the sign-in rate limit |
+| `BULWARK_LOGIN_WINDOW_SECS` | server | sign-in rate-limit / pause window (seconds) | 900 (15m) | tune the sign-in rate limit |
 | `BULWARK_STATE_DIR` | server | persist guardian state — accounts/push/pending/allowlist + child configs/applied-acks (JSON) | unset (in-memory) | durable state |
 | `BULWARK_TLS_CERT` / `BULWARK_TLS_KEY` | server | server TLS leaf cert/key (PEM **file paths**) | unset | any real deployment (accounts mode refuses to start without them) |
 | `BULWARK_TLS_CLIENT_CA` | server | client-cert CA — also require client certs (mTLS) | unset | once device/guardian client certs exist |
