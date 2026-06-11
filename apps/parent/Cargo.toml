@@ -23,10 +23,20 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# App-lock PIN hashing (see `lock.rs`). `ring` is ALREADY in the build as a
+# transitive dep of tonic's `tls-ring` feature, so declaring it directly adds ZERO
+# new crates to the lock — it reuses the SAME PBKDF2-HMAC-SHA256 primitive the
+# server uses for guardian passwords. Permissive (MIT/ISC/OpenSSL-style) licensing.
+ring = "0.17"
+
 # QR rendering for the child-pairing code (MIT/Apache). SVG-only: default features
 # pull in the heavy `image` crate we don't need, so disable them and keep just
 # `svg`, which emits a self-contained SVG string we drop into the rsx.
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
+
+# Clipboard for the "copy recovery code" button (MIT/Apache). Desktop-only need;
+# `image` default feature is unneeded (we only copy text), so keep it lean.
+arboard = { version = "3", default-features = false }
 
 [dev-dependencies]
 futures-util = "0.3"

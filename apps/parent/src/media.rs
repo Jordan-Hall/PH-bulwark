@@ -140,3 +140,11 @@ pub fn base64_encode(input: &[u8]) -> String {
     }
     out
 }
+
+/// Copy `text` to the OS clipboard (the "copy recovery code" button). Best-effort:
+/// returns an error string the caller may ignore — the code is also shown as
+/// selectable text, so a clipboard failure is never blocking.
+pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    cb.set_text(text.to_string()).map_err(|e| e.to_string())
+}

@@ -5,9 +5,11 @@ use bulwark_proto::v1::accounts_client::AccountsClient;
 use bulwark_proto::v1::child_control_client::ChildControlClient;
 use bulwark_proto::v1::review_client::ReviewClient;
 use bulwark_proto::v1::{
-    AccountAck, AlertEvent, Child as ProtoChild, ChildConfig, ChildStatusRequest,
-    CreateAccountRequest, CreatePairCodeRequest, DeviceFilter, ListChildrenRequest, LoginRequest,
-    PairCode, ReviewDecision, ReviewRequest, ReviewScope, Session, SetChildConfigRequest,
+    AccountAck, AlertEvent, ChangePasswordRequest, Child as ProtoChild, ChildConfig,
+    ChildStatusRequest, CreateAccountRequest, CreatePairCodeRequest, DeviceFilter,
+    ListChildrenRequest, LoginRequest, PairCode, RequestPasswordResetAck,
+    RequestPasswordResetRequest, ResetPasswordAck, ResetPasswordRequest, ReviewDecision,
+    ReviewRequest, ReviewScope, Session, SetChildConfigRequest,
 };
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 use tonic::Streaming;
@@ -119,6 +121,61 @@ pub async fn login_guardian(email: &str, password: &str) -> anyhow::Result<Sessi
         .login(LoginRequest {
             email: email.trim().to_string(),
             password: password.to_string(),
+        })
+        .await?
+        .into_inner())
+}
+
+/// Ask the server to EMAIL a short-lived reset code to the account's address
+/// (when the operator has configured SMTP). Anti-enumeration: the ack is the
+/// same generic message whether or not the email has an account — never reveals
+/// who's registered. The emailed code is entered into the same reset field as a
+/// recovery code (the server accepts either).
+pub async fn request_password_reset(email: &str) -> anyhow::Result<RequestPasswordResetAck> {
+    let mut client = accounts_client().await?;
+    Ok(client
+        .request_password_reset(RequestPasswordResetRequest {
+            email: email.trim().to_string(),
+        })
+        .await?
+        .into_inner())
+}
+
+/// Self-service password reset with the one-time recovery code OR an emailed
+/// reset code (the server accepts either). Returns the ack, which carries a
+/// FRESH recovery code to save.
+pub async fn reset_password_with_code(
+    email: &str,
+    recovery_code: &str,
+    new_password: &str,
+) -> anyhow::Result<ResetPasswordAck> {
+    let mut client = accounts_client().await?;
+    Ok(client
+        .reset_password(ResetPasswordRequest {
+            email: email.trim().to_string(),
+            recovery_code: recovery_code.trim().to_string(),
+            new_password: new_password.to_string(),
+        })
+        .await?
+        .into_inner())
+}
+
+/// Change the signed-in guardian's password (proves the old one). Uses the saved
+/// session token for this server. Invalidates the account's OTHER sessions.
+pub async fn change_guardian_password(
+    old_password: &str,
+    new_password: &str,
+) -> anyhow::Result<AccountAck> {
+    let token = guardian_token();
+    if token.is_empty() {
+        anyhow::bail!("sign in required to change your password");
+    }
+    let mut client = accounts_client().await?;
+    Ok(client
+        .change_password(ChangePasswordRequest {
+            token,
+            old_password: old_password.to_string(),
+            new_password: new_password.to_string(),
         })
         .await?
         .into_inner())

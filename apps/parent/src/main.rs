@@ -27,8 +27,11 @@
 //! the 0.7/0.8 native Blitz renderer (no webview) when it ships.
 
 mod api;
+mod brand;
 mod components;
 mod config;
+mod icons;
+mod lock;
 mod media;
 mod process;
 mod router;

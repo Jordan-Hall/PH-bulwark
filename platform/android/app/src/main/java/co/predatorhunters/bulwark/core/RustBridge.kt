@@ -43,6 +43,14 @@ object RustBridge {
     external fun stopVpn(handle: Long)
 
     /**
+     * True when the transparent data path failed to start or died after
+     * starting. [BulwarkVpnService] polls this and calls `stopSelf()` so the
+     * captured TUN is released — a captive fd nobody reads blackholes ALL device
+     * traffic. A clean [stopVpn] never sets it.
+     */
+    external fun isDataPathDown(): Boolean
+
+    /**
      * Feed on-device-captured text into the grooming pipeline (E2E/pinned apps).
      * @return a JSON `Verdict` (category, action, severity, score, rationale).
      */
@@ -56,7 +64,17 @@ object RustBridge {
      * Accounts endpoint. Returns JSON:
      * `{ ok: true, child_id, family_id }` or `{ ok: false, error }`.
      */
-    external fun redeemPairCode(endpoint: String, code: String, deviceId: String): String
+    external fun redeemPairCode(endpoint: String, code: String, deviceId: String, caPath: String): String
+
+    /**
+     * The device-local pinned cluster CA file (PEM) used to validate `https://`
+     * cluster endpoints. Production regions use an on-box self-signed CA that
+     * public roots can't validate, so the child pins this; provisioned at
+     * pairing. Absent → https RPCs are refused with an actionable message
+     * (never plaintext fall-back). Passed to every child→cluster JNI RPC.
+     */
+    fun clusterCaPath(ctx: android.content.Context): String =
+        java.io.File(ctx.filesDir, "cluster_ca.pem").absolutePath
 
     /**
      * Fetch this device's guardian-set desired runtime config (the remote
@@ -70,7 +88,7 @@ object RustBridge {
      *    require_always_on, config_version, updated_ts }` or `{ ok: false, error }`.
      * See [ChildConfigSync][co.predatorhunters.bulwark.vpn.ChildConfigSync].
      */
-    external fun fetchChildConfig(endpoint: String, deviceId: String, appliedVersion: Long): String
+    external fun fetchChildConfig(endpoint: String, deviceId: String, appliedVersion: Long, caPath: String): String
 
     /**
      * Submit the guardian's review decision for a flagged item: `approve` = allow

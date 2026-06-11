@@ -85,7 +85,7 @@ internal val Servers = listOf(
     ServerOption(
         "uk",
         "UK - London",
-        "http://ec2-35-179-110-106.eu-west-2.compute.amazonaws.com:8443",
+        "https://ec2-35-179-110-106.eu-west-2.compute.amazonaws.com:8443",
     ),
     ServerOption("us", "US cloud", "https://us.cloud.phbulwark.app"),
     ServerOption("self", "Self-hosted", ""),
@@ -457,6 +457,7 @@ private fun PairStep(
         mutableStateOf<PairingState>(if (alreadyPaired) PairingState.Success("") else PairingState.Idle)
     }
     val scope = rememberCoroutineScope()
+    val caPath = RustBridge.clusterCaPath(androidx.compose.ui.platform.LocalContext.current)
 
     val endpoint = resolveEndpoint(selectedServer, selfHosted)
     val normalizedCode = normalizedPairCode(code)
@@ -476,7 +477,7 @@ private fun PairStep(
                         runCatching {
                             RustBridge.ensureLoaded()
                             parsePairingResult(
-                                RustBridge.redeemPairCode(endpoint, normalizedCode, deviceId),
+                                RustBridge.redeemPairCode(endpoint, normalizedCode, deviceId, caPath),
                             )
                         }.getOrElse {
                             PairingOutcome.Error(

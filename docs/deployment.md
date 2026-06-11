@@ -130,6 +130,30 @@ child device                              home cluster                guardian
   `none` loopback-only), `BULWARK_SMTP_USERNAME`/`BULWARK_SMTP_PASSWORD` (secrets — env/
   keystore only), `BULWARK_ALERT_SUBJECT_PREFIX` (default `[Bulwark]`).
 
+### 6a. Email-based password reset (protects guardian accounts)
+- The same SMTP setup also enables an **emailed reset code** so a guardian who
+  can't find their saved recovery code can reset their password. It sits ALONGSIDE
+  the recovery code — both work.
+- **On-switch:** any time `BULWARK_SMTP_HOST` + a `From:` address are configured,
+  email reset turns on automatically (the server logs whether it is enabled). The
+  `From:` for the reset email is `BULWARK_RESET_FROM`, falling back to
+  `BULWARK_ALERT_FROM`, so one SMTP config covers both alerts and account email.
+  TLS mode / port / credentials reuse the `BULWARK_SMTP_*` variables above.
+  Optional: `BULWARK_RESET_SUBJECT` (subject line) and `BULWARK_RESET_TOKEN_TTL_SECS`
+  (reset-code lifetime, default 1800 = 30 min).
+- **Flow:** `Accounts.RequestPasswordReset{email}` → the server emails a short-lived,
+  single-use, 128-bit code to the account address, then the guardian completes
+  `Accounts.ResetPassword` with that code in the `recovery_code` field (the RPC
+  accepts EITHER the saved recovery code or an emailed code). The endpoint **always**
+  returns the same generic ack, so it never reveals whether an email has an account;
+  repeated requests for one email are rate-limited so an inbox can't be flooded.
+- The reset email is **content-free**: subject + the code + how to use it. No child
+  data, no message/media excerpts. Only the code's Argon2id hash + an expiry are
+  stored on the account (the code itself is never persisted or logged); expired codes
+  are pruned on load.
+- **Without SMTP:** email reset is unavailable (the server logs one warning); the
+  saved recovery code from account creation remains the self-service reset fallback.
+
 ## 7. FCM push alerts
 - Build the server `--features push`. On-switch: **both** `BULWARK_FCM_PROJECT_ID`
   and `BULWARK_FCM_SERVICE_ACCOUNT` (path to a GCP service-account JSON; existence
@@ -203,6 +227,9 @@ heartbeat detection still fires.
 | `BULWARK_ALERT_FROM` | bulwark-alert | From: address | unset | email on-switch |
 | `BULWARK_ALERT_RECIPIENTS` | bulwark-alert | guardian recipients (CSV) | unset | email on-switch |
 | `BULWARK_ALERT_SUBJECT_PREFIX` | bulwark-alert | subject prefix | [Bulwark] | never |
+| `BULWARK_RESET_FROM` | server (accounts) | From: for the reset email (falls back to `BULWARK_ALERT_FROM`) | unset | email reset, distinct sender |
+| `BULWARK_RESET_SUBJECT` | server (accounts) | reset email subject | `PH Bulwark — your password reset code` | never |
+| `BULWARK_RESET_TOKEN_TTL_SECS` | server (accounts) | emailed reset-code lifetime (secs) | 1800 | tune reset-code expiry |
 | `BULWARK_FCM_PROJECT_ID` | bulwark-alert (push) | FCM project (push on-switch) | unset | push (with SA) |
 | `BULWARK_FCM_SERVICE_ACCOUNT` | bulwark-alert (push) | SA JSON path | unset | push (with project) |
 | `BULWARK_CLIENT_CERT`/`_KEY`/`_CA` | client | mTLS material (PEM paths) | unset | cluster offload |

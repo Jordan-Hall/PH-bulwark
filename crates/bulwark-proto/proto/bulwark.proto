@@ -479,7 +479,7 @@ service Tamper {
 
 message CreateAccountRequest {
   string email        = 1;
-  string password     = 2; // hashed server-side (PBKDF2-HMAC-SHA256); never stored
+  string password     = 2; // hashed server-side (Argon2id PHC at rest); never stored
   string display_name = 3;
 }
 
@@ -487,6 +487,12 @@ message AccountAck {
   string account_id = 1;
   bool   created    = 2; // false if the email already exists
   string detail     = 3;
+  // ONE-TIME recovery code, returned ONLY on a successful CreateAccount (empty on a
+  // duplicate-email no-op). The out-of-band secret the user saves: it lets them
+  // self-reset their password via ResetPassword with NO operator/email loop. The
+  // server stores only its Argon2id hash — this plaintext is shown exactly once and
+  // never recoverable. Single-use: a successful reset invalidates it + issues a new one.
+  string recovery_code = 4;
 }
 
 message LoginRequest {
@@ -552,6 +558,56 @@ message PairResult {
   string family_id = 2;
 }
 
+// --- Password lifecycle: authenticated change + self-service recovery reset. ---
+
+// Authenticated rotation: the caller proves the OLD password, sets a new one.
+// `token` is a live guardian session (also accepted via Bearer metadata). On
+// success the server re-hashes with Argon2id and invalidates the account's OTHER
+// sessions (the rotated-from device keeps its session). Passwords never logged.
+message ChangePasswordRequest {
+  string token        = 1; // caller's session (also via Bearer metadata)
+  string old_password = 2; // verified before the change
+  string new_password = 3; // stored Argon2id; >= 8 chars
+}
+
+// Self-service reset with NO operator/SSH/email loop: the user proves the
+// out-of-band recovery code (from CreateAccount) and sets a new password. The
+// used code is INVALIDATED and a fresh one returned in the ack. Reset attempts are
+// rate-limited per email exactly like Login, so repeated wrong guesses are refused.
+message ResetPasswordRequest {
+  string email         = 1;
+  // EITHER the one-time recovery code saved at account creation OR a short-lived
+  // code emailed by RequestPasswordReset — the server tries both. On success the
+  // used credential is consumed (the recovery code rotates; an emailed code expires).
+  string recovery_code = 2;
+  string new_password  = 3; // stored Argon2id; >= 8 chars
+}
+
+message ResetPasswordAck {
+  bool   ok                = 1;
+  string detail            = 2;
+  // The FRESH recovery code that replaces the consumed one (shown once). Save it:
+  // the previous code is now dead. Empty when ok == false.
+  string new_recovery_code = 3;
+}
+
+// Request an EMAILED reset code — the alternative to the saved recovery code when
+// SMTP is configured. The guardian who can't find their recovery code asks the
+// server to email a short-lived reset code to their account address; they then
+// complete the reset via ResetPassword (the emailed code goes in `recovery_code`).
+// ANTI-ENUMERATION: the ack is ALWAYS the same generic ok=true, so this endpoint
+// never reveals whether an email has an account — ordinary privacy hygiene for a
+// family product. Repeated requests for the same email are rate-limited so an
+// inbox can't be flooded.
+message RequestPasswordResetRequest {
+  string email = 1;
+}
+
+message RequestPasswordResetAck {
+  bool   ok     = 1; // always true (generic) — never an account-existence oracle
+  string detail = 2; // generic guidance, identical for known + unknown emails
+}
+
 service Accounts {
   rpc CreateAccount(CreateAccountRequest) returns (AccountAck);
   rpc Login(LoginRequest) returns (Session);
@@ -562,6 +618,18 @@ service Accounts {
   // redeems it (RedeemPairCode is unauthenticated — the code IS the credential).
   rpc CreatePairCode(CreatePairCodeRequest) returns (PairCode);
   rpc RedeemPairCode(RedeemPairCodeRequest) returns (PairResult);
+  // Authenticated password change (proves the old password). Invalidates the
+  // account's other sessions on success. Reuses AccountAck (recovery_code empty).
+  rpc ChangePassword(ChangePasswordRequest) returns (AccountAck);
+  // Self-service password reset via the one-time recovery code — no operator loop.
+  // Throttled per email like Login; issues a fresh recovery code on success.
+  // The `recovery_code` field ALSO accepts a short-lived code emailed by
+  // RequestPasswordReset, so a guardian can reset with EITHER credential.
+  rpc ResetPassword(ResetPasswordRequest) returns (ResetPasswordAck);
+  // Email a short-lived reset code to the account address (when SMTP is
+  // configured) — the fallback for a guardian who can't find their recovery code.
+  // Always returns a generic ok (anti-enumeration); rate-limited per email.
+  rpc RequestPasswordReset(RequestPasswordResetRequest) returns (RequestPasswordResetAck);
 }
 
 // ---------------------------------------------------------------------------
