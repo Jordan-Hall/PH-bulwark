@@ -1,9 +1,20 @@
 //! Parent accounts + per-child assigned guardians.
 //!
 //! A PARENT ACCOUNT is an email + password. The password is **never stored** —
-//! we keep only a PBKDF2-HMAC-SHA256 hash with a per-account random salt
-//! (`ring`), and verify in constant time. A successful [`AccountStore::login`]
-//! mints an opaque random session token.
+//! we keep only a one-way KDF hash and verify in constant time. New and rotated
+//! passwords use **Argon2id** (memory-hard, OWASP-recommended), stored as a PHC
+//! string (`$argon2id$...`, salt embedded). Accounts created before this upgrade
+//! still carry a legacy **PBKDF2-HMAC-SHA256** salt+hash; those verify on login
+//! and are TRANSPARENTLY re-hashed to Argon2id + persisted on the next successful
+//! login (zero user action). A successful [`AccountStore::login`] mints an opaque
+//! random session token.
+//!
+//! SELF-SERVICE RECOVERY: every account is issued ONE high-entropy recovery code
+//! at creation (returned once, stored only as an Argon2id hash). A user who forgets
+//! their password proves the code via [`AccountStore::reset_password`] to set a new
+//! one — no operator, SSH, or email loop. The code is single-use: a reset
+//! invalidates it and issues a fresh one. Reset attempts are rate-limited per
+//! email exactly like sign-in, so repeated wrong guesses are refused.
 //!
 //! A CHILD belongs to a family and is linked to a supervised `device_id`. One or
 //! more guardian accounts are ASSIGNED to each child. Alerts route per-child: the
@@ -25,24 +36,101 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::persist::JsonFile;
+use argon2::{Algorithm, Argon2, Params, Version};
 use bulwark_proto::v1::accounts_server::Accounts;
 use bulwark_proto::v1::{
-    AccountAck, AddChildRequest, AssignGuardianRequest, Child, Children, CreateAccountRequest,
-    CreatePairCodeRequest, GuardianAck, ListChildrenRequest, LoginRequest, PairCode, PairResult,
-    RedeemPairCodeRequest, Session,
+    AccountAck, AddChildRequest, AssignGuardianRequest, ChangePasswordRequest, Child, Children,
+    CreateAccountRequest, CreatePairCodeRequest, GuardianAck, ListChildrenRequest, LoginRequest,
+    PairCode, PairResult, RedeemPairCodeRequest, RequestPasswordResetAck,
+    RequestPasswordResetRequest, ResetPasswordAck, ResetPasswordRequest, Session,
 };
+use password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use ring::pbkdf2;
 use ring::rand::{SecureRandom, SystemRandom};
 use tonic::{Request, Response, Status};
 
-/// PBKDF2 parameters. SHA-256, 100k iterations, 32-byte output, 16-byte salt.
+/// LEGACY PBKDF2 parameters. SHA-256, 100k iterations, 32-byte output, 16-byte
+/// salt. Retained ONLY to verify pre-Argon2id accounts on login (then rehash); new
+/// passwords never use this path.
 static PBKDF2_ALG: pbkdf2::Algorithm = pbkdf2::PBKDF2_HMAC_SHA256;
 const PBKDF2_ITERS: u32 = 100_000;
 const HASH_LEN: usize = 32;
 const SALT_LEN: usize = 16;
+
+/// Argon2id parameters. Chosen from the OWASP Password Storage Cheat Sheet's
+/// second-listed profile (m=19456 KiB ≈ 19 MiB, t=2, p=1) — memory-hard yet light
+/// enough for the t3.small (2 GiB) deploy box to verify many concurrent logins
+/// without OOM/thrash. 32-byte output. Salt is per-hash and embedded in the PHC
+/// string. The same params hash both passwords and recovery codes.
+const ARGON2_MEM_KIB: u32 = 19 * 1024; // 19 MiB
+const ARGON2_TIME_COST: u32 = 2;
+const ARGON2_LANES: u32 = 1;
+
+/// A configured Argon2id hasher with our pinned params (id variant, v19/0x13).
+fn argon2() -> Argon2<'static> {
+    let params = Params::new(
+        ARGON2_MEM_KIB,
+        ARGON2_TIME_COST,
+        ARGON2_LANES,
+        Some(HASH_LEN),
+    )
+    .expect("argon2 params are valid constants");
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+}
+
+/// Hash `secret` (password or recovery code) to a self-describing PHC string
+/// (`$argon2id$v=19$m=...$<salt>$<hash>`). The salt is fresh per call.
+fn argon2_hash(rng: &SystemRandom, secret: &[u8]) -> Result<String, AccountError> {
+    let mut salt_bytes = [0u8; 16];
+    rng.fill(&mut salt_bytes)
+        .map_err(|_| AccountError::Internal)?;
+    let salt = SaltString::encode_b64(&salt_bytes).map_err(|_| AccountError::Internal)?;
+    argon2()
+        .hash_password(secret, &salt)
+        .map(|h| h.to_string())
+        .map_err(|_| AccountError::Internal)
+}
+
+/// Constant-time verify of `secret` against a stored Argon2id PHC string. A
+/// malformed PHC string (corrupt row) verifies as `false`, never panics.
+fn argon2_verify(phc: &str, secret: &[u8]) -> bool {
+    match PasswordHash::new(phc) {
+        Ok(parsed) => argon2().verify_password(secret, &parsed).is_ok(),
+        Err(_) => false,
+    }
+}
 /// Session/id token entropy in bytes (→ hex string of 2× this length).
 const TOKEN_BYTES: usize = 32;
 const ID_BYTES: usize = 16;
+
+/// Self-service recovery code: 16 random bytes (128 bits) rendered as base32 in
+/// 5 dash-separated groups (e.g. `K7MQ2-9XF4T-...`). 128 bits is far beyond
+/// exhaustive guessing even before the per-email reset rate limit. Only the
+/// Argon2id hash is stored; the plaintext is shown once.
+const RECOVERY_CODE_BYTES: usize = 16;
+const RECOVERY_GROUP_LEN: usize = 5;
+
+/// EMAILED reset token: 16 random bytes (128 bits) rendered like the recovery
+/// code (base32, dash-grouped) so the guardian can type it back. It is the
+/// OPTIONAL email-based alternative to the saved recovery code: short-lived,
+/// single-use, and stored ONLY as an Argon2id hash + an expiry timestamp on the
+/// account. The plaintext is emailed once and never persisted.
+const RESET_TOKEN_BYTES: usize = 16;
+/// How long an emailed reset token stays valid; override with
+/// `BULWARK_RESET_TOKEN_TTL_SECS` (positive integer seconds). Short by design so a
+/// code that lingers in an inbox stops working quickly. Default 30 minutes.
+const DEFAULT_RESET_TOKEN_TTL_SECS: i64 = 30 * 60;
+
+/// The configured emailed-reset-token TTL in milliseconds (env override, else the
+/// default).
+fn reset_token_ttl_ms() -> i64 {
+    std::env::var("BULWARK_RESET_TOKEN_TTL_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_RESET_TOKEN_TTL_SECS)
+        .saturating_mul(1000)
+}
 
 /// Pairing codes are a short-lived, single-use linking credential.
 const PAIR_CODE_TTL_SECS: i64 = 15 * 60;
@@ -70,9 +158,9 @@ fn session_live(issued_ms: i64, now_ms: i64, ttl_ms: i64) -> bool {
     now_ms >= issued_ms && now_ms.saturating_sub(issued_ms) < ttl_ms
 }
 
-/// Login brute-force throttle defaults; override with `BULWARK_LOGIN_MAX_FAILS` /
-/// `BULWARK_LOGIN_WINDOW_SECS`. After `max` failed logins for one email within the
-/// window, that email is locked out until the window elapses.
+/// Sign-in rate-limit defaults; override with `BULWARK_LOGIN_MAX_FAILS` /
+/// `BULWARK_LOGIN_WINDOW_SECS`. After `max` failed sign-ins for one email within
+/// the window, that email is paused until the window elapses.
 const DEFAULT_LOGIN_MAX_FAILS: u32 = 5;
 const DEFAULT_LOGIN_WINDOW_SECS: i64 = 15 * 60;
 
@@ -141,6 +229,12 @@ pub enum AccountError {
     TooManyAttempts,
     /// The pairing code is unknown, expired, or already used.
     PairCodeInvalid,
+    /// The recovery code didn't match (or no recovery code is set for this email).
+    /// Indistinguishable from an unknown email — both deny without a hint.
+    BadRecoveryCode,
+    /// A cryptographic primitive (RNG / Argon2id) failed unexpectedly. Should be
+    /// unreachable in practice; surfaced as an internal error, never a credential leak.
+    Internal,
 }
 
 impl From<AccountError> for Status {
@@ -167,6 +261,12 @@ impl From<AccountError> for Status {
             AccountError::PairCodeInvalid => {
                 Status::not_found("pairing code is invalid, expired, or already used")
             }
+            // Same opaque message as bad credentials — never reveal whether the
+            // email is known vs. the code is simply wrong.
+            AccountError::BadRecoveryCode => {
+                Status::unauthenticated("invalid email or recovery code")
+            }
+            AccountError::Internal => Status::internal("internal error"),
         }
     }
 }
@@ -185,12 +285,41 @@ pub struct GuardianScope {
 // In-memory store
 // ---------------------------------------------------------------------------
 
+/// How an account's password is stored at rest. Exactly one form is authoritative.
+#[derive(Clone)]
+enum PwHash {
+    /// Argon2id PHC string (`$argon2id$...`) — the current scheme (new + rotated).
+    Argon2(String),
+    /// LEGACY PBKDF2-HMAC-SHA256 salt+hash — verified on login, then transparently
+    /// re-hashed to [`PwHash::Argon2`] and persisted (one-shot per account).
+    Pbkdf2 {
+        salt: [u8; SALT_LEN],
+        hash: [u8; HASH_LEN],
+    },
+}
+
 #[derive(Clone)]
 struct Account {
     account_id: String,
     family_id: String,
-    salt: [u8; SALT_LEN],
-    hash: [u8; HASH_LEN],
+    /// Password at rest (Argon2id, or legacy PBKDF2 awaiting on-login migration).
+    pw: PwHash,
+    /// Argon2id hash of the single-use recovery code, if one is set. `None` for a
+    /// legacy account loaded from a pre-recovery snapshot (it simply has no
+    /// self-service reset until the operator backstop or a future re-issue).
+    recovery_phc: Option<String>,
+    /// Argon2id hash of an outstanding EMAILED reset token, with its expiry. `None`
+    /// when no email reset is in flight. Single-use: cleared the moment the token is
+    /// consumed (a successful reset) or superseded (a fresh request overwrites it).
+    /// Only the hash is stored — the plaintext is emailed once, never persisted.
+    reset_token: Option<ResetToken>,
+}
+
+/// A pending emailed reset token at rest: its Argon2id hash + an absolute expiry.
+#[derive(Clone)]
+struct ResetToken {
+    phc: String,
+    expires_ms: i64,
 }
 
 #[derive(Clone)]
@@ -243,9 +372,19 @@ struct Inner {
     /// the raw bearer token never sits in a map or on disk — every lookup hashes
     /// the presented token. Expired tokens are rejected (see [`session_live`]).
     sessions: HashMap<String, SessionEntry>,
-    /// email (lowercased) → failed-login throttle (brute-force lockout). Cleared
-    /// on a successful login; not persisted.
+    /// email (lowercased) → failed-sign-in rate limit (repeated-wrong-password
+    /// pause). Cleared on a successful sign-in; not persisted.
     login_fails: HashMap<String, LoginThrottle>,
+    /// email (lowercased) → failed password-RESET throttle. Same shape + window as
+    /// `login_fails` but a SEPARATE counter so reset attempts can't be used to lock
+    /// a victim out of normal login (and vice-versa). Cleared on a successful
+    /// reset; not persisted (an in-memory lockout clears on restart).
+    reset_fails: HashMap<String, LoginThrottle>,
+    /// email (lowercased) → emailed-reset-REQUEST throttle. Counts how often an
+    /// email reset code has been requested for one address so a single inbox can't
+    /// be flooded with reset mail. Separate from `reset_fails` (wrong-code guesses)
+    /// and `login_fails`. Not persisted (clears on restart).
+    request_fails: HashMap<String, LoginThrottle>,
     /// child_id → child record.
     children: HashMap<String, ChildRec>,
     /// device_id → child_id (for routing alerts by device to a child).
@@ -321,28 +460,41 @@ impl AccountStore {
         to_hex(&buf)
     }
 
-    fn hash_password(&self, password: &str) -> ([u8; SALT_LEN], [u8; HASH_LEN]) {
-        let mut salt = [0u8; SALT_LEN];
-        self.rng.fill(&mut salt).expect("system RNG must not fail");
-        let mut hash = [0u8; HASH_LEN];
-        pbkdf2::derive(
-            PBKDF2_ALG,
-            NonZeroU32::new(PBKDF2_ITERS).unwrap(),
-            &salt,
-            password.as_bytes(),
-            &mut hash,
-        );
-        (salt, hash)
+    /// Hash a new/rotated password with Argon2id → a PHC string. New accounts and
+    /// every change/reset go through here; the legacy PBKDF2 path is verify-only.
+    fn hash_password(&self, password: &str) -> Result<String, AccountError> {
+        argon2_hash(&self.rng, password.as_bytes())
     }
 
-    /// Create a parent account. Returns `(account_id, created=true)`, or the
-    /// existing id with `created=false` if the email is taken.
+    /// Generate a fresh single-use recovery code (plaintext) and its Argon2id hash.
+    /// Returns `(plaintext_for_the_user, hash_for_storage)`. The plaintext is shown
+    /// once and never recoverable; only the hash is persisted.
+    fn new_recovery_code(&self) -> Result<(String, String), AccountError> {
+        let mut buf = [0u8; RECOVERY_CODE_BYTES];
+        self.rng
+            .fill(&mut buf)
+            .map_err(|_| AccountError::Internal)?;
+        // Crockford-ish base32 (no padding) split into readable groups. We hash the
+        // canonical (uppercased, dash-stripped) form so user-entered spacing/case
+        // doesn't matter on reset.
+        let raw = data_encoding::BASE32_NOPAD.encode(&buf);
+        let display = group_recovery_code(&raw);
+        let hash = argon2_hash(&self.rng, normalize_recovery_code(&display).as_bytes())?;
+        Ok((display, hash))
+    }
+
+    /// Create a parent account. Returns `(account_id, created, recovery_code)`:
+    /// `created=true` + a one-time recovery code on success, or the existing id with
+    /// `created=false` and an EMPTY recovery code if the email is taken (a duplicate
+    /// call must NOT mint a code — that would let anyone harvest a reset credential
+    /// for a registered email). The recovery code's plaintext is returned ONCE; only
+    /// its Argon2id hash is stored.
     pub fn create_account(
         &self,
         email: &str,
         password: &str,
         _display_name: &str,
-    ) -> Result<(String, bool), AccountError> {
+    ) -> Result<(String, bool, String), AccountError> {
         let email_key = normalize_email(email);
         if email_key.is_empty() {
             return Err(AccountError::Validation("email is required"));
@@ -352,11 +504,15 @@ impl AccountStore {
                 "password must be at least 8 characters",
             ));
         }
+        // Hash OUTSIDE the lock (Argon2id is deliberately slow + memory-hard — never
+        // hold the global account mutex across it).
+        let phc = self.hash_password(password)?;
+        let (recovery_code, recovery_phc) = self.new_recovery_code()?;
         let mut inner = self.inner.lock().expect("account mutex poisoned");
         if let Some(existing) = inner.by_email.get(&email_key) {
-            return Ok((existing.account_id.clone(), false));
+            // Email taken: no-op, and crucially DO NOT leak a recovery code.
+            return Ok((existing.account_id.clone(), false, String::new()));
         }
-        let (salt, hash) = self.hash_password(password);
         let account_id = self.rand_hex(ID_BYTES);
         let family_id = self.rand_hex(ID_BYTES);
         inner
@@ -367,15 +523,19 @@ impl AccountStore {
             Account {
                 account_id: account_id.clone(),
                 family_id,
-                salt,
-                hash,
+                pw: PwHash::Argon2(phc),
+                recovery_phc: Some(recovery_phc),
+                reset_token: None,
             },
         );
         self.persist_locked(&inner);
-        Ok((account_id, true))
+        Ok((account_id, true, recovery_code))
     }
 
-    /// Verify credentials and mint a session token on success.
+    /// Verify credentials and mint a session token on success. Accepts EITHER the
+    /// current Argon2id PHC OR a legacy PBKDF2 hash; on a successful legacy verify
+    /// the password is transparently re-hashed to Argon2id and persisted (the
+    /// account self-upgrades on next login, zero user action).
     pub fn login(
         &self,
         email: &str,
@@ -384,36 +544,54 @@ impl AccountStore {
         let email_key = normalize_email(email);
         let now = Self::now_ms();
         let (max_fails, window_ms) = login_throttle_params();
-        let mut inner = self.inner.lock().expect("account mutex poisoned");
 
-        // Brute-force lockout: once an email has too many recent failures, reject
-        // (without even checking the password) until the window elapses.
-        if inner
-            .login_fails
-            .get(&email_key)
-            .is_some_and(|t| throttle_locked(t, now, window_ms, max_fails))
-        {
-            return Err(AccountError::TooManyAttempts);
-        }
-
-        // An unknown email and a wrong password are indistinguishable to the caller
-        // (both `BadCredentials`) and both count toward the lockout. salt/hash are
-        // fixed-size arrays (Copy), so cloning them drops the `by_email` borrow.
-        let creds = inner
-            .by_email
-            .get(&email_key)
-            .map(|a| (a.salt, a.hash, a.account_id.clone()));
-        let verified = match &creds {
-            Some((salt, hash, _)) => pbkdf2::verify(
-                PBKDF2_ALG,
-                NonZeroU32::new(PBKDF2_ITERS).unwrap(),
-                salt,
-                password.as_bytes(),
-                hash,
-            )
-            .is_ok(),
-            None => false,
+        // Snapshot the throttle + stored hash under the lock, then RELEASE it before
+        // the (deliberately slow) KDF verify — never hold the global mutex across
+        // Argon2id, or one slow login serializes all others.
+        let pw = {
+            let inner = self.inner.lock().expect("account mutex poisoned");
+            if inner
+                .login_fails
+                .get(&email_key)
+                .is_some_and(|t| throttle_locked(t, now, window_ms, max_fails))
+            {
+                return Err(AccountError::TooManyAttempts);
+            }
+            inner
+                .by_email
+                .get(&email_key)
+                .map(|a| (a.pw.clone(), a.account_id.clone()))
         };
+
+        // An unknown email and a wrong password are indistinguishable (both
+        // `BadCredentials`) and both count toward the lockout.
+        let (verified, needs_rehash, account_id) = match &pw {
+            Some((PwHash::Argon2(phc), aid)) => {
+                (argon2_verify(phc, password.as_bytes()), false, aid.clone())
+            }
+            Some((PwHash::Pbkdf2 { salt, hash }, aid)) => {
+                let ok = pbkdf2::verify(
+                    PBKDF2_ALG,
+                    NonZeroU32::new(PBKDF2_ITERS).unwrap(),
+                    salt,
+                    password.as_bytes(),
+                    hash,
+                )
+                .is_ok();
+                // A correct legacy password earns a one-shot upgrade to Argon2id.
+                (ok, ok, aid.clone())
+            }
+            None => (false, false, String::new()),
+        };
+
+        // Re-hash legacy → Argon2id OUTSIDE the lock (slow), before re-acquiring.
+        let upgraded_phc = if verified && needs_rehash {
+            self.hash_password(password).ok()
+        } else {
+            None
+        };
+
+        let mut inner = self.inner.lock().expect("account mutex poisoned");
         if !verified {
             let t = inner
                 .login_fails
@@ -426,9 +604,14 @@ impl AccountStore {
             return Err(AccountError::BadCredentials);
         }
 
-        // Success: clear the failure counter and mint a session.
+        // Success: clear the failure counter, apply any legacy→Argon2id upgrade,
+        // and mint a session.
         inner.login_fails.remove(&email_key);
-        let account_id = creds.expect("verified implies creds present").2;
+        if let Some(phc) = upgraded_phc {
+            if let Some(acct) = inner.by_email.get_mut(&email_key) {
+                acct.pw = PwHash::Argon2(phc);
+            }
+        }
         let token = self.rand_hex(TOKEN_BYTES);
         let issued_ms = now;
         // Stored/persisted by DIGEST only — the raw token goes to the caller and
@@ -440,10 +623,250 @@ impl AccountStore {
                 issued_ms,
             },
         );
-        // Persist the new session so a redeploy/restart doesn't invalidate the
-        // login (the testing-phase continuous deploy restarts the server often).
+        // Persist the new session (and any rehash) so a redeploy/restart doesn't
+        // invalidate the login (the testing-phase continuous deploy restarts often).
         self.persist_locked(&inner);
         Ok((token, account_id, issued_ms))
+    }
+
+    /// Authenticated password change: the caller proves the OLD password, sets a
+    /// new Argon2id one. On success ALL of the account's sessions EXCEPT the
+    /// caller's are invalidated (a leaked old session can't outlive the rotation).
+    /// Passwords are never logged.
+    pub fn change_password(
+        &self,
+        token: &str,
+        old_password: &str,
+        new_password: &str,
+    ) -> Result<String, AccountError> {
+        if new_password.len() < 8 {
+            return Err(AccountError::Validation(
+                "password must be at least 8 characters",
+            ));
+        }
+        // Resolve the session → account, and snapshot the stored hash, under the
+        // lock; then verify + re-hash OUTSIDE it (slow KDF).
+        let (account_id, pw) = {
+            let inner = self.inner.lock().expect("account mutex poisoned");
+            let account_id = Self::account_for_token(&inner, token)?;
+            let pw = inner
+                .by_email
+                .values()
+                .find(|a| a.account_id == account_id)
+                .map(|a| a.pw.clone())
+                .ok_or(AccountError::Unauthorized)?;
+            (account_id, pw)
+        };
+
+        let old_ok = match &pw {
+            PwHash::Argon2(phc) => argon2_verify(phc, old_password.as_bytes()),
+            PwHash::Pbkdf2 { salt, hash } => pbkdf2::verify(
+                PBKDF2_ALG,
+                NonZeroU32::new(PBKDF2_ITERS).unwrap(),
+                salt,
+                old_password.as_bytes(),
+                hash,
+            )
+            .is_ok(),
+        };
+        if !old_ok {
+            return Err(AccountError::BadCredentials);
+        }
+        let new_phc = self.hash_password(new_password)?;
+        let keep = token_hash(token);
+
+        let mut inner = self.inner.lock().expect("account mutex poisoned");
+        // Find the account by email key (mutable) and set the new hash.
+        let email_key = inner
+            .email_by_id
+            .get(&account_id)
+            .cloned()
+            .ok_or(AccountError::Unauthorized)?;
+        match inner.by_email.get_mut(&email_key) {
+            Some(acct) => acct.pw = PwHash::Argon2(new_phc),
+            None => return Err(AccountError::Unauthorized),
+        }
+        // Invalidate every OTHER session for this account; the caller's stays live.
+        inner
+            .sessions
+            .retain(|digest, e| e.account_id != account_id || *digest == keep);
+        self.persist_locked(&inner);
+        Ok(account_id)
+    }
+
+    /// Self-service password reset via the one-time recovery code — no operator
+    /// loop. Verifies the recovery-code hash for `email`, sets the new Argon2id
+    /// password, INVALIDATES the used code, issues + returns a FRESH one, and (like
+    /// change_password) drops all of the account's existing sessions. Reset
+    /// attempts are throttled per email exactly like login. Returns the new
+    /// recovery code (shown once).
+    pub fn reset_password(
+        &self,
+        email: &str,
+        recovery_code: &str,
+        new_password: &str,
+    ) -> Result<String, AccountError> {
+        let email_key = normalize_email(email);
+        let now = Self::now_ms();
+        let (max_fails, window_ms) = login_throttle_params();
+        if new_password.len() < 8 {
+            return Err(AccountError::Validation(
+                "password must be at least 8 characters",
+            ));
+        }
+
+        // Throttle + snapshot BOTH the stored recovery hash and any outstanding
+        // emailed reset token under the lock; verify the (slow) Argon2id OUTSIDE it.
+        // `recovery_code` in the request may be EITHER credential — we try the
+        // recovery code first, then the emailed token.
+        let (recovery_phc, reset_token) = {
+            let inner = self.inner.lock().expect("account mutex poisoned");
+            if inner
+                .reset_fails
+                .get(&email_key)
+                .is_some_and(|t| throttle_locked(t, now, window_ms, max_fails))
+            {
+                return Err(AccountError::TooManyAttempts);
+            }
+            // Unknown email and "no credential set" are indistinguishable from a
+            // wrong code (all → BadRecoveryCode) so we never confirm an email exists.
+            match inner.by_email.get(&email_key) {
+                Some(a) => (a.recovery_phc.clone(), a.reset_token.clone()),
+                None => (None, None),
+            }
+        };
+
+        // 1) Recovery code (rotates on success). 2) Emailed token (expires on
+        // success, and only if it hasn't already timed out).
+        let recovery_ok = match &recovery_phc {
+            Some(phc) => argon2_verify(phc, normalize_recovery_code(recovery_code).as_bytes()),
+            None => false,
+        };
+        let token_ok = !recovery_ok
+            && match &reset_token {
+                Some(t) => {
+                    t.expires_ms > now
+                        && argon2_verify(&t.phc, normalize_recovery_code(recovery_code).as_bytes())
+                }
+                None => false,
+            };
+
+        if !recovery_ok && !token_ok {
+            let mut inner = self.inner.lock().expect("account mutex poisoned");
+            let t = inner
+                .reset_fails
+                .entry(email_key.clone())
+                .or_insert(LoginThrottle {
+                    fails: 0,
+                    window_start_ms: now,
+                });
+            record_failure(t, now, window_ms);
+            return Err(AccountError::BadRecoveryCode);
+        }
+
+        // Valid credential: mint the new password hash + a fresh recovery code
+        // (slow, outside the lock), then commit.
+        let new_phc = self.hash_password(new_password)?;
+        let (new_recovery_code, new_recovery_phc) = self.new_recovery_code()?;
+
+        let mut inner = self.inner.lock().expect("account mutex poisoned");
+        inner.reset_fails.remove(&email_key);
+        let account_id = match inner.by_email.get_mut(&email_key) {
+            Some(acct) => {
+                acct.pw = PwHash::Argon2(new_phc);
+                acct.recovery_phc = Some(new_recovery_phc); // single-use: old code is dead
+                                                            // Any outstanding emailed token is consumed by ANY successful reset
+                                                            // (whichever credential proved it) so a leaked code can't be replayed.
+                acct.reset_token = None;
+                acct.account_id.clone()
+            }
+            // The account vanished between snapshot and commit (extremely unlikely).
+            None => return Err(AccountError::BadRecoveryCode),
+        };
+        // Drop every session for this account — a reset means "I lost control of
+        // this account"; force a fresh login everywhere.
+        inner.sessions.retain(|_, e| e.account_id != account_id);
+        self.persist_locked(&inner);
+        Ok(new_recovery_code)
+    }
+
+    /// Request an EMAILED reset code — the alternative to the saved recovery code.
+    /// ANTI-ENUMERATION: this is intentionally side-effect-quiet. It returns
+    /// `Ok(Some((recipient_email, plaintext_code)))` ONLY when the email is a real
+    /// account AND the per-email request rate limit hasn't been hit; otherwise
+    /// `Ok(None)`. The CALLER (the async service) maps BOTH outcomes onto the SAME
+    /// generic ack, so an observer can't tell a known email from an unknown one. On
+    /// the `Some` path the account stores only the Argon2id HASH of the code + an
+    /// expiry; the returned plaintext is for the one outgoing email and is never
+    /// persisted. A fresh request overwrites any previous outstanding token.
+    pub fn request_password_reset(
+        &self,
+        email: &str,
+    ) -> Result<Option<(String, String)>, AccountError> {
+        let email_key = normalize_email(email);
+        let now = Self::now_ms();
+        let (max_fails, window_ms) = login_throttle_params();
+
+        // Rate-limit the REQUEST per email (separate from wrong-code guesses) so a
+        // single inbox can't be flooded. A throttled request returns `None` — which
+        // the caller renders identically to an unknown email (anti-enumeration).
+        {
+            let mut inner = self.inner.lock().expect("account mutex poisoned");
+            let known = inner.by_email.contains_key(&email_key);
+            if inner
+                .request_fails
+                .get(&email_key)
+                .is_some_and(|t| throttle_locked(t, now, window_ms, max_fails))
+            {
+                return Ok(None);
+            }
+            // Count this request toward the per-email cap whether or not the email
+            // exists (so probing an inbox is bounded regardless of account state).
+            let t = inner
+                .request_fails
+                .entry(email_key.clone())
+                .or_insert(LoginThrottle {
+                    fails: 0,
+                    window_start_ms: now,
+                });
+            record_failure(t, now, window_ms);
+            if !known {
+                // No such account — no email, but the caller still acks generically.
+                return Ok(None);
+            }
+        }
+
+        // Mint a token (slow hash, outside the lock), then store its hash + expiry.
+        let (code, code_phc) = self.new_reset_token()?;
+        let expires_ms = now.saturating_add(reset_token_ttl_ms());
+
+        let mut inner = self.inner.lock().expect("account mutex poisoned");
+        match inner.by_email.get_mut(&email_key) {
+            Some(acct) => {
+                acct.reset_token = Some(ResetToken {
+                    phc: code_phc,
+                    expires_ms,
+                });
+            }
+            // The account vanished between the checks (extremely unlikely) — ack
+            // generically without sending.
+            None => return Ok(None),
+        }
+        self.persist_locked(&inner);
+        Ok(Some((email_key, code)))
+    }
+
+    /// Generate a fresh emailed reset token (plaintext) + its Argon2id hash. Same
+    /// readable base32 grouping as the recovery code so a guardian can type it back.
+    fn new_reset_token(&self) -> Result<(String, String), AccountError> {
+        let mut buf = [0u8; RESET_TOKEN_BYTES];
+        self.rng
+            .fill(&mut buf)
+            .map_err(|_| AccountError::Internal)?;
+        let raw = data_encoding::BASE32_NOPAD.encode(&buf);
+        let display = group_recovery_code(&raw);
+        let hash = argon2_hash(&self.rng, normalize_recovery_code(&display).as_bytes())?;
+        Ok((display, hash))
     }
 
     /// Resolve a session token to its account_id, or `Unauthorized` (unknown OR
@@ -673,6 +1096,27 @@ fn normalize_email(email: &str) -> String {
     email.trim().to_ascii_lowercase()
 }
 
+/// Split a base32 recovery string into dash-separated groups for legibility
+/// (e.g. `K7MQ29XF4T...` → `K7MQ2-9XF4T-...`). Cosmetic only — the stored hash is
+/// over the [`normalize_recovery_code`] form, so grouping never affects verify.
+fn group_recovery_code(raw: &str) -> String {
+    let chars: Vec<char> = raw.chars().collect();
+    chars
+        .chunks(RECOVERY_GROUP_LEN)
+        .map(|c| c.iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// Canonicalize a user-entered recovery code for hashing/verify: strip dashes and
+/// whitespace, uppercase. So `k7mq2-9xf4t` and `K7MQ2 9XF4T` verify identically.
+fn normalize_recovery_code(code: &str) -> String {
+    code.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_uppercase()
+}
+
 /// Lowercase-hex encode (no deps).
 fn to_hex(bytes: &[u8]) -> String {
     const H: &[u8; 16] = b"0123456789abcdef";
@@ -685,10 +1129,10 @@ fn to_hex(bytes: &[u8]) -> String {
 }
 
 /// sha256 of a presented session token, lowercase hex. Sessions are keyed and
-/// persisted by this digest ONLY, so a stolen accounts.json (or memory dump of
-/// the map) cannot impersonate a guardian. Unsalted SHA-256 is sufficient here:
+/// persisted by this digest ONLY, so a copied accounts.json (or a memory dump of
+/// the map) cannot stand in for a guardian. Unsalted SHA-256 is sufficient here:
 /// tokens carry 256 bits of CSPRNG entropy ([`TOKEN_BYTES`]), so dictionary /
-/// rainbow-table attacks do not apply (unlike passwords, which use PBKDF2).
+/// rainbow-table precomputation does not apply (unlike passwords, which use a KDF).
 fn token_hash(token: &str) -> String {
     to_hex(ring::digest::digest(&ring::digest::SHA256, token.trim().as_bytes()).as_ref())
 }
@@ -707,9 +1151,10 @@ fn from_hex_array<const N: usize>(s: &str) -> Option<[u8; N]> {
 }
 
 // ---------------------------------------------------------------------------
-// Durable snapshot (serde JSON). Content-free: the KDF salt+hash (never the
-// password), ids, hosts. Sessions are persisted as sha256(token) digests —
-// the raw bearer token never touches disk.
+// Durable snapshot (serde JSON). Content-free: the Argon2id PHC string (or a
+// legacy PBKDF2 salt+hash awaiting migration) + the recovery-code hash — NEVER
+// the password or the recovery-code plaintext, ids, hosts. Sessions are persisted
+// as sha256(token) digests — the raw bearer token never touches disk.
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Default)]
@@ -740,8 +1185,35 @@ struct AccountRow {
     email_key: String,
     account_id: String,
     family_id: String,
+    /// Current scheme: Argon2id PHC string (`$argon2id$...`). `#[serde(default)]`
+    /// keeps old salt_hex/hash_hex-only files loadable; empty = legacy account.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    phc: String,
+    /// LEGACY PBKDF2 salt — present only for not-yet-migrated accounts. Skipped on
+    /// write once an account upgrades to `phc` (so the at-rest form is Argon2id only).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     salt_hex: String,
+    /// LEGACY PBKDF2 hash — see `salt_hex`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     hash_hex: String,
+    /// Argon2id hash of the single-use recovery code (`#[serde(default)]` → old
+    /// files without it load as "no recovery code set").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    recovery_phc: String,
+    /// Argon2id hash of an outstanding EMAILED reset token (`#[serde(default)]` →
+    /// old files load as "no email reset in flight"). Empty when none. Only the hash
+    /// is persisted; the plaintext lives only in the one outgoing email.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    reset_token_phc: String,
+    /// Absolute expiry (unix ms) of `reset_token_phc`. Expired tokens are pruned on
+    /// load (like sessions), so a stale code can't linger at rest. 0 when none.
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    reset_token_expires_ms: i64,
+}
+
+/// serde helper: drop a zero expiry from the snapshot (keeps old files byte-clean).
+fn is_zero_i64(v: &i64) -> bool {
+    *v == 0
 }
 
 #[derive(Serialize, Deserialize)]
@@ -760,12 +1232,29 @@ impl Inner {
         let mut accounts: Vec<AccountRow> = self
             .by_email
             .iter()
-            .map(|(email_key, a)| AccountRow {
-                email_key: email_key.clone(),
-                account_id: a.account_id.clone(),
-                family_id: a.family_id.clone(),
-                salt_hex: to_hex(&a.salt),
-                hash_hex: to_hex(&a.hash),
+            .map(|(email_key, a)| {
+                let (phc, salt_hex, hash_hex) = match &a.pw {
+                    PwHash::Argon2(s) => (s.clone(), String::new(), String::new()),
+                    PwHash::Pbkdf2 { salt, hash } => (String::new(), to_hex(salt), to_hex(hash)),
+                };
+                // Persist an outstanding emailed reset token (hash + expiry) so it
+                // survives a restart; a token already past its expiry is written as
+                // "none" (it is dead anyway and is pruned on load regardless).
+                let (reset_token_phc, reset_token_expires_ms) = match &a.reset_token {
+                    Some(t) => (t.phc.clone(), t.expires_ms),
+                    None => (String::new(), 0),
+                };
+                AccountRow {
+                    email_key: email_key.clone(),
+                    account_id: a.account_id.clone(),
+                    family_id: a.family_id.clone(),
+                    phc,
+                    salt_hex,
+                    hash_hex,
+                    recovery_phc: a.recovery_phc.clone().unwrap_or_default(),
+                    reset_token_phc,
+                    reset_token_expires_ms,
+                }
             })
             .collect();
         accounts.sort_by(|a, b| a.email_key.cmp(&b.email_key));
@@ -813,26 +1302,46 @@ impl Inner {
     fn from_snapshot(snap: AccountSnapshot) -> Inner {
         let mut inner = Inner::default();
         for row in snap.accounts {
-            let (salt, hash) = match (
-                from_hex_array::<SALT_LEN>(&row.salt_hex),
-                from_hex_array::<HASH_LEN>(&row.hash_hex),
-            ) {
-                (Some(s), Some(h)) => (s, h),
-                _ => {
-                    tracing::warn!(account = %row.account_id, "skipping account with malformed salt/hash");
-                    continue;
+            // Prefer the Argon2id PHC; fall back to the legacy PBKDF2 salt+hash for
+            // pre-upgrade snapshots. A row with neither (or a malformed legacy pair)
+            // is unusable → skipped, never fatal.
+            let pw = if !row.phc.is_empty() {
+                PwHash::Argon2(row.phc)
+            } else {
+                match (
+                    from_hex_array::<SALT_LEN>(&row.salt_hex),
+                    from_hex_array::<HASH_LEN>(&row.hash_hex),
+                ) {
+                    (Some(salt), Some(hash)) => PwHash::Pbkdf2 { salt, hash },
+                    _ => {
+                        tracing::warn!(account = %row.account_id, "skipping account with no usable password hash");
+                        continue;
+                    }
                 }
             };
             inner
                 .email_by_id
                 .insert(row.account_id.clone(), row.email_key.clone());
+            // Restore an outstanding emailed reset token only if it is present AND
+            // not already expired — prune stale tokens on load, like sessions.
+            let reset_token = if !row.reset_token_phc.is_empty()
+                && row.reset_token_expires_ms > AccountStore::now_ms()
+            {
+                Some(ResetToken {
+                    phc: row.reset_token_phc,
+                    expires_ms: row.reset_token_expires_ms,
+                })
+            } else {
+                None
+            };
             inner.by_email.insert(
                 row.email_key,
                 Account {
                     account_id: row.account_id,
                     family_id: row.family_id,
-                    salt,
-                    hash,
+                    pw,
+                    recovery_phc: (!row.recovery_phc.is_empty()).then_some(row.recovery_phc),
+                    reset_token,
                 },
             );
         }
@@ -899,11 +1408,47 @@ pub fn bearer_token<T>(req: &Request<T>) -> Option<String> {
 #[derive(Clone)]
 pub struct AccountsService {
     store: AccountStore,
+    /// Optional EMAIL-based reset path: when `Some`, RequestPasswordReset emails a
+    /// short-lived code; when `None` (no SMTP configured) the recovery code stays
+    /// the only self-service reset, and the endpoint still acks generically.
+    mailer: Option<crate::reset_mailer::ResetMailer>,
 }
 
 impl AccountsService {
+    /// Recovery-code-only service (no email reset). Unchanged callers/tests use this.
     pub fn new(store: AccountStore) -> Self {
-        Self { store }
+        Self {
+            store,
+            mailer: None,
+        }
+    }
+
+    /// Service with an attached email-reset mailer (the email path is enabled).
+    pub fn with_mailer(store: AccountStore, mailer: crate::reset_mailer::ResetMailer) -> Self {
+        Self {
+            store,
+            mailer: Some(mailer),
+        }
+    }
+
+    /// Build the service, enabling the email-reset path automatically when SMTP is
+    /// configured in the environment (`BULWARK_SMTP_HOST` + a `From:`). Without SMTP
+    /// the recovery-code path is the self-service fallback and we log one warning so
+    /// operators know email reset is unavailable.
+    pub fn from_env(store: AccountStore) -> Self {
+        match crate::reset_mailer::ResetMailer::from_env() {
+            Some(mailer) => {
+                tracing::info!("email password-reset ENABLED (SMTP configured)");
+                Self::with_mailer(store, mailer)
+            }
+            None => {
+                tracing::warn!(
+                    "email password-reset unavailable (no SMTP configured); \
+                     guardians self-reset with their saved recovery code"
+                );
+                Self::new(store)
+            }
+        }
     }
 
     /// Resolve the effective token for a mutating call: the explicit field first,
@@ -923,17 +1468,19 @@ impl Accounts for AccountsService {
         req: Request<CreateAccountRequest>,
     ) -> Result<Response<AccountAck>, Status> {
         let r = req.into_inner();
-        let (account_id, created) =
+        let (account_id, created, recovery_code) =
             self.store
                 .create_account(&r.email, &r.password, &r.display_name)?;
         Ok(Response::new(AccountAck {
             account_id,
             created,
             detail: if created {
-                "account created".to_string()
+                "account created — SAVE the recovery code; it is shown only once".to_string()
             } else {
                 "email already registered".to_string()
             },
+            // One-time secret on a fresh account; empty on the duplicate-email no-op.
+            recovery_code,
         }))
     }
 
@@ -999,6 +1546,81 @@ impl Accounts for AccountsService {
             family_id,
         }))
     }
+
+    async fn change_password(
+        &self,
+        req: Request<ChangePasswordRequest>,
+    ) -> Result<Response<AccountAck>, Status> {
+        let token = Self::token_or_meta(&req, &req.get_ref().token);
+        let r = req.into_inner();
+        // Passwords are NEVER logged — only the resulting account id is observable.
+        let account_id = self
+            .store
+            .change_password(&token, &r.old_password, &r.new_password)?;
+        Ok(Response::new(AccountAck {
+            account_id,
+            created: false,
+            detail: "password changed; other sessions signed out".to_string(),
+            recovery_code: String::new(), // change does not rotate the recovery code
+        }))
+    }
+
+    async fn reset_password(
+        &self,
+        req: Request<ResetPasswordRequest>,
+    ) -> Result<Response<ResetPasswordAck>, Status> {
+        // Unauthenticated by design — the recovery code is the credential.
+        let r = req.into_inner();
+        let new_recovery_code =
+            self.store
+                .reset_password(&r.email, &r.recovery_code, &r.new_password)?;
+        Ok(Response::new(ResetPasswordAck {
+            ok: true,
+            detail: "password reset — SAVE the new recovery code; the old one is now void"
+                .to_string(),
+            new_recovery_code,
+        }))
+    }
+
+    async fn request_password_reset(
+        &self,
+        req: Request<RequestPasswordResetRequest>,
+    ) -> Result<Response<RequestPasswordResetAck>, Status> {
+        // Unauthenticated by design — the guardian is proving nothing yet; they
+        // just ask for a code to be emailed to the account address.
+        let r = req.into_inner();
+
+        // The store mints + stores a token ONLY for a real, un-throttled account;
+        // it returns the recipient + plaintext to email. An unknown email, a
+        // throttled request, or a mint error all yield `None`/`Err` here, and we
+        // ack the SAME generic message either way (anti-enumeration: never reveal
+        // whether the email exists, and never surface an account-state error).
+        if let Ok(Some((recipient, code))) = self.store.request_password_reset(&r.email) {
+            match &self.mailer {
+                Some(mailer) => {
+                    let ttl_minutes = reset_token_ttl_ms() / 60_000;
+                    // The reset code is NEVER logged. A send failure is logged
+                    // content-free and does not change the generic ack.
+                    if let Err(e) = mailer.send_reset_code(&recipient, &code, ttl_minutes).await {
+                        tracing::warn!(error = %e, "guardian password-reset email could not be sent");
+                    }
+                }
+                None => {
+                    // SMTP not configured: a token was minted but cannot be emailed.
+                    // Still ack generically; warn once so operators can enable SMTP.
+                    tracing::warn!(
+                        "password-reset email requested but email reset is unavailable \
+                         (no SMTP configured); the guardian should use their recovery code"
+                    );
+                }
+            }
+        }
+
+        Ok(Response::new(RequestPasswordResetAck {
+            ok: true,
+            detail: "If that email has an account, a reset code has been sent.".to_string(),
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -1046,11 +1668,11 @@ mod tests {
         let dir = tmp_dir("reload");
         // Fresh persisted store: account + child + a second guardian.
         let s1 = AccountStore::with_state_dir(&dir).unwrap();
-        let (alice, created) = s1.create_account("a@x.com", "passwordone", "A").unwrap();
+        let (alice, created, _rc) = s1.create_account("a@x.com", "passwordone", "A").unwrap();
         assert!(created);
         let (a_tok, _, _) = s1.login("a@x.com", "passwordone").unwrap();
         let child = s1.add_child(&a_tok, "Kid", "kids-tablet").unwrap();
-        let (bob, _) = s1.create_account("b@x.com", "passwordtwo", "B").unwrap();
+        let (bob, _, _) = s1.create_account("b@x.com", "passwordtwo", "B").unwrap();
         s1.assign_guardian(&a_tok, &child.child_id, &bob).unwrap();
         drop(s1); // simulate a server restart
 
@@ -1234,18 +1856,26 @@ mod tests {
     #[test]
     fn password_round_trips_and_rejects_wrong() {
         let store = AccountStore::new();
-        let (id, created) = store
+        let (id, created, recovery) = store
             .create_account("Parent@Example.com", "hunter2hunter", "P")
             .unwrap();
         assert!(created);
         assert!(!id.is_empty());
+        assert!(
+            !recovery.is_empty(),
+            "a fresh account is issued a recovery code"
+        );
 
-        // Duplicate email → created = false, same id.
-        let (id2, created2) = store
+        // Duplicate email → created = false, same id, and NO recovery code leaked.
+        let (id2, created2, recovery2) = store
             .create_account("parent@example.com", "different-pass", "P")
             .unwrap();
         assert!(!created2);
         assert_eq!(id, id2, "email is case-insensitive and unique");
+        assert!(
+            recovery2.is_empty(),
+            "a duplicate-email no-op must not mint a recovery credential"
+        );
 
         // Right password logs in; wrong password is rejected.
         let (_tok, acct, _ts) = store.login("parent@example.com", "hunter2hunter").unwrap();
@@ -1271,11 +1901,11 @@ mod tests {
     fn child_and_guardian_routing_is_isolated() {
         let store = AccountStore::new();
         // Two separate parents.
-        let (_alice_id, _) = store
+        let (_alice_id, _, _) = store
             .create_account("alice@x.com", "alicepass1", "A")
             .unwrap();
         let (alice_tok, _, _) = store.login("alice@x.com", "alicepass1").unwrap();
-        let (bob_id, _) = store
+        let (bob_id, _, _) = store
             .create_account("bob@x.com", "bobpassword", "B")
             .unwrap();
         let (bob_tok, _, _) = store.login("bob@x.com", "bobpassword").unwrap();
@@ -1327,9 +1957,9 @@ mod tests {
         // A device_id maps to exactly one child — otherwise two families would
         // both match it in StreamPendingReviews and leak alerts across families.
         let store = AccountStore::new();
-        let (_a, _) = store.create_account("a@x.com", "passwordone", "A").unwrap();
+        let (_a, _, _) = store.create_account("a@x.com", "passwordone", "A").unwrap();
         let (a_tok, _, _) = store.login("a@x.com", "passwordone").unwrap();
-        let (_b, _) = store.create_account("b@x.com", "passwordtwo", "B").unwrap();
+        let (_b, _, _) = store.create_account("b@x.com", "passwordtwo", "B").unwrap();
         let (b_tok, _, _) = store.login("b@x.com", "passwordtwo").unwrap();
 
         store.add_child(&a_tok, "Kid A", "shared-device").unwrap();
@@ -1346,11 +1976,519 @@ mod tests {
     fn add_child_rejects_blank_device_id() {
         // A blank device_id makes the child un-routable (alerts route by device_id).
         let store = AccountStore::new();
-        let (_a, _) = store.create_account("a@x.com", "passwordone", "A").unwrap();
+        let (_a, _, _) = store.create_account("a@x.com", "passwordone", "A").unwrap();
         let (tok, _, _) = store.login("a@x.com", "passwordone").unwrap();
         assert_eq!(
             store.add_child(&tok, "Kid", "   "),
             Err(AccountError::Validation("device_id is required"))
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Argon2id + recovery-code (self-service reset) hardening
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn argon2_hash_round_trips_and_is_phc() {
+        let rng = SystemRandom::new();
+        let phc = argon2_hash(&rng, b"correct horse battery").unwrap();
+        // PHC string, argon2id variant, with an embedded salt (different per call).
+        assert!(phc.starts_with("$argon2id$"), "PHC: {phc}");
+        assert!(argon2_verify(&phc, b"correct horse battery"));
+        assert!(!argon2_verify(&phc, b"wrong"));
+        // A garbage PHC string never panics — just fails to verify.
+        assert!(!argon2_verify("not-a-phc-string", b"anything"));
+        // Fresh salt each hash → two hashes of the same input differ.
+        let phc2 = argon2_hash(&rng, b"correct horse battery").unwrap();
+        assert_ne!(phc, phc2);
+    }
+
+    #[test]
+    fn new_account_stores_argon2_not_pbkdf2() {
+        let store = AccountStore::new();
+        let (_id, _created, rc) = store
+            .create_account("ar@x.com", "passwordone", "A")
+            .unwrap();
+        assert!(!rc.is_empty());
+        let inner = store.inner.lock().unwrap();
+        let acct = inner.by_email.get("ar@x.com").unwrap();
+        assert!(
+            matches!(acct.pw, PwHash::Argon2(_)),
+            "new accounts must hash with Argon2id, never legacy PBKDF2"
+        );
+        assert!(acct.recovery_phc.is_some());
+    }
+
+    /// Insert a LEGACY (PBKDF2-only) account directly, the way an old accounts.json
+    /// would have loaded it — no Argon2id PHC, no recovery code.
+    fn insert_legacy_pbkdf2(store: &AccountStore, email: &str, password: &str) -> String {
+        let mut salt = [0u8; SALT_LEN];
+        store.rng.fill(&mut salt).unwrap();
+        let mut hash = [0u8; HASH_LEN];
+        pbkdf2::derive(
+            PBKDF2_ALG,
+            NonZeroU32::new(PBKDF2_ITERS).unwrap(),
+            &salt,
+            password.as_bytes(),
+            &mut hash,
+        );
+        let account_id = store.rand_hex(ID_BYTES);
+        let email_key = normalize_email(email);
+        let mut inner = store.inner.lock().unwrap();
+        inner
+            .email_by_id
+            .insert(account_id.clone(), email_key.clone());
+        inner.by_email.insert(
+            email_key,
+            Account {
+                account_id: account_id.clone(),
+                family_id: store.rand_hex(ID_BYTES),
+                pw: PwHash::Pbkdf2 { salt, hash },
+                recovery_phc: None,
+                reset_token: None,
+            },
+        );
+        account_id
+    }
+
+    #[test]
+    fn legacy_pbkdf2_login_verifies_and_rehashes_to_argon2() {
+        let store = AccountStore::new();
+        let aid = insert_legacy_pbkdf2(&store, "legacy@x.com", "passwordlegacy");
+        // It really is legacy at rest before any login.
+        assert!(matches!(
+            store
+                .inner
+                .lock()
+                .unwrap()
+                .by_email
+                .get("legacy@x.com")
+                .unwrap()
+                .pw,
+            PwHash::Pbkdf2 { .. }
+        ));
+        // Wrong password is still rejected via the legacy path.
+        assert_eq!(
+            store.login("legacy@x.com", "nope"),
+            Err(AccountError::BadCredentials)
+        );
+        // Correct password logs in AND transparently upgrades to Argon2id.
+        let (_tok, got_aid, _) = store.login("legacy@x.com", "passwordlegacy").unwrap();
+        assert_eq!(got_aid, aid);
+        assert!(
+            matches!(
+                store
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .by_email
+                    .get("legacy@x.com")
+                    .unwrap()
+                    .pw,
+                PwHash::Argon2(_)
+            ),
+            "a correct legacy login must re-hash to Argon2id in place"
+        );
+        // The upgraded account still logs in with the same password.
+        assert!(store.login("legacy@x.com", "passwordlegacy").is_ok());
+    }
+
+    #[test]
+    fn legacy_only_snapshot_loads_logs_in_and_next_persist_has_phc() {
+        // An OLD accounts.json: salt_hex/hash_hex only, no phc, no recovery_phc.
+        let dir = tmp_dir("legacy-snapshot");
+        // Build a real PBKDF2 salt+hash for "passwordlegacy".
+        let rng = SystemRandom::new();
+        let mut salt = [0u8; SALT_LEN];
+        rng.fill(&mut salt).unwrap();
+        let mut hash = [0u8; HASH_LEN];
+        pbkdf2::derive(
+            PBKDF2_ALG,
+            NonZeroU32::new(PBKDF2_ITERS).unwrap(),
+            &salt,
+            b"passwordlegacy",
+            &mut hash,
+        );
+        let legacy = format!(
+            r#"{{"accounts":[{{"email_key":"old@x.com","account_id":"acct-old","family_id":"fam-old","salt_hex":"{}","hash_hex":"{}"}}],"children":[],"sessions":[]}}"#,
+            to_hex(&salt),
+            to_hex(&hash),
+        );
+        std::fs::write(dir.join("accounts.json"), legacy).unwrap();
+
+        let store = AccountStore::with_state_dir(&dir).unwrap();
+        // The old account logs in (legacy verify) — back-compat holds.
+        let (_tok, aid, _) = store.login("old@x.com", "passwordlegacy").unwrap();
+        assert_eq!(aid, "acct-old");
+        // The login re-hashed + persisted: the on-disk row is now Argon2id PHC, and
+        // the legacy salt/hash are gone (skip_serializing_if when phc is set).
+        let on_disk = std::fs::read_to_string(dir.join("accounts.json")).unwrap();
+        assert!(
+            on_disk.contains("$argon2id$"),
+            "next persist carries a PHC string"
+        );
+        assert!(
+            !on_disk.contains(&to_hex(&hash)),
+            "the legacy hash must be dropped once migrated"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recovery_reset_happy_path_rotates_code_and_password() {
+        let store = AccountStore::new();
+        let (_id, _c, code) = store.create_account("r@x.com", "oldpassword", "R").unwrap();
+        // Old password works before the reset.
+        assert!(store.login("r@x.com", "oldpassword").is_ok());
+
+        // Reset with the saved code → new password set, fresh code returned.
+        let new_code = store
+            .reset_password("r@x.com", &code, "brandnewpass")
+            .unwrap();
+        assert!(!new_code.is_empty());
+        assert_ne!(new_code, code, "reset must issue a NEW recovery code");
+
+        // New password works; old password no longer does.
+        assert!(store.login("r@x.com", "brandnewpass").is_ok());
+        assert_eq!(
+            store.login("r@x.com", "oldpassword"),
+            Err(AccountError::BadCredentials)
+        );
+        // The OLD code is single-use → now dead; the NEW one works.
+        assert_eq!(
+            store.reset_password("r@x.com", &code, "anotherpass"),
+            Err(AccountError::BadRecoveryCode)
+        );
+        assert!(store
+            .reset_password("r@x.com", &new_code, "anotherpass")
+            .is_ok());
+    }
+
+    #[test]
+    fn recovery_reset_accepts_user_typed_spacing_and_case() {
+        let store = AccountStore::new();
+        let (_id, _c, code) = store
+            .create_account("sp@x.com", "oldpassword", "S")
+            .unwrap();
+        // User retypes it lowercased, with spaces instead of dashes — still valid.
+        let mangled = code.replace('-', " ").to_ascii_lowercase();
+        assert!(store
+            .reset_password("sp@x.com", &mangled, "newpass12")
+            .is_ok());
+    }
+
+    #[test]
+    fn recovery_reset_wrong_code_is_denied() {
+        let store = AccountStore::new();
+        store.create_account("w@x.com", "oldpassword", "W").unwrap();
+        assert_eq!(
+            store.reset_password("w@x.com", "WRONG-CODE-9999", "newpass12"),
+            Err(AccountError::BadRecoveryCode)
+        );
+        // Unknown email is indistinguishable (no oracle confirming the email exists).
+        assert_eq!(
+            store.reset_password("nobody@x.com", "WRONG-CODE-9999", "newpass12"),
+            Err(AccountError::BadRecoveryCode)
+        );
+        // The real password is untouched by a failed reset.
+        assert!(store.login("w@x.com", "oldpassword").is_ok());
+    }
+
+    #[test]
+    fn recovery_reset_is_throttled_per_email() {
+        let store = AccountStore::new();
+        store.create_account("t@x.com", "oldpassword", "T").unwrap();
+        // Burn the failure budget on wrong codes.
+        for _ in 0..DEFAULT_LOGIN_MAX_FAILS {
+            assert_eq!(
+                store.reset_password("t@x.com", "BADCODE", "newpass12"),
+                Err(AccountError::BadRecoveryCode)
+            );
+        }
+        // Now locked out — even a correct reset is refused until the window passes.
+        assert_eq!(
+            store.reset_password("t@x.com", "WHATEVER", "newpass12"),
+            Err(AccountError::TooManyAttempts)
+        );
+    }
+
+    #[test]
+    fn reset_throttle_is_separate_from_login_throttle() {
+        // Failing resets must NOT lock the victim out of normal login, and v.v.
+        let store = AccountStore::new();
+        store
+            .create_account("sep@x.com", "oldpassword", "S")
+            .unwrap();
+        for _ in 0..DEFAULT_LOGIN_MAX_FAILS {
+            let _ = store.reset_password("sep@x.com", "BADCODE", "newpass12");
+        }
+        // Reset is locked…
+        assert_eq!(
+            store.reset_password("sep@x.com", "X", "newpass12"),
+            Err(AccountError::TooManyAttempts)
+        );
+        // …but login still works (the counters are independent).
+        assert!(store.login("sep@x.com", "oldpassword").is_ok());
+    }
+
+    #[test]
+    fn change_password_requires_correct_old_and_invalidates_other_sessions() {
+        let store = AccountStore::new();
+        store.create_account("c@x.com", "oldpassword", "C").unwrap();
+        // Two live sessions for the same account.
+        let (tok_keep, _aid, _) = store.login("c@x.com", "oldpassword").unwrap();
+        let (tok_other, _aid, _) = store.login("c@x.com", "oldpassword").unwrap();
+        assert!(store.account_for_session(&tok_other).is_some());
+
+        // Wrong old password is denied.
+        assert_eq!(
+            store.change_password(&tok_keep, "wrongold", "newpassword"),
+            Err(AccountError::BadCredentials)
+        );
+        // Correct old password rotates it.
+        store
+            .change_password(&tok_keep, "oldpassword", "newpassword")
+            .unwrap();
+        // New password logs in; old one is dead.
+        assert!(store.login("c@x.com", "newpassword").is_ok());
+        assert_eq!(
+            store.login("c@x.com", "oldpassword"),
+            Err(AccountError::BadCredentials)
+        );
+        // The caller's session survives; the OTHER session is invalidated.
+        assert!(store.account_for_session(&tok_keep).is_some());
+        assert!(
+            store.account_for_session(&tok_other).is_none(),
+            "change-password must sign out the account's other sessions"
+        );
+    }
+
+    #[test]
+    fn change_password_rejects_short_new_password_and_bad_token() {
+        let store = AccountStore::new();
+        store
+            .create_account("c2@x.com", "oldpassword", "C")
+            .unwrap();
+        let (tok, _aid, _) = store.login("c2@x.com", "oldpassword").unwrap();
+        assert_eq!(
+            store.change_password(&tok, "oldpassword", "short"),
+            Err(AccountError::Validation(
+                "password must be at least 8 characters"
+            ))
+        );
+        assert_eq!(
+            store.change_password("not-a-token", "oldpassword", "newpassword"),
+            Err(AccountError::Unauthorized)
+        );
+    }
+
+    #[test]
+    fn recovery_code_hash_is_never_the_plaintext_at_rest() {
+        let dir = tmp_dir("recovery-at-rest");
+        let store = AccountStore::with_state_dir(&dir).unwrap();
+        let (_id, _c, code) = store
+            .create_account("rest@x.com", "oldpassword", "R")
+            .unwrap();
+        let on_disk = std::fs::read_to_string(dir.join("accounts.json")).unwrap();
+        // The plaintext code (and its normalized form) NEVER touch disk.
+        assert!(!on_disk.contains(&code));
+        assert!(!on_disk.contains(&normalize_recovery_code(&code)));
+        // Only its Argon2id hash is persisted.
+        assert!(on_disk.contains("recovery_phc"));
+        assert!(on_disk.contains("$argon2id$"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // Emailed reset token (the email-based path ALONGSIDE the recovery code)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn request_reset_returns_token_for_known_email_only() {
+        // Anti-enumeration at the store level: a real account yields a (recipient,
+        // code) to email; an unknown email yields None (the caller acks identically).
+        let store = AccountStore::new();
+        store
+            .create_account("known@x.com", "oldpassword", "K")
+            .unwrap();
+
+        let issued = store.request_password_reset("known@x.com").unwrap();
+        let (recipient, code) = issued.expect("a known account mints a reset token");
+        assert_eq!(recipient, "known@x.com");
+        assert!(!code.is_empty());
+
+        // Unknown email → None (no token, nothing to email).
+        assert!(store
+            .request_password_reset("nobody@x.com")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn emailed_token_resets_password_and_is_single_use() {
+        let store = AccountStore::new();
+        let (_id, _c, recovery) = store.create_account("e@x.com", "oldpassword", "E").unwrap();
+        let (_recipient, code) = store
+            .request_password_reset("e@x.com")
+            .unwrap()
+            .expect("token minted");
+
+        // The EMAILED code resets the password (passed in the recovery_code field).
+        let new_recovery = store
+            .reset_password("e@x.com", &code, "brandnewpass")
+            .unwrap();
+        assert!(!new_recovery.is_empty());
+        assert_ne!(
+            new_recovery, recovery,
+            "a reset still rotates the recovery code"
+        );
+
+        // New password works; old one is dead.
+        assert!(store.login("e@x.com", "brandnewpass").is_ok());
+        assert_eq!(
+            store.login("e@x.com", "oldpassword"),
+            Err(AccountError::BadCredentials)
+        );
+
+        // The emailed token is single-use → replaying it is denied.
+        assert_eq!(
+            store.reset_password("e@x.com", &code, "anotherpass1"),
+            Err(AccountError::BadRecoveryCode)
+        );
+    }
+
+    #[test]
+    fn recovery_code_still_works_after_an_email_token_is_outstanding() {
+        // Issuing an email token must NOT break the saved-recovery-code path.
+        let store = AccountStore::new();
+        let (_id, _c, recovery) = store
+            .create_account("both@x.com", "oldpassword", "B")
+            .unwrap();
+        let _ = store.request_password_reset("both@x.com").unwrap().unwrap();
+
+        // The original recovery code still resets the password.
+        assert!(store
+            .reset_password("both@x.com", &recovery, "newpassword1")
+            .is_ok());
+        assert!(store.login("both@x.com", "newpassword1").is_ok());
+    }
+
+    #[test]
+    fn expired_emailed_token_is_denied() {
+        let store = AccountStore::new();
+        store.create_account("x@x.com", "oldpassword", "X").unwrap();
+        let (_recipient, code) = store
+            .request_password_reset("x@x.com")
+            .unwrap()
+            .expect("token minted");
+
+        // Age the stored token past its expiry (in-module access to the field).
+        {
+            let mut inner = store.inner.lock().unwrap();
+            let acct = inner.by_email.get_mut("x@x.com").unwrap();
+            acct.reset_token.as_mut().unwrap().expires_ms = AccountStore::now_ms() - 1;
+        }
+        // An expired token is rejected, indistinguishable from a wrong code.
+        assert_eq!(
+            store.reset_password("x@x.com", &code, "newpassword1"),
+            Err(AccountError::BadRecoveryCode)
+        );
+        // The real password is untouched.
+        assert!(store.login("x@x.com", "oldpassword").is_ok());
+    }
+
+    #[test]
+    fn email_reset_requests_are_rate_limited_per_email() {
+        // A single inbox can't be flooded: after the per-email cap, further requests
+        // mint nothing (return None) until the window passes.
+        let store = AccountStore::new();
+        store
+            .create_account("flood@x.com", "oldpassword", "F")
+            .unwrap();
+
+        // The cap equals the shared login/reset max-fails budget.
+        let mut minted = 0;
+        for _ in 0..DEFAULT_LOGIN_MAX_FAILS {
+            if store
+                .request_password_reset("flood@x.com")
+                .unwrap()
+                .is_some()
+            {
+                minted += 1;
+            }
+        }
+        assert_eq!(minted, DEFAULT_LOGIN_MAX_FAILS as i32);
+        // Next request is over the cap → None (no email), anti-enumeration-safe.
+        assert!(store
+            .request_password_reset("flood@x.com")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn emailed_token_hash_is_never_plaintext_at_rest_and_prunes_when_expired() {
+        let dir = tmp_dir("reset-token-at-rest");
+        let store = AccountStore::with_state_dir(&dir).unwrap();
+        store
+            .create_account("rt@x.com", "oldpassword", "R")
+            .unwrap();
+        let (_recipient, code) = store
+            .request_password_reset("rt@x.com")
+            .unwrap()
+            .expect("token minted");
+
+        // Plaintext (and its normalized form) NEVER touch disk — only the Argon2id hash.
+        let on_disk = std::fs::read_to_string(dir.join("accounts.json")).unwrap();
+        assert!(!on_disk.contains(&code));
+        assert!(!on_disk.contains(&normalize_recovery_code(&code)));
+        assert!(on_disk.contains("reset_token_phc"));
+
+        // A live token survives a restart and still resets.
+        drop(store);
+        let store2 = AccountStore::with_state_dir(&dir).unwrap();
+        assert!(store2
+            .reset_password("rt@x.com", &code, "newpassword1")
+            .is_ok());
+
+        // Now mint another, force it expired on disk, and confirm it's pruned on load.
+        let (_r2, code2) = store2
+            .request_password_reset("rt@x.com")
+            .unwrap()
+            .expect("token minted");
+        {
+            let mut inner = store2.inner.lock().unwrap();
+            inner
+                .by_email
+                .get_mut("rt@x.com")
+                .unwrap()
+                .reset_token
+                .as_mut()
+                .unwrap()
+                .expires_ms = AccountStore::now_ms() - 1;
+            // Persist the expired token, then reload.
+            store2.persist_locked(&inner);
+        }
+        drop(store2);
+        let store3 = AccountStore::with_state_dir(&dir).unwrap();
+        // The expired token was pruned on load → it no longer resets.
+        assert_eq!(
+            store3.reset_password("rt@x.com", &code2, "newpassword2"),
+            Err(AccountError::BadRecoveryCode)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recovery_code_format_groups_and_normalizes() {
+        assert_eq!(normalize_recovery_code("k7mq2-9xf4t"), "K7MQ29XF4T");
+        assert_eq!(normalize_recovery_code("K7MQ2 9XF4T"), "K7MQ29XF4T");
+        assert_eq!(group_recovery_code("ABCDEFGHIJ"), "ABCDE-FGHIJ");
+        // A minted code is grouped + base32 (uppercase, dash-separated).
+        let store = AccountStore::new();
+        let (code, _hash) = store.new_recovery_code().unwrap();
+        assert!(code.contains('-'));
+        assert!(code
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-'));
     }
 }

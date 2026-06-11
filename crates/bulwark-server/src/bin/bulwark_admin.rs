@@ -20,13 +20,22 @@
 //! BULWARK_GUARDIAN_TOKEN=… bulwark_admin list-children
 //! BULWARK_GUARDIAN_TOKEN=… bulwark_admin create-pair-code <child_name>
 //!                         bulwark_admin redeem-pair-code <code> <device_id>
+//! BULWARK_ADMIN_PASSWORD=… BULWARK_RECOVERY_CODE=… bulwark_admin reset-password <email>
 //! ```
+//!
+//! `reset-password` is the OPERATOR BACKSTOP for self-service recovery: it drives
+//! the public `ResetPassword` RPC, so it needs the account's recovery code (in
+//! `$BULWARK_RECOVERY_CODE`) plus the new password (in `$BULWARK_ADMIN_PASSWORD`).
+//! It prints the FRESH recovery code that replaces the consumed one — record it.
+//! There is deliberately NO password-bypass reset: an operator who has neither the
+//! password NOR the recovery code cannot silently take over an account (that would
+//! be a back door); a fully-lost code + lost password is an unrecoverable account.
 #![forbid(unsafe_code)]
 
 use bulwark_proto::v1::accounts_client::AccountsClient;
 use bulwark_proto::v1::{
     AddChildRequest, AssignGuardianRequest, CreateAccountRequest, CreatePairCodeRequest,
-    ListChildrenRequest, LoginRequest, RedeemPairCodeRequest,
+    ListChildrenRequest, LoginRequest, RedeemPairCodeRequest, ResetPasswordRequest,
 };
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 
@@ -55,6 +64,9 @@ enum Cmd {
         code: String,
         device_id: String,
     },
+    ResetPassword {
+        email: String,
+    },
 }
 
 fn usage() -> String {
@@ -65,8 +77,23 @@ fn usage() -> String {
      assign-guardian <child_id> <guardian_account_id>   (token from $BULWARK_GUARDIAN_TOKEN)\n  \
      list-children                                      (token from $BULWARK_GUARDIAN_TOKEN)\n  \
      create-pair-code <child_name>                      (token from $BULWARK_GUARDIAN_TOKEN)\n  \
-     redeem-pair-code <code> <device_id>                (code is the short-lived credential)"
+     redeem-pair-code <code> <device_id>                (code is the short-lived credential)\n  \
+     reset-password   <email>   (new pw from $BULWARK_ADMIN_PASSWORD, code from $BULWARK_RECOVERY_CODE)\n\n\
+     note: login throttle / lockout is in-memory only — restart the server to clear it (there is no clear-lockout RPC)."
         .to_string()
+}
+
+/// Resolve the recovery code from `$BULWARK_RECOVERY_CODE` for `reset-password` —
+/// off argv (it is a single-use credential). Pure (unit-tested).
+fn require_recovery_code(env_val: Option<String>) -> Result<String, String> {
+    match env_val {
+        Some(c) if !c.trim().is_empty() => Ok(c.trim().to_string()),
+        _ => Err(
+            "set the recovery code in $BULWARK_RECOVERY_CODE (the one saved at \
+                  account creation; kept off the command line — it is a credential)"
+                .to_string(),
+        ),
+    }
 }
 
 /// Resolve the account password from `$BULWARK_ADMIN_PASSWORD` — never from argv
@@ -153,6 +180,12 @@ fn parse(args: &[String]) -> Result<Cmd, String> {
                 device_id: rest[1].clone(),
             })
         }
+        "reset-password" => {
+            need(1)?;
+            Ok(Cmd::ResetPassword {
+                email: rest[0].clone(),
+            })
+        }
         other => Err(format!("unknown subcommand `{other}`\n{}", usage())),
     }
 }
@@ -189,8 +222,17 @@ async fn main() -> anyhow::Result<()> {
     // Resolve secrets (env-only) BEFORE connecting, so a missing secret fails fast
     // and never reaches the wire / a process listing.
     let password = match &cmd {
-        Cmd::CreateAccount { .. } | Cmd::Login { .. } => Some(
+        // reset-password reuses $BULWARK_ADMIN_PASSWORD as the NEW password.
+        Cmd::CreateAccount { .. } | Cmd::Login { .. } | Cmd::ResetPassword { .. } => Some(
             require_password(std::env::var("BULWARK_ADMIN_PASSWORD").ok())
+                .map_err(|e| anyhow::anyhow!(e))?,
+        ),
+        _ => None,
+    };
+    // The recovery code (reset-password only) — also env-only, never argv.
+    let recovery_code = match &cmd {
+        Cmd::ResetPassword { .. } => Some(
+            require_recovery_code(std::env::var("BULWARK_RECOVERY_CODE").ok())
                 .map_err(|e| anyhow::anyhow!(e))?,
         ),
         _ => None,
@@ -310,6 +352,23 @@ async fn main() -> anyhow::Result<()> {
             println!("child_id={}", result.child_id);
             println!("family_id={}", result.family_id);
         }
+        Cmd::ResetPassword { email } => {
+            let ack = client
+                .reset_password(ResetPasswordRequest {
+                    email,
+                    recovery_code: recovery_code
+                        .expect("recovery code resolved for reset-password"),
+                    new_password: password.expect("new password resolved for reset-password"),
+                })
+                .await?
+                .into_inner();
+            println!("ok={}", ack.ok);
+            // The fresh recovery code that replaces the consumed one — SAVE IT.
+            println!("new_recovery_code={}", ack.new_recovery_code);
+            if !ack.detail.is_empty() {
+                println!("{}", ack.detail);
+            }
+        }
     }
     Ok(())
 }
@@ -350,6 +409,7 @@ mod tests {
         assert!(parse(&v(&["login"])).is_err()); // needs an email
         assert!(parse(&v(&["create-pair-code"])).is_err()); // needs child name
         assert!(parse(&v(&["redeem-pair-code", "ABCD1234"])).is_err()); // needs code + device
+        assert!(parse(&v(&["reset-password"])).is_err()); // needs an email
         assert!(parse(&v(&["bogus"])).is_err());
         assert!(parse(&v(&[])).is_err());
     }
@@ -362,6 +422,23 @@ mod tests {
         assert_eq!(require_token(Some(" tok ".into())).unwrap(), "tok"); // trimmed
         assert!(require_token(None).is_err());
         assert!(require_token(Some("   ".into())).is_err()); // blank
+        assert_eq!(
+            require_recovery_code(Some(" CODE ".into())).unwrap(),
+            "CODE"
+        ); // trimmed
+        assert!(require_recovery_code(None).is_err());
+        assert!(require_recovery_code(Some("  ".into())).is_err()); // blank
+    }
+
+    #[test]
+    fn parses_reset_password_with_email_only() {
+        // The new password + recovery code come from env, NOT argv.
+        assert_eq!(
+            parse(&v(&["reset-password", "a@x.com"])).unwrap(),
+            Cmd::ResetPassword {
+                email: "a@x.com".into(),
+            }
+        );
     }
 
     #[test]

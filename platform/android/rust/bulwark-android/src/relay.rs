@@ -37,7 +37,8 @@ pub struct RelayTarget {
     /// Kotlin points at `filesDir/cluster_ca.pem`, provisioned at pairing).
     /// REQUIRED for `https://` endpoints: the production regions use an on-box
     /// self-signed CA that public roots will never validate. Empty + https →
-    /// the relay stays off (honest: better silent-off than silent-MITM-able).
+    /// the relay stays off (honest: better silent-off than connecting to an
+    /// unverified server).
     pub cluster_ca: String,
 }
 

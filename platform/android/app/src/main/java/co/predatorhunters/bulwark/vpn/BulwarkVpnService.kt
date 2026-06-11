@@ -103,6 +103,16 @@ class BulwarkVpnService : VpnService() {
         polling = true
         Thread({
             while (polling) {
+                // SAFETY GATE: if the Rust data path failed to start or died, the
+                // TUN is captive (nobody reads the fd) and ALL device traffic
+                // blackholes. Release it immediately rather than leave the device
+                // with no internet — a stopped filter is detected/alerted, a
+                // blackholed device is just broken.
+                if (runCatching { RustBridge.isDataPathDown() }.getOrDefault(false)) {
+                    Log.e(TAG, "data path down — tearing down the TUN to restore connectivity")
+                    stopSelf()
+                    return@Thread
+                }
                 val alert = runCatching { RustBridge.nextAlert() }.getOrNull()
                 if (alert != null) AlertNotifier.notify(this, alert)
                 else runCatching { Thread.sleep(2_000) }

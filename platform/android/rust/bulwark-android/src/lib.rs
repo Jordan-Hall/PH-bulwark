@@ -64,6 +64,34 @@ use tonic::transport::Endpoint;
 pub mod flow;
 pub mod relay;
 
+/// Build a tonic `Endpoint` for a child→cluster RPC, pinning the cluster CA for
+/// `https://` (the production regions use an on-box self-signed CA that public
+/// webpki roots can never validate). `ca_path` is the device-local pinned CA
+/// (Kotlin: `filesDir/cluster_ca.pem`, provisioned at pairing). An https
+/// endpoint with no readable pin is REFUSED with an actionable message —
+/// never an opaque tonic transport error, never a silent plaintext fall-back.
+fn cluster_endpoint(endpoint: &str, ca_path: &str) -> Result<Endpoint, String> {
+    let endpoint = endpoint.trim();
+    if !(endpoint.starts_with("http://") || endpoint.starts_with("https://")) {
+        return Err("server must start with http:// or https://".to_string());
+    }
+    let mut ep = Endpoint::from_shared(endpoint.to_string())
+        .map_err(|_| "server address is not valid".to_string())?
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10));
+    if endpoint.to_ascii_lowercase().starts_with("https://") {
+        let pem = std::fs::read(ca_path.trim()).map_err(|e| {
+            format!("this server uses HTTPS but its pinned CA isn't on the device yet ({ca_path}): {e}")
+        })?;
+        let tls = tonic::transport::ClientTlsConfig::new()
+            .ca_certificate(tonic::transport::Certificate::from_pem(pem));
+        ep = ep
+            .tls_config(tls)
+            .map_err(|e| format!("could not apply the pinned CA: {e}"))?;
+    }
+    Ok(ep)
+}
+
 // ---------------------------------------------------------------------------
 // The on-device engine: deterministic analyzer + policy. Built once per process.
 // ---------------------------------------------------------------------------
@@ -241,16 +269,24 @@ fn err_pairing_json(error: impl AsRef<str>) -> String {
         .unwrap_or_else(|_| r#"{"ok":false,"error":"enrollment failed"}"#.to_string())
 }
 
+/// Set true when the transparent data path could NOT come up, or DIED after
+/// starting (interceptor build failure, or `run_android_data_path` returning an
+/// error). The Kotlin `BulwarkVpnService` poller reads this and tears the TUN
+/// down (`stopSelf`) — a captive TUN with no reader would otherwise blackhole
+/// ALL device traffic (the on-device test's "no internet" failure). A clean
+/// `stopVpn` cancellation returns `Ok`, so it never trips this. Reset at the
+/// start of each `startVpn`.
+fn data_path_down() -> &'static std::sync::atomic::AtomicBool {
+    static D: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    &D
+}
+
 async fn redeem_pair_code_rpc(
     endpoint: String,
     code: String,
     device_id: String,
+    ca_path: String,
 ) -> Result<PairResult, String> {
-    let endpoint = endpoint.trim();
-    if !(endpoint.starts_with("http://") || endpoint.starts_with("https://")) {
-        return Err("server must start with http:// or https://".to_string());
-    }
-
     let code = normalize_pair_code(&code);
     if code.is_empty() {
         return Err("enter the pair code from the parent app".to_string());
@@ -260,11 +296,7 @@ async fn redeem_pair_code_rpc(
         return Err("device id is not ready yet".to_string());
     }
 
-    let builder = Endpoint::from_shared(endpoint.to_string())
-        .map_err(|_| "server address is not valid".to_string())?
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(10));
-    let channel = builder
+    let channel = cluster_endpoint(&endpoint, &ca_path)?
         .connect()
         .await
         .map_err(|e| format!("could not reach server: {e}"))?;
@@ -399,21 +431,14 @@ async fn fetch_child_config_rpc(
     endpoint: String,
     device_id: String,
     applied_version: u64,
+    ca_path: String,
 ) -> Result<ChildConfig, String> {
-    let endpoint = endpoint.trim();
-    if !(endpoint.starts_with("http://") || endpoint.starts_with("https://")) {
-        return Err("server must start with http:// or https://".to_string());
-    }
     let device_id = device_id.trim();
     if device_id.is_empty() {
         return Err("device id is not ready yet".to_string());
     }
 
-    let builder = Endpoint::from_shared(endpoint.to_string())
-        .map_err(|_| "server address is not valid".to_string())?
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(10));
-    let channel = builder
+    let channel = cluster_endpoint(&endpoint, &ca_path)?
         .connect()
         .await
         .map_err(|e| format!("could not reach server: {e}"))?;
@@ -593,6 +618,10 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_startVpn(
     let _ = (tun_fd, ca_dir);
     #[cfg(target_os = "android")]
     {
+        use std::sync::atomic::Ordering;
+        // Fresh session: clear any "down" flag from a previous start in this
+        // process so the service doesn't immediately tear itself down.
+        data_path_down().store(false, Ordering::Relaxed);
         let fd = tun_fd as std::os::fd::RawFd;
         match bulwark_net::vpn::build_interceptor(ca_dir) {
             Ok(interceptor) => {
@@ -623,7 +652,10 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_startVpn(
                     if let Err(e) =
                         bulwark_net::vpn::run_android_data_path(fd, interceptor, token).await
                     {
-                        vpn_up.store(false, std::sync::atomic::Ordering::Relaxed);
+                        vpn_up.store(false, Ordering::Relaxed);
+                        // Signal the service to tear down the TUN: a captive fd
+                        // nobody reads blackholes ALL device traffic.
+                        data_path_down().store(true, Ordering::Relaxed);
                         tracing::error!(error = %e, "VPN data path exited with an error");
                         enqueue_protection_alert(
                             "vpn-datapath",
@@ -635,7 +667,9 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_startVpn(
             }
             Err(e) => {
                 // Fail-closed on the crown jewel (no CA -> no inspection), but
-                // never silent: the guardian is told protection is down.
+                // never silent, and NEVER captive: flag the service to release
+                // the TUN it already established (else every packet blackholes).
+                data_path_down().store(true, Ordering::Relaxed);
                 tracing::error!(error = %e, "VPN interceptor could not be built");
                 enqueue_protection_alert(
                     "vpn-start",
@@ -653,6 +687,21 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_startVpn(
     });
     // Leak the box into a raw pointer the caller owns; stopVpn reclaims it.
     Box::into_raw(session) as jlong
+}
+
+/// `external fun isDataPathDown(): Boolean`
+///
+/// True when the transparent data path failed to start or died after starting
+/// (see [`data_path_down`]). The `BulwarkVpnService` poller reads this and calls
+/// `stopSelf()` so the TUN is released — a captive fd nobody reads would
+/// blackhole every packet on the device. A clean `stopVpn` never sets it.
+#[no_mangle]
+pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_isDataPathDown(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jboolean {
+    use std::sync::atomic::Ordering;
+    u8::from(data_path_down().load(Ordering::Relaxed))
 }
 
 /// `external fun stopVpn(handle: Long)`
@@ -769,6 +818,7 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_redeemPai
     endpoint: JString,
     code: JString,
     device_id: JString,
+    ca_path: JString,
 ) -> jstring {
     let endpoint = match jstring_to_string(&mut env, &endpoint) {
         Some(s) => s,
@@ -776,6 +826,7 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_redeemPai
     };
     let code = jstring_to_string(&mut env, &code).unwrap_or_default();
     let device_id = jstring_to_string(&mut env, &device_id).unwrap_or_default();
+    let ca_path = jstring_to_string(&mut env, &ca_path).unwrap_or_default();
 
     let json = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -783,7 +834,7 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_redeemPai
         .thread_name("bulwark-android-enroll")
         .build()
     {
-        Ok(rt) => match rt.block_on(redeem_pair_code_rpc(endpoint, code, device_id)) {
+        Ok(rt) => match rt.block_on(redeem_pair_code_rpc(endpoint, code, device_id, ca_path)) {
             Ok(pair) => ok_pairing_json(&pair),
             Err(e) => err_pairing_json(e),
         },
@@ -819,6 +870,7 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_fetchChil
     endpoint: JString,
     device_id: JString,
     applied_version: jlong,
+    ca_path: JString,
 ) -> jstring {
     let endpoint = match jstring_to_string(&mut env, &endpoint) {
         Some(s) => s,
@@ -830,6 +882,7 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_fetchChil
         }
     };
     let device_id = jstring_to_string(&mut env, &device_id).unwrap_or_default();
+    let ca_path = jstring_to_string(&mut env, &ca_path).unwrap_or_default();
     // Negative can't come from the Kotlin prefs (default 0); clamp defensively.
     let applied_version = applied_version.max(0) as u64;
 
@@ -839,7 +892,12 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_fetchChil
         .thread_name("bulwark-android-config")
         .build()
     {
-        Ok(rt) => match rt.block_on(fetch_child_config_rpc(endpoint, device_id, applied_version)) {
+        Ok(rt) => match rt.block_on(fetch_child_config_rpc(
+            endpoint,
+            device_id,
+            applied_version,
+            ca_path,
+        )) {
             Ok(cfg) => {
                 // Live profile reconcile: a fetched config that is NOT older
                 // than what this device already applied updates the strictness

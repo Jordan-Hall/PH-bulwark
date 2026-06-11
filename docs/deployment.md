@@ -83,7 +83,7 @@ child device                              home cluster                guardian
   the parent app).
   Tokens expire after `BULWARK_SESSION_TTL_SECS` (default 12h) and are dropped on
   restart, so a leaked token is short-lived — re-`login` to refresh.
-- **Brute-force lockout:** after `BULWARK_LOGIN_MAX_FAILS` (default 5) failed logins
+- **Repeated-wrong-password pause:** after `BULWARK_LOGIN_MAX_FAILS` (default 5) failed sign-ins
   for one email within `BULWARK_LOGIN_WINDOW_SECS` (default 15m), that email is locked
   out until the window elapses; a successful login clears the counter.
 - **Durable:** with `BULWARK_STATE_DIR` set, accounts + push targets + pending
@@ -129,6 +129,30 @@ child device                              home cluster                guardian
   (default 465 TLS / 587 STARTTLS), `BULWARK_SMTP_TLS` (`tls`|`starttls`|`none`;
   `none` loopback-only), `BULWARK_SMTP_USERNAME`/`BULWARK_SMTP_PASSWORD` (secrets — env/
   keystore only), `BULWARK_ALERT_SUBJECT_PREFIX` (default `[Bulwark]`).
+
+### 6a. Email-based password reset (protects guardian accounts)
+- The same SMTP setup also enables an **emailed reset code** so a guardian who
+  can't find their saved recovery code can reset their password. It sits ALONGSIDE
+  the recovery code — both work.
+- **On-switch:** any time `BULWARK_SMTP_HOST` + a `From:` address are configured,
+  email reset turns on automatically (the server logs whether it is enabled). The
+  `From:` for the reset email is `BULWARK_RESET_FROM`, falling back to
+  `BULWARK_ALERT_FROM`, so one SMTP config covers both alerts and account email.
+  TLS mode / port / credentials reuse the `BULWARK_SMTP_*` variables above.
+  Optional: `BULWARK_RESET_SUBJECT` (subject line) and `BULWARK_RESET_TOKEN_TTL_SECS`
+  (reset-code lifetime, default 1800 = 30 min).
+- **Flow:** `Accounts.RequestPasswordReset{email}` → the server emails a short-lived,
+  single-use, 128-bit code to the account address, then the guardian completes
+  `Accounts.ResetPassword` with that code in the `recovery_code` field (the RPC
+  accepts EITHER the saved recovery code or an emailed code). The endpoint **always**
+  returns the same generic ack, so it never reveals whether an email has an account;
+  repeated requests for one email are rate-limited so an inbox can't be flooded.
+- The reset email is **content-free**: subject + the code + how to use it. No child
+  data, no message/media excerpts. Only the code's Argon2id hash + an expiry are
+  stored on the account (the code itself is never persisted or logged); expired codes
+  are pruned on load.
+- **Without SMTP:** email reset is unavailable (the server logs one warning); the
+  saved recovery code from account creation remains the self-service reset fallback.
 
 ## 7. FCM push alerts
 - Build the server `--features push`. On-switch: **both** `BULWARK_FCM_PROJECT_ID`
@@ -187,8 +211,8 @@ heartbeat detection still fires.
 | `BULWARK_QUORUM_DSN` | server (cluster) | Postgres DSN for the lease store | unset | quorum (split-brain safety) |
 | `BULWARK_ACCOUNTS` | server | enable guardian accounts | off | provisioning guardians |
 | `BULWARK_SESSION_TTL_SECS` | server | guardian session-token lifetime (seconds) | 43200 (12h) | tune session expiry |
-| `BULWARK_LOGIN_MAX_FAILS` | server | failed logins per email before lockout | 5 | tune brute-force throttle |
-| `BULWARK_LOGIN_WINDOW_SECS` | server | login-throttle / lockout window (seconds) | 900 (15m) | tune brute-force throttle |
+| `BULWARK_LOGIN_MAX_FAILS` | server | failed sign-ins per email before a pause | 5 | tune the sign-in rate limit |
+| `BULWARK_LOGIN_WINDOW_SECS` | server | sign-in rate-limit / pause window (seconds) | 900 (15m) | tune the sign-in rate limit |
 | `BULWARK_STATE_DIR` | server | persist guardian state — accounts/push/pending/allowlist + child configs/applied-acks (JSON) | unset (in-memory) | durable state |
 | `BULWARK_TLS_CERT` / `BULWARK_TLS_KEY` | server | server TLS leaf cert/key (PEM **file paths**) | unset | any real deployment (accounts mode refuses to start without them) |
 | `BULWARK_TLS_CLIENT_CA` | server | client-cert CA — also require client certs (mTLS) | unset | once device/guardian client certs exist |
@@ -203,6 +227,9 @@ heartbeat detection still fires.
 | `BULWARK_ALERT_FROM` | bulwark-alert | From: address | unset | email on-switch |
 | `BULWARK_ALERT_RECIPIENTS` | bulwark-alert | guardian recipients (CSV) | unset | email on-switch |
 | `BULWARK_ALERT_SUBJECT_PREFIX` | bulwark-alert | subject prefix | [Bulwark] | never |
+| `BULWARK_RESET_FROM` | server (accounts) | From: for the reset email (falls back to `BULWARK_ALERT_FROM`) | unset | email reset, distinct sender |
+| `BULWARK_RESET_SUBJECT` | server (accounts) | reset email subject | `PH Bulwark — your password reset code` | never |
+| `BULWARK_RESET_TOKEN_TTL_SECS` | server (accounts) | emailed reset-code lifetime (secs) | 1800 | tune reset-code expiry |
 | `BULWARK_FCM_PROJECT_ID` | bulwark-alert (push) | FCM project (push on-switch) | unset | push (with SA) |
 | `BULWARK_FCM_SERVICE_ACCOUNT` | bulwark-alert (push) | SA JSON path | unset | push (with project) |
 | `BULWARK_CLIENT_CERT`/`_KEY`/`_CA` | client | mTLS material (PEM paths) | unset | cluster offload |

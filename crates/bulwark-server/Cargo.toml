@@ -37,9 +37,17 @@ thiserror.workspace = true
 async-trait.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
-# Password hashing for parent accounts (PBKDF2-HMAC-SHA256). ring is already in
-# the build graph (tonic tls-ring) so this adds no new native dependency.
+# Password hashing for parent accounts. ring (PBKDF2-HMAC-SHA256) is the LEGACY
+# path, kept for transparent on-login migration of existing accounts; new/rotated
+# passwords use Argon2id. ring is already in the build graph (tonic tls-ring).
 ring.workspace = true
+# Argon2id (memory-hard, OWASP-recommended) + the PHC `$argon2id$...` string
+# format. Pure Rust (MIT/Apache-2.0) — no native dep, no rusqlite/SAC surface,
+# builds on Linux/CI and the Windows host. `data-encoding` base32-encodes the
+# one-time self-service recovery codes (already a transitive dep; MIT).
+argon2.workspace = true
+password-hash.workspace = true
+data-encoding.workspace = true
 # Optional file-backed durability for guardian state (BULWARK_STATE_DIR) — JSON
 # snapshots via the `persist` module. NO rusqlite (won't build on this host).
 serde = { workspace = true, features = ["derive"] }

@@ -1,11 +1,12 @@
 //! Domain model + shared UI state for the console: app status, the shared
-//! `Console` context, the guardian-facing Alert shape, and the
-//! evidence-display policy helpers.
+//! `Console` context, the `AuthState` gate/lock context, the guardian-facing
+//! Alert shape, and the evidence-display policy helpers.
 
 use dioxus::prelude::*;
 
 use bulwark_proto::v1::{AlertEvent, AlertKind, Category, Child as ProtoChild};
 
+use crate::lock::pin_is_set;
 use crate::servers::{active_server_label, cluster_endpoint, guardian_token, server_session_key};
 
 #[derive(Clone, PartialEq)]
@@ -28,6 +29,79 @@ impl AppStatus {
     }
 }
 
+/// Where the auth gate should send a guardian on first paint, given what's saved
+/// on this machine. Computed from disk truth (session token + PIN record), so the
+/// `Splash` route can `replace()` to exactly the right place with no flash of
+/// gated content.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AuthPhase {
+    /// A session is saved AND a PIN is set → show the Lock screen (quick unlock).
+    Locked,
+    /// A session is saved but no PIN → already trusted this install; go straight in.
+    Authed,
+    /// No saved session → run the welcome → choose-server → sign-in flow.
+    NeedsSignIn,
+}
+
+/// The auth/lock context — provided once at the app root and read by the route
+/// guards + the auth/lock screens. Deliberately SEPARATE from `Console` (which
+/// holds console *data*): this is the gate that decides whether any console data
+/// is reachable at all.
+///
+/// `unlocked` is the single in-memory source of truth for "this app session is
+/// past the lock". It starts `false` whenever a PIN is set (re-opening the app
+/// re-locks), and is flipped `true` by a successful PIN/biometric unlock, a fresh
+/// sign-in, or the "no PIN set, trust this install" path. Route guards read it.
+#[derive(Clone, Copy)]
+pub struct AuthState {
+    /// True once the guardian has cleared the lock for THIS app run.
+    pub unlocked: Signal<bool>,
+    /// Server/session/login snapshot (mirrors `Console.status`, but owned by the
+    /// gate so the auth screens can refresh it without touching console data).
+    pub status: Signal<AppStatus>,
+}
+
+impl AuthState {
+    /// Build the gate state from disk. A saved session WITH a PIN starts LOCKED
+    /// (`unlocked = false`); a saved session WITHOUT a PIN, or no session at all,
+    /// starts effectively open at the gate (the guards still route correctly via
+    /// `phase()`), so we set `unlocked = true` to avoid trapping the user behind a
+    /// Lock screen that has no PIN to satisfy it.
+    pub fn new() -> Self {
+        let status = AppStatus::load();
+        let locked = status.logged_in && pin_is_set();
+        Self {
+            unlocked: Signal::new(!locked),
+            status: Signal::new(status),
+        }
+    }
+
+    /// Re-read disk truth into `status` (call after sign-in / sign-out / server
+    /// switch). Does NOT change `unlocked`.
+    pub fn refresh(&mut self) {
+        self.status.set(AppStatus::load());
+    }
+
+    /// The current gate phase from live signal + disk truth.
+    pub fn phase(&self) -> AuthPhase {
+        let logged_in = self.status.read().logged_in;
+        if !logged_in {
+            AuthPhase::NeedsSignIn
+        } else if pin_is_set() && !(self.unlocked)() {
+            AuthPhase::Locked
+        } else {
+            AuthPhase::Authed
+        }
+    }
+
+    /// Whether the console (alerts/children/etc.) is reachable right now: a valid
+    /// saved session for the selected server AND past the lock. The route guards
+    /// gate every console screen on exactly this.
+    pub fn console_reachable(&self) -> bool {
+        self.status.read().logged_in && (!pin_is_set() || (self.unlocked)())
+    }
+}
+
 #[derive(Clone, PartialEq)]
 pub struct PairCodeUi {
     pub child_name: String,
@@ -42,15 +116,16 @@ pub struct PairCodeUi {
 /// app's `Setup` struct).
 #[derive(Clone, Copy)]
 pub struct Console {
-    /// Live inbox, newest first (seeded with demo rows while offline).
+    /// Live inbox, newest first. Empty until the review stream delivers rows —
+    /// there is no demo/seed half-state behind the auth gate.
     pub alerts: Signal<Vec<Alert>>,
-    /// True until the review stream connects (drives the demo banner).
+    /// True while the review stream is disconnected (drives a calm "reconnecting"
+    /// note — NOT a demo banner). Starts false; the stream coroutine owns it.
     pub offline: Signal<bool>,
     /// Last approve/keep-blocked submit failure, shown in the chrome.
     pub action_error: Signal<Option<String>>,
-    /// Server/session snapshot for the status grid + logged_in gating.
-    pub status: Signal<AppStatus>,
-    // Family-setup form (Setup screen).
+    // Auth/pairing form fields. (The server/session snapshot lives on
+    // `AuthState`, the gate context — one source of truth for login status.)
     pub setup_note: Signal<Option<String>>,
     pub setup_error: Signal<Option<String>>,
     pub setup_busy: Signal<bool>,
@@ -73,10 +148,13 @@ impl Console {
     /// single-component `match active()`.
     pub fn new() -> Self {
         Self {
-            alerts: Signal::new(seed()),
-            offline: Signal::new(true),
+            // No demo half-state: the auth gate guarantees the console is only
+            // ever shown to a signed-in guardian, so the inbox starts EMPTY and is
+            // filled only by the live review stream. (`seed()` is retained for
+            // tests + as documentation of the alert shape, not as a UI fallback.)
+            alerts: Signal::new(Vec::new()),
+            offline: Signal::new(false),
             action_error: Signal::new(None),
-            status: Signal::new(AppStatus::load()),
             setup_note: Signal::new(None),
             setup_error: Signal::new(None),
             setup_busy: Signal::new(false),
@@ -218,9 +296,11 @@ pub fn format_when(ts_millis: i64) -> String {
     }
 }
 
-/// Seed data stands in as an OFFLINE fallback while the gRPC client is not
-/// connected. These mirror what `Review.StreamPendingReviews` streams from the
-/// cluster — all redacted, never media.
+/// Sample alert rows that mirror what `Review.StreamPendingReviews` streams from
+/// the cluster (all redacted, never media). No longer shown in the UI — the auth
+/// gate removed the offline demo half-state — but retained as documentation of
+/// the alert shape and exercised by the test suite.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn seed() -> Vec<Alert> {
     vec![
         Alert {

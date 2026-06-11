@@ -6,6 +6,7 @@ use dioxus::prelude::*;
 use bulwark_proto::v1::{Category, Child as ProtoChild, FilteringProfile};
 
 use crate::api::{fetch_segment_remote, get_child_status, set_child_config};
+use crate::icons::svg;
 use crate::media::{base64_encode, image_data_uri, load_segment_from_disk, sniff_video_mime};
 use crate::servers::CHILD_REGIONS;
 use crate::state::{should_show_snippet, should_show_thumbnail, Alert};
@@ -21,8 +22,8 @@ pub fn ChildVpnRow(child: ProtoChild) -> Element {
     let mut region = use_signal(|| "uk".to_string());
     let mut enabled = use_signal(|| true);
     let mut profile = use_signal(|| FilteringProfile::Preteen as i32);
-    let mut note = use_signal(|| Option::<String>::None);
-    let mut busy = use_signal(|| false);
+    let note = use_signal(|| Option::<String>::None);
+    let busy = use_signal(|| false);
 
     rsx! {
         div { class: "vpn-row",
@@ -56,11 +57,13 @@ pub fn ChildVpnRow(child: ProtoChild) -> Element {
                 }
                 button {
                     class: if enabled() { "vpn-toggle vpn-toggle-on" } else { "vpn-toggle vpn-toggle-off" },
+                    "aria-pressed": enabled(),
                     onclick: move |_| {
                         let v = !enabled();
                         enabled.set(v);
                     },
-                    if enabled() { "Filtering on" } else { "Filtering off" }
+                    if enabled() { "Protection on" } else { "Protection off" }
+                    span { class: "knob" }
                 }
                 button {
                     class: "primary vpn-apply",
@@ -111,11 +114,22 @@ pub fn ChildVpnRow(child: ProtoChild) -> Element {
                             }
                         });
                     },
-                    if busy() { "Applying..." } else { "Apply VPN settings" }
+                    if busy() { "Applying…" } else { "Apply settings" }
                 }
             }
             if let Some(n) = note() {
-                div { class: "vpn-note", "{n}" }
+                {
+                    let applied = n.contains("Applied");
+                    let failed = n.starts_with("Failed");
+                    let cls = if applied { "vpn-note" } else if failed { "vpn-note failed" } else { "vpn-note pending" };
+                    let icon = if applied { "check" } else if failed { "alert" } else { "info" };
+                    rsx! {
+                        div { class: "{cls}",
+                            span { dangerous_inner_html: "{svg(icon)}" }
+                            "{n}"
+                        }
+                    }
+                }
             }
         }
     }
@@ -140,39 +154,58 @@ pub fn AlertCard(alert: Alert, on_decide: EventHandler<bool>) -> Element {
     // The actual flagged text — shown in full to the guardian, except for CSAM.
     let show_snippet = should_show_snippet(&alert);
 
-    rsx! {
-        div { class: "card",
-            div { class: "ttl", "{alert.title}" }
-            div { class: "meta", "{alert.device} \u{00b7} {alert.when}" }
-            p { class: "detail", "{alert.detail}" }
+    // Cohesive icon + tint per alert family: grooming/protection-status read as a
+    // gentle warning; content blocks read as a calm "kept safe"; CSAM is withheld.
+    let is_grooming = alert.category == Category::Grooming;
+    let (ic_cls, ic_name) = if is_csam {
+        ("alert-ic csam", "eye-off")
+    } else if is_grooming {
+        ("alert-ic warn", "alert")
+    } else {
+        ("alert-ic block", "shield-check")
+    };
 
-            if is_csam {
-                // No image, no snippet — withheld notice only (never displayed/stored).
-                div { class: "csam",
-                    "Preview withheld — suspected illegal content is blocked and is never shown or stored."
-                }
-            } else {
-                if let Some(seg) = alert.segment_uri.clone() {
-                    SegmentPlayer { uri: seg }
-                }
-                if let Some(uri) = preview_uri {
-                    div { class: "preview",
-                        div { class: "preview-label", "Preview of what was blocked:" }
-                        img { class: "thumb", src: "{uri}", alt: "Safe preview of the blocked content" }
-                    }
-                }
-                if show_snippet {
-                    div { class: "snippet",
-                        div { class: "snippet-label", "What was blocked:" }
-                        p { class: "snippet-text", "{alert.snippet}" }
-                    }
+    rsx! {
+        div { class: "alert-card",
+            div { class: "alert-top",
+                span { class: "{ic_cls}", dangerous_inner_html: "{svg(ic_name)}" }
+                div { class: "alert-head",
+                    div { class: "ttl", "{alert.title}" }
+                    div { class: "meta", "{alert.device} \u{00b7} {alert.when}" }
                 }
             }
+            div { class: "alert-body",
+                p { class: "detail", "{alert.detail}" }
 
-            if alert.actionable {
-                div { class: "row",
-                    button { class: "approve", onclick: move |_| on_decide.call(true), "Approve" }
-                    button { class: "deny", onclick: move |_| on_decide.call(false), "Keep blocked" }
+                if is_csam {
+                    // No image, no snippet — withheld notice only (never displayed/stored).
+                    div { class: "csam",
+                        span { dangerous_inner_html: "{svg(\"eye-off\")}" }
+                        "Preview withheld — suspected illegal content is blocked and is never shown or stored."
+                    }
+                } else {
+                    if let Some(seg) = alert.segment_uri.clone() {
+                        SegmentPlayer { uri: seg }
+                    }
+                    if let Some(uri) = preview_uri {
+                        div { class: "preview",
+                            div { class: "preview-label", "Preview of what was blocked" }
+                            img { class: "thumb", src: "{uri}", alt: "Safe preview of the blocked content" }
+                        }
+                    }
+                    if show_snippet {
+                        div { class: "snippet",
+                            div { class: "snippet-label", "What was blocked" }
+                            p { class: "snippet-text", "{alert.snippet}" }
+                        }
+                    }
+                }
+
+                if alert.actionable {
+                    div { class: "row",
+                        button { class: "approve", onclick: move |_| on_decide.call(true), "Approve" }
+                        button { class: "deny", onclick: move |_| on_decide.call(false), "Keep blocked" }
+                    }
                 }
             }
         }
@@ -269,7 +302,19 @@ pub fn CoverageMatrix() -> Element {
             thead { tr { th { "App / surface" } th { "Status" } th { "How" } } }
             tbody {
                 for (app, status, how) in rows.iter() {
-                    tr { td { "{app}" } td { "{status}" } td { class: "how", "{how}" } }
+                    {
+                        // "Filtered via proxy" reads as full coverage; everything else
+                        // (being validated / text-only / content-filter-only) is partial.
+                        let partial = !status.starts_with("Filtered");
+                        let cls = if partial { "cov-status partial" } else { "cov-status" };
+                        rsx! {
+                            tr {
+                                td { "{app}" }
+                                td { span { class: "{cls}", "{status}" } }
+                                td { class: "how", "{how}" }
+                            }
+                        }
+                    }
                 }
             }
         }

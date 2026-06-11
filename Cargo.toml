@@ -88,6 +88,15 @@ sqlx = { version = "0.8", default-features = false, features = ["postgres", "run
 rusqlite = { version = "0.40", features = ["bundled-sqlcipher"] }
 age = "0.11"
 ring = "0.17"
+# Parent-account password hashing — pure Rust (MIT/Apache-2.0), no native dep, no
+# rusqlite/SAC surface; builds clean on Linux/CI and the Windows host. Argon2id is
+# the memory-hard, OWASP-recommended successor to the legacy PBKDF2 path (which we
+# keep verifying for transparent on-login migration). `password-hash` gives the
+# PHC `$argon2id$...` string format + constant-time verify; `data-encoding`
+# (already in the tree, MIT) base32-encodes the one-time recovery codes.
+argon2 = { version = "0.5", features = ["std"] }
+password-hash = { version = "0.5", features = ["std"] }
+data-encoding = "2"
 
 # Email + web
 # default off (drops native-tls); rustls async SMTP with the ring provider + cert verifier.
