@@ -169,10 +169,49 @@ pub async fn run_vpn(cfg: VpnConfig, shutdown: CancellationToken) -> Result<()> 
     close
 }
 
-/// Android data path: start the in-process TLS-inspecting proxy and run the transparent
-/// smoltcp pump over the `VpnService` fd, both pointed at `127.0.0.1:8080`, until
-/// `shutdown` is cancelled. This is what the JNI `startVpn` spawns on a
-/// multi-threaded runtime.
+/// Build the in-process TLS-inspecting interceptor for VPN mode (proxy on
+/// `127.0.0.1:8080`, started later by [`run_android_data_path`]).
+///
+/// `Some(ca_dir)` → the per-install CA persists across sessions via the
+/// app-sandbox [`crate::ca::FileKeyStore`] (Android passes `filesDir/ca`
+/// through `startVpn`'s configJson). `None` → SESSION-ONLY in-memory CA
+/// (trust + pinning learning reset every restart) — kept as a fallback and
+/// logged loudly; note the in-memory tier is refused by the CA loader outside
+/// tests, so on a real device a missing `ca_dir` fails the build (fail-closed
+/// on the crown jewel, surfaced by the caller as a protection-status alert).
+///
+/// Cross-platform on purpose so HOST tests prove CA persistence (same
+/// fingerprint across two builds over one directory) without a device.
+pub fn build_interceptor(
+    ca_dir: Option<std::path::PathBuf>,
+) -> Result<std::sync::Arc<crate::NetInterceptor>> {
+    use crate::ca::{CaKeyStore, DevInMemoryKeyStore, FileKeyStore};
+    use crate::{NetConfig, NetInterceptor};
+    use std::sync::Arc;
+
+    let net_cfg = NetConfig {
+        proxy_listen: "127.0.0.1:8080".to_string(),
+        ..Default::default()
+    };
+    let keystore: Arc<dyn CaKeyStore> = match ca_dir {
+        Some(dir) => Arc::new(FileKeyStore::new(dir)),
+        None => {
+            tracing::warn!(
+                "no ca_dir provided: per-install CA would be SESSION-ONLY \
+                 (in-memory dev keystore; refused outside tests)"
+            );
+            Arc::new(DevInMemoryKeyStore::new())
+        }
+    };
+    Ok(Arc::new(NetInterceptor::with_keystore(net_cfg, keystore)?))
+}
+
+/// Android data path: start the TLS-inspecting proxy held by `interceptor` and
+/// run the transparent smoltcp pump over the `VpnService` fd, both pointed at
+/// `127.0.0.1:8080`, until `shutdown` is cancelled. The JNI `startVpn` builds
+/// the interceptor via [`build_interceptor`] and KEEPS a clone so a flow
+/// consumer can drain `next_flow()` / answer the decision gate concurrently —
+/// without that consumer, gated media stalls the 5s gate window and drops.
 ///
 /// Coverage note: Android 7+ ignores user-installed CAs for most apps, so full
 /// HTTPS decryption is limited (the on-device accessibility/OCR path covers
@@ -182,22 +221,18 @@ pub async fn run_vpn(cfg: VpnConfig, shutdown: CancellationToken) -> Result<()> 
 #[cfg(target_os = "android")]
 pub async fn run_android_data_path(
     tun_fd: std::os::fd::RawFd,
+    interceptor: std::sync::Arc<crate::NetInterceptor>,
     shutdown: CancellationToken,
 ) -> Result<()> {
-    use crate::{DevInMemoryKeyStore, Interceptor, NetConfig, NetInterceptor};
-    use std::sync::Arc;
+    use crate::Interceptor;
 
-    // In-process TLS-inspecting proxy on the loopback port the pump CONNECTs to. The
-    // dev/in-memory keystore avoids any platform-keystore dependency on Android;
-    // a fresh CA is generated per VPN SESSION (in-memory keystore — not yet
-    // persisted per-install on Android, so user-trusted-CA flows and pinning
-    // learning reset each session; persistence is follow-up work).
-    let net_cfg = NetConfig {
-        proxy_listen: "127.0.0.1:8080".to_string(),
-        ..Default::default()
-    };
-    let interceptor = NetInterceptor::with_keystore(net_cfg, Arc::new(DevInMemoryKeyStore::new()))?;
-    interceptor.start_proxy_only().await?;
+    if let Err(e) = interceptor.start_proxy_only().await {
+        // Tear down before returning so the flow channel closes and the
+        // caller's already-spawned flow consumer exits instead of blocking on
+        // `next_flow` forever (a leaked task per failed start).
+        let _ = interceptor.shutdown().await;
+        return Err(e);
+    }
 
     // Transparent pump over the VpnService fd, pointed at the proxy above.
     let bridge = netstack::BridgeConfig::from_vpn(&VpnConfig::default())?;
@@ -205,6 +240,7 @@ pub async fn run_android_data_path(
     let result = netstack::run_netstack(tun.as_ref(), bridge, shutdown).await;
 
     // Best-effort proxy teardown (errors ignored — the runtime is going away).
+    // This also closes the flow channel, ending the caller's flow consumer.
     let _ = interceptor.shutdown().await;
     result
 }
@@ -218,6 +254,27 @@ mod tests {
         let c = VpnConfig::default();
         assert!(c.proxy_url.starts_with("http://127.0.0.1:"));
         assert_eq!(c.tun_name, "Bulwark");
+    }
+
+    #[test]
+    fn build_interceptor_persists_the_ca_across_sessions() {
+        let dir = std::env::temp_dir().join(format!(
+            "bulwark-vpn-ca-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let first = build_interceptor(Some(dir.clone())).expect("first build");
+        let fp = first.ca_fingerprint().to_string();
+        drop(first);
+        let second = build_interceptor(Some(dir.clone())).expect("second build");
+        assert_eq!(
+            second.ca_fingerprint(),
+            fp,
+            "the SAME per-install root must reload from disk (no per-session CA)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

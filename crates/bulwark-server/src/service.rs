@@ -263,18 +263,23 @@ pub async fn run(
     let addr = parse_bind(&cfg.bind)?;
     let mut builder = Server::builder();
 
-    if let (Some(cert), Some(key), Some(ca)) =
-        (&cfg.tls_cert_pem, &cfg.tls_key_pem, &cfg.client_ca_pem)
-    {
-        use tonic::transport::{Certificate, Identity, ServerTlsConfig};
-        let identity = Identity::from_pem(cert, key);
-        let tls = ServerTlsConfig::new()
-            .identity(identity)
-            .client_ca_root(Certificate::from_pem(ca));
-        builder = builder.tls_config(tls)?;
-        tracing::info!("mTLS enabled (client certs required)");
-    } else {
-        tracing::warn!("serving WITHOUT TLS — dev only; configure mTLS for any real deployment");
+    match (&cfg.tls_cert_pem, &cfg.tls_key_pem) {
+        (Some(cert), Some(key)) => {
+            use tonic::transport::{Certificate, Identity, ServerTlsConfig};
+            let mut tls = ServerTlsConfig::new().identity(Identity::from_pem(cert, key));
+            if let Some(ca) = &cfg.client_ca_pem {
+                tls = tls.client_ca_root(Certificate::from_pem(ca));
+                tracing::info!("mTLS enabled (client certs required)");
+            } else {
+                tracing::info!("TLS enabled (server-authenticated; client certs not yet required)");
+            }
+            builder = builder.tls_config(tls)?;
+        }
+        _ => {
+            tracing::warn!(
+                "serving WITHOUT TLS — dev only; set BULWARK_TLS_CERT/BULWARK_TLS_KEY for any real deployment"
+            );
+        }
     }
 
     let analysis = AnalysisServer::new(AnalysisService::new(registry));

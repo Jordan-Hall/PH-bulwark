@@ -7,11 +7,13 @@ import org.json.JSONObject
 
 /**
  * Funnels a detected tamper / protection-downgrade event to the guardian:
- *  1. reports it to the Rust core ([RustBridge.reportTamper]) so it rides the same
- *     redacted relay path to the home cluster as content alerts (where the
- *     guardian — possibly on another device — sees it), and
- *  2. posts an immediate on-device PROTECTION_DISABLED notification as a local,
- *     real-time signal.
+ *  1. reports it to the Rust core ([RustBridge.reportTamper]) — feeds the LOCAL
+ *     alert queue (the guaranteed copy) and is relayed best-effort to the
+ *     enrolled cluster once a VPN session has armed the relay (startVpn).
+ *     Relay to a self-signed https region needs the pinned cluster CA file
+ *     (filesDir/cluster_ca.pem, provisioned at pairing) — absent it, the relay
+ *     stays off and only the local notification surfaces, and
+ *  2. posts an immediate on-device PROTECTION_DISABLED notification.
  *
  * TRANSPARENT + CONSENTED: the managed child device visibly runs Bulwark; this is
  * parental-control tamper-evidence, not covert surveillance. Carries NO content —

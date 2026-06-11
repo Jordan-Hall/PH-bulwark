@@ -22,6 +22,9 @@ services:
     environment:
       BULWARK_BIND: "0.0.0.0:8443"
       BULWARK_ACCOUNTS: "1"
+      # DEV ONLY: accounts mode now refuses plaintext. For any non-loopback use,
+      # remove this line and mount certs + set BULWARK_TLS_CERT/BULWARK_TLS_KEY.
+      BULWARK_ALLOW_PLAINTEXT: "1"
       BULWARK_STATE_DIR: "/var/lib/bulwark"
       # --- email alerts (all three or none) ---
       # BULWARK_SMTP_HOST: "smtp.example.com"

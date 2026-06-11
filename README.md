@@ -10,17 +10,21 @@
 Free / open-source, Rust **client/server** child-safety system. It blocks
 non-child-safe content **in real time** (not whole-site blocking), detects signs of
 grooming in text, retains blocked clips for guardian review, raises tamper alerts if
-protection is disabled, and notifies a guardian (email + push) whenever it intervenes
-or suspects grooming. Thin device clients; a horizontally-scalable analysis backend.
+protection is disabled, and notifies a guardian (email; push is feature-gated and
+needs FCM credentials) whenever it intervenes or suspects grooming. Thin device
+clients; a horizontally-scalable analysis backend.
 
 > **Status (2026-06):** all crates **implemented + compile-verified in CI**
 > (`.github/workflows/ci.yml`: clippy + build + test + feature builds + windows-gated
 > + cargo-deny, all required-green on `master`). The **server is deployed live** on a
 > single EC2 in London (`deploy/aws/`), with CI redeploy via AWS SSM. SQLite-backed
 > crates build on CI/Linux (a local Windows SAC quirk blocks only the local
-> build-script binary). **Remaining:** the cross-platform transparent-VPN data path
-> on Linux/macOS/Android (`docs/design/vpn-data-path-plan.md`) — Windows VPN + proxy
-> mode work today; plus model/ffmpeg provisioning + a `/security-review`.
+> build-script binary). **Remaining:** the transparent-VPN data path
+> (`docs/design/vpn-data-path-plan.md`) — **explicit proxy mode is the working
+> desktop path today**; the Windows transparent pump **fails closed pending
+> validation** (it does not filter yet), and the unix/Android smoltcp pump is
+> implemented with device validation pending; plus model/ffmpeg provisioning + a
+> `/security-review`.
 
 ---
 
@@ -28,7 +32,7 @@ or suspects grooming. Thin device clients; a horizontally-scalable analysis back
 
 | Goal | How | Reachable by the network VPN? |
 |---|---|---|
-| Block adult **web pages/images** | TLS inspection HTTPS via a per-install CA → small NSFW model / text rules | ✅ |
+| Block adult **web pages/images** | TLS inspection HTTPS via a per-install CA → small NSFW model / text rules | ✅ images · 🟠 pages (alert-only today; DNS/SNI blocklist planned) |
 | Block adult **video** (mp4 / HLS / DASH) | broadcast-delay buffer → ffmpeg sample → classify → blur/mute/block | ✅ (with delay) |
 | Block adult **live streams** | bounded delay + frame/audio sampling | ✅ (WebRTC = block-only) |
 | Detect **grooming** in chat | deterministic 8-category rule+lexicon engine (+ optional small classifier) | ✅ on readable text |

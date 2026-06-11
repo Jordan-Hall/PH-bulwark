@@ -57,8 +57,9 @@ impl ServerRole {
 pub struct ServerConfig {
     pub role: ServerRole,
     pub bind: String, // host:port
-    /// mTLS material (PEM). When all three are set the server requires client
-    /// certs; otherwise it binds plaintext (dev only — logged loudly).
+    /// Transport security material (PEM). cert+key → server-authenticated TLS;
+    /// adding `client_ca_pem` also requires client certs (mTLS). None → plaintext
+    /// (dev only — the binary refuses accounts mode without TLS material).
     pub tls_cert_pem: Option<Vec<u8>>,
     pub tls_key_pem: Option<Vec<u8>>,
     pub client_ca_pem: Option<Vec<u8>>,

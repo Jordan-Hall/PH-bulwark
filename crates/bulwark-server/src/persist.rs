@@ -32,6 +32,13 @@ impl JsonFile {
     /// means the operator asked for persistence we genuinely can't provide).
     pub fn new(dir: &Path, name: &str) -> io::Result<Self> {
         std::fs::create_dir_all(dir)?;
+        // Guardian state (KDF hashes, session digests, child configs) is
+        // operator-only: tighten the dir to 700 on unix (no-op elsewhere).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
         Ok(Self {
             path: dir.join(name),
         })
@@ -74,6 +81,19 @@ impl JsonFile {
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
         {
+            // 600 from creation on unix (rename preserves it) — the state JSONs
+            // hold KDF hashes + session digests and are operator/service-only.
+            #[cfg(unix)]
+            let mut f = {
+                use std::os::unix::fs::OpenOptionsExt;
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(&tmp)?
+            };
+            #[cfg(not(unix))]
             let mut f = std::fs::File::create(&tmp)?;
             f.write_all(&bytes)?;
             f.sync_all()?;

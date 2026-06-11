@@ -235,21 +235,28 @@ pub fn SegmentPlayer(uri: String) -> Element {
 
 #[component]
 pub fn CoverageMatrix() -> Element {
+    // HONEST static matrix (audit 2026-06-10): what is filtered TODAY, not the
+    // target architecture. Keep in sync with PLAN.md §0a.
     let rows = [
         (
-            "Web (browsers)",
-            "Filtered",
-            "HTTPS decrypted via the per-install CA",
+            "Web (browsers, desktop)",
+            "Filtered via proxy",
+            "Explicit proxy mode: HTTPS decrypted via the per-install CA while the proxy is connected",
+        ),
+        (
+            "Android (transparent VPN)",
+            "Being validated",
+            "Capture pump implemented; device validation pending; HTTPS coverage limited (Android 7+ ignores user CAs)",
         ),
         (
             "Video / live streams",
-            "Filtered",
-            "Buffered, sampled, block/blur/mute",
+            "Filtered via proxy",
+            "On the proxy path: buffered, sampled, block/blur/mute",
         ),
         (
-            "WhatsApp / Signal / Messenger (E2E)",
-            "On-device only",
-            "Network can't read; on-device text check",
+            "WhatsApp / Signal / Messenger (E2E / pinned)",
+            "Android text check only",
+            "Network can't read E2E; on-device text check covers 6 messengers on Android — no OCR agent yet, NOT covered elsewhere",
         ),
         (
             "iPhone / iPad",

@@ -16,7 +16,7 @@ pub const CLOUD_REGIONS: &[(&str, &str, &str)] = &[
     (
         "uk",
         "PH Bulwark Cloud — UK (London)",
-        "http://ec2-35-179-110-106.eu-west-2.compute.amazonaws.com:8443",
+        "https://ec2-35-179-110-106.eu-west-2.compute.amazonaws.com:8443",
     ),
     (
         "us",
@@ -358,7 +358,7 @@ pub const CHILD_REGIONS: &[(&str, &str, &str)] = &[
     (
         "uk",
         "UK — London",
-        "http://ec2-35-179-110-106.eu-west-2.compute.amazonaws.com:8443",
+        "https://ec2-35-179-110-106.eu-west-2.compute.amazonaws.com:8443",
     ),
     ("us", "US cloud", "https://us.cloud.phbulwark.app"),
 ];

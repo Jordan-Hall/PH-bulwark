@@ -83,12 +83,15 @@ and its `blob://` ref flows into the `AlertEvent`. The cluster dispatch is wired
 too (`AnalyzerRegistry::with_text_and_video`, used by `bulwark-server`); an
 **all-in-one** node also passes a `SegmentStore` so the co-located parent app can
 read the clip. Real frame/audio sampling is behind bulwark-video's `ffmpeg` feature
-(the default `NullDemuxer` fails open, storing nothing).
+(the default `NullDemuxer` can't decode → segments fail closed via
+`Category::Unspecified`, storing nothing).
 
 **Distributed limitation (honest).** `blob://` is a *local* reference. In a
 distributed deployment the analysis cluster is a different host than the guardian's
 parent app, so a clip stored cluster-side is not reachable by a remote parent —
 which is why a distributed worker keeps **no** store (segment retention stays the
 child device's job, on the client pipeline). Remote video review (parent on a
-different machine than the child) needs a clip-fetch API over the existing gRPC
-channel; that is a tracked follow-up, not yet implemented.
+different machine than the child) is now implemented: an all-in-one server serves
+retained clips over `Review.FetchSegment` (streamed, auth-gated in accounts mode)
+and the parent console plays the fetched clip back. CSAM is never retained, so it
+is never fetchable.

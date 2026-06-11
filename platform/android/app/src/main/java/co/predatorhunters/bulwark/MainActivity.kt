@@ -234,7 +234,9 @@ class MainActivity : ComponentActivity() {
         // consent is currently in place (e.g. always-on configured by the parent).
         vpnConsented = prefs().getBoolean(KEY_VPN_CONSENTED, false) ||
             VpnService.prepare(this) == null
-        vpnRunning = vpnConsented
+        // Honest live state: BulwarkVpnService flips `running` in
+        // onStartCommand/onDestroy — consent alone must never show "running".
+        vpnRunning = BulwarkVpnService.running
         antiRemovalOn = Lockdown.isDeviceOwner(this) || Lockdown.isActiveAdmin(this)
         paired = Enrollment.isEnrolled(this)
         enrollment = Enrollment.record(this)

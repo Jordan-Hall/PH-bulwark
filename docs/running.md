@@ -1,8 +1,7 @@
 # Bulwark — Build, Run & Setup Guide
 
-> ⚠️ The tree is **not compile-verified yet**. Do the integration pass in
-> [`integration-todo.md`](integration-todo.md) alongside the first `cargo build`.
-> This guide is the target operating procedure once it builds.
+> Compile-verified in CI (`.github/workflows/ci.yml`: clippy + build + test +
+> feature builds + cargo-deny, required-green on `master`).
 
 ## 1. Prerequisites
 
@@ -17,10 +16,9 @@
 
 Dev tooling: `cargo install cargo-deny`; `rustup component add clippy rustfmt`.
 
-## 2. First build (the integration pass)
+## 2. First build
 
-Because the crates were written in parallel against the contract and never compiled,
-expect to fix the items in [`integration-todo.md`](integration-todo.md) here:
+The workspace is CI-verified; a fresh checkout builds with:
 
 ```bash
 cargo build --workspace 2>&1 | tee build.log     # fix fallout iteratively
@@ -39,15 +37,17 @@ trait into `bulwark-core`; confirm `tonic` generated server-trait associated-typ
 | Feature | Crate | Effect |
 |---|---|---|
 | `classifier` | `bulwark-text` | small ONNX text classifier backs up the rule engine |
-| `onnx` | `bulwark-vision`, `bulwark-audio` | real model inference via `ort` (else fails open) |
-| `ffmpeg` | `bulwark-video` | real decode/sample via ffmpeg-sidecar (else passes video) |
+| `onnx` | `bulwark-vision`, `bulwark-audio` | real model inference via `ort` (else the stub fails closed: unscored → `Category::Unspecified` → blocked) |
+| `ffmpeg` | `bulwark-video` | real decode/sample via ffmpeg-sidecar (else undecodable segments fail closed) |
 | `tesseract` / `winocr` | `bulwark-agent` | OCR backends (else stub source) |
 | `gossip` / `quorum` | `bulwark-cluster` | multi-node SWIM (`foca`) / Postgres quorum |
 | `llm-explain` | `bulwark-ui` | guardian-initiated "explain thread" endpoint (opt-in only) |
 
 A bare `cargo run` (no features) starts and wires the loop but the model analyzers
-**fail open** (allow) and video isn't decoded — useful for exercising the control flow,
-not for real filtering.
+**fail closed**: anything they cannot score comes back `Category::Unspecified` and
+policy blocks it (the intentional fail-opens are tiny/oversized images and
+cert-pinned hosts, which pass through). Video isn't decoded — useful for exercising
+the control flow, not for real filtering.
 
 ## 4. Run — single node (Windows-first)
 

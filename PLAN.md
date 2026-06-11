@@ -26,7 +26,7 @@ runs on a **clusterable server backend**; devices run a thin client.
 
 | Goal | Network VPN alone? | Reality |
 |---|---|---|
-| Block adult **websites/pages** | ✅ | DNS + SNI + on-device TLS inspection |
+| Block adult **websites/pages** | ✅ | guardian host blocklist (CONNECT/Host refused with a block page; pump RSTs listed IPs pre-CONNECT) + TLS-inspected HTML gated on the local text verdict (BLOCK → inline block page; fail-open after 2 s with no verdict). No DNS-level blocking yet |
 | Block adult **images** in pages | ✅ | on-device TLS inspect → small NSFW model |
 | Block adult **video** (mp4, HLS/DASH) | ✅ (with delay) | Buffer → ffmpeg → classify → block/blur/mute → forward |
 | Block adult **live WebRTC** calls | ⚠️ Hard | Realistic option is **block**, not analyze |

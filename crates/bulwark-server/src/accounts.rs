@@ -50,8 +50,8 @@ const PAIR_CODE_LEN: usize = 8;
 /// Unambiguous alphabet for human-typed pair codes (no 0/O/1/I).
 const PAIR_CODE_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 /// Default guardian-session lifetime; override with `BULWARK_SESSION_TTL_SECS`
-/// (positive integer seconds). A leaked token is valid at most this long; sessions
-/// are also dropped on restart (never persisted).
+/// (positive integer seconds). A leaked token is valid at most this long. Sessions
+/// persist across restarts as sha256 digests only (see [`token_hash`]).
 const DEFAULT_SESSION_TTL_SECS: i64 = 12 * 3600;
 
 /// The configured session TTL in milliseconds (env override, else the default).
@@ -239,8 +239,9 @@ struct Inner {
     by_email: HashMap<String, Account>,
     /// account_id → email (reverse lookup).
     email_by_id: HashMap<String, String>,
-    /// session token → (account_id, issued time). Expired tokens are rejected
-    /// (see [`session_live`]). Never persisted — dropped on restart.
+    /// sha256(session token) hex → (account_id, issued time). Keyed by DIGEST so
+    /// the raw bearer token never sits in a map or on disk — every lookup hashes
+    /// the presented token. Expired tokens are rejected (see [`session_live`]).
     sessions: HashMap<String, SessionEntry>,
     /// email (lowercased) → failed-login throttle (brute-force lockout). Cleared
     /// on a successful login; not persisted.
@@ -280,10 +281,11 @@ impl AccountStore {
     }
 
     /// Durable store rooted at `dir`: loads `accounts.json` on startup and
-    /// write-throughs every account/child/guardian mutation. Session tokens are
-    /// NOT persisted — guardians simply re-`login` after a restart (keeps the
-    /// at-rest credential surface to the KDF hash only). A corrupt file starts
-    /// empty (logged); only an unusable directory is fatal.
+    /// write-throughs every account/child/guardian mutation. Sessions persist as
+    /// sha256(token) digests only — a login survives a restart/redeploy, but a
+    /// stolen accounts.json cannot impersonate a guardian (at-rest credential
+    /// surface = KDF hash + token digest). A corrupt file starts empty (logged);
+    /// only an unusable directory is fatal.
     pub fn with_state_dir(dir: &Path) -> std::io::Result<Self> {
         let file = JsonFile::new(dir, "accounts.json")?;
         let snap: AccountSnapshot = file.load_or_default();
@@ -429,8 +431,10 @@ impl AccountStore {
         let account_id = creds.expect("verified implies creds present").2;
         let token = self.rand_hex(TOKEN_BYTES);
         let issued_ms = now;
+        // Stored/persisted by DIGEST only — the raw token goes to the caller and
+        // is never written anywhere server-side.
         inner.sessions.insert(
-            token.clone(),
+            token_hash(&token),
             SessionEntry {
                 account_id: account_id.clone(),
                 issued_ms,
@@ -447,7 +451,7 @@ impl AccountStore {
     fn account_for_token(inner: &Inner, token: &str) -> Result<String, AccountError> {
         let entry = inner
             .sessions
-            .get(token.trim())
+            .get(&token_hash(token))
             .ok_or(AccountError::Unauthorized)?;
         if !session_live(entry.issued_ms, Self::now_ms(), session_ttl_ms()) {
             return Err(AccountError::Unauthorized);
@@ -634,7 +638,7 @@ impl AccountStore {
     /// `None` for an unknown OR expired token (caller treats that as "deny").
     pub fn guardian_scope(&self, token: &str) -> Option<GuardianScope> {
         let inner = self.inner.lock().expect("account mutex poisoned");
-        let entry = inner.sessions.get(token.trim())?;
+        let entry = inner.sessions.get(&token_hash(token))?;
         if !session_live(entry.issued_ms, Self::now_ms(), session_ttl_ms()) {
             return None;
         }
@@ -656,7 +660,7 @@ impl AccountStore {
     /// fields on guardian-authored mutations (e.g. ChildControl.SetChildConfig).
     pub fn account_for_session(&self, token: &str) -> Option<String> {
         let inner = self.inner.lock().expect("account mutex poisoned");
-        let entry = inner.sessions.get(token.trim())?;
+        let entry = inner.sessions.get(&token_hash(token))?;
         if !session_live(entry.issued_ms, Self::now_ms(), session_ttl_ms()) {
             return None;
         }
@@ -680,6 +684,15 @@ fn to_hex(bytes: &[u8]) -> String {
     s
 }
 
+/// sha256 of a presented session token, lowercase hex. Sessions are keyed and
+/// persisted by this digest ONLY, so a stolen accounts.json (or memory dump of
+/// the map) cannot impersonate a guardian. Unsalted SHA-256 is sufficient here:
+/// tokens carry 256 bits of CSPRNG entropy ([`TOKEN_BYTES`]), so dictionary /
+/// rainbow-table attacks do not apply (unlike passwords, which use PBKDF2).
+fn token_hash(token: &str) -> String {
+    to_hex(ring::digest::digest(&ring::digest::SHA256, token.trim().as_bytes()).as_ref())
+}
+
 /// Decode an exactly-`N`-byte lowercase-hex string into `[u8; N]`. `None` on a
 /// wrong-length or non-hex string (a corrupt snapshot row is skipped, not fatal).
 fn from_hex_array<const N: usize>(s: &str) -> Option<[u8; N]> {
@@ -695,7 +708,8 @@ fn from_hex_array<const N: usize>(s: &str) -> Option<[u8; N]> {
 
 // ---------------------------------------------------------------------------
 // Durable snapshot (serde JSON). Content-free: the KDF salt+hash (never the
-// password), ids, hosts. Session tokens are deliberately NOT persisted.
+// password), ids, hosts. Sessions are persisted as sha256(token) digests —
+// the raw bearer token never touches disk.
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Default)]
@@ -710,6 +724,12 @@ struct AccountSnapshot {
 
 #[derive(Serialize, Deserialize)]
 struct SessionRow {
+    /// sha256(token) hex — the only form that ever touches disk.
+    #[serde(default)]
+    token_sha256: String,
+    /// LEGACY (pre-hashing snapshots): the raw token. Read for migration only —
+    /// hashed on load, never serialized again (`skip_serializing_if`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     token: String,
     account_id: String,
     issued_ms: i64,
@@ -770,13 +790,14 @@ impl Inner {
         let mut sessions: Vec<SessionRow> = self
             .sessions
             .iter()
-            .map(|(token, e)| SessionRow {
-                token: token.clone(),
+            .map(|(token_sha256, e)| SessionRow {
+                token_sha256: token_sha256.clone(),
+                token: String::new(),
                 account_id: e.account_id.clone(),
                 issued_ms: e.issued_ms,
             })
             .collect();
-        sessions.sort_by(|a, b| a.token.cmp(&b.token));
+        sessions.sort_by(|a, b| a.token_sha256.cmp(&b.token_sha256));
 
         AccountSnapshot {
             accounts,
@@ -785,8 +806,10 @@ impl Inner {
         }
     }
 
-    /// Rebuild from a snapshot, deriving the reverse maps; `sessions` starts empty
-    /// (tokens are not persisted). Rows with malformed salt/hash are skipped.
+    /// Rebuild from a snapshot, deriving the reverse maps. Session rows are keyed
+    /// by their sha256 digest; LEGACY rows that still carry a raw token are hashed
+    /// on load (one-shot migration — the next persist writes digests only). Rows
+    /// with malformed salt/hash are skipped.
     fn from_snapshot(snap: AccountSnapshot) -> Inner {
         let mut inner = Inner::default();
         for row in snap.accounts {
@@ -832,8 +855,22 @@ impl Inner {
             );
         }
         for row in snap.sessions {
+            // Prune expired sessions on load (correctness never depended on it —
+            // lookups reject expired — but the file must not grow forever and
+            // stale digests shouldn't linger at rest).
+            if !session_live(row.issued_ms, AccountStore::now_ms(), session_ttl_ms()) {
+                continue;
+            }
+            // Prefer the digest; hash a legacy raw token on load (migration).
+            let key = if !row.token_sha256.is_empty() {
+                row.token_sha256
+            } else if !row.token.is_empty() {
+                token_hash(&row.token)
+            } else {
+                continue;
+            };
             inner.sessions.insert(
-                row.token,
+                key,
                 SessionEntry {
                     account_id: row.account_id,
                     issued_ms: row.issued_ms,
@@ -1051,6 +1088,55 @@ mod tests {
     }
 
     #[test]
+    fn session_tokens_persist_hashed_never_raw() {
+        let dir = tmp_dir("hashed-sessions");
+        let s = AccountStore::with_state_dir(&dir).unwrap();
+        s.create_account("h@x.com", "passwordeight", "H").unwrap();
+        let (tok, acct, _) = s.login("h@x.com", "passwordeight").unwrap();
+        let on_disk = std::fs::read_to_string(dir.join("accounts.json")).unwrap();
+        assert!(
+            !on_disk.contains(&tok),
+            "raw bearer token must never touch disk"
+        );
+        assert!(on_disk.contains(&token_hash(&tok)));
+        // Restart: the same raw token still authenticates (lookup hashes it).
+        drop(s);
+        let s2 = AccountStore::with_state_dir(&dir).unwrap();
+        assert_eq!(s2.account_for_session(&tok).as_deref(), Some(acct.as_str()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_plaintext_session_rows_migrate_to_hashes_on_load() {
+        let dir = tmp_dir("legacy-sessions");
+        // A pre-hashing snapshot: the session row carries the RAW token.
+        let now = AccountStore::now_ms();
+        let legacy = format!(
+            r#"{{"accounts":[],"children":[],"sessions":[{{"token":"rawtoken123","account_id":"acct-1","issued_ms":{now}}}]}}"#
+        );
+        std::fs::write(dir.join("accounts.json"), legacy).unwrap();
+        let s = AccountStore::with_state_dir(&dir).unwrap();
+        // The old raw token still authenticates (hashed on load)…
+        assert_eq!(
+            s.account_for_session("rawtoken123").as_deref(),
+            Some("acct-1")
+        );
+        // …and the next persisted snapshot is scrubbed: digest only.
+        s.create_account("m@x.com", "passwordnine", "M").unwrap();
+        let on_disk = std::fs::read_to_string(dir.join("accounts.json")).unwrap();
+        assert!(!on_disk.contains("rawtoken123"));
+        assert!(on_disk.contains(&token_hash("rawtoken123")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn token_hash_is_stable_and_trims() {
+        assert_eq!(token_hash("abc"), token_hash(" abc "));
+        assert_eq!(token_hash("abc").len(), 64); // sha256 hex
+        assert_ne!(token_hash("abc"), token_hash("abd"));
+    }
+
+    #[test]
     fn session_live_window() {
         assert!(session_live(0, 0, 1000)); // issued == now
         assert!(session_live(0, 999, 1000)); // within ttl
@@ -1070,7 +1156,7 @@ mod tests {
         // Age the session past the TTL (in-module access to the private field).
         {
             let mut inner = s.inner.lock().unwrap();
-            inner.sessions.get_mut(tok.trim()).unwrap().issued_ms -= session_ttl_ms() + 1000;
+            inner.sessions.get_mut(&token_hash(&tok)).unwrap().issued_ms -= session_ttl_ms() + 1000;
         }
         // Now treated as unauthenticated everywhere a token is checked.
         assert!(s.guardian_scope(&tok).is_none());

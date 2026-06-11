@@ -39,7 +39,9 @@ pub enum HostInspection {
     /// TLS inspection succeeded before — ordinary HTTPS we filter in-line.
     Inspectable,
     /// TLS inspection was rejected (cert-pinned and/or E2E) — the network
-    /// cannot read it; the host/app is routed to on-device OCR.
+    /// cannot read it; today such traffic passes through UNFILTERED on the wire
+    /// (on Android, supported messengers get an on-device text check; the OCR
+    /// route is planned, not built).
     Pinned,
 }
 
@@ -95,9 +97,9 @@ pub struct EventView {
 pub struct CoverageRow {
     pub app: String,
     pub web_mitm: bool,  // ordinary HTTPS we can decrypt
-    pub e2e: bool,       // end-to-end encrypted → on-device OCR only
-    pub pinned: bool,    // cert-pinned → on-device OCR only
-    pub ocr_agent: bool, // on-device OCR active for this app
+    pub e2e: bool,       // end-to-end encrypted → not network-readable (OCR route planned)
+    pub pinned: bool,    // cert-pinned → not network-readable (OCR route planned)
+    pub ocr_agent: bool, // on-device OCR active for this app (no agent ships yet → always false)
     pub note: String,
 }
 
@@ -162,9 +164,10 @@ async fn events(State(st): State<AppState>, Query(q): Query<EventsQuery>) -> Jso
 
 /// The coverage matrix, derived LIVE from the injected [`CoverageSource`]
 /// (bulwark-net's pinning registry): one honest row per host the engine has
-/// actually classified. Inspection-rejected hosts show as pinned → routed to
-/// on-device OCR. The network cannot distinguish cert-pinning from E2E (both
-/// reject our leaf at the handshake), so the note says so rather than guess.
+/// actually classified. Inspection-rejected hosts show as pinned → currently
+/// UNFILTERED on the wire (OCR route planned). The network cannot distinguish
+/// cert-pinning from E2E (both reject our leaf at the handshake), so the note
+/// says so rather than guess.
 async fn coverage(State(st): State<AppState>) -> Json<Vec<CoverageRow>> {
     Json(
         st.coverage
@@ -193,8 +196,10 @@ fn coverage_row(h: HostCoverage) -> CoverageRow {
             // note carries the E2E caveat instead of a guessed flag.
             e2e: false,
             pinned: true,
-            ocr_agent: true,
-            note: "TLS inspection rejected (cert-pinned and/or E2E) — network cannot read; routed to on-device OCR".into(),
+            // No OCR agent is active anywhere yet (bulwark-agent has no capture
+            // loop) — never claim coverage that does not exist.
+            ocr_agent: false,
+            note: "TLS inspection rejected (cert-pinned and/or E2E) — currently passes through UNFILTERED on the wire; on-device text-capture covers supported messengers on Android; OCR route planned".into(),
         },
     }
 }
@@ -252,8 +257,11 @@ mod tests {
         let web = rows.iter().find(|r| r.app == "example.com").unwrap();
         assert!(web.web_mitm && !web.pinned && !web.ocr_agent);
         let pinned = rows.iter().find(|r| r.app == "signal.org").unwrap();
-        assert!(!pinned.web_mitm && pinned.pinned && pinned.ocr_agent);
-        assert!(pinned.note.contains("OCR"));
+        assert!(!pinned.web_mitm && pinned.pinned && !pinned.ocr_agent);
+        assert!(
+            pinned.note.contains("UNFILTERED") && pinned.note.contains("planned"),
+            "pinned rows must state the live gap, not claim OCR coverage"
+        );
     }
 
     #[tokio::test]
@@ -274,7 +282,7 @@ mod tests {
             web_mitm: false,
             e2e: true,
             pinned: true,
-            ocr_agent: true,
+            ocr_agent: false,
             note: "x".into(),
         };
         assert!(

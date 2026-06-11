@@ -207,12 +207,11 @@ Missing:
 
 ## UI Framework Direction
 
-The parent app is currently a Dioxus desktop app pinned to the 0.6 line. Dioxus
-0.7 is the current published line, and Dioxus Native/Blitz is the route to a
-shared native-rendered UI across desktop/mobile without a webview. Dioxus 0.8 is
-still a future migration target, so the near-term implementation should keep the
-account/enrollment views as small pure-RSX components that can move from desktop
-to native/mobile once the runtime is stable enough for our app.
+Both apps (`apps/parent`, `apps/child`) ship on **Dioxus 0.8.0-alpha.0** today.
+Dioxus Native/Blitz remains the route to a shared native-rendered UI across
+desktop/mobile without a webview, so the account/enrollment views stay small
+pure-RSX components that can move from desktop to native/mobile as the 0.8
+runtime stabilises.
 
 Planned UI screens:
 
