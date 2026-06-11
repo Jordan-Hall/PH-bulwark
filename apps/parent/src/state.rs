@@ -351,10 +351,27 @@ pub fn pair_expiry_text(ts_millis: i64) -> String {
         .unwrap_or(ts_millis);
     let secs = (ts_millis - now).max(0) / 1000;
     if secs < 60 {
-        format!("expires in {}s", secs.max(1))
+        format!("expires in {} seconds", secs.max(1))
     } else {
-        format!("expires in {}m", secs / 60)
+        let mins = secs / 60;
+        format!(
+            "expires in {} minute{}",
+            mins,
+            if mins == 1 { "" } else { "s" }
+        )
     }
+}
+
+/// Split a pair code into groups of 4 for the segmented "type it by hand"
+/// display (e.g. `ABCD2345` → `["ABCD", "2345"]`). Empty input → no groups, so
+/// the slots simply don't render.
+pub fn segment_code(code: &str) -> Vec<String> {
+    code.trim()
+        .chars()
+        .collect::<Vec<_>>()
+        .chunks(4)
+        .map(|chunk| chunk.iter().collect())
+        .collect()
 }
 
 pub fn can_show_evidence(category: Category) -> bool {

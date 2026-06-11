@@ -81,7 +81,9 @@ fn cluster_endpoint(endpoint: &str, ca_path: &str) -> Result<Endpoint, String> {
         .timeout(Duration::from_secs(10));
     if endpoint.to_ascii_lowercase().starts_with("https://") {
         let pem = std::fs::read(ca_path.trim()).map_err(|e| {
-            format!("this server uses HTTPS but its pinned CA isn't on the device yet ({ca_path}): {e}")
+            format!(
+                "this server uses HTTPS but its pinned CA isn't on the device yet ({ca_path}): {e}"
+            )
         })?;
         let tls = tonic::transport::ClientTlsConfig::new()
             .ca_certificate(tonic::transport::Certificate::from_pem(pem));
@@ -254,6 +256,10 @@ fn ok_pairing_json(pair: &PairResult) -> String {
         "ok": true,
         "child_id": pair.child_id,
         "family_id": pair.family_id,
+        // Minted at redeem and returned exactly ONCE - the device's bearer
+        // credential for child->cluster RPCs. Kotlin persists it alongside
+        // child_id/family_id; never logged, never echoed in errors.
+        "device_token": pair.device_token,
     });
     serde_json::to_string(&obj).unwrap_or_else(|_| {
         r#"{"ok":false,"error":"could not serialize enrollment result"}"#.to_string()
@@ -432,6 +438,7 @@ async fn fetch_child_config_rpc(
     device_id: String,
     applied_version: u64,
     ca_path: String,
+    device_token: String,
 ) -> Result<ChildConfig, String> {
     let device_id = device_id.trim();
     if device_id.is_empty() {
@@ -453,6 +460,9 @@ async fn fetch_child_config_rpc(
         control.get_child_config(ChildConfigFilter {
             device_id: device_id.to_string(),
             have_version: applied_version,
+            // Per-device bearer credential minted at pairing ("" when this
+            // device enrolled before tokens existed; server policy decides).
+            device_token: device_token.trim().to_string(),
         }),
     )
     .await
@@ -796,14 +806,18 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_analyzeTe
     string_to_jstring(&mut env, &json)
 }
 
-/// `external fun redeemPairCode(endpoint: String, code: String, deviceId: String): String`
+/// `external fun redeemPairCode(endpoint: String, code: String, deviceId: String, caPath: String): String`
 ///
 /// Child enrollment path. The Android setup screen calls this after the guardian
 /// has selected the same server in the parent app and generated a short-lived
 /// code. The code is the credential; the device id is the stable child-device
 /// routing key. Returns compact JSON:
 ///
-/// * `{"ok":true,"child_id":"...","family_id":"..."}`
+/// * `{"ok":true,"child_id":"...","family_id":"...","device_token":"..."}`
+///
+/// `device_token` is the per-device credential the server mints at redeem and
+/// returns exactly once; Kotlin persists it and sends it on heartbeats and
+/// config fetches. It is never logged and never echoed in errors.
 /// * `{"ok":false,"error":"..."}`
 ///
 /// No pair code or device id is echoed in errors.
@@ -843,7 +857,7 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_redeemPai
     string_to_jstring(&mut env, &json)
 }
 
-/// `external fun fetchChildConfig(endpoint: String, deviceId: String, appliedVersion: Long): String`
+/// `external fun fetchChildConfig(endpoint: String, deviceId: String, appliedVersion: Long, caPath: String, deviceToken: String): String`
 ///
 /// Child-side half of the parent-controlled VPN: fetch this device's
 /// guardian-set desired config (`ChildControl.GetChildConfig`) from the
@@ -871,6 +885,7 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_fetchChil
     device_id: JString,
     applied_version: jlong,
     ca_path: JString,
+    device_token: JString,
 ) -> jstring {
     let endpoint = match jstring_to_string(&mut env, &endpoint) {
         Some(s) => s,
@@ -883,6 +898,7 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_fetchChil
     };
     let device_id = jstring_to_string(&mut env, &device_id).unwrap_or_default();
     let ca_path = jstring_to_string(&mut env, &ca_path).unwrap_or_default();
+    let device_token = jstring_to_string(&mut env, &device_token).unwrap_or_default();
     // Negative can't come from the Kotlin prefs (default 0); clamp defensively.
     let applied_version = applied_version.max(0) as u64;
 
@@ -897,6 +913,7 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_fetchChil
             device_id,
             applied_version,
             ca_path,
+            device_token,
         )) {
             Ok(cfg) => {
                 // Live profile reconcile: a fetched config that is NOT older
@@ -1096,8 +1113,10 @@ mod tests {
         let ok = ok_pairing_json(&PairResult {
             child_id: "child-1".to_string(),
             family_id: "family-1".to_string(),
+            device_token: "tok-1".to_string(),
         });
         assert!(ok.contains("\"ok\":true"), "{ok}");
+        assert!(ok.contains("\"device_token\":\"tok-1\""), "{ok}");
         assert!(ok.contains("\"child_id\":\"child-1\""), "{ok}");
         assert!(ok.contains("\"family_id\":\"family-1\""), "{ok}");
 

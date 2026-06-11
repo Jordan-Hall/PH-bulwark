@@ -392,6 +392,17 @@ input.url:focus, .field input:focus { outline: none; border-color: var(--green);
 .pair-qr-img svg { display: block; width: 100%; height: 100%; }
 .pair-qr .hint { flex: 1; min-width: 200px; margin-top: 0; text-align: left; }
 
+/* Setup-code handoff: segmented short code, denser v2 QR, copy action */
+.code-seg { display: flex; gap: 9px; justify-content: center; flex-wrap: wrap; margin: 6px 0 4px; }
+.code-seg span {
+  font-family: var(--display); color: var(--navy); font-size: 32px; font-weight: 600;
+  letter-spacing: .12em; background: #fff; border: 1px solid #CBDEE9; border-radius: var(--r-sm);
+  padding: 6px 14px;
+}
+.setup-qr-img { width: 228px; height: 228px; }
+.setup-row { display: flex; justify-content: center; margin-top: 14px; }
+.setup-row .copy-btn { margin: 0; }
+
 /* ======================================================================
    COVERAGE MATRIX
    ====================================================================== */

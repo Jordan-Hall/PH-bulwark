@@ -134,6 +134,11 @@ fn reset_token_ttl_ms() -> i64 {
 
 /// Pairing codes are a short-lived, single-use linking credential.
 const PAIR_CODE_TTL_SECS: i64 = 15 * 60;
+/// Single global key for the pair-code redeem throttle: redemption is
+/// unauthenticated (no email/account to key on), so all wrong-code guesses
+/// share one counter. Simple by design — a global pause on guessing is
+/// acceptable for a 15-minute, single-use, ~39-bit code (belt-and-braces).
+const REDEEM_THROTTLE_KEY: &str = "redeem";
 const PAIR_CODE_LEN: usize = 8;
 /// Unambiguous alphabet for human-typed pair codes (no 0/O/1/I).
 const PAIR_CODE_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
@@ -329,6 +334,14 @@ struct ChildRec {
     name: String,
     device_id: String,
     guardians: HashSet<String>,
+    /// sha256 hex of the per-device token minted at pairing (the raw token is
+    /// returned to the device exactly once, never stored). EMPTY for children
+    /// enrolled before device tokens existed (or via AddChild, where no device
+    /// is present to receive one) — those verify under a legacy grace until a
+    /// device-removal/re-pair flow ships (re-pairing an enrolled device_id
+    /// currently returns DeviceInUse — follow-up).
+    /// See [`AccountStore::verify_device_token`].
+    device_token_sha256: String,
 }
 
 impl ChildRec {
@@ -391,6 +404,11 @@ struct Inner {
     device_to_child: HashMap<String, String>,
     /// pairing code → pending child record. Short-lived, single-use, not persisted.
     pair_codes: HashMap<String, PairCodeRec>,
+    /// Failed pair-code REDEEM throttle. Redemption is the one unauthenticated
+    /// guessing surface with no account to key on, so a single GLOBAL key
+    /// ([`REDEEM_THROTTLE_KEY`]) paces all wrong-code attempts (same
+    /// window/params as login). Cleared by a successful redeem; not persisted.
+    redeem_fails: HashMap<String, LoginThrottle>,
 }
 
 /// Cloneable handle to the in-memory account/guardian state. Every clone shares
@@ -920,6 +938,10 @@ impl AccountStore {
             name: child_name.trim().to_string(),
             device_id: device_id.trim().to_string(),
             guardians,
+            // AddChild is the manual (guardian-typed) enrollment path — no
+            // device is present to receive a token, so this record verifies
+            // under the legacy grace until the device pairs properly.
+            device_token_sha256: String::new(),
         };
         // device_id is guaranteed non-empty (validated above) → always indexed.
         inner
@@ -965,32 +987,65 @@ impl AccountStore {
 
     /// Redeem a pairing code from a child device: creates the child (with this
     /// `device_id`) under the code's family, assigns the minting parent as the
-    /// first guardian, and consumes the code. Unauthenticated — the code IS the
-    /// credential, so the not-yet-enrolled child can call it.
+    /// first guardian, consumes the code, and mints the PER-DEVICE TOKEN the
+    /// device authenticates with from then on (Heartbeat / config reads).
+    /// Returns `(child_id, family_id, device_token)` — the raw token goes to
+    /// the device exactly once; only its sha256 digest is stored.
+    /// Unauthenticated — the code IS the credential, so the not-yet-enrolled
+    /// child can call it; wrong-code guesses are paced by a global throttle
+    /// (this is the one unauthenticated guessing surface here).
     pub fn redeem_pair_code(
         &self,
         code: &str,
         device_id: &str,
-    ) -> Result<(String, String), AccountError> {
+    ) -> Result<(String, String, String), AccountError> {
+        let now = Self::now_ms();
+        let (max_fails, window_ms) = login_throttle_params();
         let mut inner = self.inner.lock().expect("account mutex poisoned");
+        // Throttle FIRST: while locked, even a correct code is refused (same
+        // discipline as login). Unlike login there is no slow KDF on this path
+        // — sha256 + the RNG are fast — so the whole redeem stays under the
+        // one lock instead of the snapshot/release/re-acquire dance.
+        if inner
+            .redeem_fails
+            .get(REDEEM_THROTTLE_KEY)
+            .is_some_and(|t| throttle_locked(t, now, window_ms, max_fails))
+        {
+            return Err(AccountError::TooManyAttempts);
+        }
         let key = code.trim().to_uppercase();
         let device_id = device_id.trim();
         if device_id.is_empty() {
             return Err(AccountError::Validation("device_id is required"));
         }
-        let rec = inner
-            .pair_codes
-            .get(&key)
-            .cloned()
-            .ok_or(AccountError::PairCodeInvalid)?;
-        if !session_live(rec.issued_ms, Self::now_ms(), PAIR_CODE_TTL_SECS * 1000) {
-            inner.pair_codes.remove(&key);
-            return Err(AccountError::PairCodeInvalid);
-        }
+        // Unknown or expired code = a guess → count it toward the throttle.
+        // (Validation/DeviceInUse are NOT guesses and don't count.)
+        let rec = match inner.pair_codes.get(&key).cloned() {
+            Some(rec) if session_live(rec.issued_ms, now, PAIR_CODE_TTL_SECS * 1000) => rec,
+            other => {
+                if other.is_some() {
+                    inner.pair_codes.remove(&key); // expired → drop it
+                }
+                let t = inner
+                    .redeem_fails
+                    .entry(REDEEM_THROTTLE_KEY.to_string())
+                    .or_insert(LoginThrottle {
+                        fails: 0,
+                        window_start_ms: now,
+                    });
+                record_failure(t, now, window_ms);
+                return Err(AccountError::PairCodeInvalid);
+            }
+        };
         if inner.device_to_child.contains_key(device_id) {
             return Err(AccountError::DeviceInUse);
         }
         let child_id = self.rand_hex(ID_BYTES);
+        // The per-device secret: 32 bytes of CSPRNG entropy, hex — the same
+        // strength as a session token. Stored as a sha256 digest ONLY
+        // (mirrors sessions: a copied accounts.json is never enough to act as
+        // the device); the raw value goes back to the device exactly once.
+        let device_token = self.rand_hex(TOKEN_BYTES);
         let mut guardians = HashSet::new();
         guardians.insert(rec.account_id.clone());
         let child_rec = ChildRec {
@@ -999,14 +1054,16 @@ impl AccountStore {
             name: rec.child_name.clone(),
             device_id: device_id.to_string(),
             guardians,
+            device_token_sha256: token_hash(&device_token),
         };
         inner
             .device_to_child
             .insert(device_id.to_string(), child_id.clone());
         inner.children.insert(child_id.clone(), child_rec);
         inner.pair_codes.remove(&key); // single-use
+        inner.redeem_fails.remove(REDEEM_THROTTLE_KEY); // success clears the pacing
         self.persist_locked(&inner);
-        Ok((child_id, rec.family_id))
+        Ok((child_id, rec.family_id, device_token))
     }
 
     /// Generate a short, human-typeable, unambiguous pairing code.
@@ -1088,6 +1145,48 @@ impl AccountStore {
             return None;
         }
         Some(entry.account_id.clone())
+    }
+
+    /// Verify a per-device credential (minted at [`Self::redeem_pair_code`],
+    /// presented on Heartbeat / child-config reads): `true` iff `device_id` is
+    /// an enrolled child device AND sha256(token) matches the stored digest
+    /// (digests compared, never raw secrets — the same digest-only pattern as
+    /// the session HashMap lookup; the raw token is never stored).
+    ///
+    /// LEGACY GRACE: a record whose stored digest is EMPTY (device enrolled
+    /// before per-device tokens existed, or added via AddChild with no device
+    /// present) is accepted and logged — an honest acknowledgement that
+    /// already-enrolled devices have no token to present. The grace tightens
+    /// to a hard requirement once a device-removal/re-pair flow ships
+    /// (re-pairing an enrolled device_id currently returns DeviceInUse —
+    /// follow-up).
+    pub fn verify_device_token(&self, device_id: &str, token: &str) -> bool {
+        let device_id = device_id.trim();
+        // Snapshot the stored digest under the lock; compare after releasing.
+        let stored = {
+            let inner = self.inner.lock().expect("account mutex poisoned");
+            let Some(child_id) = inner.device_to_child.get(device_id) else {
+                return false; // unknown device — nothing to verify against
+            };
+            match inner.children.get(child_id) {
+                Some(c) => c.device_token_sha256.clone(),
+                None => return false,
+            }
+        };
+        if stored.is_empty() {
+            // debug (not info): legacy devices hit this on every heartbeat +
+            // config poll (~2x/min) — info would be production log noise.
+            tracing::debug!(
+                device = %device_id,
+                "device enrolled before per-device tokens; accepted under legacy grace"
+            );
+            return true;
+        }
+        // Compare DIGESTS, not secrets: the presented token is hashed first,
+        // so byte-wise equality here can't leak anything useful — knowing
+        // digest bytes doesn't help construct a matching token (preimage
+        // resistance). Same reasoning as the session lookup keyed by digest.
+        token_hash(token) == stored
     }
 }
 
@@ -1223,6 +1322,11 @@ struct ChildRow {
     name: String,
     device_id: String,
     guardians: Vec<String>,
+    /// sha256 hex of the per-device pairing token (`#[serde(default)]` → rows
+    /// written before device tokens load as "no token set" = legacy grace).
+    /// Digest only — the raw token never touches disk.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    device_token_sha256: String,
 }
 
 impl Inner {
@@ -1271,6 +1375,7 @@ impl Inner {
                     name: c.name.clone(),
                     device_id: c.device_id.clone(),
                     guardians,
+                    device_token_sha256: c.device_token_sha256.clone(),
                 }
             })
             .collect();
@@ -1360,6 +1465,7 @@ impl Inner {
                     name: row.name,
                     device_id: row.device_id,
                     guardians,
+                    device_token_sha256: row.device_token_sha256,
                 },
             );
         }
@@ -1540,10 +1646,14 @@ impl Accounts for AccountsService {
     ) -> Result<Response<PairResult>, Status> {
         // Unauthenticated by design — the pairing code is the credential.
         let r = req.into_inner();
-        let (child_id, family_id) = self.store.redeem_pair_code(&r.code, &r.device_id)?;
+        let (child_id, family_id, device_token) =
+            self.store.redeem_pair_code(&r.code, &r.device_id)?;
         Ok(Response::new(PairResult {
             child_id,
             family_id,
+            // Returned exactly once: the device's authentication credential
+            // from here on. Server-side only its sha256 digest exists.
+            device_token,
         }))
     }
 
@@ -1636,7 +1746,8 @@ mod tests {
         let (token, _aid, _) = store.login("parent@example.com", "password123").unwrap();
 
         let (code, _expires) = store.create_pair_code(&token, "Kiddo").unwrap();
-        let (child_id, _family) = store.redeem_pair_code(&code, "device-xyz").unwrap();
+        let (child_id, _family, _device_token) =
+            store.redeem_pair_code(&code, "device-xyz").unwrap();
 
         // The parent now sees the linked child, routed by its device id.
         let kids = store.list_children(&token).unwrap();
@@ -1648,6 +1759,120 @@ mod tests {
         assert!(store.redeem_pair_code(&code, "device-2").is_err());
         // Unknown code fails.
         assert!(store.redeem_pair_code("NOTACODE", "device-3").is_err());
+    }
+
+    #[test]
+    fn redeem_mints_device_token_and_stores_only_its_digest() {
+        let dir = tmp_dir("device-token");
+        let store = AccountStore::with_state_dir(&dir).unwrap();
+        store
+            .create_account("parent@example.com", "password123", "Parent")
+            .unwrap();
+        let (token, _aid, _) = store.login("parent@example.com", "password123").unwrap();
+        let (code, _expires) = store.create_pair_code(&token, "Kiddo").unwrap();
+        let (child_id, _family, device_token) =
+            store.redeem_pair_code(&code, "device-tok").unwrap();
+
+        // A real secret: 32 bytes of entropy, hex-encoded.
+        assert_eq!(device_token.len(), TOKEN_BYTES * 2);
+        // In memory AND at rest only the sha256 digest exists — never the raw.
+        {
+            let inner = store.inner.lock().unwrap();
+            let rec = inner.children.get(&child_id).unwrap();
+            assert_eq!(rec.device_token_sha256, token_hash(&device_token));
+        }
+        let on_disk = std::fs::read_to_string(dir.join("accounts.json")).unwrap();
+        assert!(
+            !on_disk.contains(&device_token),
+            "raw device token must never touch disk"
+        );
+        assert!(on_disk.contains(&token_hash(&device_token)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn device_token_verifies_and_rejects_wrong_or_unknown() {
+        let store = AccountStore::new();
+        store
+            .create_account("parent@example.com", "password123", "Parent")
+            .unwrap();
+        let (token, _aid, _) = store.login("parent@example.com", "password123").unwrap();
+        let (code, _) = store.create_pair_code(&token, "Kiddo").unwrap();
+        let (_child, _family, device_token) = store.redeem_pair_code(&code, "device-tok").unwrap();
+
+        assert!(store.verify_device_token("device-tok", &device_token));
+        assert!(!store.verify_device_token("device-tok", "wrong-token"));
+        assert!(!store.verify_device_token("device-tok", ""));
+        assert!(!store.verify_device_token("no-such-device", &device_token));
+    }
+
+    #[test]
+    fn legacy_device_with_no_stored_token_digest_passes_grace() {
+        // AddChild-enrolled (or pre-token) devices have an empty stored digest:
+        // accepted — with any or no token — until a device-removal/re-pair
+        // flow ships (logged grace; re-pairing an enrolled device_id
+        // currently returns DeviceInUse — follow-up).
+        let store = AccountStore::new();
+        store
+            .create_account("parent@example.com", "password123", "Parent")
+            .unwrap();
+        let (token, _aid, _) = store.login("parent@example.com", "password123").unwrap();
+        store.add_child(&token, "Kid", "legacy-device").unwrap();
+        assert!(store.verify_device_token("legacy-device", ""));
+        assert!(store.verify_device_token("legacy-device", "anything"));
+    }
+
+    #[test]
+    fn redeem_is_throttled_after_repeated_wrong_codes() {
+        let store = AccountStore::new();
+        store
+            .create_account("parent@example.com", "password123", "Parent")
+            .unwrap();
+        let (token, _aid, _) = store.login("parent@example.com", "password123").unwrap();
+        let (code, _) = store.create_pair_code(&token, "Kiddo").unwrap();
+
+        // Burn the budget on wrong codes (the global redeem counter).
+        // "WRONGCOD" contains 'O', which the code alphabet excludes — it can
+        // never collide with a minted code.
+        for _ in 0..DEFAULT_LOGIN_MAX_FAILS {
+            assert_eq!(
+                store.redeem_pair_code("WRONGCOD", "device-x"),
+                Err(AccountError::PairCodeInvalid)
+            );
+        }
+        // Locked: even the CORRECT code is refused until the window passes.
+        assert_eq!(
+            store.redeem_pair_code(&code, "device-x"),
+            Err(AccountError::TooManyAttempts)
+        );
+    }
+
+    #[test]
+    fn successful_redeem_clears_the_redeem_throttle() {
+        let store = AccountStore::new();
+        store
+            .create_account("parent@example.com", "password123", "Parent")
+            .unwrap();
+        let (token, _aid, _) = store.login("parent@example.com", "password123").unwrap();
+
+        // max-1 failures, then a success → counter cleared…
+        for _ in 0..(DEFAULT_LOGIN_MAX_FAILS - 1) {
+            assert_eq!(
+                store.redeem_pair_code("WRONGCOD", "device-x"),
+                Err(AccountError::PairCodeInvalid)
+            );
+        }
+        let (code, _) = store.create_pair_code(&token, "Kid A").unwrap();
+        assert!(store.redeem_pair_code(&code, "device-a").is_ok());
+        // …so max-1 more failures still don't lock, and a fresh redeem works.
+        for _ in 0..(DEFAULT_LOGIN_MAX_FAILS - 1) {
+            assert_eq!(
+                store.redeem_pair_code("WRONGCOD", "device-x"),
+                Err(AccountError::PairCodeInvalid)
+            );
+        }
+        let (code_b, _) = store.create_pair_code(&token, "Kid B").unwrap();
+        assert!(store.redeem_pair_code(&code_b, "device-b").is_ok());
     }
 
     fn tmp_dir(tag: &str) -> std::path::PathBuf {

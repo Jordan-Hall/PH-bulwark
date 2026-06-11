@@ -1,47 +1,95 @@
-//! Media + encoding helpers: pairing QR (payload -> SVG), segment disk loads,
-//! data-URI assembly, and MIME sniffing for evidence previews.
+//! Media + encoding helpers: pairing setup payload (v2 JSON -> QR SVG), segment
+//! disk loads, data-URI assembly, and MIME sniffing for evidence previews.
 
 use qrcode::render::svg;
 use qrcode::{EcLevel, QrCode};
 
 use crate::config::segments_dir;
-use crate::servers::cluster_endpoint;
+use crate::servers::{
+    cluster_ca_path_for_endpoint, cluster_endpoint, saved_choice, selected_server_id,
+};
 
-/// Build the compact pairing payload the child device can scan, as a documented
-/// custom scheme: `bulwark://pair?code=<PAIR_CODE>&server=<cluster endpoint>`.
-/// The child reads `code` to redeem the pairing and `server` so it points at the
-/// SAME backend the guardian minted the code on (the console's resolved
-/// `cluster_endpoint()`), so the QR always matches the active server.
-pub fn pair_payload(code: &str) -> String {
-    format!(
-        "bulwark://pair?code={}&server={}",
-        encode_query_value(code.trim()),
-        encode_query_value(cluster_endpoint().trim()),
+/// Build the **setup payload v2** the child device consumes by QR scan or paste:
+/// routing (active region id + endpoint), the freshly minted short-lived pair
+/// code + its expiry, the child's name, and — when this console has a CA pinned
+/// for the active server — that CA PEM (base64), so the child device can make
+/// its FIRST secure call against a self-hosted/private-CA server. The CA is
+/// public certificate material, not a secret; the single-use pair code stays the
+/// only credential. `include_ca: false` builds the same payload without the CA
+/// (the QR fallback when a large pinned CA won't fit in a scannable code).
+pub fn setup_payload_v2(
+    child_name: &str,
+    pair_code: &str,
+    expires_ts: i64,
+    include_ca: bool,
+) -> Option<String> {
+    let endpoint = cluster_endpoint();
+    let region = selected_server_id(&saved_choice());
+    let ca_b64 = if include_ca {
+        pinned_ca_b64(&endpoint)
+    } else {
+        None
+    };
+    build_setup_payload_v2(
+        &region,
+        &endpoint,
+        pair_code,
+        expires_ts,
+        child_name,
+        ca_b64.as_deref(),
     )
 }
 
-/// Minimal `application/x-www-form-urlencoded`-style escaping for a query value:
-/// keep unreserved chars, percent-encode the rest. Enough for our pair code
-/// (alnum) and an `http(s)://host:port` endpoint; no external dep needed.
-pub fn encode_query_value(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for b in value.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
+/// base64 of the pinned cluster CA PEM for `endpoint`, or `None` when no CA is
+/// pinned for that server (plain http / public-cert self-hosted) or the file
+/// isn't certificate PEM. Best-effort by design: a missing or malformed CA file
+/// never blocks pairing — the payload simply omits the field.
+fn pinned_ca_b64(endpoint: &str) -> Option<String> {
+    let bytes = std::fs::read(cluster_ca_path_for_endpoint(endpoint)).ok()?;
+    if !String::from_utf8_lossy(&bytes).contains("BEGIN CERTIFICATE") {
+        return None;
     }
-    out
+    Some(base64_encode(&bytes))
+}
+
+/// Pure payload-v2 assembly (see [`setup_payload_v2`]), split out so tests can
+/// exercise the wire shape without touching disk. `cluster_ca_pem_b64` is
+/// omitted entirely when no CA is pinned. This shape is the FIXED v2 contract
+/// the child app's scan + paste paths parse.
+pub fn build_setup_payload_v2(
+    server_region: &str,
+    server_endpoint: &str,
+    pair_code: &str,
+    expires_ts: i64,
+    child_name: &str,
+    cluster_ca_pem_b64: Option<&str>,
+) -> Option<String> {
+    let mut payload = serde_json::json!({
+        "v": 2,
+        "server_region": server_region.trim(),
+        "server_endpoint": server_endpoint.trim(),
+        "pair_code": pair_code.trim(),
+        "expires_ts": expires_ts,
+        "child_name": child_name.trim(),
+    });
+    if let (Some(map), Some(ca)) = (payload.as_object_mut(), cluster_ca_pem_b64) {
+        map.insert(
+            "cluster_ca_pem_b64".to_string(),
+            serde_json::Value::String(ca.to_string()),
+        );
+    }
+    serde_json::to_string(&payload).ok()
 }
 
 /// Render `payload` as a self-contained SVG QR string for inline display via
 /// `dangerous_inner_html` (the SVG is produced locally from a controlled payload).
-/// Colours match the console's calm dark theme. `None` if the payload can't be
-/// encoded, so the caller falls back to the typed code alone.
+/// Colours match the console's calm dark theme. Tries medium error correction
+/// first, then low — a v2 payload carrying a pinned CA can be dense. `None` if
+/// the payload still can't be encoded, so the caller falls back gracefully.
 pub fn pair_qr_svg(payload: &str) -> Option<String> {
-    let code = QrCode::with_error_correction_level(payload.as_bytes(), EcLevel::M).ok()?;
+    let code = QrCode::with_error_correction_level(payload.as_bytes(), EcLevel::M)
+        .or_else(|_| QrCode::with_error_correction_level(payload.as_bytes(), EcLevel::L))
+        .ok()?;
     Some(
         code.render::<svg::Color>()
             .min_dimensions(180, 180)

@@ -351,6 +351,14 @@ async fn main() -> anyhow::Result<()> {
                 .into_inner();
             println!("child_id={}", result.child_id);
             println!("family_id={}", result.family_id);
+            // Shown ONCE (the server keeps only a digest): the device's
+            // credential for heartbeats + config reads. Store it on the device
+            // — desktop clients read it from BULWARK_DEVICE_TOKEN; Android
+            // persists it automatically at pairing.
+            println!("device_token={}", result.device_token);
+            println!(
+                "(shown once — on a desktop child device set BULWARK_DEVICE_TOKEN to this value, or its heartbeats/config reads are refused)"
+            );
         }
         Cmd::ResetPassword { email } => {
             let ack = client

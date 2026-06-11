@@ -40,6 +40,12 @@ pub struct RelayTarget {
     /// the relay stays off (honest: better silent-off than connecting to an
     /// unverified server).
     pub cluster_ca: String,
+    /// Per-device bearer token minted at pairing (`PairResult.device_token`,
+    /// persisted by the Kotlin enrollment store and carried in the device
+    /// config as `device_token`). Sent on every heartbeat so the cluster can
+    /// authenticate this device's reports. "" when the device enrolled before
+    /// tokens existed - the server decides whether to accept those.
+    pub device_token: String,
 }
 
 fn target_cell() -> &'static Mutex<Option<RelayTarget>> {
@@ -71,6 +77,7 @@ pub fn set_target_from_config_json(config_json: &str) {
         child_id: s("child_id"),
         family_id: s("family_id"),
         cluster_ca: s("cluster_ca"),
+        device_token: s("device_token"),
     };
     if let Ok(mut cell) = target_cell().lock() {
         *cell = Some(target);
@@ -194,6 +201,10 @@ async fn send_heartbeat(t: &RelayTarget, vpn_up: bool) -> Result<u32, String> {
         // Tamper events reach the cluster via RaiseAlert (reportTamper path);
         // sending them here too would double-alert the guardian.
         tamper_events: Vec::new(),
+        // Per-device bearer credential minted at pairing ("" = enrolled before
+        // tokens existed; the server decides whether to accept legacy
+        // token-less heartbeats). Never logged.
+        device_token: t.device_token.clone(),
     };
     let ack = client
         .heartbeat(hb)
@@ -253,13 +264,21 @@ mod tests {
         assert!(target().is_none());
 
         set_target_from_config_json(
-            r#"{"cluster_endpoint":"http://srv:50051","device_id":"d1","child_id":"c1","family_id":"f1","profile":"TEEN"}"#,
+            r#"{"cluster_endpoint":"http://srv:50051","device_id":"d1","child_id":"c1","family_id":"f1","profile":"TEEN","device_token":"tok-d1"}"#,
         );
         let t = target().expect("enrolled config sets the target");
         assert_eq!(t.endpoint, "http://srv:50051");
         assert_eq!(t.device_id, "d1");
         assert_eq!(t.child_id, "c1");
         assert_eq!(t.family_id, "f1");
+        assert_eq!(t.device_token, "tok-d1");
+
+        // Legacy enrollment (paired before tokens existed) still arms the
+        // relay - the token is simply empty, never a parse failure.
+        set_target_from_config_json(
+            r#"{"cluster_endpoint":"http://srv:50051","device_id":"d2","child_id":"c2","family_id":"f2"}"#,
+        );
+        assert_eq!(target().expect("still enrolled").device_token, "");
     }
 
     #[test]
@@ -270,6 +289,7 @@ mod tests {
             child_id: "c1".into(),
             family_id: "f1".into(),
             cluster_ca: String::new(),
+            device_token: String::new(),
         };
         let s = protection_status(&t, true);
         assert_eq!(s.device_id, "kids-phone");

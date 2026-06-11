@@ -10,6 +10,8 @@
 //!   5. StreamChildConfig with a stale `have_version` emits the current config;
 //!      with an up-to-date `have_version` it does NOT re-emit (no rollback /
 //!      no redundant push).
+//!   6. Devices authenticate: Get/Stream with a wrong or missing
+//!      `device_token` (minted at pairing, returned once) are Unauthenticated.
 //!
 //! Every await is wrapped in a timeout so a regression can never hang CI.
 
@@ -104,7 +106,12 @@ async fn guardian_sets_config_child_fetches_and_streams() {
     .await
     .into_inner();
     let child_id = paired.child_id;
+    let device_token = paired.device_token;
     assert!(!child_id.is_empty());
+    assert!(
+        !device_token.is_empty(),
+        "redeem returns the per-device token exactly once"
+    );
 
     // (1) Guardian sets the child's config → version 1, audit stamped.
     let ack = timeout(
@@ -144,6 +151,7 @@ async fn guardian_sets_config_child_fetches_and_streams() {
         control.get_child_config(ChildConfigFilter {
             device_id: "kids-device-1".to_string(),
             have_version: 0,
+            device_token: device_token.clone(),
         }),
         "GetChildConfig",
     )
@@ -154,6 +162,33 @@ async fn guardian_sets_config_child_fetches_and_streams() {
     assert_eq!(got.config_version, 1);
     assert!(got.filtering_enabled);
     assert_eq!(got.profile, FilteringProfile::Preteen as i32);
+
+    // (3b) Devices authenticate: a WRONG (or missing) device token cannot read
+    // the config — neither one-shot nor streaming.
+    let get_denied = tokio::time::timeout(
+        STEP_TIMEOUT,
+        control.get_child_config(ChildConfigFilter {
+            device_id: "kids-device-1".to_string(),
+            have_version: 0,
+            device_token: "not-the-token".to_string(),
+        }),
+    )
+    .await
+    .expect("wrong-token GetChildConfig did not hang")
+    .expect_err("a wrong device token must not read the config");
+    assert_eq!(get_denied.code(), tonic::Code::Unauthenticated);
+    let stream_denied = tokio::time::timeout(
+        STEP_TIMEOUT,
+        control.stream_child_config(ChildConfigFilter {
+            device_id: "kids-device-1".to_string(),
+            have_version: 0,
+            device_token: String::new(), // missing counts as wrong for a paired device
+        }),
+    )
+    .await
+    .expect("missing-token StreamChildConfig did not hang")
+    .expect_err("a missing device token must not open the config stream");
+    assert_eq!(stream_denied.code(), tonic::Code::Unauthenticated);
 
     // (4) A second guardian Set bumps the monotonic version to 2.
     let ack2 = timeout(
@@ -175,6 +210,7 @@ async fn guardian_sets_config_child_fetches_and_streams() {
         control.stream_child_config(ChildConfigFilter {
             device_id: "kids-device-1".to_string(),
             have_version: 1, // child already applied v1 → wants anything newer
+            device_token: device_token.clone(),
         }),
         "StreamChildConfig (stale)",
     )
@@ -197,6 +233,7 @@ async fn guardian_sets_config_child_fetches_and_streams() {
         control.stream_child_config(ChildConfigFilter {
             device_id: "kids-device-1".to_string(),
             have_version: 2, // already current → nothing to push yet
+            device_token: device_token.clone(),
         }),
         "StreamChildConfig (current)",
     )

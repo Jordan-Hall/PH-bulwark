@@ -98,6 +98,16 @@ Important security properties:
 
 - Pair codes are short-lived, single-use credentials.
 - Pair code redemption is unauthenticated by design; the code is the credential.
+- Wrong-code redemption attempts share one GLOBAL rate limit (same window as
+  sign-in). Known tradeoff: sustained wrong-code traffic pauses ALL new pairing
+  for the window — fail-direction safe (already-enrolled children are
+  unaffected); per-peer keying at the transport layer is the follow-up if it
+  ever bites.
+- A successful redeem also mints the `device_token` the device authenticates
+  with from then on. Rollout note: ship the child app update with/after the
+  server that mints tokens — an OLD child app pairing against a NEW server
+  discards the minted token, and that enrollment's heartbeats/config fetches
+  are then refused.
 - `device_id` must be unique. Reuse is rejected because it could route one
   device into two families' scopes.
 - Guardian review streams and decisions require a valid guardian session token in
@@ -113,18 +123,28 @@ server is the main first-run friction. Two faster methods front-load the same
 inherit the same security properties (a leaked QR/NFC blob expires fast and is dead once
 redeemed).
 
-The shared **pairing payload** (what QR encodes / NFC writes):
+The shared **pairing payload** (what QR encodes / NFC writes / "Copy setup code"
+copies — **v2, shipped in the Manager console 2026-06-11**):
 
 ```json
 {
-  "v": 1,
+  "v": 2,
   "server_region": "uk",
   "server_endpoint": "https://<cluster-host>:8443",
   "pair_code": "ABCD2345",
   "expires_ts": 1750000000000,
-  "child_name": "Ava"
+  "child_name": "Ava",
+  "cluster_ca_pem_b64": "<base64 of the pinned CA PEM — omitted when no CA is pinned>"
 }
 ```
+
+`cluster_ca_pem_b64` carries the console's pinned cluster CA for the active
+server (`sessions/<server_hash>/cluster_ca.pem`), so the child device can make
+its FIRST TLS call against a self-hosted/private-CA server with no manual CA
+provisioning. It is public certificate material, not a secret — the short-lived,
+single-use `pair_code` remains the only credential. If a large CA makes the QR
+too dense to encode, the console falls back to a QR without it; the "Copy setup
+code" paste path always carries the complete payload.
 
 - **QR (default — phone-to-phone, no extra hardware).** After "Add child", the parent
   app renders the payload as a QR. The child app opens the camera, scans it, and

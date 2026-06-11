@@ -316,11 +316,30 @@ pub async fn run(
             alert_sink,
         )));
 
+        // Parent accounts + per-child guardians (accounts mode): built BEFORE
+        // the Tamper service so heartbeats can verify the per-device token
+        // minted at pairing. The same store also scopes Review, ChildControl,
+        // and the Accounts service below — one source of truth. Persisted when
+        // a state dir is configured (else in-memory).
+        let accounts = if cfg.accounts_enabled {
+            Some(match &cfg.state_dir {
+                Some(dir) => AccountStore::with_state_dir(dir)?,
+                None => AccountStore::new(),
+            })
+        } else {
+            None
+        };
+
         // Tamper: child-device protection liveness + uninstall/disable alerts,
         // fanned out through the SAME hub (so they reach guardian Review streams,
         // scoped per child/device). A background task sweeps for devices that have
         // gone silent past the grace window and raises a missed-heartbeat alert.
-        let tamper = TamperService::new(hub.clone());
+        // In accounts mode, heartbeats authenticate with the pairing-minted
+        // device token (legacy-enrolled devices pass the store's logged grace).
+        let tamper = match &accounts {
+            Some(accounts) => TamperService::new(hub.clone()).with_accounts(accounts.clone()),
+            None => TamperService::new(hub.clone()),
+        };
         {
             let sweeper = tamper.clone();
             tokio::spawn(async move {
@@ -363,14 +382,10 @@ pub async fn run(
                     .ok()
             })
             .map(Arc::new);
-        if cfg.accounts_enabled {
-            // Parent accounts + per-child guardians: the store scopes Review's
-            // pending stream/decisions AND backs the Accounts service. Persisted to
-            // disk when a state dir is configured (else in-memory).
-            let accounts = match &cfg.state_dir {
-                Some(dir) => AccountStore::with_state_dir(dir)?,
-                None => AccountStore::new(),
-            };
+        if let Some(accounts) = accounts {
+            // The shared accounts store (built above, also verifying device
+            // tokens for Tamper) scopes Review's pending stream/decisions AND
+            // backs the Accounts service.
             router = router.add_service(ReviewServer::new(
                 ReviewService::with_accounts(hub, accounts.clone())
                     .with_segment_store(review_store.clone()),

@@ -451,6 +451,14 @@ message Heartbeat {
   // Tamper events observed locally since the last heartbeat (empty on a normal
   // liveness ping). Each becomes a PROTECTION_DISABLED guardian alert.
   repeated TamperKind tamper_events = 2;
+  // Per-device credential from PairResult.device_token. In accounts mode the
+  // server verifies it, so a forged heartbeat can't keep a removed device
+  // looking alive (which would suppress the missed-check-in protection-status
+  // alert). Devices enrolled before tokens existed are accepted for now
+  // (legacy grace, logged) until a device-removal/re-pair flow ships
+  // (re-pairing an enrolled device_id currently returns DeviceInUse —
+  // follow-up). Content-free: a random id.
+  string device_token = 3;
 }
 
 message HeartbeatAck {
@@ -556,6 +564,15 @@ message RedeemPairCodeRequest {
 message PairResult {
   string child_id  = 1;
   string family_id = 2;
+  // Per-device credential minted at redeem and returned EXACTLY ONCE. The
+  // child device stores it and presents it on Tamper.Heartbeat and the
+  // ChildControl Get/StreamChildConfig reads, so knowing a device_id alone is
+  // not enough to act as that device. The server keeps only a sha256 digest
+  // (never the raw value); it cannot be re-fetched, and rotation needs the
+  // device-removal/re-pair flow (follow-up — re-pairing an enrolled
+  // device_id currently returns DeviceInUse).
+  // Content-free: a random id, carries no content.
+  string device_token = 3;
 }
 
 // --- Password lifecycle: authenticated change + self-service recovery reset. ---
@@ -615,7 +632,9 @@ service Accounts {
   rpc AssignGuardian(AssignGuardianRequest) returns (GuardianAck);
   rpc ListChildren(ListChildrenRequest) returns (Children);
   // Pairing: parent mints a code (CreatePairCode); the not-yet-enrolled child
-  // redeems it (RedeemPairCode is unauthenticated — the code IS the credential).
+  // redeems it (RedeemPairCode is unauthenticated — the code IS the credential;
+  // wrong-code guesses are rate-limited server-side). A successful redeem also
+  // mints the device_token the device authenticates with from then on.
   rpc CreatePairCode(CreatePairCodeRequest) returns (PairCode);
   rpc RedeemPairCode(RedeemPairCodeRequest) returns (PairResult);
   // Authenticated password change (proves the old password). Invalidates the
@@ -638,7 +657,8 @@ service Accounts {
 // policy + routing only, never message/media. See docs/design/parent-controlled-vpn.md.
 //   * A guardian SetChildConfig is authenticated by the session token and scoped
 //     to a child they guard (same model as Review/Accounts).
-//   * The child fetches/streams its own config by device identity (mTLS subject);
+//   * The child fetches/streams its own config by device identity: device_id
+//     plus the per-device token minted at pairing (PairResult.device_token);
 //     config_version is monotonic per child so a stale config can never roll back
 //     protection.
 // ---------------------------------------------------------------------------
@@ -685,6 +705,12 @@ message ChildConfigFilter {
   // GetChildStatus exposes to the guardian ("applied ✓ vN" vs "pending").
   // Content-free: a bare version number, never content.
   uint64 have_version = 2;
+  // Per-device credential from PairResult.device_token — proves the caller IS
+  // the enrolled device, so a config is only ever handed to its own device.
+  // Devices enrolled before tokens existed are accepted (legacy grace, logged)
+  // until a device-removal/re-pair flow ships (re-pairing an enrolled
+  // device_id currently returns DeviceInUse — follow-up).
+  string device_token = 3;
 }
 
 // Guardian-side status query: did the child apply the config yet? `token` must

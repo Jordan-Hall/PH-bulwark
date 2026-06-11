@@ -12,8 +12,10 @@
 //!     `config_version` (starts at 1, +1 per change), `updated_ts`, and
 //!     `updated_by` (the guardian's account id) — clients cannot forge these.
 //!   * `GetChildConfig` / `StreamChildConfig` resolve the child by `device_id`
-//!     (the child identifies by its own device identity / mTLS subject) and need
-//!     no guardian token — a child reads ONLY its own config.
+//!     and authenticate the DEVICE: the caller must present the per-device
+//!     `device_token` minted at pairing ([`AccountStore::verify_device_token`];
+//!     devices enrolled before tokens existed pass under its logged legacy
+//!     grace). No guardian token is needed — a child reads ONLY its own config.
 //!
 //! `config_version` is monotonic per child so a stale config can never roll back
 //! protection: the child applies a config only when `version > have_version`.
@@ -277,10 +279,11 @@ impl ChildConfigStore {
         if !inner.device_to_child.contains_key(device_id) {
             return; // unknown device: nothing to attribute the report to
         }
-        // Get/Stream are not yet device-identity authenticated, so never record
-        // a version HIGHER than the guardian's desired one — a spoofed
-        // `have_version: 999` would otherwise permanently mask real acks
-        // (the recorded version is monotonic by design).
+        // Defense-in-depth: the Get/Stream RPCs verify the per-device token
+        // before recording, but this store method is callable on its own, so
+        // never record a version HIGHER than the guardian's desired one — a
+        // forged `have_version: 999` can't mask real acks (the recorded
+        // version is monotonic by design).
         let desired = inner
             .device_to_child
             .get(device_id)
@@ -523,6 +526,20 @@ impl ChildControlService {
         }
         crate::accounts::bearer_token(req).unwrap_or_default()
     }
+
+    /// Gate a child-facing read: the caller must present the per-device token
+    /// minted at pairing (`PairResult.device_token`). Unknown devices and wrong
+    /// tokens are unauthenticated; devices enrolled before tokens existed pass
+    /// under the accounts store's logged legacy grace (empty stored digest).
+    fn verify_device(&self, device_id: &str, device_token: &str) -> Result<(), Status> {
+        if self.accounts.verify_device_token(device_id, device_token) {
+            Ok(())
+        } else {
+            Err(Status::unauthenticated(
+                "unknown device or invalid device token",
+            ))
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -549,6 +566,12 @@ impl ChildControl for ChildControlService {
         req: Request<ChildConfigFilter>,
     ) -> Result<Response<ChildConfig>, Status> {
         let f = req.into_inner();
+        if f.device_id.trim().is_empty() {
+            return Err(Status::invalid_argument("device_id is required"));
+        }
+        // Devices authenticate: verify the pairing-minted token BEFORE anything
+        // is recorded, so a forged poll can't even refresh "last seen".
+        self.verify_device(&f.device_id, &f.device_token)?;
         // The poll IS the child's ack: `have_version` = the version it last
         // applied. Recorded (monotonic, enrolled devices only) for GetChildStatus.
         self.store
@@ -568,6 +591,8 @@ impl ChildControl for ChildControlService {
         if device_id.is_empty() {
             return Err(Status::invalid_argument("device_id is required"));
         }
+        // Same device-token gate as GetChildConfig — verified before recording.
+        self.verify_device(&device_id, &f.device_token)?;
         self.store.record_applied_report(&device_id, f.have_version);
         let rx = self
             .store
@@ -812,9 +837,10 @@ mod tests {
 
     #[test]
     fn spoofed_applied_report_is_clamped_to_desired_version() {
-        // Get/Stream carry no device-identity auth yet, so a spoofed
-        // have_version=999 must never mask real acks: the recorded applied
-        // version is clamped to the guardian's desired version.
+        // The RPCs now verify the per-device token, but the store-level clamp
+        // stays as defense-in-depth: a forged have_version=999 can't mask
+        // real acks — the recorded applied version is clamped to the guardian's
+        // desired version.
         let (accounts, token, child_id) = accounts_with_child("dev-1");
         let store = ChildConfigStore::new();
         store
