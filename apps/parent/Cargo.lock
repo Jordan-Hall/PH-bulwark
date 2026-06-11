@@ -318,6 +318,8 @@ dependencies = [
  "bulwark-proto",
  "dioxus",
  "futures-util",
+ "jni 0.21.1",
+ "ndk-context",
  "qrcode",
  "ring",
  "serde",

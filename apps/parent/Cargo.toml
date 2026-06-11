@@ -5,12 +5,23 @@ edition = "2021"
 license = "Apache-2.0 OR MIT"
 description = "Bulwark parent console — all-Rust Dioxus UI over the shared core."
 
+# Platform features map to the matching dioxus renderer, mirroring apps/child —
+# dx enables the right one per target (`dx serve` / plain cargo = desktop;
+# `dx build --platform android` = mobile). default = desktop for dev/preview.
+# Deliberately NO `web` feature: this console uses tokio/tonic/std::fs/
+# std::process, none of which target wasm.
+[features]
+default = ["desktop"]
+desktop = ["dioxus/desktop"]
+mobile = ["dioxus/mobile"]
+
 [dependencies]
 # All-Rust UI, migrated to the Dioxus 0.8 line (shared with the labeling app), so
-# the same RSX can target desktop now and mobile/native (Blitz) next. `desktop`
-# covers Windows + macOS. NOTE: 0.8 is alpha — the dx CLI must be installed with
-# --locked; the library builds with plain cargo.
-dioxus = { version = "0.8.0-alpha.0", features = ["desktop", "router"] }
+# the same RSX targets desktop (Windows + macOS) now and Android via the `mobile`
+# feature above. The RENDERER comes from the platform features, not hard-enabled
+# here. NOTE: 0.8 is alpha — the dx CLI must be installed with --locked; the
+# library builds with plain cargo.
+dioxus = { version = "0.8.0-alpha.0", features = ["router"] }
 
 # The parent console is just another Rust client of the shared core: it speaks
 # the SAME gRPC contract the cluster serves (no FFI bridge). It only uses the
@@ -34,9 +45,21 @@ ring = "0.17"
 # `svg`, which emits a self-contained SVG string we drop into the rsx.
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 
-# Clipboard for the "copy recovery code" button (MIT/Apache). Desktop-only need;
-# `image` default feature is unneeded (we only copy text), so keep it lean.
+# Clipboard for the "copy recovery code" / "copy setup code" buttons (MIT/Apache).
+# arboard has NO Android backend (fails to compile for the target), so it is
+# desktop-only; on Android `media::copy_to_clipboard` goes through the system
+# webview instead. `image` default feature is unneeded (we only copy text).
+[target.'cfg(not(target_os = "android"))'.dependencies]
 arboard = { version = "3", default-features = false }
+
+# Android-only: resolve the app-private files dir (`Context.getFilesDir()`)
+# through the JNI context dioxus' mobile glue registers with `ndk-context` at
+# startup — the ONLY reliably writable location for the session/pinned-CA files
+# on-device pairing needs. Both MIT/Apache; wry/tao already pin these exact
+# versions, so this adds no new major to the android dep tree.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"
 
 [dev-dependencies]
 futures-util = "0.3"

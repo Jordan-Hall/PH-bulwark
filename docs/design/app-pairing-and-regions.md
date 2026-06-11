@@ -151,12 +151,16 @@ code" paste path always carries the complete payload.
   **auto-selects the server + fills the code** — the guardian's chosen region and the
   code arrive together, so the child can't accidentally pair to the wrong server. One
   tap → `RedeemPairCode`. Fastest path; no typing.
-- **NFC tap.** The parent device writes the payload as an NDEF message; tapping the two
-  phones back-to-back transfers it to the child app, which pre-fills server + code the
-  same way. Ideal for the in-person setup most families do. (Android: `NfcAdapter` /
-  reader-mode; iOS: Core NFC read.) Falls back to QR where a device lacks NFC.
+- **NFC tap — honestly NOT viable phone-to-phone anymore (corrected 2026-06-11).**
+  Android removed Beam (phone-to-phone NFC push) in Android 10, so "tap the two
+  phones back-to-back" no longer exists on modern devices. NFC survives only as
+  *tag* reading (a guardian writes the payload to a physical NFC tag) — a niche
+  flow we are not building. QR scan (shipped: the child app's "Scan the setup
+  QR" button, zxing-android-embedded) + copy/paste + the typed code cover the
+  real cases. Single-device note: when the Manager runs on the SAME phone as
+  the child app, a phone cannot scan its own screen — copy/paste is the path.
 - **Code.** The existing short, single-use, short-lived code typed by hand — the
-  always-available fallback (camera denied, NFC absent, accessibility setup).
+  always-available fallback (camera denied, accessibility setup).
 
 Implementation notes:
 

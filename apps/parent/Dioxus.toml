@@ -1,0 +1,21 @@
+# PH Bulwark Manager — Dioxus 0.8 bundle/mobile config (mirrors apps/child's).
+#
+# WHY THIS FILE EXISTS: without a Dioxus.toml, dx ships its DEFAULT
+# AndroidManifest (a com.example package, no INTERNET permission) — the console
+# couldn't even dial the cluster. The distinct `.manager` identifier lets the
+# guardian console coexist with the child app (co.predatorhunters.bulwark) on
+# the same device.
+
+[application]
+name = "PH Bulwark Manager"
+
+[bundle]
+identifier = "co.predatorhunters.bulwark.manager"
+
+[android]
+identifier = "co.predatorhunters.bulwark.manager"
+min_sdk = 26
+target_sdk = 34
+
+[android.permissions]
+"android.permission.INTERNET" = { description = "Connect to your PH Bulwark server to review alerts and pair your child's device" }

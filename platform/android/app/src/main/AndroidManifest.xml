@@ -7,6 +7,11 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!-- Camera is used ONLY for the one-time pairing QR scan (zxing-android-embedded
+         requests it at scan time); optional so camera-less devices still pair by
+         pasting/typing the setup code. Never used for monitoring of any kind. -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+
     <application
         android:name=".BulwarkApp"
         android:allowBackup="false"
