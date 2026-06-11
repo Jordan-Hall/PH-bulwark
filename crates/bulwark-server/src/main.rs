@@ -35,14 +35,40 @@ async fn main() -> anyhow::Result<()> {
         .filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from);
 
+    // Transport security: BULWARK_TLS_CERT + BULWARK_TLS_KEY (PEM file paths)
+    // enable server TLS; BULWARK_TLS_CLIENT_CA additionally requires client
+    // certificates (mTLS). Read at startup so a typo'd path fails the boot
+    // loudly instead of silently falling back to plaintext.
+    let tls_cert_pem = read_pem_env("BULWARK_TLS_CERT")?;
+    let tls_key_pem = read_pem_env("BULWARK_TLS_KEY")?;
+    let client_ca_pem = read_pem_env("BULWARK_TLS_CLIENT_CA")?;
+    if tls_cert_pem.is_some() != tls_key_pem.is_some() {
+        anyhow::bail!("BULWARK_TLS_CERT and BULWARK_TLS_KEY must be set together (PEM file paths)");
+    }
+
+    // Guardian passwords and session tokens MUST NOT cross the network in clear:
+    // accounts mode without TLS refuses to start. BULWARK_ALLOW_PLAINTEXT=1 is
+    // the explicit, grep-able dev override — a log warning could regress unseen.
+    let allow_plaintext = matches!(
+        std::env::var("BULWARK_ALLOW_PLAINTEXT").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    );
+    if accounts_enabled && tls_cert_pem.is_none() && !allow_plaintext {
+        anyhow::bail!(
+            "refusing to start: accounts mode (BULWARK_ACCOUNTS=1) over plaintext would send \
+             guardian passwords and session tokens in clear. Set BULWARK_TLS_CERT/BULWARK_TLS_KEY \
+             (PEM file paths), or BULWARK_ALLOW_PLAINTEXT=1 for local development only."
+        );
+    }
+
     let cfg = ServerConfig {
         role,
         bind,
         accounts_enabled,
         state_dir,
-        // mTLS material is loaded from bulwark-core Config in a full deployment;
-        // left None here so a local single-node run works out of the box (dev).
-        ..ServerConfig::default()
+        tls_cert_pem,
+        tls_key_pem,
+        client_ca_pem,
     };
 
     // Text + buffered-video dispatch (image/audio stay on the device fast path /
@@ -126,4 +152,19 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(?role, "starting bulwark-server");
     service::run(cfg, registry, alert_sink, cluster, hub).await
+}
+
+/// Read an env var holding a PEM **file path** into bytes. Unset/empty → `None`;
+/// set-but-unreadable → an error (a bad cert path must fail the boot, never
+/// silently fall back to plaintext).
+fn read_pem_env(var: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    match std::env::var_os(var).filter(|v| !v.is_empty()) {
+        Some(path) => {
+            let path = std::path::PathBuf::from(path);
+            let pem = std::fs::read(&path)
+                .map_err(|e| anyhow::anyhow!("{var}: cannot read {}: {e}", path.display()))?;
+            Ok(Some(pem))
+        }
+        None => Ok(None),
+    }
 }

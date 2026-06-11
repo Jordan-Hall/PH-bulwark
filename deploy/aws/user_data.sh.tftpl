@@ -7,7 +7,39 @@ apt-get update
 apt-get install -y docker.io
 systemctl enable --now docker
 
-mkdir -p /var/lib/bulwark
+# Guardian state (KDF hashes, hashed session tokens) is operator/service-only.
+mkdir -p /var/lib/bulwark/tls
+chmod 700 /var/lib/bulwark /var/lib/bulwark/tls
+
+# First-boot TLS material, generated ON the box (private keys never leave it):
+# a self-signed cluster CA + a leaf for this instance's public host/IP. Clients
+# PIN ca.crt (the parent app's per-server cluster_ca.pem) — no public PKI needed.
+if [ ! -s /var/lib/bulwark/tls/server.crt ]; then
+  TOK=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')
+  PUB_HOST=$(curl -s -H "X-aws-ec2-metadata-token: $TOK" http://169.254.169.254/latest/meta-data/public-hostname)
+  PUB_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOK" http://169.254.169.254/latest/meta-data/public-ipv4)
+  # VPCs without DNS hostnames return an empty public-hostname — fall back to
+  # the IP so the leaf CN/SAN is never empty ($$ = terraform-escaped $).
+  PUB_HOST=$${PUB_HOST:-$PUB_IP}
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+    -keyout /var/lib/bulwark/tls/ca.key -out /var/lib/bulwark/tls/ca.crt \
+    -subj '/CN=PH Bulwark Cluster CA' -days 3650
+  openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+    -keyout /var/lib/bulwark/tls/server.key -out /var/lib/bulwark/tls/server.csr \
+    -subj "/CN=$PUB_HOST" -addext "subjectAltName=DNS:$PUB_HOST,IP:$PUB_IP"
+  openssl x509 -req -in /var/lib/bulwark/tls/server.csr \
+    -CA /var/lib/bulwark/tls/ca.crt -CAkey /var/lib/bulwark/tls/ca.key \
+    -CAcreateserial -days 825 -copy_extensions copyall \
+    -out /var/lib/bulwark/tls/server.crt
+  rm -f /var/lib/bulwark/tls/server.csr
+  chmod 600 /var/lib/bulwark/tls/ca.key /var/lib/bulwark/tls/server.key
+fi
+
+# The container runs as uid 10001 (Dockerfile useradd): it must read the leaf
+# cert/key and write the state JSONs — but NOT the CA key (root-only; used on
+# the box solely to mint the leaf).
+chown -R 10001:10001 /var/lib/bulwark
+chown root:root /var/lib/bulwark/tls/ca.key
 
 docker run -d --name bulwark-server --restart unless-stopped \
   -p ${bulwark_port}:${bulwark_port} \
@@ -15,4 +47,6 @@ docker run -d --name bulwark-server --restart unless-stopped \
   -e BULWARK_BIND=0.0.0.0:${bulwark_port} \
   -e BULWARK_ACCOUNTS=1 \
   -e BULWARK_STATE_DIR=/var/lib/bulwark \
+  -e BULWARK_TLS_CERT=/var/lib/bulwark/tls/server.crt \
+  -e BULWARK_TLS_KEY=/var/lib/bulwark/tls/server.key \
   ${bulwark_image} --role all-in-one

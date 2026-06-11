@@ -60,6 +60,9 @@
         env:
           BULWARK_BIND: "0.0.0.0:{{ bulwark_port }}"
           BULWARK_ACCOUNTS: "1"
+          # TODO(P1): provision per-node TLS like deploy/aws (BULWARK_TLS_CERT/KEY)
+          # and drop this override — the cluster playbook is testing-grade today.
+          BULWARK_ALLOW_PLAINTEXT: "1"
           BULWARK_STATE_DIR: "/var/lib/bulwark"
           BULWARK_NODE_ID: "{{ inventory_hostname }}"
           BULWARK_CLUSTER_ID: "{{ bulwark_cluster_id }}"

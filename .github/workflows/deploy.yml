@@ -55,7 +55,9 @@ jobs:
           # Boot with the SAME flags production runs (accounts + persistent state
           # dir), so a guardian-state/ChildControl persistence regression fails
           # HERE instead of on the box.
-          docker run -d --name smoke -e BULWARK_ACCOUNTS=1 -e BULWARK_STATE_DIR=/var/lib/bulwark "$IMAGE:${GITHUB_SHA}" --role all-in-one
+          # BULWARK_ALLOW_PLAINTEXT=1: the smoke container never leaves the runner
+          # loopback; production runs with BULWARK_TLS_CERT/KEY (see the SSM step).
+          docker run -d --name smoke -e BULWARK_ACCOUNTS=1 -e BULWARK_ALLOW_PLAINTEXT=1 -e BULWARK_STATE_DIR=/var/lib/bulwark "$IMAGE:${GITHUB_SHA}" --role all-in-one
           sleep 12
           if [ "$(docker inspect -f '{{.State.Running}}' smoke 2>/dev/null)" != "true" ]; then
             echo "::error::server did not stay up — ONNX runtime .so missing or model load failed"
@@ -103,12 +105,17 @@ jobs:
             "df -h / || true",
             "docker system prune -af || true",
             "docker rm -f aegis-server || true",
-            "mkdir -p /var/lib/bulwark",
+            "mkdir -p /var/lib/bulwark/tls && chmod 700 /var/lib/bulwark /var/lib/bulwark/tls",
             "[ -d /var/lib/aegis ] && cp -an /var/lib/aegis/. /var/lib/bulwark/ 2>/dev/null || true",
+            "if [ ! -s /var/lib/bulwark/tls/server.crt ]; then TOK=\$(curl -s -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 300'); PUB_HOST=\$(curl -s -H \"X-aws-ec2-metadata-token: \$TOK\" http://169.254.169.254/latest/meta-data/public-hostname); PUB_IP=\$(curl -s -H \"X-aws-ec2-metadata-token: \$TOK\" http://169.254.169.254/latest/meta-data/public-ipv4); PUB_HOST=\${PUB_HOST:-\$PUB_IP}; openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout /var/lib/bulwark/tls/ca.key -out /var/lib/bulwark/tls/ca.crt -subj '/CN=PH Bulwark Cluster CA' -days 3650; openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout /var/lib/bulwark/tls/server.key -out /var/lib/bulwark/tls/server.csr -subj \"/CN=\$PUB_HOST\" -addext \"subjectAltName=DNS:\$PUB_HOST,IP:\$PUB_IP\"; openssl x509 -req -in /var/lib/bulwark/tls/server.csr -CA /var/lib/bulwark/tls/ca.crt -CAkey /var/lib/bulwark/tls/ca.key -CAcreateserial -days 825 -copy_extensions copyall -out /var/lib/bulwark/tls/server.crt; rm -f /var/lib/bulwark/tls/server.csr; chmod 600 /var/lib/bulwark/tls/ca.key /var/lib/bulwark/tls/server.key; fi",
+            "chmod 600 /var/lib/bulwark/*.json 2>/dev/null || true",
+            "chown -R 10001:10001 /var/lib/bulwark && chown root:root /var/lib/bulwark/tls/ca.key",
             "echo '${GHCR_TOKEN}' | docker login ghcr.io -u '${GHCR_USER}' --password-stdin",
             "docker pull '${REF}'",
             "docker rm -f bulwark-server || true",
-            "docker run -d --name bulwark-server --restart unless-stopped -p ${PORT}:${PORT} -v /var/lib/bulwark:/var/lib/bulwark -e BULWARK_BIND=0.0.0.0:${PORT} -e BULWARK_ACCOUNTS=1 -e BULWARK_STATE_DIR=/var/lib/bulwark '${REF}' --role all-in-one",
+            "docker run -d --name bulwark-server --restart unless-stopped -p ${PORT}:${PORT} -v /var/lib/bulwark:/var/lib/bulwark -e BULWARK_BIND=0.0.0.0:${PORT} -e BULWARK_ACCOUNTS=1 -e BULWARK_STATE_DIR=/var/lib/bulwark -e BULWARK_TLS_CERT=/var/lib/bulwark/tls/server.crt -e BULWARK_TLS_KEY=/var/lib/bulwark/tls/server.key '${REF}' --role all-in-one",
+            "sleep 5",
+            "docker ps --filter name=bulwark-server --format '{{.Status}}' | grep -q Up || { docker logs --tail 50 bulwark-server; exit 1; }",
             "docker logout ghcr.io || true",
             "docker image prune -f || true"
           ]}

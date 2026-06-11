@@ -28,15 +28,13 @@ variable "key_name" {
 }
 
 variable "ssh_cidr" {
-  description = "CIDR allowed to SSH (set to YOUR_IP/32, not the default open)."
+  description = "CIDR allowed to SSH — set to YOUR_IP/32. No default: exposure must be an explicit choice (pass 0.0.0.0/0 deliberately, never silently)."
   type        = string
-  default     = "0.0.0.0/0"
 }
 
 variable "app_cidr" {
-  description = "CIDR allowed to reach the Bulwark gRPC port."
+  description = "CIDR allowed to reach the Bulwark gRPC port (the guardian/child apps connect here). No default: a public region typically wants 0.0.0.0/0, but it must be chosen explicitly."
   type        = string
-  default     = "0.0.0.0/0"
 }
 
 variable "bulwark_image" {

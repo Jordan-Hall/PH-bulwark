@@ -23,7 +23,8 @@ terraform init
 terraform apply \
   -var region=eu-west-2 \           # London (see variables.tf for the country list)
   -var key_name=my-keypair \
-  -var ssh_cidr=$(curl -s ifconfig.me)/32 \   # lock SSH to your IP
+  -var ssh_cidr=$(curl -s ifconfig.me)/32 \   # lock SSH to your IP (REQUIRED — no default)
+  -var app_cidr=0.0.0.0/0 \                   # gRPC reachability (REQUIRED — choose deliberately)
   -var bulwark_image=ghcr.io/your-org/bulwark-server:latest
 # -> outputs the public endpoint; set it in the client (self-hosted, or as a
 #    PH Bulwark Cloud regional endpoint).
@@ -73,8 +74,26 @@ Guidance for a **$20-30/mo** cap: either **one `t3.small`** region, or **two
 ## Honest caveats
 - **Single EC2 = single point of failure** — fine for testing; for real scale use the
   multi-node Ansible cluster (`deploy/ansible/`).
-- **Plaintext `http`** by default (no TLS). Put it behind a TLS terminator (Caddy /
-  ALB / nginx) or supply server certs before non-test use.
-- The security group defaults to `0.0.0.0/0` — **set `ssh_cidr`/`app_cidr`** to real
-  ranges.
+- **TLS is on-box and self-signed**: first boot generates a cluster CA + leaf in
+  `/var/lib/bulwark/tls` (keys never leave the instance) and the server refuses
+  accounts mode without it. Clients must **pin the CA** (next section) — there is
+  no public-PKI cert yet (ALB/Let's Encrypt is a later upgrade), and **client
+  certificates (mTLS) are not yet issued** — bearer tokens + the SG are the gate.
+- `ssh_cidr`/`app_cidr` have **no defaults** — you must choose the exposure
+  explicitly at apply time.
+
+## Pin the server CA in the apps (one-time per server)
+
+The CA **certificate** is public material (the key stays on the box). Fetch it:
+
+```sh
+ssh ubuntu@<ec2-public-dns> 'sudo cat /var/lib/bulwark/tls/ca.crt' > my-region-ca.pem
+```
+
+Then point the parent console at it — either set `BULWARK_CLUSTER_CA=<path to
+my-region-ca.pem>` in the app's environment, or copy the file to the per-server pin
+location `<config dir>/sessions/<server-key>/cluster_ca.pem` (the app prints/uses
+this path via `cluster_ca_path_for_endpoint`). Without the pin, the app refuses the
+connection with a message naming the expected path — it never falls back to
+plaintext or unvalidated TLS.
 - The image must be pullable by the instance (public registry, or configure auth).

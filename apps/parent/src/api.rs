@@ -36,15 +36,61 @@ pub async fn connect_channel() -> anyhow::Result<Channel> {
 }
 
 pub async fn connect_channel_to(endpoint: &str, ca_path: Option<&str>) -> anyhow::Result<Channel> {
+    if !plaintext_allowed(endpoint) {
+        anyhow::bail!(
+            "refusing plaintext to {endpoint}: guardian logins and session tokens would cross \
+             the network in clear. Use an https:// endpoint with its CA pinned (cluster_ca.pem \
+             / BULWARK_CLUSTER_CA), or set BULWARK_ALLOW_PLAINTEXT=1 for local development only."
+        );
+    }
     let mut builder = Endpoint::from_shared(endpoint.to_string())?;
 
     if let Some(ca_path) = ca_path.filter(|p| !p.trim().is_empty()) {
         let ca_pem = std::fs::read(ca_path)?;
         let tls = ClientTlsConfig::new().ca_certificate(Certificate::from_pem(&ca_pem));
         builder = builder.tls_config(tls)?;
+    } else if endpoint.trim().to_ascii_lowercase().starts_with("https://") {
+        // tonic here is tls-ring with NO OS-root fallback compiled in: an https
+        // dial without a pinned CA can never validate. Fail with the fix instead
+        // of tonic's opaque transport error.
+        anyhow::bail!(
+            "https endpoint but no CA pinned for it: copy the server's ca.crt to {} (or set \
+             BULWARK_CLUSTER_CA to its path)",
+            cluster_ca_path_for_endpoint(endpoint).display()
+        );
     }
 
     Ok(builder.connect().await?)
+}
+
+/// May the console carry guardian credentials over `endpoint`? https:// always;
+/// http:// ONLY to loopback (a local dev server — nothing leaves the machine) or
+/// under the explicit `BULWARK_ALLOW_PLAINTEXT=1` dev override.
+fn plaintext_allowed(endpoint: &str) -> bool {
+    let allow_env = matches!(
+        std::env::var("BULWARK_ALLOW_PLAINTEXT").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    );
+    plaintext_allowed_for(endpoint, allow_env)
+}
+
+/// Pure core of [`plaintext_allowed`] (unit-tested without env races).
+fn plaintext_allowed_for(endpoint: &str, allow_env: bool) -> bool {
+    // Schemes are case-insensitive (http crate normalizes them), so the guard
+    // must be too — `HTTP://` must not bypass the plaintext refusal.
+    let lower = endpoint.trim().to_ascii_lowercase();
+    let Some(rest) = lower.strip_prefix("http://") else {
+        return true; // https:// (anything else fails in tonic with its own error)
+    };
+    if allow_env {
+        return true;
+    }
+    let host_port = rest.split('/').next().unwrap_or("");
+    let host = match host_port.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => host_port.split(':').next().unwrap_or(""),
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 pub async fn accounts_client() -> anyhow::Result<AccountsClient<Channel>> {
@@ -303,4 +349,38 @@ pub async fn fetch_segment_remote(uri: &str) -> Result<Vec<u8>, String> {
         return Err("empty or unavailable segment".to_string());
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod transport_policy_tests {
+    use super::plaintext_allowed_for;
+
+    #[test]
+    fn https_is_always_allowed() {
+        assert!(plaintext_allowed_for("https://uk.example:8443", false));
+    }
+
+    #[test]
+    fn plaintext_loopback_is_dev_friendly() {
+        assert!(plaintext_allowed_for("http://127.0.0.1:8443", false));
+        assert!(plaintext_allowed_for("http://localhost:8443", false));
+        assert!(plaintext_allowed_for("http://[::1]:8443", false));
+    }
+
+    #[test]
+    fn plaintext_remote_requires_explicit_override() {
+        assert!(!plaintext_allowed_for(
+            "http://ec2-1-2-3-4.compute.amazonaws.com:8443",
+            false
+        ));
+        assert!(!plaintext_allowed_for("http://192.168.1.10:8443", false));
+        assert!(plaintext_allowed_for("http://192.168.1.10:8443", true));
+        // A loopback-PREFIXED public name is still remote.
+        assert!(!plaintext_allowed_for(
+            "http://localhost.evil.example:8443",
+            false
+        ));
+        // Scheme case must not bypass the refusal (http normalizes schemes).
+        assert!(!plaintext_allowed_for("HTTP://192.168.1.10:8443", false));
+    }
 }
