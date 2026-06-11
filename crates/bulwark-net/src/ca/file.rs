@@ -26,6 +26,8 @@ pub struct FileKeyStore {
 }
 
 impl FileKeyStore {
+    /// Keystore rooted at `dir` (the platform shell's app-private directory;
+    /// Android passes `filesDir/ca`). The directory is created on first write.
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self { dir: dir.into() }
     }
