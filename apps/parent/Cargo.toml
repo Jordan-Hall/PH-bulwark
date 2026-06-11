@@ -10,7 +10,7 @@ description = "Bulwark parent console — all-Rust Dioxus UI over the shared cor
 # the same RSX can target desktop now and mobile/native (Blitz) next. `desktop`
 # covers Windows + macOS. NOTE: 0.8 is alpha — the dx CLI must be installed with
 # --locked; the library builds with plain cargo.
-dioxus = { version = "0.8.0-alpha.0", features = ["desktop"] }
+dioxus = { version = "0.8.0-alpha.0", features = ["desktop", "router"] }
 
 # The parent console is just another Rust client of the shared core: it speaks
 # the SAME gRPC contract the cluster serves (no FFI bridge). It only uses the
@@ -22,6 +22,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# QR rendering for the child-pairing code (MIT/Apache). SVG-only: default features
+# pull in the heavy `image` crate we don't need, so disable them and keep just
+# `svg`, which emits a self-contained SVG string we drop into the rsx.
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 
 [dev-dependencies]
 futures-util = "0.3"

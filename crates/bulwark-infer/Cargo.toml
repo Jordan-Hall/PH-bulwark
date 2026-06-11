@@ -11,7 +11,7 @@ license.workspace = true
 # dedicated first-pass models locally instead of offloading (PLAN §0b: small
 # dedicated task models only — this crate adds NO models of its own, it only
 # drives the runtime when policy says "local").
-onnx = ["dep:ort"]
+onnx = ["dep:ort", "dep:bulwark-vision", "dep:ring"]
 
 [dependencies]
 bulwark-proto = { path = "../bulwark-proto" }
@@ -32,5 +32,18 @@ futures-util.workspace = true
 # build/test the router here.
 ort = { workspace = true, optional = true }
 
+# Shared image preprocessing (decode → NCHW tensor) + score postprocessing for
+# the local first-pass model — the SAME pipeline as the live bulwark-vision
+# path, so the on-device and server score conventions cannot drift. Pulled only
+# by `onnx` builds (and WITHOUT bulwark-vision's own `onnx` feature: we drive
+# our own session; the bundled vision model is not embedded here).
+bulwark-vision = { path = "../bulwark-vision", optional = true }
+# SHA-256 for Evidence.sha256 (hash-only audit of analysed media), mirroring
+# bulwark-vision. Workspace dep, `onnx` builds only.
+ring = { workspace = true, optional = true }
+
 [dev-dependencies]
 tokio = { workspace = true }
+# Synthetic in-memory PNG for the self-skipping live-model test (same crate the
+# bulwark-vision tests use). Dev-only.
+image = { version = "0.25", default-features = false, features = ["png"] }

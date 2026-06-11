@@ -25,6 +25,57 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<dyn Store>,
+    /// Live coverage feed (the network engine's pinning-registry snapshot),
+    /// injected by the host process. The standalone dashboard binary has no
+    /// engine in-process → [`NoCoverage`].
+    pub coverage: Arc<dyn CoverageSource>,
+}
+
+/// What the network engine LEARNED about a host. Engine-agnostic mirror of
+/// bulwark-net's `HostCapability`, so this crate carries no network-engine
+/// dependency — the host process maps between the two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostInspection {
+    /// TLS inspection succeeded before — ordinary HTTPS we filter in-line.
+    Inspectable,
+    /// TLS inspection was rejected (cert-pinned and/or E2E) — the network
+    /// cannot read it; the host/app is routed to on-device OCR.
+    Pinned,
+}
+
+/// One live per-host observation feeding the coverage matrix.
+#[derive(Debug, Clone)]
+pub struct HostCoverage {
+    /// The host (SNI) or app id the engine classified.
+    pub host: String,
+    /// What was learned about it.
+    pub inspection: HostInspection,
+}
+
+/// Live source of coverage data, injected by the process that owns the
+/// network engine (bulwark-client wraps `PinningRegistry::snapshot()` in
+/// this). Closures work directly via the blanket impl below.
+pub trait CoverageSource: Send + Sync {
+    /// Point-in-time list of hosts with a learned capability.
+    fn snapshot(&self) -> Vec<HostCoverage>;
+}
+
+/// Closures are sources, so hosts can inject without a newtype.
+impl<F> CoverageSource for F
+where
+    F: Fn() -> Vec<HostCoverage> + Send + Sync,
+{
+    fn snapshot(&self) -> Vec<HostCoverage> {
+        self()
+    }
+}
+
+/// No engine attached (standalone dashboard binary): zero rows, honestly.
+pub struct NoCoverage;
+impl CoverageSource for NoCoverage {
+    fn snapshot(&self) -> Vec<HostCoverage> {
+        Vec::new()
+    }
 }
 
 /// Redacted event as shown in the dashboard (built from a `Verdict`; carries no
@@ -76,6 +127,17 @@ pub fn router(state: AppState) -> Router {
     r
 }
 
+/// Bind `bind` and serve the dashboard until shutdown. Convenience for host
+/// processes that embed the dashboard (e.g. the runnable proxy) without
+/// taking a direct axum dependency.
+pub async fn serve(state: AppState, bind: &str) -> anyhow::Result<()> {
+    let app = router(state);
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    tracing::info!(%bind, "bulwark-ui dashboard listening");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
 async fn healthz() -> &'static str {
     "ok"
 }
@@ -98,28 +160,43 @@ async fn events(State(st): State<AppState>, Query(q): Query<EventsQuery>) -> Jso
     Json(views)
 }
 
-/// Static-ish coverage matrix (honest about the network's hard limits). A full
-/// build derives `ocr_agent`/`pinned` live from bulwark-net's pinning registry +
-/// bulwark-agent's active apps.
-async fn coverage(State(_st): State<AppState>) -> Json<Vec<CoverageRow>> {
-    Json(vec![
-        CoverageRow {
-            app: "web (browsers)".into(),
+/// The coverage matrix, derived LIVE from the injected [`CoverageSource`]
+/// (bulwark-net's pinning registry): one honest row per host the engine has
+/// actually classified. Inspection-rejected hosts show as pinned → routed to
+/// on-device OCR. The network cannot distinguish cert-pinning from E2E (both
+/// reject our leaf at the handshake), so the note says so rather than guess.
+async fn coverage(State(st): State<AppState>) -> Json<Vec<CoverageRow>> {
+    Json(
+        st.coverage
+            .snapshot()
+            .into_iter()
+            .map(coverage_row)
+            .collect(),
+    )
+}
+
+/// Map one learned host observation onto an honest matrix row.
+fn coverage_row(h: HostCoverage) -> CoverageRow {
+    match h.inspection {
+        HostInspection::Inspectable => CoverageRow {
+            app: h.host,
             web_mitm: true,
             e2e: false,
             pinned: false,
             ocr_agent: false,
-            note: "HTTPS decrypted via per-install CA".into(),
+            note: "HTTPS inspected in-line via the per-install CA".into(),
         },
-        CoverageRow {
-            app: "WhatsApp / Signal / Messenger secret".into(),
+        HostInspection::Pinned => CoverageRow {
+            app: h.host,
             web_mitm: false,
-            e2e: true,
+            // Unknowable from the network: pinning is what we OBSERVED. The
+            // note carries the E2E caveat instead of a guessed flag.
+            e2e: false,
             pinned: true,
             ocr_agent: true,
-            note: "E2E — network cannot read; on-device OCR only".into(),
+            note: "TLS inspection rejected (cert-pinned and/or E2E) — network cannot read; routed to on-device OCR".into(),
         },
-    ])
+    }
 }
 
 #[cfg(not(feature = "llm-explain"))]
@@ -150,6 +227,44 @@ async fn explain_enabled(Json(req): Json<ExplainReq>) -> Json<serde_json::Value>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn coverage_derives_rows_from_the_live_source() {
+        let store = bulwark_store::open_in_memory().unwrap();
+        let source = || {
+            vec![
+                HostCoverage {
+                    host: "example.com".into(),
+                    inspection: HostInspection::Inspectable,
+                },
+                HostCoverage {
+                    host: "signal.org".into(),
+                    inspection: HostInspection::Pinned,
+                },
+            ]
+        };
+        let st = AppState {
+            store,
+            coverage: Arc::new(source),
+        };
+        let Json(rows) = coverage(State(st)).await;
+        assert_eq!(rows.len(), 2);
+        let web = rows.iter().find(|r| r.app == "example.com").unwrap();
+        assert!(web.web_mitm && !web.pinned && !web.ocr_agent);
+        let pinned = rows.iter().find(|r| r.app == "signal.org").unwrap();
+        assert!(!pinned.web_mitm && pinned.pinned && pinned.ocr_agent);
+        assert!(pinned.note.contains("OCR"));
+    }
+
+    #[tokio::test]
+    async fn coverage_is_empty_without_an_engine() {
+        let st = AppState {
+            store: bulwark_store::open_in_memory().unwrap(),
+            coverage: Arc::new(NoCoverage),
+        };
+        let Json(rows) = coverage(State(st)).await;
+        assert!(rows.is_empty(), "no engine attached → no fabricated rows");
+    }
 
     #[test]
     fn coverage_is_honest_about_e2e() {

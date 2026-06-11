@@ -23,7 +23,7 @@ C0 when the proto compiles, but names, arguments, and ownership must hold.
 
 | Trait | Implemented by | Async? | Purpose |
 |---|---|---|---|
-| `Interceptor` | **bulwark-net** | yes | TUN/MITM capture; CA; QUIC downgrade; pinning detection |
+| `Interceptor` | **bulwark-net** | yes | TUN/TLS inspection capture; CA; QUIC downgrade; pinning detection |
 | `FlowClassifier` | **bulwark-flow** | yes | classify flow, demux streams, buffer/delay |
 | `Analyzer` | **bulwark-vision / -audio / -video / -text / -supervision** (server) and **bulwark-infer** (local) | yes | `AnalysisRequest → Verdict` |
 | `OcrSource` | **bulwark-agent** | yes | on-device conventional OCR / accessibility → `TextSpan` |
@@ -41,7 +41,7 @@ Captures and (where possible) decrypts device traffic, surfacing inspectable
 units. Owns the per-install CA and the QUIC-downgrade / pinning-detection logic.
 
 ```rust
-/// A captured, MITM-decrypted (or marked-unreadable) network unit handed up to
+/// A captured, inspection-decrypted (or marked-unreadable) network unit handed up to
 /// the flow layer. Carries no verdict yet.
 pub struct CapturedFlow {
     pub flow_id: u64,
@@ -59,7 +59,7 @@ pub enum InterceptDecision {
 
 #[async_trait::async_trait]
 pub trait Interceptor: Send + Sync {
-    /// Bring the TUN/VpnService + MITM proxy up; install/load the per-install CA.
+    /// Bring the TUN/VpnService + TLS-inspecting proxy up; install/load the per-install CA.
     async fn start(&self) -> bulwark_core::Result<()>;
 
     /// Stream of decrypted (or pinning-flagged) flows for classification.

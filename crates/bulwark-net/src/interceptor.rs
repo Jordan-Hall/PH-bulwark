@@ -1,7 +1,7 @@
 //! The [`Interceptor`] trait (interfaces.md) and the concrete [`NetInterceptor`].
 //!
 //! This is the public face of `bulwark-net`. It wires together the TUN device, the
-//! per-install CA, the MITM proxy, QUIC downgrade, and pinning detection, and
+//! per-install CA, the TLS-inspecting proxy, QUIC downgrade, and pinning detection, and
 //! surfaces decrypted flows to `bulwark-flow` over a channel.
 //!
 //! The trait signatures mirror `docs/design/interfaces.md` verbatim (names,
@@ -37,7 +37,7 @@ pub use bulwark_core::flow::{CapturedFlow, FlowPayload, HttpHead, InterceptDecis
 /// (interfaces.md `Interceptor`.)
 #[async_trait]
 pub trait Interceptor: Send + Sync {
-    /// Bring the TUN/VpnService + MITM proxy up; install/load the per-install CA.
+    /// Bring the TUN/VpnService + TLS-inspecting proxy up; install/load the per-install CA.
     async fn start(&self) -> CoreResult<()>;
 
     /// Stream of decrypted (or pinning-flagged) flows for classification.
@@ -64,7 +64,7 @@ pub struct NetInterceptor {
     /// (opening it can require the driver/admin), so construction stays cheap and
     /// testable. Behind a Mutex because the trait methods take `&self`.
     tun: Mutex<Option<Box<dyn TunDevice>>>,
-    /// The running MITM proxy handle (None until `start`).
+    /// The running TLS-inspecting proxy handle (None until `start`).
     proxy: Mutex<Option<MitmProxy>>,
     /// Receiver end of the flow channel; `next_flow` drains it.
     flow_rx: Mutex<FlowReceiver>,
@@ -133,6 +133,13 @@ impl NetInterceptor {
     /// SHA-256 fingerprint of the per-install root CA (audit / UI).
     pub fn ca_fingerprint(&self) -> &str {
         self.ca.fingerprint_hex()
+    }
+
+    /// Point-in-time pinning-registry snapshot (host → learned capability).
+    /// Feeds the guardian coverage matrix: the host process wraps this in a
+    /// bulwark-ui `CoverageSource` so the dashboard derives its rows LIVE.
+    pub fn pinning_snapshot(&self) -> Vec<(String, crate::pinning::HostCapability)> {
+        self.pinning.snapshot()
     }
 
     /// The per-install root CA certificate in PEM, so a host tool can write it to
@@ -209,7 +216,7 @@ impl NetInterceptor {
 }
 
 impl NetInterceptor {
-    /// Start ONLY the MITM proxy (install CA + spawn hudsucker), skipping the TUN
+    /// Start ONLY the TLS-inspecting proxy (install CA + spawn hudsucker), skipping the TUN
     /// device and the QUIC firewall rule. This is the **explicit-proxy** path: the
     /// user points their browser's HTTP/HTTPS proxy at `proxy_listen` directly, so
     /// no transparent TUN redirect (which needs admin / the wintun driver) is
@@ -217,7 +224,7 @@ impl NetInterceptor {
     pub async fn start_proxy_only(&self) -> crate::Result<()> {
         // Best-effort CA trust: installing a root into the user store requires the
         // user's consent (a Windows dialog), and the proxy can serve even if that is
-        // declined or deferred — the browser simply won't accept the MITM leaf certs
+        // declined or deferred — the browser simply won't accept the TLS inspection leaf certs
         // until the printed root CA is trusted. So a trust-store failure here is a
         // WARNING, not fatal: the proxy still comes up, and the user can trust the CA
         // (the entrypoint prints the exact `certutil` command) and then browse.
@@ -231,7 +238,7 @@ impl NetInterceptor {
         self.spawn_proxy().await
     }
 
-    /// Spawn the MITM proxy listener + arm decision-gating. Shared by
+    /// Spawn the TLS-inspecting proxy listener + arm decision-gating. Shared by
     /// [`Interceptor::start`] and [`NetInterceptor::start_proxy_only`].
     async fn spawn_proxy(&self) -> crate::Result<()> {
         let listen: std::net::SocketAddr = self
@@ -253,7 +260,7 @@ impl NetInterceptor {
             ca_fp = %self.ca.fingerprint_hex(),
             tier = ?self.ca.tier(),
             listen = %proxy.listen_addr(),
-            "MITM proxy started (decision-gating armed)"
+            "TLS-inspecting proxy started (decision-gating armed)"
         );
         *self.proxy.lock().await = Some(proxy);
         Ok(())
@@ -277,7 +284,7 @@ impl Interceptor for NetInterceptor {
         self.quic.apply_rule().map_err(bulwark_core::Error::from)?;
 
         // 3. Install / confirm the per-install root CA in the trust store, then
-        //    start the MITM proxy. CA was already loaded/generated in `new`
+        //    start the TLS-inspecting proxy. CA was already loaded/generated in `new`
         //    (fail-closed there); installing the public root is safe to repeat.
         self.install_ca().map_err(bulwark_core::Error::from)?;
 
@@ -353,7 +360,7 @@ impl Interceptor for NetInterceptor {
     }
 
     async fn shutdown(&self) -> CoreResult<()> {
-        // 1. Stop the MITM proxy.
+        // 1. Stop the TLS-inspecting proxy.
         if let Some(proxy) = self.proxy.lock().await.take() {
             proxy.stop().await.map_err(bulwark_core::Error::from)?;
         }
@@ -368,7 +375,7 @@ impl Interceptor for NetInterceptor {
             *tun = None;
         }
         // 4. Trust-store hygiene: on a true uninstall, remove the root (orphaned
-        //    root = latent MITM backdoor). On a normal stop we keep it so the
+        //    root = latent TLS inspection backdoor). On a normal stop we keep it so the
         //    next start doesn't re-prompt; uninstall sets `remove_root_on_shutdown`.
         if self.remove_root_on_shutdown.load(Ordering::Relaxed) {
             self.uninstall_ca().map_err(bulwark_core::Error::from)?;

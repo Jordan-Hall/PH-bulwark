@@ -13,6 +13,10 @@ bulwark-infer = { path = "../bulwark-infer" }
 bulwark-policy = { path = "../bulwark-policy" }
 bulwark-alert = { path = "../bulwark-alert" }
 bulwark-store = { path = "../bulwark-store" }
+# Embedded guardian dashboard for the runnable binaries: the coverage matrix
+# is derived LIVE from the pinning registry (a CoverageSource closure over
+# NetInterceptor::pinning_snapshot).
+bulwark-ui = { path = "../bulwark-ui" }
 bulwark-text = { path = "../bulwark-text" }
 # Local NSFW image scoring. Default build uses its fail-OPEN stub; the `onnx`
 # feature turns on bulwark-vision/onnx for real scoring (see [features]).

@@ -52,8 +52,10 @@ use jni::JNIEnv;
 
 use bulwark_policy::{AgeProfile, Policy, PolicyContext, PolicyDecision};
 use bulwark_proto::v1::accounts_client::AccountsClient;
+use bulwark_proto::v1::child_control_client::ChildControlClient;
 use bulwark_proto::v1::{
-    Category, PairResult, RedeemPairCodeRequest, SourceChannel, TextSpan, Verdict,
+    Category, ChildConfig, ChildConfigFilter, FilteringProfile, PairResult, RedeemPairCodeRequest,
+    SourceChannel, TextSpan, Verdict,
 };
 use bulwark_proto::DeviceId;
 use bulwark_text::TextAnalyzer;
@@ -109,6 +111,29 @@ fn tamper_queue() -> &'static Mutex<VecDeque<String>> {
     Q.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
+/// Enqueue a content-free PROTECTION_DISABLED alert so the existing Kotlin
+/// alert poller (`nextAlert`) surfaces it to the guardian. Used by
+/// `reportTamper` and by the VPN data path when it exits with an error (a
+/// captive TUN with a dead pump would otherwise be a silent blackhole).
+fn enqueue_protection_alert(tag: &str, message: &str) {
+    let now_s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // AlertKind::PROTECTION_DISABLED == 3; category 0 (a status signal, not content).
+    let obj = serde_json::json!({
+        "alert_id": format!("{tag}-{now_s}"),
+        "kind": 3,
+        "category": 0,
+        "redacted_context": message,
+    });
+    if let Ok(mut q) = tamper_queue().lock() {
+        if q.len() < TAMPER_QUEUE_CAP {
+            q.push_back(obj.to_string());
+        }
+    }
+}
+
 /// Guardian-facing, content-free description for an `bulwark.v1.TamperKind` ordinal.
 fn tamper_message(kind: i32) -> &'static str {
     match kind {
@@ -132,21 +157,14 @@ fn tamper_message(kind: i32) -> &'static str {
 /// here — this crate is the content-analysis bridge only. We record the fd and
 /// config so the handle round-trips cleanly (and so `stopVpn` has something well
 /// defined to free), and leave the loop wiring to the owning crate.
-// Fields are intentionally stored-but-not-yet-read: the TUN intercept loop that
-// would consume them lives in the networking crate owned by another agent. We
-// keep them so the handle round-trips meaningfully and the loop wiring has a
-// well-defined place to read them from.
-#[allow(dead_code)]
+/// The boxed state behind the `jlong` handle: the tokio runtime running the VPN
+/// data path (`bulwark_net::vpn::run_android_data_path`) and a `CancellationToken`
+/// to stop it. `stopVpn` cancels + tears it down. The `GlobalRef` keeps the
+/// `VpnService` alive for the session's lifetime.
 struct VpnSession {
-    /// The TUN file descriptor handed over by `BulwarkVpnService` (informational;
-    /// we do not read/write it here).
-    tun_fd: i32,
-    /// The serialized client config string (cluster endpoint, device id, …).
-    config_json: String,
-    /// Global reference to the VpnService. The future network bridge must call
-    /// `service.protect(socket_fd)` before every upstream connect so sockets do
-    /// not route back into this VPN.
-    vpn_service: Option<GlobalRef>,
+    runtime: tokio::runtime::Runtime,
+    shutdown: bulwark_net::vpn::CancellationToken,
+    _vpn_service: Option<GlobalRef>,
 }
 
 // ---------------------------------------------------------------------------
@@ -248,6 +266,159 @@ async fn redeem_pair_code_rpc(
     .into_inner();
 
     Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// ChildControl fetch — the child-side half of the parent-controlled VPN
+// (docs/design/parent-controlled-vpn.md §3, workflow B step 2). The device
+// fetches ITS OWN desired config by device_id over the same transport pattern
+// as enrollment. CONTENT-FREE: policy + routing only, never message/media.
+// The strictly-newer config_version gate (replay/rollback defense) lives on
+// the Kotlin side, which persists the last applied version.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Age-profile global — the guardian's strictness band (ChildConfig.profile),
+// applied to every on-device policy evaluation. Content-free: a band name only.
+// Written by startVpn (from deviceConfigJson's persisted `profile`) and by
+// fetchChildConfig (from a fresh, not-older guardian config); read by
+// analyzeText. Defaults to the engine baseline (Teen) until a config arrives.
+// ---------------------------------------------------------------------------
+
+fn age_profile_cell() -> &'static Mutex<AgeProfile> {
+    static P: OnceLock<Mutex<AgeProfile>> = OnceLock::new();
+    P.get_or_init(|| Mutex::new(AgeProfile::default()))
+}
+
+/// Map a ChildConfig profile name (the stable UPPERCASE strings `profile_name`
+/// emits) onto the policy engine's band. CUSTOM has no on-device thresholds
+/// yet, so it maps to the engine's Teen baseline; unknown/empty returns `None`
+/// (leave the band as-is — never silently change strictness on a parse hiccup).
+fn age_profile_from_name(name: &str) -> Option<AgeProfile> {
+    match name.trim() {
+        "YOUNG_CHILD" => Some(AgeProfile::YoungChild),
+        "PRETEEN" => Some(AgeProfile::PreTeen),
+        "TEEN" => Some(AgeProfile::Teen),
+        "CUSTOM" => Some(AgeProfile::Teen),
+        _ => None,
+    }
+}
+
+fn set_age_profile(profile: AgeProfile) {
+    if let Ok(mut p) = age_profile_cell().lock() {
+        *p = profile;
+    }
+}
+
+fn current_age_profile() -> AgeProfile {
+    age_profile_cell().lock().map(|p| *p).unwrap_or_default()
+}
+
+/// Apply the `profile` field of a device-config JSON (the Kotlin
+/// `BulwarkVpnService.deviceConfigJson()`). Anything malformed or missing is
+/// ignored — fail open, never crash, never downgrade on bad input.
+fn apply_profile_from_config_json(config_json: &str) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(config_json) else {
+        return;
+    };
+    if let Some(p) = v
+        .get("profile")
+        .and_then(|p| p.as_str())
+        .and_then(age_profile_from_name)
+    {
+        set_age_profile(p);
+    }
+}
+
+/// Stable, content-free uppercase name for a strictness band — mirrors the
+/// proto enum names (same style as `category_name`), so the Kotlin side keys
+/// on strings, never bare ordinals.
+fn profile_name(p: FilteringProfile) -> &'static str {
+    match p {
+        FilteringProfile::Unspecified => "UNSPECIFIED",
+        FilteringProfile::YoungChild => "YOUNG_CHILD",
+        FilteringProfile::Preteen => "PRETEEN",
+        FilteringProfile::Teen => "TEEN",
+        FilteringProfile::Custom => "CUSTOM",
+    }
+}
+
+/// Serialize the guardian's desired config for the Kotlin reconciler. Carries
+/// ONLY policy/routing fields (the control plane is content-free by contract).
+/// The guardian's account id (`updated_by`) is server-side audit detail the
+/// child does not need, so it is deliberately omitted.
+fn ok_child_config_json(cfg: &ChildConfig) -> String {
+    let obj = serde_json::json!({
+        "ok": true,
+        "child_id": cfg.child_id,
+        "device_id": cfg.device_id,
+        "filtering_enabled": cfg.filtering_enabled,
+        "server_region": cfg.server_region,
+        "server_endpoint": cfg.server_endpoint,
+        "profile": profile_name(cfg.profile()),
+        "require_always_on": cfg.require_always_on,
+        "config_version": cfg.config_version,
+        "updated_ts": cfg.updated_ts,
+    });
+    serde_json::to_string(&obj).unwrap_or_else(|_| {
+        r#"{"ok":false,"error":"could not serialize child config"}"#.to_string()
+    })
+}
+
+fn err_child_config_json(error: impl AsRef<str>) -> String {
+    let obj = serde_json::json!({
+        "ok": false,
+        "error": error.as_ref(),
+    });
+    serde_json::to_string(&obj)
+        .unwrap_or_else(|_| r#"{"ok":false,"error":"config fetch failed"}"#.to_string())
+}
+
+async fn fetch_child_config_rpc(
+    endpoint: String,
+    device_id: String,
+    applied_version: u64,
+) -> Result<ChildConfig, String> {
+    let endpoint = endpoint.trim();
+    if !(endpoint.starts_with("http://") || endpoint.starts_with("https://")) {
+        return Err("server must start with http:// or https://".to_string());
+    }
+    let device_id = device_id.trim();
+    if device_id.is_empty() {
+        return Err("device id is not ready yet".to_string());
+    }
+
+    let builder = Endpoint::from_shared(endpoint.to_string())
+        .map_err(|_| "server address is not valid".to_string())?
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10));
+    let channel = builder
+        .connect()
+        .await
+        .map_err(|e| format!("could not reach server: {e}"))?;
+    let mut control = ChildControlClient::new(channel);
+    let config = tokio::time::timeout(
+        Duration::from_secs(10),
+        // One-shot Get: the server returns the CURRENT config unconditionally,
+        // and RECORDS `have_version` as this device's applied-version report —
+        // the poll doubles as the "applied ✓ vN" ack the parent console shows
+        // via GetChildStatus. The strictly-newer apply check still happens on
+        // the Kotlin side against the persisted applied version.
+        control.get_child_config(ChildConfigFilter {
+            device_id: device_id.to_string(),
+            have_version: applied_version,
+        }),
+    )
+    .await
+    .map_err(|_| "server timed out while fetching the config".to_string())?
+    .map_err(|e| match e.code() {
+        tonic::Code::NotFound => "no guardian config for this device yet".to_string(),
+        tonic::Code::InvalidArgument => "device id was rejected".to_string(),
+        _ => format!("server rejected the config fetch: {}", e.code()),
+    })?
+    .into_inner();
+
+    Ok(config)
 }
 
 /// The fail-open verdict JSON used whenever input is bad or the engine is
@@ -358,16 +529,60 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_startVpn(
     // Warm the engine (ignore failure — analyzeText will fail open if absent).
     let _ = engine();
 
+    // Parse the device config: the guardian's strictness band (`profile`,
+    // persisted by ChildConfigSync) seeds the policy global so the on-device
+    // engine comes back up under the right band after a process restart.
+    // Anything malformed is ignored (fail open) — never crashes the bridge.
     let config = jstring_to_string(&mut env, &config_json).unwrap_or_default();
+    apply_profile_from_config_json(&config);
     let vpn_service = if vpn_service.is_null() {
         None
     } else {
         env.new_global_ref(vpn_service).ok()
     };
+
+    // A multi-threaded runtime is required: the smoltcp pump parks a worker via
+    // `block_in_place` while the proxy/DNS tasks run on the others.
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(2)
+        .thread_name("bulwark-vpn")
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(_) => return 0, // 0 handle == "not started" (Kotlin treats it as failure)
+    };
+    let shutdown = bulwark_net::vpn::CancellationToken::new();
+    // The transparent data path only exists on-device; host builds of this
+    // crate (unit tests on the dev machine) still compile + test the JSON/JNI
+    // surface without it.
+    #[cfg(not(target_os = "android"))]
+    let _ = tun_fd;
+    #[cfg(target_os = "android")]
+    let fd = tun_fd as std::os::fd::RawFd;
+    #[cfg(target_os = "android")]
+    let token = shutdown.clone();
+    #[cfg(target_os = "android")]
+    runtime.spawn(async move {
+        // Never panic across the host (a filter must not take down the device),
+        // but NEVER fail silent either: if the data path exits with an error
+        // while the VpnService still owns the TUN, every packet would route
+        // into an fd nobody reads (a blackhole). Surface it as a content-free
+        // protection-status alert so the guardian learns filtering is down.
+        if let Err(e) = bulwark_net::vpn::run_android_data_path(fd, token).await {
+            tracing::error!(error = %e, "VPN data path exited with an error");
+            enqueue_protection_alert(
+                "vpn-datapath",
+                "The filtering VPN on the child's device stopped unexpectedly. \
+                 Protection may be off until the app restarts it.",
+            );
+        }
+    });
+
     let session = Box::new(VpnSession {
-        tun_fd: tun_fd as i32,
-        config_json: config,
-        vpn_service,
+        runtime,
+        shutdown,
+        _vpn_service: vpn_service,
     });
     // Leak the box into a raw pointer the caller owns; stopVpn reclaims it.
     Box::into_raw(session) as jlong
@@ -391,10 +606,14 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_stopVpn(
         return;
     }
     // SAFETY: non-zero handles are pointers produced by `startVpn`'s
-    // `Box::into_raw`; we reconstruct the Box exactly once and drop it.
-    unsafe {
-        drop(Box::from_raw(handle as *mut VpnSession));
-    }
+    // `Box::into_raw`; we reconstruct the Box exactly once.
+    let session = *unsafe { Box::from_raw(handle as *mut VpnSession) };
+    // Signal the pump to stop, then give the runtime a bounded window to drain
+    // (the pump observes cancellation within a poll tick) before dropping it.
+    session.shutdown.cancel();
+    session
+        .runtime
+        .shutdown_timeout(std::time::Duration::from_secs(2));
 }
 
 /// `external fun analyzeText(app: String, threadId: String, text: String): String`
@@ -447,13 +666,13 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_analyzeTe
     // analyzer's rapid-escalation window degrades gracefully without real ts.
     let verdict = engine.text.analyze_span("a11y", &span, 0);
 
-    // Policy authority: map the verdict -> action under a default (Teen) context.
-    // The supervised child's real age band is configured in the parent app; the
-    // bridge uses the engine default until that config is wired through.
+    // Policy authority: map the verdict -> action under the guardian's CURRENT
+    // strictness band (ChildConfig.profile, kept fresh by startVpn + the config
+    // poll). Defaults to the engine's Teen baseline until a config arrives.
     let ctx = PolicyContext::new(
         DeviceId(String::new()),
         SourceChannel::OcrOnscreen,
-        AgeProfile::default(),
+        current_age_profile(),
     );
     let decision = engine.policy.evaluate(&verdict, &ctx);
 
@@ -502,6 +721,73 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_redeemPai
             Err(e) => err_pairing_json(e),
         },
         Err(_) => err_pairing_json("enrollment runtime could not start"),
+    };
+    string_to_jstring(&mut env, &json)
+}
+
+/// `external fun fetchChildConfig(endpoint: String, deviceId: String, appliedVersion: Long): String`
+///
+/// Child-side half of the parent-controlled VPN: fetch this device's
+/// guardian-set desired config (`ChildControl.GetChildConfig`) from the
+/// enrolled server. `appliedVersion` is the config_version this device last
+/// applied — sent as `have_version`, which the server records as the
+/// applied-version ack the parent console shows; the bridge also live-applies
+/// the fetched strictness band when the config is not older than it.
+/// CONTENT-FREE — policy + routing only. Returns compact JSON:
+///
+/// * `{"ok":true,"filtering_enabled":...,"server_region":"...","server_endpoint":"...",
+///    "profile":"TEEN","require_always_on":...,"config_version":N,"updated_ts":...}`
+/// * `{"ok":false,"error":"..."}` ("no config yet" is a normal, expected state)
+///
+/// The Kotlin reconciler ignores any config strictly OLDER than the version it
+/// last applied (replay/rollback defense) and persists the applied version.
+///
+/// # Safety
+/// JNI entry point. Every jstring argument is null-/UTF-8-validated; invalid
+/// input returns an error JSON instead of panicking.
+#[no_mangle]
+pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_fetchChildConfig(
+    mut env: JNIEnv,
+    _class: JClass,
+    endpoint: JString,
+    device_id: JString,
+    applied_version: jlong,
+) -> jstring {
+    let endpoint = match jstring_to_string(&mut env, &endpoint) {
+        Some(s) => s,
+        None => {
+            return string_to_jstring(
+                &mut env,
+                &err_child_config_json("server address is missing"),
+            )
+        }
+    };
+    let device_id = jstring_to_string(&mut env, &device_id).unwrap_or_default();
+    // Negative can't come from the Kotlin prefs (default 0); clamp defensively.
+    let applied_version = applied_version.max(0) as u64;
+
+    let json = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(2)
+        .thread_name("bulwark-android-config")
+        .build()
+    {
+        Ok(rt) => match rt.block_on(fetch_child_config_rpc(endpoint, device_id, applied_version)) {
+            Ok(cfg) => {
+                // Live profile reconcile: a fetched config that is NOT older
+                // than what this device already applied updates the strictness
+                // band for analyzeText immediately (no service restart). The
+                // version gate mirrors the Kotlin rollback defense.
+                if cfg.config_version >= applied_version {
+                    if let Some(p) = age_profile_from_name(profile_name(cfg.profile())) {
+                        set_age_profile(p);
+                    }
+                }
+                ok_child_config_json(&cfg)
+            }
+            Err(e) => err_child_config_json(e),
+        },
+        Err(_) => err_child_config_json("config runtime could not start"),
     };
     string_to_jstring(&mut env, &json)
 }
@@ -587,22 +873,7 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_reportTam
     _class: JClass,
     kind: jint,
 ) {
-    let now_s = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    // AlertKind::PROTECTION_DISABLED == 3; category 0 (a status signal, not content).
-    let obj = serde_json::json!({
-        "alert_id": format!("tamper-{kind}-{now_s}"),
-        "kind": 3,
-        "category": 0,
-        "redacted_context": tamper_message(kind),
-    });
-    if let Ok(mut q) = tamper_queue().lock() {
-        if q.len() < TAMPER_QUEUE_CAP {
-            q.push_back(obj.to_string());
-        }
-    }
+    enqueue_protection_alert(&format!("tamper-{kind}"), tamper_message(kind));
 }
 
 // ---------------------------------------------------------------------------
@@ -708,5 +979,70 @@ mod tests {
         let err = err_pairing_json("pair code is invalid");
         assert!(err.contains("\"ok\":false"), "{err}");
         assert!(err.contains("pair code is invalid"), "{err}");
+    }
+
+    #[test]
+    fn child_config_json_is_content_free_and_stable() {
+        let cfg = ChildConfig {
+            child_id: "child-1".to_string(),
+            device_id: "dev-1".to_string(),
+            filtering_enabled: true,
+            server_region: "uk".to_string(),
+            server_endpoint: "https://lon.example:8443".to_string(),
+            profile: FilteringProfile::Teen as i32,
+            require_always_on: false,
+            config_version: 7,
+            updated_ts: 1_700_000_000_000,
+            updated_by: "guardian-acct-1".to_string(),
+        };
+        let json = ok_child_config_json(&cfg);
+        assert!(json.contains("\"ok\":true"), "{json}");
+        assert!(json.contains("\"filtering_enabled\":true"), "{json}");
+        assert!(json.contains("\"config_version\":7"), "{json}");
+        assert!(json.contains("\"profile\":\"TEEN\""), "{json}");
+        assert!(json.contains("\"server_region\":\"uk\""), "{json}");
+        // The guardian's account id is server-side audit detail — never forwarded.
+        assert!(!json.contains("guardian-acct-1"), "{json}");
+
+        let err = err_child_config_json("no guardian config for this device yet");
+        assert!(err.contains("\"ok\":false"), "{err}");
+        assert!(err.contains("no guardian config"), "{err}");
+    }
+
+    #[test]
+    fn age_profile_names_map_to_policy_bands() {
+        assert_eq!(
+            age_profile_from_name("YOUNG_CHILD"),
+            Some(AgeProfile::YoungChild)
+        );
+        assert_eq!(age_profile_from_name("PRETEEN"), Some(AgeProfile::PreTeen));
+        assert_eq!(age_profile_from_name("TEEN"), Some(AgeProfile::Teen));
+        // CUSTOM has no on-device thresholds yet — engine baseline, never a crash.
+        assert_eq!(age_profile_from_name("CUSTOM"), Some(AgeProfile::Teen));
+        // Unknown/empty must NOT silently change strictness.
+        assert_eq!(age_profile_from_name(""), None);
+        assert_eq!(age_profile_from_name("nonsense"), None);
+        // Round-trip: every proto band name resolves to a policy band.
+        for p in [
+            FilteringProfile::YoungChild,
+            FilteringProfile::Preteen,
+            FilteringProfile::Teen,
+            FilteringProfile::Custom,
+        ] {
+            assert!(age_profile_from_name(profile_name(p)).is_some());
+        }
+    }
+
+    #[test]
+    fn device_config_json_sets_the_profile_global() {
+        set_age_profile(AgeProfile::default());
+        apply_profile_from_config_json(r#"{"device_id":"d","profile":"YOUNG_CHILD"}"#);
+        assert_eq!(current_age_profile(), AgeProfile::YoungChild);
+        // Malformed JSON / a missing field leaves the band untouched (fail open,
+        // never a silent strictness change).
+        apply_profile_from_config_json("{not json");
+        apply_profile_from_config_json(r#"{"device_id":"d"}"#);
+        assert_eq!(current_age_profile(), AgeProfile::YoungChild);
+        set_age_profile(AgeProfile::default()); // restore for other tests
     }
 }

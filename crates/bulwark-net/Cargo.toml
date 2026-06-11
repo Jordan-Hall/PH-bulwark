@@ -7,7 +7,7 @@ license.workspace = true
 # bulwark-net — the interception layer (SECURITY-CRITICAL crate).
 #
 # Owns: the platform TUN abstraction (Windows `wintun` real; Linux/Android
-# stubbed), the `hudsucker` transparent MITM proxy (rustls + rcgen leaf certs),
+# stubbed), the `hudsucker` transparent TLS-inspecting proxy (rustls + rcgen leaf certs),
 # the **per-install root CA** (the crown jewel — see docs/security/threat-model.md
 # Asset 1), QUIC downgrade, and cert-pinning detection.
 #
@@ -36,7 +36,7 @@ windows-tun = []
 bulwark-proto = { path = "../bulwark-proto" }
 bulwark-core = { path = "../bulwark-core" }
 
-# MITM proxy + TLS + per-install CA.
+# TLS-inspecting proxy + TLS + per-install CA.
 hudsucker.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
@@ -50,7 +50,7 @@ anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 bytes.workspace = true # build the canonical FlowPayload::Http body_peek in convert()
-http-body-util = "0.1" # BodyExt::collect() for the hudsucker MITM handler (already transitive via hudsucker)
+http-body-util = "0.1" # BodyExt::collect() for the hudsucker TLS inspection handler (already transitive via hudsucker)
 
 # Windows TUN driver (WireGuard's pre-signed wintun.dll). Target-gated: only
 # pulled in on Windows. Listed in the workspace allowlist already.
@@ -84,12 +84,15 @@ smoltcp = { workspace = true }
 tun-rs = { workspace = true }
 libc = "0.2" # geteuid() for the VPN elevation pre-flight check
 
-# Android VpnService shim — stubbed behind cfg; JNI dep declared for later.
+# Android VpnService data path — reuses the shared smoltcp transparent pump
+# (`vpn::run_netstack`) over the VpnService fd. `tokio-util`'s CancellationToken
+# drives clean shutdown, same as the desktop path.
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { workspace = true }
 tun-rs = { workspace = true }
 libc = "0.2"
 smoltcp = { workspace = true }
+tokio-util = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

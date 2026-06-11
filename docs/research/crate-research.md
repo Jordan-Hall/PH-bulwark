@@ -11,7 +11,7 @@
 | TUN (Windows) | `wintun` | 0.5 | MIT | native WinTun driver bindings |
 | TUN (Linux/macOS) | `tun-rs` | 2.8 | Apache-2.0 | async, multi-queue |
 | Android FFI | `jni` | 0.22 | MIT/Apache-2.0 | VpnService shim |
-| MITM proxy | `hudsucker` | 0.24 | Apache-2.0/MIT | HTTP/S + WebSocket |
+| TLS-inspecting proxy | `hudsucker` | 0.24 | Apache-2.0/MIT | HTTP/S + WebSocket |
 | TLS | `rustls` | 0.23 | Apache/MIT/ISC | 0.24 (breaking) coming — stay on 0.23 |
 | Async TLS | `tokio-rustls` | 0.26 | MIT | mTLS via features |
 | Cert gen | `rcgen` | 0.14 | MIT/Apache-2.0 | per-install CA + leaf certs |
@@ -49,7 +49,7 @@ sync for nodes rejoining after long outages.
 - `ort` 2.0-rc — maintainers call it production-ready (used by Google Magika, SurrealDB); fallback `candle`.
 - `leptess` stable but ~3y old API; fallback = spawn `tesseract` binary or use `Windows.Media.Ocr`.
 - `rustls` 0.24 will require an explicit crypto provider (breaking) — pin 0.23 for now.
-- `hudsucker` low churn; fallback = hand-rolled `hyper` + `rustls` MITM (more maintenance).
+- `hudsucker` low churn; fallback = hand-rolled `hyper` + `rustls` TLS inspection (more maintenance).
 
 ## ONNX execution-provider note
 `SessionBuilder::execution_providers([...])` tries providers in order, **silently falling back to

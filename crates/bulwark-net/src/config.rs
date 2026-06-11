@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NetConfig {
-    /// Loopback address:port the MITM proxy listens on. The TUN redirects
+    /// Loopback address:port the TLS-inspecting proxy listens on. The TUN redirects
     /// captured TCP here. Loopback-only by default (never exposed off-host).
     pub proxy_listen: String,
 
@@ -45,7 +45,7 @@ pub struct NetConfig {
     /// to fall back from QUIC). Matched against SNI / app id.
     pub quic_allowlist: Vec<String>,
 
-    /// **Fail-open** on a cert-pinned / MITM-rejected host (forward + log) vs.
+    /// **Fail-open** on a cert-pinned / TLS inspection-rejected host (forward + log) vs.
     /// fail-closed (block). Default `true` (fail-open) per the threat model:
     /// blocking every pinned app is too disruptive for parental control; the
     /// coverage gap is surfaced honestly and the host is routed to on-device OCR.

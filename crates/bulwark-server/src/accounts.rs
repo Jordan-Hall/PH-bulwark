@@ -650,6 +650,18 @@ impl AccountStore {
         }
         Some(scope)
     }
+
+    /// Resolve a session token to its account id (the guardian who owns it), or
+    /// `None` for an unknown OR expired token. Used to stamp `updated_by` audit
+    /// fields on guardian-authored mutations (e.g. ChildControl.SetChildConfig).
+    pub fn account_for_session(&self, token: &str) -> Option<String> {
+        let inner = self.inner.lock().expect("account mutex poisoned");
+        let entry = inner.sessions.get(token.trim())?;
+        if !session_live(entry.issued_ms, Self::now_ms(), session_ttl_ms()) {
+            return None;
+        }
+        Some(entry.account_id.clone())
+    }
 }
 
 /// Lowercase + trim an email for use as the account key.

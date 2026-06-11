@@ -13,17 +13,26 @@ runs on a **clusterable server backend**; devices run a thin client.
 
 ## 0. Read this first
 
+> **Framing (read first):** PH Bulwark is a consensual **parental-control,
+> child-safety content-filtering VPN** — guardian-installed, on a device the
+> guardian owns, for a minor they are the legal guardian of, openly visible and
+> switch-off-able. It is **not** offensive security, surveillance, or anything
+> biological. The networking technique is standard **on-device TLS inspection**
+> (the same approach parental-control / enterprise-DLP products use), applied only
+> on the guardian's own device. See **[docs/FRAMING.md](docs/FRAMING.md)** for the
+> protective glossary (e.g. "inspection" not "interception") used throughout.
+
 ### 0a. What is and isn't possible (drives everything)
 
 | Goal | Network VPN alone? | Reality |
 |---|---|---|
-| Block adult **websites/pages** | ✅ | DNS + SNI + MITM HTTPS |
-| Block adult **images** in pages | ✅ | MITM decrypt → small NSFW model |
+| Block adult **websites/pages** | ✅ | DNS + SNI + on-device TLS inspection |
+| Block adult **images** in pages | ✅ | on-device TLS inspect → small NSFW model |
 | Block adult **video** (mp4, HLS/DASH) | ✅ (with delay) | Buffer → ffmpeg → classify → block/blur/mute → forward |
 | Block adult **live WebRTC** calls | ⚠️ Hard | Realistic option is **block**, not analyze |
-| Read ordinary web chat (non-pinned HTTPS) | ✅ | MITM → text rules + classifier |
+| Read ordinary web chat (non-pinned HTTPS) | ✅ | on-device TLS inspect → text rules + classifier |
 | Read **E2E** chats (Messenger secret, WhatsApp, Signal, iMessage) | ❌ Never | Plaintext never on the wire → **on-device OCR** |
-| Read **cert-pinned** apps | ❌ | App rejects MITM cert → **on-device OCR** |
+| Read **cert-pinned** apps | ❌ | App rejects TLS inspection cert → **on-device OCR** |
 | Decrypt arbitrary **Android 7+** app traffic | ⚠️ | User CAs ignored unless app opts in → **on-device OCR** |
 
 Consequences: grooming detection = **network text + on-device OCR + platform supervision APIs**, all
@@ -63,7 +72,7 @@ Bulwark is **rules-first, small-model-second, big-AI-rarely**:
         Devices (thin clients)                       Server cluster (scales horizontally)
  ┌───────────────────────────────┐            ┌──────────────────────────────────────────┐
  │ bulwark-client                  │   gRPC     │  Load balancer / gateway (bulwark-server LB) │
- │  • bulwark-net  (TUN+MITM+CA)   │  (mTLS)    │        │                │                 │
+ │  • bulwark-net  (TUN+TLS inspection+CA)   │  (mTLS)    │        │                │                 │
  │  • bulwark-agent (manual OCR)   │ ─────────► │  worker-1        worker-2        worker-N  │
  │  • bulwark-flow (buffer/delay)  │ ◄───────── │  (bulwark-server: vision/audio/video/text)   │
  │  • tiny first-pass models     │  verdicts  │        \________ bulwark-cluster ________/   │
@@ -96,7 +105,7 @@ bulwark/crates/
   bulwark-client       # device orchestrator: wires net + agent + flow + infer
   bulwark-server       # clusterable analysis backend (roles: lb | worker | all-in-one)
   bulwark-cluster      # membership, health, load balancing, work queue, shared state
-  bulwark-net          # TUN/VpnService + MITM proxy + per-install CA
+  bulwark-net          # TUN/VpnService + TLS-inspecting proxy + per-install CA
   bulwark-flow         # protocol/flow classify + stream demux + buffering/delay
   bulwark-vision       # small dedicated NSFW image/frame classifier (ONNX, quantized)
   bulwark-audio        # small dedicated explicit-audio classifier (ONNX)
@@ -114,7 +123,7 @@ bulwark/crates/
 Heavy/untrusted media parsers run as **sandboxed worker processes** (they ingest hostile input).
 
 ### Key per-crate notes
-- **bulwark-net:** `wintun` (Win), `tun` (Linux/macOS), Android `VpnService` via JNI; MITM via
+- **bulwark-net:** `wintun` (Win), `tun` (Linux/macOS), Android `VpnService` via JNI; TLS inspection via
   `hudsucker` (hyper+rustls+rcgen); **per-install CA** (never shared/baked-in), key in TPM/keystore;
   QUIC downgrade; pinning detection → flag for on-device.
 - **bulwark-vision / bulwark-audio:** runtime `ort` (CPU + CUDA/TensorRT/DirectML/CoreML/NNAPI). Small
@@ -146,7 +155,7 @@ local-only by default, offload only to the user's own cluster, **no telemetry** 
 | Phase | Deliverable |
 |---|---|
 | **0 Foundations** | Workspace, CI, `cargo-deny`/`audit`, threat model, legal/consent docs, per-install CA, policy schema, **`bulwark-proto` contracts + single-node `bulwark-server`/`bulwark-client` skeleton over gRPC**, device-capability detection |
-| **1 Web + text** | MITM proxy, DNS/SNI/page filtering, **rule+lexicon grooming engine** + small text classifier on web/non-E2E, alerting MVP |
+| **1 Web + text** | TLS-inspecting proxy, DNS/SNI/page filtering, **rule+lexicon grooming engine** + small text classifier on web/non-E2E, alerting MVP |
 | **2 Images** | Small NSFW image model on web images; blur/block |
 | **3 Video + audio** | ffmpeg pipeline (progressive + HLS/DASH); frame sampling + audio muting |
 | **4 Live + GPU + cluster scale** | Buffered-delay live filtering, GPU re-encode/blur, **multi-node `bulwark-cluster` (membership/LB/work queue)**, WebRTC block |
@@ -163,3 +172,92 @@ in-memory only, redact, report-never-archive · live-video latency → delay bud
 offload · coverage gaps (E2E/pinning/QUIC/WebRTC) → honest per-app coverage dashboard · **CA key
 compromise** → per-install TPM key, rotation · cluster split-brain → quorum/Postgres source-of-truth ·
 grooming model bias/language → multilingual eval set + rule transparency.
+
+---
+
+## 6. Next-phase product workflows
+
+The engine (§2) is built; the next phases turn it into the **product** the family
+uses: a maintainable Dioxus app suite, a parent who remotely governs the child's
+filtering VPN, the fastest+secure real-time AI filtering with rich attribution, and
+a longer-term reach into SMS/calls. Each workflow has a dedicated design doc and is
+shippable in reviewable increments. Status as of **2026-06-10**.
+
+### Just shipped (foundation for these workflows)
+- **Transparent VPN pump, wired end-to-end** — `bulwark-net::vpn::run_netstack`
+  (fd-driven smoltcp pump: per-flow TCP terminate → TLS inspection `CONNECT` → splice; DNS
+  forward; QUIC drop) is now driven by `vpn::run_android_data_path`, which starts
+  the in-process TLS-inspecting proxy + the pump over the VpnService fd. The Android
+  `startVpn`/`stopVpn` JNI run/cancel it on a tokio runtime. Host-tested + the full
+  bridge cross-compiles for Android. Remaining: on-device validation (CA-trust
+  limits on Android 7+ are covered by the OCR path). See
+  [`docs/design/vpn-data-path-plan.md`](docs/design/vpn-data-path-plan.md).
+- **Parent-controlled VPN (Workflow B)** — server `ChildControl`
+  (`SetChildConfig`/`Get`/`Stream`/`GetChildStatus` in `bulwark-server`:
+  guardian-scoped, monotonic version, watch-stream, JSON persist; 6 unit + 1 e2e
+  green), the parent UI (per-child VPN-control row → `SetChildConfig`, then
+  polls `GetChildStatus` until "Applied on the child's device ✓"), **and the
+  child apply-loop (2026-06-10)**: a `fetchChildConfig` JNI (one-shot
+  `GetChildConfig`; its `have_version` doubles as the applied-version ack the
+  server records) + Kotlin `ChildConfigSync` reconciler — `filtering_enabled`
+  starts/stops the VPN service, strictly-older configs rejected (replay
+  defense), applied version + strictness band persisted, and the fetched
+  `profile` live-updates the on-device `AgeProfile` used by `analyzeText`;
+  polled every 60s + on app foreground. Remaining: stream push +
+  `server_endpoint` reconcile.
+- **Dioxus app suite on `dioxus-router`, BOTH apps (Workflow A)** — child: six
+  modules (typed `Route`, `Outlet`, `JourneyLayout`). Parent (2026-06-10):
+  2974-line main.rs → eleven modules (`router`/`theme`/`state`/`servers`/`api`/
+  `config`/`process`/`media`/`components`/`screens`/`tests`) **with full router
+  adoption**: typed `Route` + `ConsoleLayout` + six routed screens + a shared
+  `Console` context (form state survives tab switches); 12/12 tests green incl.
+  the loopback FakeReview e2e.
+- **Real-time path engine items (Workflow C, 2026-06-10)** — pinning detection
+  is LIVE (`should_intercept` 3-strike heuristic → pinned → OCR route /
+  fail-open passthrough; strikes decay on successful decrypt);
+  `bulwark-infer::OnnxAnalyzer` really `session.run()`s (shared bulwark-vision
+  pre/postprocess, hash-only evidence, inconclusive→offload on anything it
+  can't judge); and the guardian dashboard's `/api/coverage` derives live rows
+  from the pinning registry (`bulwark_proxy` embeds it on 127.0.0.1:8081).
+- **Midscene UI-test harness** — `tools/ui-tests/` drives the apps' web target
+  cross-platform (no device); optional Android path.
+- **Native Android onboarding** — guided one-permission-at-a-time setup journey +
+  proper VpnService-consent flow (the model the Dioxus child mirrors).
+
+### Workflow A — Dioxus app suite: code-split + full Dioxus stack (incl. router)
+**The Dioxus apps are the main UI** (`apps/parent` console, `apps/child` shield).
+Split each single-file app into a maintainable module tree (lib+bin, `screens/`,
+`components/`, `state/`, `api/`, `theme`), share a theme-parameterised
+`bulwark-ui-kit`, and adopt **`dioxus-router`** (typed `Route` enum, `Outlet`,
+`Link`) + `dioxus-stores` for all navigation/state — no hand-rolled enum-dispatch.
+Incremental, `cargo check`-verifiable at every step. → **[`docs/design/dioxus-app-architecture.md`](docs/design/dioxus-app-architecture.md)**
+
+### Workflow B — Parent-controlled VPN + easier pairing (QR · NFC · code)
+The child device runs like a normal always-on VPN app, but **the parent owns the
+switch**: from the parent app the guardian picks the region/server, toggles
+filtering on/off, and sets strictness — pushed to the child via a new content-free
+`ChildControl` gRPC contract (config_version-monotonic, guardian-scoped). First-run
+is QR-scan / NFC-tap / short-code, so a child is paired + protected in seconds.
+Honest enforcement tiers (advisory-but-detected → Device-Owner always-on lockdown).
+→ **[`docs/design/parent-controlled-vpn.md`](docs/design/parent-controlled-vpn.md)**,
+**[`docs/design/app-pairing-and-regions.md`](docs/design/app-pairing-and-regions.md)**
+
+### Workflow C — Real-time AI filtering + rich attribution (fastest + secure)
+Make the real-time path production-grade: tiered latency budget (text rules always
+local sub-ms; small NSFW image gated fail-closed; audio/video offload-preferred),
+runtime accelerator detection (NNAPI/ML Kit/CoreML/DirectML → bundled CPU floor, so
+ALL phones are covered), and one policy merging NSFW image + grooming text + OCR.
+Plus **rich OCR attribution** — every on-device capture says *which app* and *who
+said it* (child vs other party, thread, timestamp) while staying content-free and
+never storing raw messages/CSAM. → **[`docs/design/realtime-filtering-and-attribution.md`](docs/design/realtime-filtering-and-attribution.md)**
+
+### Workflow D — SMS & call safety (long-term)
+Extend the same detector to the channels an abuser falls back to: Bulwark as the
+default **SMS app** (Android — feasible) routing message bodies through the grooming
+engine, and **call screening** (default dialer) for caller identity; call-**audio**
+transcription is managed-device/R&D only (modern OSes block it) and gated by
+per-region consent. Honest about iOS limits. → **[`docs/design/sms-call-monitoring.md`](docs/design/sms-call-monitoring.md)**
+
+These slot onto the §4 roadmap as the product-surface phases (post-Phase-5 on-device
+agent), and the per-step execution tasks are tracked in
+[`docs/finish-plan.md`](docs/finish-plan.md).

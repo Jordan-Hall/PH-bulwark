@@ -49,10 +49,19 @@ bulwark-policy = { path = "../../../../crates/bulwark-policy" }
 bulwark-core = { path = "../../../../crates/bulwark-core" }
 bulwark-proto = { path = "../../../../crates/bulwark-proto" }
 
+# The interception layer — its transparent VPN pump (`vpn::run_android_data_path`)
+# is what `startVpn` runs over the VpnService fd. Pulls the TLS-inspecting proxy + per-install
+# CA + smoltcp pump; cross-compiles for android (cargo-ndk).
+bulwark-net = { path = "../../../../crates/bulwark-net" }
+
 # Minimal JSON assembly for the Verdict the Kotlin side parses. (serde_json is
 # already in the workspace tree via the analyzer crates' dev-deps; pull it here
 # explicitly as a normal dep.)
 serde_json = "1"
+
+# Structured logging — already in the tree via bulwark-net; used to record a
+# data-path exit alongside the guardian-facing protection-status alert.
+tracing = "0.1"
 
 # Child enrollment talks to the same Accounts gRPC service as the parent app.
 # Keep this in Rust so Android does not need a second generated gRPC client.

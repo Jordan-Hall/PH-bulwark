@@ -59,6 +59,20 @@ object RustBridge {
     external fun redeemPairCode(endpoint: String, code: String, deviceId: String): String
 
     /**
+     * Fetch this device's guardian-set desired runtime config (the remote
+     * "VPN switch": filtering on/off, region/server, strictness band) from the
+     * ChildControl service on the enrolled server. CONTENT-FREE: policy and
+     * routing only. [appliedVersion] is the config_version this device last
+     * applied — the server records it as the applied-version ack the parent
+     * console shows ("applied ✓ vN"), and the Rust bridge live-applies the
+     * fetched strictness band when the config is not older than it. Returns JSON:
+     * `{ ok: true, filtering_enabled, server_region, server_endpoint, profile,
+     *    require_always_on, config_version, updated_ts }` or `{ ok: false, error }`.
+     * See [ChildConfigSync][co.predatorhunters.bulwark.vpn.ChildConfigSync].
+     */
+    external fun fetchChildConfig(endpoint: String, deviceId: String, appliedVersion: Long): String
+
+    /**
      * Submit the guardian's review decision for a flagged item: `approve` = allow
      * it through / override the block; otherwise keep it blocked. Routed to the
      * policy engine, which records the decision and may allowlist the host/hash

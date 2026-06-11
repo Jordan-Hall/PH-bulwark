@@ -1,7 +1,7 @@
-//! `bulwark_proxy` — a runnable, browser-pointable Bulwark MITM proxy.
+//! `bulwark_proxy` — a runnable, browser-pointable Bulwark TLS-inspecting proxy.
 //!
 //! This is the end-to-end demo entrypoint the product brief asks for. It:
-//!   1. Brings up the `bulwark-net` interceptor — the hudsucker MITM proxy on
+//!   1. Brings up the `bulwark-net` interceptor — the hudsucker TLS-inspecting proxy on
 //!      `127.0.0.1:8080`, backed by the **per-install CA** (`CaManager`).
 //!   2. **Writes the root CA cert to disk and PRINTS its path**, so the user can
 //!      trust it (Windows: `certutil -addstore -user Root <path>`; or import it
@@ -55,16 +55,17 @@ async fn main() -> anyhow::Result<()> {
     // --- 2. Persist + PRINT the CA cert path so the user can trust it. --------
     let ca_path = write_ca_cert(net.ca_cert_pem())?;
     println!("=================================================================");
-    println!(" Bulwark MITM proxy");
+    println!(" Bulwark TLS-inspecting proxy");
     println!(" Listening:     http://{PROXY_LISTEN}  (set this as your browser proxy)");
     println!(" Root CA cert:  {}", ca_path.display());
     println!(" CA fingerprint: {}", net.ca_fingerprint());
     println!(" Trust it (Windows):");
     println!("   certutil -addstore -user Root \"{}\"", ca_path.display());
     println!(" Cluster (alerts): {cluster_endpoint}  (AlertRelay.RaiseAlert)");
+    println!(" Dashboard:      http://127.0.0.1:8081/api/coverage  (BULWARK_UI_BIND to change)");
     println!("=================================================================");
 
-    // Explicit-proxy mode: bring up ONLY the MITM proxy (install CA + spawn
+    // Explicit-proxy mode: bring up ONLY the TLS-inspecting proxy (install CA + spawn
     // hudsucker), skipping the TUN device + QUIC firewall (which need admin). The
     // user points their browser proxy at 127.0.0.1:8080, so no transparent
     // redirect is required.
@@ -72,6 +73,12 @@ async fn main() -> anyhow::Result<()> {
     net.start_proxy_only()
         .await
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    // --- 2b. Guardian dashboard: the coverage matrix is derived LIVE from the
+    // pinning registry (inspected in-line vs pinned → on-device OCR route).
+    // Best-effort: a bind failure logs a warning and never blocks filtering.
+    spawn_dashboard(net.clone());
+
     let interceptor: Arc<dyn bulwark_net::Interceptor> = net;
 
     // --- 3. Build the pipeline (text rules + local NSFW image scoring). -------
@@ -158,6 +165,44 @@ async fn run_loop(
         }
     }
     Ok(())
+}
+
+/// Serve the bulwark-ui dashboard on `BULWARK_UI_BIND` (default
+/// 127.0.0.1:8081), with the coverage matrix fed by the live pinning-registry
+/// snapshot — the honest per-host "inspected vs pinned → OCR" matrix.
+fn spawn_dashboard(net: Arc<bulwark_net::NetInterceptor>) {
+    let bind = std::env::var("BULWARK_UI_BIND").unwrap_or_else(|_| "127.0.0.1:8081".to_string());
+    let store = match bulwark_store::open_in_memory() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "dashboard store unavailable; dashboard disabled");
+            return;
+        }
+    };
+    let coverage = move || {
+        net.pinning_snapshot()
+            .into_iter()
+            .filter_map(|(host, cap)| {
+                let inspection = match cap {
+                    bulwark_net::HostCapability::Mitmable => {
+                        bulwark_ui::HostInspection::Inspectable
+                    }
+                    bulwark_net::HostCapability::Pinned => bulwark_ui::HostInspection::Pinned,
+                    bulwark_net::HostCapability::Unknown => return None,
+                };
+                Some(bulwark_ui::HostCoverage { host, inspection })
+            })
+            .collect()
+    };
+    let state = bulwark_ui::AppState {
+        store,
+        coverage: Arc::new(coverage),
+    };
+    tokio::spawn(async move {
+        if let Err(e) = bulwark_ui::serve(state, &bind).await {
+            tracing::warn!(%bind, error = %e, "guardian dashboard unavailable");
+        }
+    });
 }
 
 /// Write the root CA cert PEM to a stable per-user file and return its path.

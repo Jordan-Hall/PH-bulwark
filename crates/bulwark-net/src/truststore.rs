@@ -5,7 +5,7 @@
 //! store and — critically — removes it again on uninstall.
 //!
 //! ## Why uninstall is a release-blocker (threat-model Asset 1)
-//! An orphaned root left in the trust store after uninstall is a **latent MITM
+//! An orphaned root left in the trust store after uninstall is a **latent TLS inspection
 //! backdoor**: anyone holding the (now-deleted) key, or who later recovers it,
 //! could impersonate any site to this device. The threat model marks "uninstall
 //! removes the root" as a release-blocker test case. [`uninstall_root`] therefore

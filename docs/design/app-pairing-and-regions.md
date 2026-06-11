@@ -104,6 +104,52 @@ Important security properties:
   accounts mode.
 - A guardian can see or approve only children they are assigned to.
 
+## Easier pairing: QR · NFC · code
+
+The bare short code (above) is the universal fallback, but typing a code + picking a
+server is the main first-run friction. Two faster methods front-load the same
+`RedeemPairCode` call so the child device is paired in seconds. All three carry the
+**same credential** — a short-lived, single-use pair code — plus routing hints, so they
+inherit the same security properties (a leaked QR/NFC blob expires fast and is dead once
+redeemed).
+
+The shared **pairing payload** (what QR encodes / NFC writes):
+
+```json
+{
+  "v": 1,
+  "server_region": "uk",
+  "server_endpoint": "https://<cluster-host>:8443",
+  "pair_code": "ABCD2345",
+  "expires_ts": 1750000000000,
+  "child_name": "Ava"
+}
+```
+
+- **QR (default — phone-to-phone, no extra hardware).** After "Add child", the parent
+  app renders the payload as a QR. The child app opens the camera, scans it, and
+  **auto-selects the server + fills the code** — the guardian's chosen region and the
+  code arrive together, so the child can't accidentally pair to the wrong server. One
+  tap → `RedeemPairCode`. Fastest path; no typing.
+- **NFC tap.** The parent device writes the payload as an NDEF message; tapping the two
+  phones back-to-back transfers it to the child app, which pre-fills server + code the
+  same way. Ideal for the in-person setup most families do. (Android: `NfcAdapter` /
+  reader-mode; iOS: Core NFC read.) Falls back to QR where a device lacks NFC.
+- **Code.** The existing short, single-use, short-lived code typed by hand — the
+  always-available fallback (camera denied, NFC absent, accessibility setup).
+
+Implementation notes:
+
+- The payload is **not** a second credential — the `pair_code` inside it is the same
+  one `CreatePairCode` mints, so no new server surface is required for QR/NFC; only the
+  apps change. Redemption still goes through the unauthenticated `RedeemPairCode` (the
+  code is the credential) and is single-use.
+- Encode `expires_ts` so the child app can show *"this code has expired — ask for a new
+  one"* before even calling the server.
+- After a successful redeem, the parent app seeds the child's first
+  [`ChildConfig`](parent-controlled-vpn.md) (region + strictness + `filtering_enabled =
+  true`) so the device comes up **already protected**.
+
 ## Self-Hosted Server
 
 A self-hosted family runs the same `bulwark-server` binary:

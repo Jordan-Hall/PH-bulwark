@@ -35,7 +35,7 @@ enum MediaKind {
 // stream differently from a live stream or an on-device OCR capture.
 enum SourceChannel {
   SOURCE_CHANNEL_UNSPECIFIED = 0;
-  WEB                        = 1; // MITM'd HTTP(S) page / web chat
+  WEB                        = 1; // inspected HTTP(S) page / web chat
   VIDEO_STREAM               = 2; // progressive / HLS / DASH (buffered, delay OK)
   LIVE_STREAM                = 3; // low-latency live (bounded delay budget)
   OCR_ONSCREEN               = 4; // on-device conventional OCR (E2E / pinned apps)
@@ -562,6 +562,90 @@ service Accounts {
   // redeems it (RedeemPairCode is unauthenticated — the code IS the credential).
   rpc CreatePairCode(CreatePairCodeRequest) returns (PairCode);
   rpc RedeemPairCode(RedeemPairCodeRequest) returns (PairResult);
+}
+
+// ---------------------------------------------------------------------------
+// ChildControl service — parent-set, child-applied runtime config (the remote
+// "VPN switch": region/server, filtering on/off, strictness). CONTENT-FREE:
+// policy + routing only, never message/media. See docs/design/parent-controlled-vpn.md.
+//   * A guardian SetChildConfig is authenticated by the session token and scoped
+//     to a child they guard (same model as Review/Accounts).
+//   * The child fetches/streams its own config by device identity (mTLS subject);
+//     config_version is monotonic per child so a stale config can never roll back
+//     protection.
+// ---------------------------------------------------------------------------
+
+// Strictness band; maps onto bulwark-policy AgeProfile + thresholds.
+enum FilteringProfile {
+  FILTERING_PROFILE_UNSPECIFIED = 0;
+  YOUNG_CHILD                   = 1; // strictest
+  PRETEEN                       = 2;
+  TEEN                          = 3;
+  CUSTOM                        = 4;
+}
+
+// Per-child desired runtime config, set by a guardian, applied by the child device.
+message ChildConfig {
+  string child_id          = 1;
+  string device_id         = 2;
+  bool   filtering_enabled = 3; // the parent's master VPN on/off switch
+  string server_region     = 4; // "uk" | "us" | "self"
+  string server_endpoint   = 5; // resolved cluster endpoint the child filters through
+  FilteringProfile profile = 6; // strictness / age band -> bulwark-policy
+  bool   require_always_on = 7; // request always-on VPN lockdown (needs Device Owner)
+  uint64 config_version    = 8; // monotonic; the child applies only a strictly newer one
+  int64  updated_ts        = 9; // unix epoch millis
+  string updated_by        = 10; // guardian account id (audit)
+}
+
+message SetChildConfigRequest {
+  string token       = 1; // guardian session (also via Bearer metadata); must guard child_id
+  ChildConfig config = 2; // config_version/updated_ts/updated_by are set server-side
+}
+
+message ChildConfigAck {
+  bool   applied        = 1;
+  uint64 config_version = 2;
+  string detail         = 3;
+}
+
+message ChildConfigFilter {
+  string device_id    = 1; // child identifies by its device id / cert subject
+  // Dual purpose: (a) stream filter — emit only configs strictly newer than
+  // this; (b) the child's APPLIED-VERSION REPORT — the server records it per
+  // enrolled device (last version applied + when it last checked in), which
+  // GetChildStatus exposes to the guardian ("applied ✓ vN" vs "pending").
+  // Content-free: a bare version number, never content.
+  uint64 have_version = 2;
+}
+
+// Guardian-side status query: did the child apply the config yet? `token` must
+// belong to a guardian of `child_id` (same scoping as SetChildConfig).
+message ChildStatusRequest {
+  string token    = 1; // guardian session (also via Bearer metadata)
+  string child_id = 2;
+}
+
+// Desired-vs-applied status for the parent console. Child-reported state lives
+// HERE — never on ChildConfig, which stays the guardian's desired document.
+// Content-free: version numbers + a check-in timestamp only.
+message ChildConfigStatus {
+  string child_id        = 1;
+  uint64 desired_version = 2; // latest guardian-set config_version
+  uint64 applied_version = 3; // last version the child reported applied (0 = none yet)
+  int64  last_report_ts  = 4; // unix ms of the child's last check-in (0 = never / since restart)
+}
+
+service ChildControl {
+  // Guardian sets desired config (auth: guardian token, scoped to their child).
+  rpc SetChildConfig(SetChildConfigRequest) returns (ChildConfigAck);
+  // Child fetches its current desired config (one-shot, e.g. on app start).
+  // `have_version` doubles as the child's applied-version report (recorded).
+  rpc GetChildConfig(ChildConfigFilter) returns (ChildConfig);
+  // Child streams desired config; server pushes on every guardian change.
+  rpc StreamChildConfig(ChildConfigFilter) returns (stream ChildConfig);
+  // Guardian reads desired-vs-applied + last check-in (auth: guardian token, scoped).
+  rpc GetChildStatus(ChildStatusRequest) returns (ChildConfigStatus);
 }
 
 // ---------------------------------------------------------------------------

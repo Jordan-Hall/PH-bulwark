@@ -20,12 +20,12 @@ variable reference.
 child device                              home cluster                guardian
 ┌────────────────────────┐   AlertRelay   ┌───────────────┐  email +  ┌──────────────┐
 │ bulwark_proxy / bulwark_vpn │──(redacted)──▶ │ bulwark-server  │── FCM ───▶ │ parent app / │
-│  MITM filter + OCR +    │   gRPC         │ relay+accounts│   push     │ UI / phone   │
+│  TLS inspection filter + OCR +    │   gRPC         │ relay+accounts│   push     │ UI / phone   │
 │  tamper heartbeat       │◀─ offload ────▶│ +Review+Tamper│            └──────────────┘
 └────────────────────────┘  (mTLS)        └───────────────┘
 ```
 - **Child** runs `bulwark_proxy` (no admin; per-user system proxy) or `bulwark_vpn`
-  (admin; TUN captures all TCP). Both MITM HTTPS with the per-install root CA and
+  (admin; TUN captures all TCP). Both TLS inspection HTTPS with the per-install root CA and
   run the same pipeline; both emit a tamper heartbeat.
 - **Cluster** (`bulwark-server`, roles `all-in-one`/`lb`/`worker`) receives redacted
   `AlertEvent`s, scopes per child/guardian, and delivers via email + optional FCM.
@@ -180,7 +180,7 @@ defeats software-only prevention short of zero-touch/ABM — detection still fir
 | `BULWARK_SESSION_TTL_SECS` | server | guardian session-token lifetime (seconds) | 43200 (12h) | tune session expiry |
 | `BULWARK_LOGIN_MAX_FAILS` | server | failed logins per email before lockout | 5 | tune brute-force throttle |
 | `BULWARK_LOGIN_WINDOW_SECS` | server | login-throttle / lockout window (seconds) | 900 (15m) | tune brute-force throttle |
-| `BULWARK_STATE_DIR` | server | persist guardian state — accounts/push/pending/allowlist (JSON) | unset (in-memory) | durable state |
+| `BULWARK_STATE_DIR` | server | persist guardian state — accounts/push/pending/allowlist + child configs/applied-acks (JSON) | unset (in-memory) | durable state |
 | `BULWARK_ADMIN_ENDPOINT` | bulwark_admin | Accounts service endpoint for the CLI | `http://127.0.0.1:8443` | remote/TLS provisioning |
 | `BULWARK_UI_BIND` | bulwark-ui | dashboard host:port | 127.0.0.1:8080 | non-loopback UI |
 | `BULWARK_SMTP_HOST` | bulwark-alert | SMTP host (email on-switch) | unset | with FROM+RECIPIENTS |

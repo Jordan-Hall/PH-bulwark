@@ -11,7 +11,7 @@ async fn main() -> anyhow::Result<()> {
     let _ = bulwark_core::init_tracing_default();
     let cfg = ClientConfig::default();
 
-    // SEAM: construct the platform interceptor (Windows Wintun + MITM + per-install CA).
+    // SEAM: construct the platform interceptor (Windows Wintun + TLS inspection + per-install CA).
     // Exact constructor confirmed at integration; bulwark-net exposes NetInterceptor + NetConfig.
     // NetInterceptor::new returns Result (fail-closed if the keystore can't
     // provide a CA key) — propagate it.

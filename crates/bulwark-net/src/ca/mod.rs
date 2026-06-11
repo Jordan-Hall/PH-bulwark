@@ -1,6 +1,6 @@
 //! Per-install root CA management (threat-model Asset 1 — the CROWN JEWEL).
 //!
-//! The MITM proxy mints a leaf cert per visited host, signed by a root CA that
+//! The TLS-inspecting proxy mints a leaf cert per visited host, signed by a root CA that
 //! is installed into the device trust store. This module:
 //!   * **generates a unique root CA on first run** (`rcgen`), never a shared one;
 //!   * stores the CA private key via a [`CaKeyStore`] (DPAPI on Windows);
@@ -193,7 +193,7 @@ impl CaManager {
     }
 
     /// Mint a leaf certificate for `host`, signed by this root CA. Called by the
-    /// MITM proxy per visited host. Returns `(leaf_cert_der, leaf_key_der)`.
+    /// TLS-inspecting proxy per visited host. Returns `(leaf_cert_der, leaf_key_der)`.
     ///
     /// The leaf is short-lived and minted **locally** — leaf certs are never
     /// requested from the cluster (threat-model Asset 1 / S).
@@ -207,7 +207,7 @@ impl CaManager {
             .push(rcgen::DnType::CommonName, host);
         let now = std::time::SystemTime::now();
         params.not_before = now.into();
-        // Short-lived leaf (a few days is plenty for a live MITM session).
+        // Short-lived leaf (a few days is plenty for a live TLS inspection session).
         params.not_after = (now + std::time::Duration::from_secs(7 * 24 * 60 * 60)).into();
 
         // Build the CA issuer directly from the stored root cert DER + key, so

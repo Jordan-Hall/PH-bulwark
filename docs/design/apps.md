@@ -32,7 +32,7 @@ The on-device filter must be native because traffic capture is a kernel/OS featu
 
 | OS | Capture mechanism | Status / notes |
 |---|---|---|
-| **Windows** | Wintun TUN + MITM (`bulwark-net`) | built |
+| **Windows** | Wintun TUN + TLS inspection (`bulwark-net`) | built |
 | **Android** | `VpnService` + accessibility (`platform/android`) | built (transparent) |
 | **macOS** | Network Extension — `NEFilterDataProvider` / Packet Tunnel + Rust core | to build (Swift shell) |
 | **iOS** | Network Extension content filter + Rust core | to build; **content-filtering + alerts only** |

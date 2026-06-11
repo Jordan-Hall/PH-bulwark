@@ -52,7 +52,10 @@ jobs:
       - name: Smoke test — server boots + loads the ONNX model (.so dlopens)
         run: |
           set -euo pipefail
-          docker run -d --name smoke -e BULWARK_ACCOUNTS=1 "$IMAGE:${GITHUB_SHA}" --role all-in-one
+          # Boot with the SAME flags production runs (accounts + persistent state
+          # dir), so a guardian-state/ChildControl persistence regression fails
+          # HERE instead of on the box.
+          docker run -d --name smoke -e BULWARK_ACCOUNTS=1 -e BULWARK_STATE_DIR=/var/lib/bulwark "$IMAGE:${GITHUB_SHA}" --role all-in-one
           sleep 12
           if [ "$(docker inspect -f '{{.State.Running}}' smoke 2>/dev/null)" != "true" ]; then
             echo "::error::server did not stay up — ONNX runtime .so missing or model load failed"

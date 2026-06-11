@@ -57,7 +57,7 @@ pub struct LinuxRouting {
     pub route_table: u16,
     /// Firewall mark applied to packets redirected to userspace.
     pub fwmark: String,
-    /// Local MITM proxy port.
+    /// Local TLS-inspecting proxy port.
     pub proxy_port: u16,
 }
 
@@ -204,7 +204,7 @@ pub struct MacosRouting {
     pub anchor: String,
     /// utun interface name assigned by the kernel.
     pub interface: String,
-    /// Local MITM proxy port.
+    /// Local TLS-inspecting proxy port.
     pub proxy_port: u16,
 }
 

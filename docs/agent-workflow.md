@@ -24,14 +24,14 @@ Wave A (read-only, parallel)  →  Wave B (design)  →  Wave C (build, parallel
 |---|---|---|---|
 | **A1 Crate research** | Explore (very thorough) | read-only | Confirm crates + **OSS licenses** + maturity: TUN, `hudsucker`, `rustls`/`rcgen`, `ort`, `ffmpeg-sidecar`, `lettre`, `sqlx`/`rusqlite`, `axum`/`tauri`, **`tonic`/`prost` (gRPC), SWIM membership (`foca`/`chitchat`/alt), Postgres, mTLS** + `cargo-deny`/`audit`. Output: dep table + license red-flags + recommended set |
 | **A2 Model research** | Explore (very thorough) | read-only | Pick **small dedicated** OSS models (minimal-AI steer): NSFW image, explicit-audio, grooming text classifier; **conventional OCR engines** (Tesseract/OS-native, NOT vision-LLMs); note the deterministic rule/lexicon approach for grooming; LLM only as optional escalation. License + size + quantization + device tier + eval datasets (PAN2012). Output: model registry + per-tier recommendation |
-| **A3 Platform + topology** | Explore (very thorough) | read-only | Go/no-go for: Win Wintun+MITM+CA-install; Linux gateway; Android VpnService+AccessibilityService (+Android-7 user-CA limit); QUIC downgrade; pinning behavior; **client⇄clustered-server gRPC/mTLS topology + role-based single binary + offload path**. Output: feasibility report w/ risks |
+| **A3 Platform + topology** | Explore (very thorough) | read-only | Go/no-go for: Win Wintun+TLS inspection+CA-install; Linux gateway; Android VpnService+AccessibilityService (+Android-7 user-CA limit); QUIC downgrade; pinning behavior; **client⇄clustered-server gRPC/mTLS topology + role-based single binary + offload path**. Output: feasibility report w/ risks |
 | **B1 Architect** | general-purpose | worktree | Per-crate design + **`bulwark-proto` gRPC/protobuf contracts** all builders code against; client/server/cluster boundaries; device-capability + offload interface. Output: `docs/design/*.md` + `bulwark-proto` definitions |
 | **B2 Threat model** | general-purpose | worktree | Threat model + CA-key handling + sandboxing + mTLS/cluster trust + data/CSAM policy + legal/consent doc. Output: `docs/security/` |
 | **C0 proto** | general-purpose | worktree | `bulwark-proto` finalized (tonic/prost) — gates all client/server builders |
 | **C-cluster** | general-purpose | worktree | `bulwark-cluster` (membership/health/LB/work queue/shared state) — after C0 |
 | **C-server** | general-purpose | worktree | `bulwark-server` (role: lb\|worker\|all-in-one, hosts analyzers) — after C0, C-cluster |
 | **C-client** | general-purpose | worktree | `bulwark-client` (device orchestrator wiring net/agent/flow/infer) — after C0 |
-| **C-net** | general-purpose | worktree | `bulwark-net` (TUN + MITM + per-install CA) |
+| **C-net** | general-purpose | worktree | `bulwark-net` (TUN + TLS inspection + per-install CA) |
 | **C-flow** | general-purpose | worktree | `bulwark-flow` (classify + buffer/delay) — after C-net |
 | **C-vision** | general-purpose | worktree | `bulwark-vision` (small ONNX NSFW image/frame) |
 | **C-audio** | general-purpose | worktree | `bulwark-audio` (small ONNX explicit-audio) |
@@ -76,6 +76,35 @@ C-text←C-agent.
    (rules/small models/conventional OCR, no hot-path LLM); no telemetry; no explicit-media persistence.
 4. Done = compiles, `cargo deny`/`clippy` clean, unit tests, README, **honest can't-do notes**.
 5. Report: what was built, deviations, gaps, follow-ups.
+
+## Persistent agent roster (`.claude/agents/`)
+
+The wave roster above built the engine. Ongoing product work (PLAN.md §6 workflows
+A–D) uses a **persistent, project-local roster** — each is a markdown agent in
+`.claude/agents/` with the project's hard-won facts baked in (toolchain paths, SAC
+workaround, framing glossary, proven code patterns):
+
+| Agent | Owns | Typical use |
+|---|---|---|
+| `rust-core` | `crates/bulwark-*` engine | data-path tracing, crate review, cargo verify |
+| `android-bridge` | JNI cdylib + Kotlin shell + builds | cargo-ndk `.so`, gradle APK, adb/logcat |
+| `dioxus-ui` | `apps/child` + `apps/parent` UI | screens, router, theme, code-split (Workflow A) |
+| `grpc-contract` | `bulwark.proto` + server services | ChildControl-style contracts (Workflow B) |
+| `midscene-qa` | `tools/ui-tests` harness | UI journeys web/android, smoke, devices |
+| `framing-review` | language only | protective-framing audit before every PR |
+| `code-review` | the diff (gatekeeper) | pre-commit + pre-merge review: invariants, CI parity, tests; APPROVE / REQUEST-CHANGES verdict |
+| `plan-sync` | PLAN.md + docs/design + finish-plan | mark DONE, flag drift, draft next increment |
+
+**House rule:** spawned agents cannot write files in this environment — every agent
+is read-only by contract and returns exact `path` + old→new edits (plain text, never
+HTML-escaped) that the **main session applies and verifies**. Root `CLAUDE.md` is
+loaded by every agent and carries the shared constraints.
+
+Standard loop per increment: `plan-sync` (where are we) → specialist agent(s) in
+parallel (design + exact edits) → main session applies + `cargo check`/tests →
+`code-review` + `framing-review` on the diff (fix until **APPROVE**) → commit →
+`plan-sync` edits to mark DONE → PR (`@codex review` when credits allow) →
+`code-review` once more on the branch-vs-master diff → merge when clean + CI green.
 
 ## Mapping to the six requirements
 

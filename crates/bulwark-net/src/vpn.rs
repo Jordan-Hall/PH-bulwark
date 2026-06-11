@@ -8,7 +8,7 @@
 //! a `smoltcp` bridge scaffold. The setup/teardown and packet parser are wired,
 //! but the full TCP socket pump remains fail-closed until Linux/macOS/Android
 //! device testing proves it will not blackhole a supervised device. We also block
-//! QUIC/UDP-443 so HTTP/3 can't slip past the TCP MITM once the bridge is enabled.
+//! QUIC/UDP-443 so HTTP/3 can't slip past the TCP TLS inspection once the bridge is enabled.
 //!
 //! ## Requirements (honest)
 //! * **Admin** — creating the TUN adapter + owning the default route needs
@@ -32,7 +32,7 @@ mod netstack;
 use crate::tun::{open_tun, TunConfig};
 use crate::Result;
 
-/// The local MITM proxy captured TCP is redirected to. It speaks HTTP CONNECT, so
+/// The local TLS-inspecting proxy captured TCP is redirected to. It speaks HTTP CONNECT, so
 /// the scheme MUST be `http` (tun2proxy's `ProxyType::Http`).
 const DEFAULT_PROXY_URL: &str = "http://127.0.0.1:8080";
 /// TUN adapter name shown to the OS.
@@ -41,7 +41,7 @@ const DEFAULT_TUN_NAME: &str = "Bulwark";
 /// VPN-mode configuration.
 #[derive(Clone, Debug)]
 pub struct VpnConfig {
-    /// HTTP MITM proxy URL that captured TCP is redirected to (the local hudsucker
+    /// HTTP TLS-inspecting proxy URL that captured TCP is redirected to (the local hudsucker
     /// proxy). Must be an `http://` URL — the proxy speaks CONNECT.
     pub proxy_url: String,
     /// TUN adapter name.
@@ -58,7 +58,7 @@ impl Default for VpnConfig {
 }
 
 impl VpnConfig {
-    /// The MITM proxy URL captured TCP is sent to.
+    /// The TLS-inspecting proxy URL captured TCP is sent to.
     pub fn proxy_url(&self) -> &str {
         &self.proxy_url
     }
@@ -141,10 +141,11 @@ pub fn elevation_command() -> String {
 
 /// Run VPN mode until `shutdown` is cancelled.
 ///
-/// Status: the setup/teardown path and smoltcp packet parser are wired, but the
-/// full TCP socket bridge still fails closed inside [`netstack`]. That is
-/// intentional until loopback and real-device tests prove it will not blackhole a
-/// supervised device.
+/// Status: on unix/Android the full fd-driven pump runs inside [`netstack`]
+/// (per-flow TCP terminate → CONNECT to the local TLS-inspecting proxy → splice;
+/// DNS forward; QUIC drop) — host-tested, on-device validation pending. On
+/// Windows (wintun) the pump deliberately still fails closed until its own
+/// spike proves it will not blackhole a supervised device.
 pub async fn run_vpn(cfg: VpnConfig, shutdown: CancellationToken) -> Result<()> {
     let bridge = netstack::BridgeConfig::from_vpn(&cfg)?;
     let mut tun = open_tun()?;
@@ -166,6 +167,46 @@ pub async fn run_vpn(cfg: VpnConfig, shutdown: CancellationToken) -> Result<()> 
     result?;
     teardown?;
     close
+}
+
+/// Android data path: start the in-process TLS-inspecting proxy and run the transparent
+/// smoltcp pump over the `VpnService` fd, both pointed at `127.0.0.1:8080`, until
+/// `shutdown` is cancelled. This is what the JNI `startVpn` spawns on a
+/// multi-threaded runtime.
+///
+/// Coverage note: Android 7+ ignores user-installed CAs for most apps, so full
+/// HTTPS decryption is limited (the on-device accessibility/OCR path covers
+/// E2E/pinned apps). The proxy still mints leaf certs for inspectable flows, and
+/// DNS forwarding + QUIC-downgrade + per-flow routing run regardless. Loop
+/// prevention relies on the service's `addDisallowedApplication(self)`.
+#[cfg(target_os = "android")]
+pub async fn run_android_data_path(
+    tun_fd: std::os::fd::RawFd,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    use crate::{DevInMemoryKeyStore, Interceptor, NetConfig, NetInterceptor};
+    use std::sync::Arc;
+
+    // In-process TLS-inspecting proxy on the loopback port the pump CONNECTs to. The
+    // dev/in-memory keystore avoids any platform-keystore dependency on Android;
+    // a fresh CA is generated per VPN SESSION (in-memory keystore — not yet
+    // persisted per-install on Android, so user-trusted-CA flows and pinning
+    // learning reset each session; persistence is follow-up work).
+    let net_cfg = NetConfig {
+        proxy_listen: "127.0.0.1:8080".to_string(),
+        ..Default::default()
+    };
+    let interceptor = NetInterceptor::with_keystore(net_cfg, Arc::new(DevInMemoryKeyStore::new()))?;
+    interceptor.start_proxy_only().await?;
+
+    // Transparent pump over the VpnService fd, pointed at the proxy above.
+    let bridge = netstack::BridgeConfig::from_vpn(&VpnConfig::default())?;
+    let tun = crate::tun::open_tun_from_fd(tun_fd)?;
+    let result = netstack::run_netstack(tun.as_ref(), bridge, shutdown).await;
+
+    // Best-effort proxy teardown (errors ignored — the runtime is going away).
+    let _ = interceptor.shutdown().await;
+    result
 }
 
 #[cfg(test)]

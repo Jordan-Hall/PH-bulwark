@@ -1,0 +1,32 @@
+# PH Bulwark Shield — Dioxus 0.8 mobile config.
+#
+# WHY THIS FILE EXISTS: without a Dioxus.toml, dx ships its DEFAULT AndroidManifest
+# (package com.example.BulwarkChild, no permission services) → "no permissions
+# showing". dx 0.8 maps [android.permissions] + a merged manifest into the real
+# AndroidManifest.xml, so the native VPN / Accessibility / DeviceAdmin grant flows
+# can surface from the same Dioxus codebase (no separate native app needed).
+
+[application]
+name = "PH Bulwark Shield"
+
+[bundle]
+identifier = "co.predatorhunters.bulwark"
+
+[android]
+identifier = "co.predatorhunters.bulwark"
+min_sdk = 26
+target_sdk = 34
+# The filtering VPN runs as a special-use foreground service (child-safety filtering).
+foreground_service_types = ["specialUse"]
+# NEXT STEP (separate increment): merge the VpnService / AccessibilityService /
+# DeviceAdminReceiver <service>/<receiver> declarations via `manifest = "..."` once
+# their Kotlin classes are compiled into the dx build (gradle source set / dependency
+# from platform/android). Declaring services whose classes aren't present would break
+# the build, so the manifest-merge is deferred until that Kotlin integration lands.
+
+[android.permissions]
+"android.permission.INTERNET" = { description = "Connect to the cluster for offloaded media analysis" }
+"android.permission.FOREGROUND_SERVICE" = { description = "Run the content-safety shield in the background" }
+"android.permission.FOREGROUND_SERVICE_SPECIAL_USE" = { description = "Child-safety content filtering VPN" }
+"android.permission.POST_NOTIFICATIONS" = { description = "Send guardian alerts to the parent" }
+"android.permission.RECEIVE_BOOT_COMPLETED" = { description = "Re-arm the shield after a device reboot" }

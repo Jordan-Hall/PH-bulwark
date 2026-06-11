@@ -19,7 +19,7 @@
 ## 0. Trust boundaries & adversaries
 
 ```
- [hostile media/network input] ─► bulwark-net (MITM, holds CA key) ─► bulwark-flow ─► sandboxed parsers
+ [hostile media/network input] ─► bulwark-net (TLS inspection, holds CA key) ─► bulwark-flow ─► sandboxed parsers
                                           │                                            │
  [on-device apps / E2E plaintext] ─► bulwark-agent (OCR/accessibility) ───────────────────┤
                                           │                                            ▼
@@ -36,7 +36,7 @@
 storage on every host.
 
 **Adversary classes:**
-- **A1 — Network attacker / MITM-on-MITM:** intercepts client↔cluster or node↔node links, or impersonates a node.
+- **A1 — Network attacker / TLS inspection-on-TLS inspection:** intercepts client↔cluster or node↔node links, or impersonates a node.
 - **A2 — Malicious / compromised content:** crafted images, video, audio, fonts, archives designed to exploit a parser. *Bulwark ingests hostile input by design — this is the highest-likelihood code-exec vector.*
 - **A3 — Local attacker on a device:** malware/another user trying to steal the CA key, client cert, or plaintext intermediates.
 - **A4 — Compromised cluster node / insider:** a worker or operator turning the analysis backend into an exfiltration surface for child PII / plaintext.
@@ -48,13 +48,13 @@ storage on every host.
 
 ## Asset 1 — Per-install root CA private key (CROWN JEWEL)
 
-The MITM proxy (`bulwark-net`, `hudsucker` + `rcgen`) mints a per-install root CA and installs it into the
+The TLS-inspecting proxy (`bulwark-net`, `hudsucker` + `rcgen`) mints a per-install root CA and installs it into the
 device trust store so HTTPS can be decrypted. **Whoever holds this key can transparently impersonate any
 website to this device.** It is the single most dangerous secret in the system.
 
 | STRIDE | Threat | Mitigation |
 |---|---|---|
-| **S** | Attacker forges a cert chaining to our CA → MITMs the child's banking/everything. | Key never leaves the host. **No network egress of the key, ever** (not even to the owner's cluster — leaf certs are minted locally). One CA per install (see §"No shared CA"). |
+| **S** | Attacker forges a cert chaining to our CA → TLS inspections the child's banking/everything. | Key never leaves the host. **No network egress of the key, ever** (not even to the owner's cluster — leaf certs are minted locally). One CA per install (see §"No shared CA"). |
 | **T** | Malware tampers with the trust store to add its own root alongside ours. | Out of Bulwark's control once OS trust store is writable by admin, but: log CA fingerprint at startup, surface installed-root inventory in the UI, alert on unexpected roots. |
 | **R** | No record of who/when the CA was created or rotated. | Append CA create/rotate/revoke events to the **audit log** (Asset 6) with timestamp + host identity. |
 | **I** | **Key exfiltrated from disk.** Primary loss scenario. | Store the private key **wrapped by a hardware/OS keystore**, never as a plaintext file: <br>• **Windows:** DPAPI (`CryptProtectData`, machine+user scope), **TPM-backed where a TPM is present** (CNG `Microsoft Platform Crypto Provider`, key non-exportable). <br>• **Android:** **Android Keystore** (StrongBox/TEE when available), key flagged non-exportable, optionally `setUserAuthenticationRequired`. <br>• **macOS:** **Keychain** as a non-exportable key, Secure Enclave when available. <br>• **Linux gateway:** TPM 2.0 via `tpm2-tss` if present; else kernel keyring + root-only file `0600`, documented as a weaker tier. <br>Key marked **non-exportable**; signing happens inside the keystore, the raw key bytes never enter Bulwark address space. |
@@ -64,11 +64,11 @@ website to this device.** It is the single most dangerous secret in the system.
 **Rotation & lifecycle (charter requirement):**
 - Generate CA at install with a **bounded validity** (e.g. ≤ 2 years) and a documented rotation procedure.
 - **Rotation = generate new CA in keystore → install new root → re-sign leaf cache → remove old root from trust store → wipe old key from keystore.** Overlap window kept short; rotation is logged.
-- **Revocation/uninstall MUST remove the root from the OS trust store.** Orphaned roots left in a trust store after uninstall are a latent MITM backdoor — this is a release-blocker test case.
+- **Revocation/uninstall MUST remove the root from the OS trust store.** Orphaned roots left in a trust store after uninstall are a latent TLS inspection backdoor — this is a release-blocker test case.
 - On **suspected compromise**: immediate revoke + regenerate + re-install + audit-log entry + guardian notification.
 
 **Why NO shared / baked-in CA (non-negotiable):**
-- A single CA embedded in the OSS binary would mean **every Bulwark install on Earth shares one private key**. The key is in the public repo or trivially extracted from any binary → anyone could MITM **any** Bulwark user.
+- A single CA embedded in the OSS binary would mean **every Bulwark install on Earth shares one private key**. The key is in the public repo or trivially extracted from any binary → anyone could TLS inspection **any** Bulwark user.
 - It would also let one compromised install pivot to all others.
 - Therefore the CA is **generated locally, per install, stored only in that host's keystore, never transmitted**. This is stated in `PLAN.md` §3 and is a hard invariant. Reviewers must reject any code path that ships, bakes in, or transmits a CA private key.
 
@@ -213,7 +213,7 @@ Different subsystems get **different** defaults, by design:
 | **CA key missing / TLS interception can't sign** | **Fail-CLOSED** (block, alert, re-provision) | Silently passing unfiltered traffic defeats the product and hides the failure. |
 | **Cluster node lost Postgres quorum** | **Fail-CLOSED** (stop accepting work) | Prevents split-brain divergent verdicts. |
 | **Hostile parser timeout / crash** | **Fail-CLOSED for that item** (treat as suspicious / block-or-flag), kill process | Don't let a crash become a bypass. |
-| **Cert-pinned / E2E app where MITM is impossible** | **Fail-OPEN + log + coverage dashboard** | Per `platform-feasibility.md` §5: blocking all pinned apps is too disruptive for parental control; be **honest about the coverage gap** instead. Fall back to on-device OCR where possible. |
+| **Cert-pinned / E2E app where TLS inspection is impossible** | **Fail-OPEN + log + coverage dashboard** | Per `platform-feasibility.md` §5: blocking all pinned apps is too disruptive for parental control; be **honest about the coverage gap** instead. Fall back to on-device OCR where possible. |
 | **QUIC/HTTP3** | **Downgrade** (block UDP/443 → TCP fallback), per-app allowlist for non-fallback apps | Inspectable path preferred; documented. |
 | **Analysis backend unreachable (mobile, offload path down)** | Configurable; **default = local tiny-model first-pass + log gap**, do not hard-block the device | Availability vs coverage trade-off, surfaced honestly. |
 

@@ -55,6 +55,10 @@ jobs:
       # build without the model/ffmpeg binary present (those are runtime only).
       - run: cargo build -p bulwark-text --features classifier
       - run: cargo build -p bulwark-vision --features onnx
+      # bulwark-infer's local first-pass: a real session.run() behind `onnx`.
+      # Its unit tests are model-gated (self-skip when BULWARK_NSFW_MODEL is
+      # unset), so this stays green with no model artifact present.
+      - run: cargo test -p bulwark-infer --features onnx
       - run: cargo build -p bulwark-video --features ffmpeg
       # whisper STT pulls whisper.cpp (C++/cmake). Non-blocking for now — it can't
       # compile on the Windows dev box, so this CI run is where it's first verified.

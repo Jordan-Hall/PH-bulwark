@@ -1,21 +1,24 @@
-//! Shared transparent-VPN bridge scaffolding.
+//! Shared transparent-VPN bridge.
 //!
-//! This is the permissive replacement seam for the removed GPL `tun2proxy`
-//! backend. The packet parser, flow policy, and the proxy bridge (synthesise
-//! `CONNECT` → bidirectional `splice`) are in place and unit-tested; the smoltcp
-//! TCP-termination that wires a captured TUN flow into the bridge is the remaining
-//! device-validated spike, so `run_netstack` is deliberately still fail-closed.
-#![allow(dead_code)] // Bridge halves are exercised by tests until the pump lands.
+//! This is the permissive replacement for the removed GPL `tun2proxy` backend.
+//! On unix/Android, `run_netstack` runs the full fd-driven pump: smoltcp
+//! terminates each captured TCP flow, the bridge synthesises a `CONNECT` to the
+//! in-process TLS-inspecting proxy and splices bytes both ways, DNS is forwarded,
+//! and QUIC/443 is dropped so HTTP/3 can't bypass the TCP inspection. The packet
+//! parser, flow policy, and bridge halves are unit-tested on every host; the pump
+//! itself is host-tested and awaits on-device validation. On Windows (wintun) the
+//! pump stays deliberately fail-closed pending its own spike.
+#![allow(dead_code)] // Non-unix builds compile the bridge halves without the pump.
 
 use std::net::{SocketAddr, ToSocketAddrs};
 
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
-use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
+use smoltcp::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::tcp;
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{
-    HardwareAddress, IpAddress, IpCidr, IpEndpoint, IpProtocol, IpVersion, Ipv4Packet, Ipv6Packet,
-    TcpPacket, UdpPacket,
+    HardwareAddress, IpAddress, IpCidr, IpEndpoint, IpProtocol, IpVersion, Ipv4Address, Ipv4Packet,
+    Ipv4Repr, Ipv6Packet, TcpPacket, UdpPacket, UdpRepr,
 };
 
 use crate::tun::TunDevice;
@@ -60,15 +63,595 @@ impl BridgeConfig {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The live transparent VPN pump.
+//
+// `run_netstack` reads captured L3 packets from the TUN and drives a `smoltcp`
+// netstack that TERMINATES each TCP flow on a per-flow transparent listener bound
+// to the flow's ORIGINAL destination, opens an HTTP `CONNECT` tunnel to the
+// in-process TLS-inspecting proxy for that destination, and splices the two — so every TCP
+// flow is decrypted + content-filtered. UDP/53 DNS is forwarded to an upstream
+// resolver (so the device can still resolve names) and UDP/443 QUIC is dropped
+// (forcing the HTTP/3 fallback onto inspectable TCP/443).
+//
+// The loop is fd-driven: a single `poll(2)` waits on the TUN fd plus a self-pipe
+// that the async proxy/DNS tasks poke when they have bytes to flush. That keeps the
+// synchronous smoltcp core and the async (tokio) proxy/DNS halves coordinated
+// without a busy-wait, and lets `poll`'s timeout tick smoltcp's timers and observe
+// cancellation. It therefore lives on the unix/Android targets that hand us a
+// pollable VpnService/utun fd; the Windows/wintun desktop pump is a separate spike
+// and stays fail-closed below.
+//
+// HONEST LIMITATIONS (tracked for the on-device validation pass):
+//   * IPv4 first — captured IPv6 TCP/UDP is dropped, so apps fall back to v4.
+//   * Non-DNS UDP (other than QUIC/443, intentionally dropped) is dropped.
+//   * Loop prevention relies on the VpnService `addDisallowedApplication(self)` so
+//     our own upstream/proxy sockets bypass the TUN (already set in
+//     `BulwarkVpnService`); the desktop path must exclude the proxy by route.
+//   * Clean shutdown relies on `poll(2)`'s timeout ticking the loop to observe the
+//     `CancellationToken` (we never block indefinitely on a bare `recv`).
+
+/// Windows/wintun desktop pump is a separate spike; keep it fail-closed so a
+/// desktop VPN run can never blackhole the host before that path is device-tested.
+#[cfg(not(unix))]
 pub(super) async fn run_netstack(
     _tun: &dyn TunDevice,
     cfg: BridgeConfig,
     _shutdown: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     Err(NetError::unsupported(format!(
-        "smoltcp TCP bridge is scaffolded but not enabled yet (proxy target {})",
+        "transparent VPN pump is fd-driven (Android/Unix); Windows wintun pump pending (proxy {})",
         cfg.proxy_addr
     )))
+}
+
+// ---- pure helpers (host-testable; not unix-gated) --------------------------
+
+/// Private / loopback IPv4 space. A DNS query addressed at one of these (e.g. the
+/// VpnService-advertised gateway `10.0.0.1`) has no real resolver behind it, so we
+/// forward it to a public resolver instead; a public address is forwarded as-is.
+fn is_private_v4(o: [u8; 4]) -> bool {
+    o[0] == 10
+        || (o[0] == 172 && (16..=31).contains(&o[1]))
+        || (o[0] == 192 && o[1] == 168)
+        || (o[0] == 100 && (64..=127).contains(&o[1]))
+        || o[0] == 127
+}
+
+/// Where to forward a captured DNS query whose original destination was `server`.
+fn resolver_for(server: [u8; 4]) -> SocketAddr {
+    let o = if is_private_v4(server) {
+        [1, 1, 1, 1]
+    } else {
+        server
+    };
+    SocketAddr::new(
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(o[0], o[1], o[2], o[3])),
+        53,
+    )
+}
+
+/// Extract the UDP payload (the DNS message) from a captured IPv4 UDP packet.
+fn v4_udp_payload(packet: &[u8]) -> Option<Vec<u8>> {
+    let ip = Ipv4Packet::new_checked(packet).ok()?;
+    if ip.next_header() != IpProtocol::Udp {
+        return None;
+    }
+    let udp = UdpPacket::new_checked(ip.payload()).ok()?;
+    Some(udp.payload().to_vec())
+}
+
+/// Build an IPv4/UDP packet carrying `payload` from `src:src_port` to `dst:dst_port`,
+/// with correct IP + UDP checksums. Used to inject a DNS *reply* straight back into
+/// the TUN, sourced from the resolver address the client originally queried (so the
+/// client accepts it) — sidestepping any smoltcp UDP source-address ambiguity.
+fn build_dns_response_v4(
+    src: [u8; 4],
+    src_port: u16,
+    dst: [u8; 4],
+    dst_port: u16,
+    payload: &[u8],
+) -> Vec<u8> {
+    let src_a = Ipv4Address::new(src[0], src[1], src[2], src[3]);
+    let dst_a = Ipv4Address::new(dst[0], dst[1], dst[2], dst[3]);
+    let udp_repr = UdpRepr { src_port, dst_port };
+    let ip_repr = Ipv4Repr {
+        src_addr: src_a,
+        dst_addr: dst_a,
+        next_header: IpProtocol::Udp,
+        payload_len: udp_repr.header_len() + payload.len(),
+        hop_limit: 64,
+    };
+    let caps = ChecksumCapabilities::default();
+    let ip_hdr_len = ip_repr.buffer_len();
+    let mut buf = vec![0u8; ip_hdr_len + ip_repr.payload_len];
+    // UDP into the payload region first (it doesn't touch the IP header bytes)...
+    {
+        let mut udp_pkt = UdpPacket::new_unchecked(&mut buf[ip_hdr_len..]);
+        udp_repr.emit(
+            &mut udp_pkt,
+            &IpAddress::Ipv4(src_a),
+            &IpAddress::Ipv4(dst_a),
+            payload.len(),
+            |b| b.copy_from_slice(payload),
+            &caps,
+        );
+    }
+    // ...then the IP header (+ its checksum) over the leading bytes.
+    {
+        let mut ip_pkt = Ipv4Packet::new_unchecked(&mut buf[..]);
+        ip_repr.emit(&mut ip_pkt, &caps);
+    }
+    buf
+}
+
+// ---- the fd-driven pump (unix / Android) -----------------------------------
+
+/// Per-flow proxy-channel depth (client→proxy). Bounded so a slow proxy applies
+/// natural TCP backpressure (we stop draining smoltcp's recv buffer when full).
+#[cfg(unix)]
+const PROXY_UP_CHANNEL: usize = 32;
+
+/// Cap on bytes buffered from the proxy awaiting the client's smoltcp send window.
+#[cfg(unix)]
+const TO_CLIENT_CAP: usize = 256 * 1024;
+
+/// A self-pipe write end the async tasks poke to wake the (blocking) `poll(2)` loop.
+#[cfg(unix)]
+struct Waker {
+    fd: std::os::fd::RawFd,
+}
+
+#[cfg(unix)]
+impl Waker {
+    fn wake(&self) {
+        // Best-effort single byte; a full pipe (EWOULDBLOCK) already means the loop
+        // has pending work queued, so dropping the extra byte is fine.
+        let b = [1u8];
+        let _ = unsafe { libc::write(self.fd, b.as_ptr() as *const libc::c_void, 1) };
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Waker {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = libc::close(self.fd);
+        }
+    }
+}
+
+// (`Waker` is just an owned `RawFd` (i32), so it is auto-`Send + Sync`; the
+// pipe `write`/`close` are atomic and safe from any thread.)
+
+/// One captured TCP flow being terminated by smoltcp and bridged to the proxy.
+#[cfg(unix)]
+struct Flow {
+    handle: SocketHandle,
+    /// (src, src_port, dst, dst_port) — dedups retransmitted SYNs to one listener.
+    key: (Ipv4Address, u16, Ipv4Address, u16),
+    /// `host:port` of the original destination, for the proxy `CONNECT`.
+    authority: String,
+    /// client → proxy bytes (None until the flow establishes / after client FIN).
+    up_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    /// proxy → client bytes. BOUNDED so a stalled client (closed smoltcp send
+    /// window) backpressures the proxy task's upstream reads instead of
+    /// buffering an entire download in RAM on the supervised device.
+    down_rx: Option<tokio::sync::mpsc::Receiver<Vec<u8>>>,
+    /// proxy bytes staged for smoltcp's send window.
+    to_client: std::collections::VecDeque<u8>,
+    /// set by the proxy task when its upstream half is finished/failed.
+    proxy_done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    spawned: bool,
+    closing: bool,
+}
+
+/// Run the transparent pump until `shutdown` is cancelled. Must be called from a
+/// multi-threaded tokio runtime (it parks a worker via `block_in_place` while the
+/// proxy/DNS tasks run on the others).
+#[cfg(unix)]
+pub(super) async fn run_netstack(
+    tun: &dyn TunDevice,
+    cfg: BridgeConfig,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::block_in_place(move || netstack_loop(tun, &cfg, &handle, &shutdown))
+}
+
+#[cfg(unix)]
+fn make_pipe() -> Result<(std::os::fd::RawFd, std::os::fd::RawFd)> {
+    let mut fds = [0 as std::os::fd::RawFd; 2];
+    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if rc != 0 {
+        return Err(NetError::tun(format!(
+            "VPN pump: pipe: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    set_nonblocking(fds[0]);
+    set_nonblocking(fds[1]);
+    Ok((fds[0], fds[1]))
+}
+
+#[cfg(unix)]
+fn set_nonblocking(fd: std::os::fd::RawFd) {
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags >= 0 {
+            let _ = libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn drain_pipe(fd: std::os::fd::RawFd) {
+    let mut b = [0u8; 256];
+    loop {
+        let n = unsafe { libc::read(fd, b.as_mut_ptr() as *mut libc::c_void, b.len()) };
+        if n <= 0 {
+            break;
+        }
+    }
+}
+
+/// One DNS reply queued for injection back into the TUN:
+/// `(src_ip, src_port, dst_ip, dst_port, payload)` — sourced from the DNS
+/// server address the client originally queried, back to the client.
+#[cfg(unix)]
+type DnsReply = ([u8; 4], u16, [u8; 4], u16, Vec<u8>);
+
+#[cfg(unix)]
+fn netstack_loop(
+    tun: &dyn TunDevice,
+    cfg: &BridgeConfig,
+    handle: &tokio::runtime::Handle,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    let tunfd = tun
+        .as_raw_fd()
+        .ok_or_else(|| NetError::tun("VPN pump: TUN exposes no pollable fd"))?;
+    let mtu = 1500usize;
+    let mut phy = TunPhy::new(tun, mtu);
+    let mut iface = build_interface(&mut phy);
+    let mut sockets = SocketSet::new(Vec::new());
+    let mut flows: Vec<Flow> = Vec::new();
+
+    let (wake_rd, wake_wr) = make_pipe()?;
+    let waker = std::sync::Arc::new(Waker { fd: wake_wr });
+    let (dns_tx, dns_rx) = std::sync::mpsc::channel::<DnsReply>();
+
+    tracing::info!(proxy = %cfg.proxy_addr, "VPN pump: transparent netstack up");
+
+    let result = (|| -> Result<()> {
+        loop {
+            if shutdown.is_cancelled() {
+                break;
+            }
+            let now = SmolInstant::now();
+            let delay_ms = iface
+                .poll_delay(now, &sockets)
+                .map(|d| d.total_millis() as i32)
+                .unwrap_or(200)
+                .clamp(1, 200);
+            let mut pfds = [
+                libc::pollfd {
+                    fd: tunfd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: wake_rd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            let rc = unsafe { libc::poll(pfds.as_mut_ptr(), 2, delay_ms) };
+            if rc < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(NetError::tun(format!("VPN pump: poll: {e}")));
+            }
+            if pfds[1].revents & libc::POLLIN != 0 {
+                drain_pipe(wake_rd);
+            }
+            if pfds[0].revents & libc::POLLIN != 0 {
+                let mut buf = vec![0u8; mtu + 64];
+                if let Ok(n) = tun.recv(&mut buf) {
+                    if n > 0 {
+                        handle_inbound(
+                            &buf[..n],
+                            &mut iface,
+                            &mut phy,
+                            &mut sockets,
+                            &mut flows,
+                            handle,
+                            &waker,
+                            &dns_tx,
+                        );
+                    }
+                }
+            }
+            pump_tcp_flows(&mut sockets, &mut flows, handle, cfg.proxy_addr, &waker);
+            // DNS replies go straight back to the TUN with the queried source addr.
+            while let Ok((s, sp, d, dp, resp)) = dns_rx.try_recv() {
+                let pkt = build_dns_response_v4(s, sp, d, dp, &resp);
+                let _ = tun.send(&pkt);
+            }
+            iface.poll(SmolInstant::now(), &mut phy, &mut sockets);
+            reap_flows(&mut sockets, &mut flows);
+        }
+        Ok(())
+    })();
+
+    // Teardown: dropping the flows closes their channels so the proxy tasks end;
+    // close the pipe read end (the Waker closes the write end on Arc drop).
+    flows.clear();
+    unsafe {
+        let _ = libc::close(wake_rd);
+    }
+    tracing::info!("VPN pump: transparent netstack stopped");
+    result
+}
+
+/// Classify and feed one captured inbound packet.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn handle_inbound(
+    pkt: &[u8],
+    iface: &mut Interface,
+    phy: &mut TunPhy,
+    sockets: &mut SocketSet,
+    flows: &mut Vec<Flow>,
+    handle: &tokio::runtime::Handle,
+    waker: &std::sync::Arc<Waker>,
+    dns_tx: &std::sync::mpsc::Sender<DnsReply>,
+) {
+    let Some(summary) = parse_packet(pkt) else {
+        return;
+    };
+    // IPv4-first: v6 is dropped so apps fall back to v4 (documented limitation).
+    let (IpAddress::Ipv4(src), IpAddress::Ipv4(dst)) = (summary.src, summary.dst) else {
+        return;
+    };
+    match summary.transport {
+        Transport::Tcp {
+            src_port,
+            dst_port,
+            syn,
+        } => {
+            let key = (src, src_port, dst, dst_port);
+            if syn && !flows.iter().any(|f| f.key == key) {
+                let endpoint = IpEndpoint::new(IpAddress::Ipv4(dst), dst_port);
+                if let Ok(h) = open_proxy_listener(sockets, endpoint) {
+                    flows.push(Flow {
+                        handle: h,
+                        key,
+                        authority: format!("{dst}:{dst_port}"),
+                        up_tx: None,
+                        down_rx: None,
+                        to_client: std::collections::VecDeque::new(),
+                        proxy_done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        spawned: false,
+                        closing: false,
+                    });
+                }
+            }
+            phy.stage(pkt.to_vec());
+            iface.poll(SmolInstant::now(), phy, sockets);
+        }
+        Transport::Udp { src_port, dst_port } => {
+            if dst_port == QUIC_UDP_PORT {
+                return; // drop QUIC -> forces inspectable TCP/443
+            }
+            if dst_port == 53 && pkt.len() >= 20 {
+                // src/dst are at fixed IPv4 offsets regardless of options length.
+                let src_o = [pkt[12], pkt[13], pkt[14], pkt[15]];
+                let dst_o = [pkt[16], pkt[17], pkt[18], pkt[19]];
+                if let Some(payload) = v4_udp_payload(pkt) {
+                    let resolver = resolver_for(dst_o);
+                    let tx = dns_tx.clone();
+                    let w = waker.clone();
+                    handle.spawn(dns_query(
+                        payload, resolver, src_o, src_port, dst_o, dst_port, tx, w,
+                    ));
+                }
+            }
+            // other UDP dropped (documented limitation)
+        }
+        Transport::Other(_) => {}
+    }
+}
+
+/// Move bytes between each flow's smoltcp socket and its proxy task, spawning the
+/// proxy bridge on establish and closing finished flows.
+#[cfg(unix)]
+fn pump_tcp_flows(
+    sockets: &mut SocketSet,
+    flows: &mut [Flow],
+    handle: &tokio::runtime::Handle,
+    proxy: SocketAddr,
+    waker: &std::sync::Arc<Waker>,
+) {
+    use std::sync::atomic::Ordering;
+    for flow in flows.iter_mut() {
+        let sock = sockets.get_mut::<tcp::Socket>(flow.handle);
+
+        // On establish, open the proxy CONNECT bridge for this destination.
+        if !flow.spawned && sock.state() == tcp::State::Established {
+            let (up_tx, up_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(PROXY_UP_CHANNEL);
+            let (down_tx, down_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
+            handle.spawn(proxy_flow(
+                proxy,
+                flow.authority.clone(),
+                up_rx,
+                down_tx,
+                flow.proxy_done.clone(),
+                waker.clone(),
+            ));
+            flow.up_tx = Some(up_tx);
+            flow.down_rx = Some(down_rx);
+            flow.spawned = true;
+        }
+
+        // client -> proxy, only while the channel has room (else backpressure).
+        if let Some(up_tx) = &flow.up_tx {
+            while sock.can_recv() {
+                match up_tx.try_reserve() {
+                    Ok(permit) => {
+                        let mut b = [0u8; 8192];
+                        match sock.recv_slice(&mut b) {
+                            Ok(n) if n > 0 => permit.send(b[..n].to_vec()),
+                            _ => break,
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+
+        // proxy -> staging buffer (bounded).
+        if let Some(down_rx) = &mut flow.down_rx {
+            while flow.to_client.len() < TO_CLIENT_CAP {
+                match down_rx.try_recv() {
+                    Ok(v) => flow.to_client.extend(v),
+                    Err(_) => break,
+                }
+            }
+        }
+
+        // staging buffer -> client (smoltcp send window).
+        while sock.can_send() && !flow.to_client.is_empty() {
+            let (head, _) = flow.to_client.as_slices();
+            match sock.send_slice(head) {
+                Ok(n) if n > 0 => {
+                    flow.to_client.drain(..n);
+                }
+                _ => break,
+            }
+        }
+
+        // client closed its send half -> let the proxy task see EOF upstream.
+        if !sock.may_recv() && !sock.can_recv() {
+            flow.up_tx = None;
+        }
+
+        // proxy finished and everything flushed -> close our half.
+        if flow.proxy_done.load(Ordering::Relaxed)
+            && flow.to_client.is_empty()
+            && !flow.closing
+            && sock.is_open()
+        {
+            sock.close();
+            flow.closing = true;
+        }
+    }
+}
+
+/// Remove fully-closed flows (drops their channels -> proxy tasks end).
+#[cfg(unix)]
+fn reap_flows(sockets: &mut SocketSet, flows: &mut Vec<Flow>) {
+    let mut dead = Vec::new();
+    flows.retain(|f| {
+        let open = sockets.get::<tcp::Socket>(f.handle).is_open();
+        if !open {
+            dead.push(f.handle);
+        }
+        open
+    });
+    for h in dead {
+        sockets.remove(h);
+    }
+}
+
+/// The proxy bridge for one established flow: `CONNECT` to the TLS-inspecting proxy for the
+/// flow's destination, then shuttle bytes both ways via the flow's channels.
+#[cfg(unix)]
+async fn proxy_flow(
+    proxy: SocketAddr,
+    authority: String,
+    mut up_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    down_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    waker: std::sync::Arc<Waker>,
+) {
+    use std::sync::atomic::Ordering;
+    let stream = match connect_via_proxy(proxy, &authority).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!(%authority, error = %e, "VPN bridge: proxy CONNECT failed");
+            done.store(true, Ordering::Relaxed);
+            waker.wake();
+            return;
+        }
+    };
+    let (mut rd, mut wr) = stream.into_split();
+    // client -> proxy
+    let up = tokio::spawn(async move {
+        while let Some(chunk) = up_rx.recv().await {
+            if wr.write_all(&chunk).await.is_err() {
+                break;
+            }
+        }
+        let _ = wr.shutdown().await;
+    });
+    // proxy -> client
+    let mut buf = vec![0u8; 16 * 1024];
+    loop {
+        match rd.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                // Bounded: this awaits when the pump's staging buffer is full,
+                // which backpressures our upstream reads (no unbounded RAM).
+                if down_tx.send(buf[..n].to_vec()).await.is_err() {
+                    break;
+                }
+                waker.wake();
+            }
+        }
+    }
+    up.abort();
+    done.store(true, Ordering::Relaxed);
+    waker.wake();
+}
+
+/// Forward one captured DNS query to `resolver` and return the reply 4-tuple +
+/// payload to the loop (which crafts the reply packet and writes it to the TUN).
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+async fn dns_query(
+    payload: Vec<u8>,
+    resolver: SocketAddr,
+    client: [u8; 4],
+    client_port: u16,
+    server: [u8; 4],
+    server_port: u16,
+    resp_tx: std::sync::mpsc::Sender<DnsReply>,
+    waker: std::sync::Arc<Waker>,
+) {
+    let sock = match tokio::net::UdpSocket::bind(("0.0.0.0", 0)).await {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    if sock.connect(resolver).await.is_err() || sock.send(&payload).await.is_err() {
+        return;
+    }
+    let mut buf = vec![0u8; 2048];
+    if let Ok(Ok(n)) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), sock.recv(&mut buf)).await
+    {
+        if n > 0 {
+            // Reply is sourced from the server the client queried, back to the client.
+            if resp_tx
+                .send((server, server_port, client, client_port, buf[..n].to_vec()))
+                .is_ok()
+            {
+                waker.wake();
+            }
+        }
+    }
 }
 
 fn parse_http_proxy_addr(url: &str) -> Result<SocketAddr> {
@@ -166,7 +749,7 @@ fn tcp_connect_authority(summary: &PacketSummary) -> Option<String> {
 }
 
 /// QUIC's default UDP port. UDP to :443 is HTTP/3 — the bridge drops it so the
-/// browser falls back to TCP/443, which the MITM can actually inspect. Without
+/// browser falls back to TCP/443, which the TLS inspection can actually inspect. Without
 /// this, HTTP/3 sails straight past the content filter.
 const QUIC_UDP_PORT: u16 = 443;
 
@@ -174,7 +757,7 @@ const QUIC_UDP_PORT: u16 = 443;
 /// of (and testable without) the still-gated socket pump in [`run_netstack`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum FlowAction {
-    /// A new TCP flow (SYN): open a tunnel to the MITM proxy via `CONNECT` to this
+    /// A new TCP flow (SYN): open a tunnel to the TLS-inspecting proxy via `CONNECT` to this
     /// `host:port`, so the flow is decrypted and content-filtered.
     ProxyConnect(String),
     /// Drop the packet (with a reason). Used for QUIC/UDP-443 to force the HTTP/3
@@ -192,7 +775,7 @@ fn decide(summary: &PacketSummary) -> FlowAction {
             .map(FlowAction::ProxyConnect)
             .unwrap_or(FlowAction::Forward),
         Transport::Udp { dst_port, .. } if dst_port == QUIC_UDP_PORT => {
-            FlowAction::Drop("QUIC/HTTP-3 (UDP/443) blocked -> forces TCP/443 for MITM")
+            FlowAction::Drop("QUIC/HTTP-3 (UDP/443) blocked -> forces TCP/443 for TLS inspection")
         }
         _ => FlowAction::Forward,
     }
@@ -206,7 +789,7 @@ fn decide(summary: &PacketSummary) -> FlowAction {
 // async over any stream so they are unit-tested here against a loopback fake proxy —
 // no TUN / device needed.
 
-/// Open a TCP tunnel to the MITM proxy via HTTP `CONNECT authority`, so the flow is
+/// Open a TCP tunnel to the TLS-inspecting proxy via HTTP `CONNECT authority`, so the flow is
 /// decrypted + content-filtered. Returns the established stream once the proxy answers
 /// 2xx. `authority` is the `host:port` from [`FlowAction::ProxyConnect`].
 async fn connect_via_proxy(proxy: SocketAddr, authority: &str) -> Result<TcpStream> {
@@ -446,7 +1029,7 @@ mod tests {
     #[test]
     fn quic_udp_443_is_dropped() {
         // HTTP/3 over QUIC must be dropped so the browser falls back to TCP/443
-        // (which the MITM inspects) — otherwise it bypasses the content filter.
+        // (which the TLS inspection inspects) — otherwise it bypasses the content filter.
         let s = parse_packet(&ipv4_udp(443)).expect("valid packet");
         assert!(matches!(decide(&s), FlowAction::Drop(_)));
     }
@@ -650,5 +1233,51 @@ mod tests {
         let tx = Device::transmit(&mut phy, SmolInstant::from_millis(0)).expect("tx token");
         tx.consume(3, |buf| buf.copy_from_slice(&[9, 8, 7]));
         assert_eq!(fake.sent.lock().unwrap()[0], vec![9, 8, 7]);
+    }
+
+    #[test]
+    fn private_v4_ranges_are_recognised() {
+        assert!(is_private_v4([10, 0, 0, 1]));
+        assert!(is_private_v4([192, 168, 1, 1]));
+        assert!(is_private_v4([172, 16, 0, 1]));
+        assert!(is_private_v4([127, 0, 0, 1]));
+        assert!(!is_private_v4([8, 8, 8, 8]));
+        assert!(!is_private_v4([1, 1, 1, 1]));
+    }
+
+    #[test]
+    fn dns_to_private_gateway_goes_to_public_resolver() {
+        // A query to the VpnService gateway (10.0.0.1) has no real resolver behind
+        // it, so it must be forwarded to the public resolver, not looped back.
+        assert_eq!(resolver_for([10, 0, 0, 1]).to_string(), "1.1.1.1:53");
+        // A query aimed at a real public resolver is forwarded as-is.
+        assert_eq!(resolver_for([8, 8, 8, 8]).to_string(), "8.8.8.8:53");
+    }
+
+    #[test]
+    fn dns_response_round_trips_through_the_parser() {
+        // The crafted reply must be a valid IPv4/UDP packet the same parser accepts,
+        // sourced from the queried server back to the client, ports swapped.
+        let payload = b"\x12\x34\x81\x80 dns answer bytes";
+        let pkt = build_dns_response_v4([8, 8, 8, 8], 53, [10, 0, 0, 2], 49152, payload);
+        let summary = parse_packet(&pkt).expect("crafted reply parses");
+        assert_eq!(summary.src.to_string(), "8.8.8.8");
+        assert_eq!(summary.dst.to_string(), "10.0.0.2");
+        assert!(matches!(
+            summary.transport,
+            Transport::Udp {
+                src_port: 53,
+                dst_port: 49152
+            }
+        ));
+        // And the payload survives intact.
+        assert_eq!(v4_udp_payload(&pkt).as_deref(), Some(&payload[..]));
+    }
+
+    #[test]
+    fn v4_udp_payload_rejects_tcp() {
+        // The DNS payload extractor must not mistake a TCP packet for UDP.
+        let tcp = ipv4_tcp_syn(443);
+        assert!(v4_udp_payload(&tcp).is_none());
     }
 }

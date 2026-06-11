@@ -2,7 +2,7 @@
 
 All crates are implemented. **Build status — verified on the Windows dev host
 (`cargo build`, network on):** the **15 non-SQLite crates compile cleanly** —
-`bulwark-proto` (tonic/protox codegen), `bulwark-core`, `bulwark-net` (Wintun + MITM +
+`bulwark-proto` (tonic/protox codegen), `bulwark-core`, `bulwark-net` (Wintun + TLS inspection +
 DPAPI FFI), `flow`, `vision`, `audio`, `video`, `text`, `policy`, `alert`, `infer`,
 `cluster`, `server`, `supervision`. The 3 SQLite-backed crates (`bulwark-store`,
 `bulwark-client`, `bulwark-ui`) could NOT be built **on this host**: Windows Application
