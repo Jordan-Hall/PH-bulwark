@@ -323,6 +323,8 @@ input.url:focus, .field input:focus { outline: none; border-color: var(--green);
 }
 .vpn-note.pending { color: #7c5410; background: var(--amber-tint); border-color: var(--amber-line); }
 .vpn-note.failed { color: var(--rose-ink); background: var(--rose-tint); border-color: var(--rose-line); }
+.vpn-hint { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; background: var(--card-soft); border: 1px solid var(--line); border-radius: var(--r-sm); color: var(--ink-2); font-size: 12.5px; line-height: 1.45; }
+.vpn-hint svg { width: 15px; height: 15px; flex: none; margin-top: 1px; color: var(--navy); }
 
 /* ======================================================================
    PROTECTION PANEL (this device)

@@ -320,6 +320,7 @@ fn desired_config(child_id: &str, device_id: &str, region: &str) -> ChildConfig 
         config_version: 0,
         updated_ts: 0,
         updated_by: String::new(),
+        filter_location: 0,
     }
 }
 

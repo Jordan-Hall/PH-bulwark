@@ -22,6 +22,11 @@ pub fn ChildVpnRow(child: ProtoChild) -> Element {
     let mut region = use_signal(|| "uk".to_string());
     let mut enabled = use_signal(|| true);
     let mut profile = use_signal(|| FilteringProfile::Preteen as i32);
+    // 0 = FILTER_ON_DEVICE (default), 1 = FILTER_ON_SERVER (route through the
+    // region + filter server-side + anonymise the child's IP). The server-side
+    // data path is rolling out, so selecting Cloud is honest about staying
+    // on-device until it's live (see the hint below) — never a silent claim.
+    let mut filter_location = use_signal(|| 0i32);
     let note = use_signal(|| Option::<String>::None);
     let busy = use_signal(|| false);
 
@@ -37,6 +42,27 @@ pub fn ChildVpnRow(child: ProtoChild) -> Element {
                             "{label}"
                         }
                     }
+                }
+            }
+            div { class: "vpn-field",
+                span { class: "vpn-label", "Where filtering runs" }
+                div { class: "vpn-seg",
+                    button {
+                        class: if filter_location() == 0 { "vpn-seg-btn vpn-seg-on" } else { "vpn-seg-btn" },
+                        onclick: move |_| filter_location.set(0),
+                        "On the device"
+                    }
+                    button {
+                        class: if filter_location() == 1 { "vpn-seg-btn vpn-seg-on" } else { "vpn-seg-btn" },
+                        onclick: move |_| filter_location.set(1),
+                        "PH Bulwark Cloud"
+                    }
+                }
+            }
+            if filter_location() == 1 {
+                div { class: "vpn-hint",
+                    span { dangerous_inner_html: "{svg(\"info\")}" }
+                    "Cloud filtering — routes through your region and hides your child's IP — is rolling out. Until it's live there, your child stays protected on-device."
                 }
             }
             div { class: "vpn-controls",
@@ -79,12 +105,13 @@ pub fn ChildVpnRow(child: ProtoChild) -> Element {
                             .unwrap_or_default();
                         let enabled = enabled();
                         let profile = profile();
+                        let filter_location = filter_location();
                         let mut note = note;
                         let mut busy = busy;
                         busy.set(true);
                         note.set(None);
                         spawn(async move {
-                            match set_child_config(&child_id, &device_id, &region, &endpoint, enabled, profile).await {
+                            match set_child_config(&child_id, &device_id, &region, &endpoint, enabled, profile, filter_location).await {
                                 Ok(v) => {
                                     note.set(Some(format!("Sent · config v{v} — waiting for the child to confirm…")));
                                     busy.set(false);
