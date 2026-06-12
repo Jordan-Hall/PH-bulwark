@@ -28,6 +28,10 @@ default = []
 # Build the real Windows TUN backend (wintun). Implied on windows targets via
 # cfg in the source; the feature exists so non-windows CI can opt in for docs.
 windows-tun = []
+# Phase-5 groundwork: userspace WireGuard CLIENT (noise state machine only — no
+# socket pump yet) for `ChildConfig.filter_location == FILTER_ON_SERVER`.
+# Default OFF so the default build is unchanged; compiles `vpn::wg`.
+wg-client = ["dep:boringtun", "dep:rand_core"]
 
 [dependencies]
 # Path deps per the build brief. We DO use bulwark-core's Config/Error here
@@ -51,6 +55,16 @@ thiserror.workspace = true
 serde.workspace = true
 bytes.workspace = true # build the canonical FlowPayload::Http body_peek in convert()
 http-body-util = "0.1" # BodyExt::collect() for the hudsucker TLS inspection handler (already transitive via hudsucker)
+
+# Userspace WireGuard noise/tunnel state machine (Cloudflare, BSD-3-Clause) for
+# the future device->region transport leg (`vpn::wg`). Optional: only the
+# `wg-client` feature pulls it in. boringtun 0.7 ships an EMPTY default feature
+# set, so this is the noise core only — none of its device/FFI/JNI layers.
+boringtun = { workspace = true, optional = true }
+# OS CSPRNG handle for device-keypair generation; rand_core 0.6 matches the
+# x25519-dalek 2 traits behind boringtun's key types (boringtun itself pins
+# rand_core ^0.6.4 + getrandom, so this adds no new tree entries).
+rand_core = { version = "0.6.4", features = ["getrandom"], optional = true }
 
 # Windows TUN driver (WireGuard's pre-signed wintun.dll). Target-gated: only
 # pulled in on Windows. Listed in the workspace allowlist already.

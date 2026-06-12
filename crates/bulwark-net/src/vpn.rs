@@ -29,6 +29,13 @@ pub use tokio_util::sync::CancellationToken;
 
 mod netstack;
 
+// Userspace WireGuard CLIENT scaffold (Phase 5 — the transport leg for
+// `filter_location == FILTER_ON_SERVER`). Default OFF; `--features wg-client`
+// pulls in boringtun (BSD-3-Clause). Noise state machine only — no socket
+// pump, no data-path integration yet (see the module docs).
+#[cfg(feature = "wg-client")]
+pub mod wg;
+
 use crate::tun::{open_tun, TunConfig};
 use crate::Result;
 
