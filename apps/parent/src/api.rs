@@ -227,6 +227,7 @@ pub async fn set_child_config(
     endpoint: &str,
     filtering_enabled: bool,
     profile: i32,
+    filter_location: i32,
 ) -> anyhow::Result<u64> {
     let token = guardian_token();
     if token.is_empty() {
@@ -244,6 +245,7 @@ pub async fn set_child_config(
                 server_endpoint: endpoint.to_string(),
                 profile,
                 require_always_on: false,
+                filter_location,
                 // server-stamped — ignored on input:
                 config_version: 0,
                 updated_ts: 0,

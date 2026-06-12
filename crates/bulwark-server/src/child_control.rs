@@ -396,6 +396,10 @@ struct ConfigRow {
     config_version: u64,
     updated_ts: i64,
     updated_by: String,
+    // Added 2026-06-12; `serde(default)` so configs persisted before this field
+    // existed deserialize as 0 = FILTER_ON_DEVICE (the safe default).
+    #[serde(default)]
+    filter_location: i32,
 }
 
 impl ConfigRow {
@@ -411,6 +415,7 @@ impl ConfigRow {
             config_version: c.config_version,
             updated_ts: c.updated_ts,
             updated_by: c.updated_by.clone(),
+            filter_location: c.filter_location,
         }
     }
 
@@ -426,6 +431,7 @@ impl ConfigRow {
             config_version: self.config_version,
             updated_ts: self.updated_ts,
             updated_by: self.updated_by,
+            filter_location: self.filter_location,
         }
     }
 }
@@ -632,6 +638,7 @@ mod tests {
             config_version: 999,
             updated_ts: 0,
             updated_by: String::new(),
+            filter_location: 0,
         }
     }
 

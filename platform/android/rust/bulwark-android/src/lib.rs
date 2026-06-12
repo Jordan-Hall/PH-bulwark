@@ -427,6 +427,14 @@ fn ok_child_config_json(cfg: &ChildConfig) -> String {
         "require_always_on": cfg.require_always_on,
         "config_version": cfg.config_version,
         "updated_ts": cfg.updated_ts,
+        // Where to filter: "on_device" (default) or "on_server" (route through the
+        // region over WireGuard, server-side filter + IP anonymise). Kotlin
+        // ChildConfigSync reads this; the server-side data path is staged, so until
+        // it lands the child stays on-device and surfaces the requested mode.
+        "filter_location": match cfg.filter_location() {
+            bulwark_proto::v1::FilterLocation::FilterOnServer => "on_server",
+            _ => "on_device",
+        },
     });
     serde_json::to_string(&obj).unwrap_or_else(|_| {
         r#"{"ok":false,"error":"could not serialize child config"}"#.to_string()
@@ -1175,11 +1183,13 @@ mod tests {
             config_version: 7,
             updated_ts: 1_700_000_000_000,
             updated_by: "guardian-acct-1".to_string(),
+            filter_location: bulwark_proto::v1::FilterLocation::FilterOnServer as i32,
         };
         let json = ok_child_config_json(&cfg);
         assert!(json.contains("\"ok\":true"), "{json}");
         assert!(json.contains("\"filtering_enabled\":true"), "{json}");
         assert!(json.contains("\"config_version\":7"), "{json}");
+        assert!(json.contains("\"filter_location\":\"on_server\""), "{json}");
         assert!(json.contains("\"profile\":\"TEEN\""), "{json}");
         assert!(json.contains("\"server_region\":\"uk\""), "{json}");
         // The guardian's account id is server-side audit detail — never forwarded.
