@@ -1,7 +1,8 @@
 # PH Bulwark — Production-Readiness Audit (authoritative gap map)
 
-Refreshed **2026-06-09** to match shipped reality (was a 2026-06-08 source audit; much
-of the perception/VPN layer has since landed + deployed). Pairs with [PLAN.md](../PLAN.md).
+Refreshed **2026-06-12** to match shipped reality (domain/TLS cutover + Android
+CA-trust install since the 2026-06-09 pass; perception/VPN layer landed earlier).
+Pairs with [PLAN.md](../PLAN.md).
 Legend: 🔴 P0 · 🟠 P1 · 🟡 P2 · ✅ done · 🧪 needs real-device / model / credential / deploy
 validation (can't be fully CI-verified here).
 
@@ -39,7 +40,9 @@ validation (can't be fully CI-verified here).
 | **Pinning detection** | ✅ live (2026-06-10) | `HttpHandler::should_intercept` now drives `record_intercept_attempt` → `record_pinned`: hudsucker swallows the leaf-rejection internally, so pinning is inferred via a 3-strike heuristic (CONNECTs that never decrypt), with strikes reset on any successful decrypt. Pinned hosts tunnel through under fail-open (→ OCR route + honest coverage gap) or stay blocked under fail-closed. 6 new unit tests. |
 | **UI coverage fake** | ✅ live (2026-06-10) | `/api/coverage` now derives one row per LEARNED host from the injected `CoverageSource`; `PinningRegistry::snapshot()` + `NetInterceptor::pinning_snapshot()` feed it; `bulwark_proxy` embeds the dashboard (`BULWARK_UI_BIND`, default 127.0.0.1:8081). Hardcoded rows deleted. |
 | Linux/macOS routing unwired 🧪 | ⏳ | Tested route-plans exist but `install_routing` isn't wired; gated behind the pump. |
-| Non-Windows truststore/keystore 🧪 | ⏳ | Only Windows DPAPI; Linux/macOS/Android CA install + keystore needed. |
+| **Cluster TLS: real domain + public cert** | ✅ live (2026-06-12) | Cluster reachable at `https://api.predatorhunters.co.uk:8443` (+ `vpn.` SAN) with a **Let's Encrypt** cert auto-issued on the box via acme.sh DNS-01 (Cloudflare), self-signed cluster CA as the fallback. Clients are **public-trust-by-default, pin-optional**: parent console (`tls-webpki-roots`) + child/relay JNI trust public roots when no CA is pinned, so a CA-less pairing payload pairs cleanly; private-CA pinning stays for self-hosted. |
+| **Android inspection-CA install** | ✅ shipped (2026-06-12) | `bulwark-net::vpn::inspection_ca_pem` exports the per-install root (public cert only) over JNI (`inspectionCaPem`); `CaTrust` installs it into the **system** trust store via `DevicePolicyManager.installCaCert` when Device Owner (idempotent), fixing "connection not private". Honest limit: a non-managed device can't make apps trust a user CA (Android 7+), so transparent HTTPS needs a managed device; the OCR path is the fallback. → [`docs/design/server-vpn-mode-and-ca-trust.md`](design/server-vpn-mode-and-ca-trust.md) Phase 1. |
+| Linux/macOS desktop truststore/keystore 🧪 | ⏳ | Windows DPAPI + `certutil` install ship; the **Android** CA install now ships (above); Linux/macOS desktop CA install + non-Windows keystore still pending (desktop child filter is Windows-gated). |
 
 ## 🟡 P2 — polish / planned
 - WebRTC remediation (DTLS-SRTP terminate + real-time transcode + re-encrypt) — weeks; the file/segment remediation engine is the reusable core.

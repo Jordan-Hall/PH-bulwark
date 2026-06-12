@@ -17,9 +17,11 @@ clients; a horizontally-scalable analysis backend.
 > **Status (2026-06):** all crates **implemented + compile-verified in CI**
 > (`.github/workflows/ci.yml`: clippy + build + test + feature builds + windows-gated
 > + cargo-deny, all required-green on `master`). The **server is deployed live** on a
-> single EC2 in London (`deploy/aws/`), with CI redeploy via AWS SSM. SQLite-backed
-> crates build on CI/Linux (a local Windows SAC quirk blocks only the local
-> build-script binary). **Remaining:** the transparent-VPN data path
+> single EC2 in London (`deploy/aws/`), with CI redeploy via AWS SSM, reachable at
+> `https://api.predatorhunters.co.uk:8443` (+ `vpn.` SAN) behind an auto-renewing
+> **Let's Encrypt** cert — clients are public-trust-by-default with optional
+> private-CA pinning. SQLite-backed crates build on CI/Linux (a local Windows SAC
+> quirk blocks only the local build-script binary). **Remaining:** the transparent-VPN data path
 > (`docs/design/vpn-data-path-plan.md`) — **explicit proxy mode is the working
 > desktop path today**; the Windows transparent pump **fails closed pending
 > validation** (it does not filter yet), and the unix/Android smoltcp pump is
