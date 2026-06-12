@@ -504,7 +504,8 @@ table.cov { width: 100%; border-collapse: separate; border-spacing: 0; font-size
 .gate-primary:hover { background: var(--green-deep); }
 .gate-primary:active { transform: translateY(1px); }
 .gate-primary:disabled { background: #C9D8BF; color: #F2F7EE; box-shadow: none; cursor: not-allowed; }
-.gate-ghost { width: 100%; border: 0; background: transparent; color: var(--ink-2); font-family: inherit; font-weight: 600; font-size: 14.5px; padding: 12px; border-radius: var(--r-md); cursor: pointer; transition: color .18s; }
+.gate-ghost { width: 100%; display: flex; align-items: center; justify-content: center; gap: 8px; border: 0; background: transparent; color: var(--ink-2); font-family: inherit; font-weight: 600; font-size: 14.5px; padding: 12px; border-radius: var(--r-md); cursor: pointer; transition: color .18s; }
+.gate-ghost .gg-ic svg, .gate-ghost svg { width: 15px; height: 15px; flex: none; }
 .gate-ghost:hover { color: var(--navy); }
 .gate-ghost.danger-link { color: #A2452F; background: transparent; border: 0; }
 .gate-ghost.danger-link:hover { color: #82371F; }

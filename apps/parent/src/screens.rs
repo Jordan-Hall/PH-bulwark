@@ -627,7 +627,7 @@ pub fn ForgotPassword() -> Element {
             class: "gate-ghost",
             disabled: emailing() || !can_email,
             onclick: move |_| request_email(()),
-            span { dangerous_inner_html: "{svg(\"bell\")}" }
+            span { class: "gg-ic", dangerous_inner_html: "{svg(\"mail\")}" }
             if emailing() { "Sending…" } else { "Email me a code instead" }
         }
         if let Some(msg) = emailed() {

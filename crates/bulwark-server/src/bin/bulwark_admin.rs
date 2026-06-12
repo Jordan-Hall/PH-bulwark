@@ -35,7 +35,8 @@
 use bulwark_proto::v1::accounts_client::AccountsClient;
 use bulwark_proto::v1::{
     AddChildRequest, AssignGuardianRequest, CreateAccountRequest, CreatePairCodeRequest,
-    ListChildrenRequest, LoginRequest, RedeemPairCodeRequest, ResetPasswordRequest,
+    ListChildrenRequest, LoginRequest, RedeemPairCodeRequest, RequestPasswordResetRequest,
+    ResetPasswordRequest,
 };
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 
@@ -65,6 +66,10 @@ enum Cmd {
         device_id: String,
     },
     ResetPassword {
+        email: String,
+    },
+    /// Ask the server to EMAIL a reset code (tests the SMTP path end-to-end).
+    RequestReset {
         email: String,
     },
 }
@@ -183,6 +188,12 @@ fn parse(args: &[String]) -> Result<Cmd, String> {
         "reset-password" => {
             need(1)?;
             Ok(Cmd::ResetPassword {
+                email: rest[0].clone(),
+            })
+        }
+        "request-reset" => {
+            need(1)?;
+            Ok(Cmd::RequestReset {
                 email: rest[0].clone(),
             })
         }
@@ -373,6 +384,17 @@ async fn main() -> anyhow::Result<()> {
             println!("ok={}", ack.ok);
             // The fresh recovery code that replaces the consumed one — SAVE IT.
             println!("new_recovery_code={}", ack.new_recovery_code);
+            if !ack.detail.is_empty() {
+                println!("{}", ack.detail);
+            }
+        }
+        Cmd::RequestReset { email } => {
+            // Unauthenticated, anti-enumeration: the ack is always generic.
+            let ack = client
+                .request_password_reset(RequestPasswordResetRequest { email })
+                .await?
+                .into_inner();
+            println!("ok={}", ack.ok);
             if !ack.detail.is_empty() {
                 println!("{}", ack.detail);
             }
