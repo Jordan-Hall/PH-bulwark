@@ -129,6 +129,12 @@ internal data class SetupState(
     val vpnRunning: Boolean,
     val antiRemovalOn: Boolean,
     val paired: Boolean,
+    /**
+     * Guardian asked for server-side ("cloud") filtering. HONEST STATUS ONLY:
+     * the server-side data path is still staged, so filtering keeps running
+     * on-device regardless — this just lets the dashboard say it's rolling out.
+     */
+    val cloudFilteringRequested: Boolean = false,
 ) {
     val vpnReady: Boolean get() = vpnConsented || vpnRunning
 }
@@ -808,6 +814,14 @@ internal fun StatusDashboard(
                 SummaryRow("Chat safety on", state.accessibilityOn)
                 SummaryRow("Network filtering on", state.vpnReady)
                 SummaryRow("Anti-removal", state.antiRemovalOn, optionalWhenOff = true)
+                if (state.cloudFilteringRequested) {
+                    Text(
+                        "Cloud filtering requested — rolling out; protecting on-device meanwhile",
+                        color = Slate,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
             }
         }
 
