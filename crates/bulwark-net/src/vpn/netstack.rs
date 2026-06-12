@@ -983,6 +983,7 @@ const NETSTACK_GATEWAY: Ipv4Address = Ipv4Address::new(10, 0, 0, 1);
 ///     identity — the client `10.0.0.2` is then on-link for replies; and
 ///   * add a default IPv4 route via that same `10.0.0.1`, so EVERY captured
 ///     destination resolves to a local gateway and is accepted on ingress.
+///
 /// Without the default route the pump rejected every public-IP SYN on ingress —
 /// the device had DNS (which bypasses smoltcp) but no TCP (the on-device
 /// blackhole). IPv4-only by design: v6 is dropped in `handle_inbound`, so no v6
