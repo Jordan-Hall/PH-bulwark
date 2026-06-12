@@ -141,7 +141,11 @@ rewrite_conf() {
       echo "[Peer]"
       echo "PublicKey = $pk"
       [ "$psk" != "-" ] && echo "PresharedKey = $psk"
-      echo "AllowedIPs = $ips"
+      # A peer block parsed without AllowedIPs must not round-trip to a literal
+      # "AllowedIPs = -": wg setconf rejects it AFTER the mv, bricking every
+      # later add/remove and the next wg-quick up. (`if` on purpose: as the last
+      # command of this redirected group a failed `[ … ] &&` would fail the group.)
+      if [ "$ips" != "-" ]; then echo "AllowedIPs = $ips"; fi
     } >> "$tmp"
   done
   cp -p "$CONF" "$CONF.bak" 2>/dev/null || true
@@ -152,8 +156,17 @@ rewrite_conf() {
 # Push the file state onto the LIVE interface without a restart (no dropped
 # tunnels). If wg0 is down the file is still authoritative for the next up.
 apply_live() {
+  local stripped
   if ip link show "$WG_IF" >/dev/null 2>&1; then
-    wg syncconf "$WG_IF" <(wg-quick strip "$WG_IF")
+    # Two steps so a wg-quick strip failure aborts (set -e) instead of
+    # syncconf'ing partial/empty output and silently dropping every live peer
+    # (process substitution swallows strip's exit status). The strip output
+    # carries the server PRIVATE key: keep it in $WG_DIR (0600 via umask) and
+    # remove it immediately.
+    stripped="$(mktemp "$WG_DIR/.wg0.strip.XXXXXX")"
+    wg-quick strip "$WG_IF" > "$stripped"
+    wg syncconf "$WG_IF" "$stripped"
+    rm -f "$stripped"
     note "live $WG_IF synced (no tunnel restart)"
   else
     note "$WG_IF is not up; config saved — it applies on the next 'init' / wg-quick up"
@@ -180,7 +193,9 @@ print_client_info() {
   echo "  [Interface] Address   = $ip/32"
   echo "  [Peer] PublicKey      = $(server_pub)"
   echo "  [Peer] Endpoint       = $host:$port"
-  echo "  [Peer] AllowedIPs     = 0.0.0.0/0    (full-tunnel; PersistentKeepalive = 25)"
+  echo "  [Peer] AllowedIPs     = 0.0.0.0/0, ::/0    (full-tunnel; PersistentKeepalive = 25)"
+  echo "  (::/0 on purpose: the region is IPv4-only, so the child's IPv6 is blackholed"
+  echo "   inside the tunnel instead of leaking the home IPv6 address around it)"
 }
 
 # ---- subcommands -------------------------------------------------------------
@@ -189,8 +204,18 @@ cmd_init() {
   local port="${WG_PORT:-$PORT_DEFAULT}" egress spriv
   mkdir -p "$WG_DIR"
   if [ ! -s "$WG_DIR/server.key" ]; then
-    wg genkey > "$WG_DIR/server.key"
-    note "generated new server key (private key stays in $WG_DIR, never printed)"
+    if [ -f "$CONF" ]; then
+      # An existing wg0.conf is the source of truth for the key: derive the
+      # sidecar from its PrivateKey. Generating a fresh one here would make
+      # server_pub()/add-peer print a public key wg-quick doesn't use — newly
+      # enrolled devices could never handshake.
+      sed -n 's/^[ \t]*PrivateKey[ \t]*=[ \t]*//p' "$CONF" | head -n1 > "$WG_DIR/server.key"
+      [ -s "$WG_DIR/server.key" ] || die "$CONF exists but has no PrivateKey — fix the config first"
+      note "derived server.key from the existing $CONF (config stays the source of truth)"
+    else
+      wg genkey > "$WG_DIR/server.key"
+      note "generated new server key (private key stays in $WG_DIR, never printed)"
+    fi
   fi
   wg pubkey < "$WG_DIR/server.key" > "$WG_DIR/server.pub"
   if [ ! -f "$CONF" ]; then
@@ -202,8 +227,8 @@ cmd_init() {
 Address = $SUBNET_PREFIX.1/24
 ListenPort = $port
 PrivateKey = $spriv
-PostUp   = iptables -A FORWARD -i $WG_IF -j ACCEPT; iptables -t nat -A POSTROUTING -o $egress -j MASQUERADE
-PostDown = iptables -D FORWARD -i $WG_IF -j ACCEPT; iptables -t nat -D POSTROUTING -o $egress -j MASQUERADE
+PostUp   = iptables -A FORWARD -i $WG_IF -d 169.254.169.254 -j DROP; iptables -A FORWARD -i $WG_IF -j ACCEPT; iptables -t nat -A POSTROUTING -o $egress -j MASQUERADE
+PostDown = iptables -D FORWARD -i $WG_IF -d 169.254.169.254 -j DROP; iptables -D FORWARD -i $WG_IF -j ACCEPT; iptables -t nat -D POSTROUTING -o $egress -j MASQUERADE
 EOF
     chmod 600 "$CONF"
     note "wrote new $CONF (NAT exit via $egress; no peers yet — use add-peer)"
@@ -221,7 +246,7 @@ EOF
 cmd_add() {
   [ $# -ge 2 ] || usage
   local device="$1" key_arg="$2"; shift 2
-  local want_psk=0 gen=0 cpriv="" cpub="" psk="-" ip ts row kdev
+  local want_psk=0 gen=0 cpriv="" cpub="" psk="-" ip ts row kdev ep_port
   while [ $# -gt 0 ]; do
     case "$1" in
       --psk) want_psk=1 ;;
@@ -288,8 +313,9 @@ cmd_add() {
     echo "[Peer]"
     echo "PublicKey = $(server_pub)"
     [ "$psk" != "-" ] && echo "PresharedKey = $psk"
-    echo "Endpoint = ${WG_ENDPOINT:-vpn.predatorhunters.co.uk}:$(listen_port)"
-    echo "AllowedIPs = 0.0.0.0/0"
+    ep_port="$(listen_port)"
+    echo "Endpoint = ${WG_ENDPOINT:-vpn.predatorhunters.co.uk}:${ep_port:-$PORT_DEFAULT}"
+    echo "AllowedIPs = 0.0.0.0/0, ::/0"
     echo "PersistentKeepalive = 25"
     note "-----------------------------------------------------------------------------------"
   fi

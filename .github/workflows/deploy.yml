@@ -218,6 +218,9 @@ jobs:
         run: |
           set -euo pipefail
           PORT="${WG_PORT:-51820}"
+          # The var is spliced into JSON + the remote shell line below — refuse
+          # anything that isn't a plain port number.
+          [[ "$PORT" =~ ^[0-9]{1,5}$ ]] || { echo "::error::BULWARK_WG_PORT must be numeric"; exit 1; }
           # Ship the peer tool as base64 (single JSON-safe token, same pattern as
           # SMTP_B64 above). It carries no secrets — it's a script from the repo.
           PEERS_B64="$(base64 -w0 deploy/wireguard/wg-peers.sh)"
@@ -253,5 +256,9 @@ jobs:
             esac
             sleep 10
           done
+          # A slow first-time install can stay Pending/InProgress for all 30
+          # polls — falling through silently would paint a green step over a
+          # box whose wg0 may never have come up.
+          [ "$ST" = "Success" ] || { echo "::error::SSM wireguard setup timed out (last status: $ST)"; exit 1; }
           echo "=== wireguard output ==="
           aws ssm get-command-invocation --command-id "$CID" --instance-id "$IID" --query StandardOutputContent --output text
