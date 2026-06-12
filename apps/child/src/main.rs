@@ -1,11 +1,12 @@
-//! PH Bulwark — child app (Dioxus 0.8). The onboarding "setup journey", now
-//! code-split into modules and driven by `dioxus-router`: each step is a route
-//! under a shared `JourneyLayout`. See docs/design/dioxus-app-architecture.md.
+//! PH Bulwark — child onboarding **DESIGN PREVIEW** (Dioxus 0.8), NOT the shipped
+//! child app. The shipped child app is **native** (`platform/android`: VpnService /
+//! AccessibilityService / DeviceAdminReceiver + the Rust core over JNI) — a webview
+//! cannot be those OS services. This crate exists to iterate the journey's design on
+//! desktop/web (and drive the `tools/ui-tests` web journey); its grant buttons just
+//! flip shared signal state, they do not touch real OS services.
 //!
-//! UI only. The real OS services live native in `platform/android` (VpnService /
-//! AccessibilityService / DeviceAdminReceiver); on the mobile target the grant
-//! buttons bridge to them via `java_plugin!`. Here they flip shared signal state
-//! so the journey is fully previewable on desktop/web.
+//! Code-split into modules, driven by `dioxus-router` (each step a route under a
+//! shared `JourneyLayout`). See docs/design/dioxus-app-architecture.md.
 
 mod components;
 mod router;

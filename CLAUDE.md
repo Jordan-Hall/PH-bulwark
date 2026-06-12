@@ -26,8 +26,15 @@ prose/comments use the protective terms.
 ## Layout
 
 - `crates/bulwark-*` — 18-crate Cargo workspace (engine). `bulwark-net` is security-critical.
-- `apps/child`, `apps/parent` — Dioxus 0.8.0-alpha.0 apps (detached workspaces). **The main UI.**
-- `platform/android` — native Android shell + `rust/bulwark-android` JNI cdylib (detached workspace).
+- `apps/parent` — Dioxus 0.8.0-alpha.0 (detached workspace) — **the SHIPPED guardian console**
+  (PH Bulwark Manager): desktop (Win/macOS/Linux) + Android (experimental via `dx`).
+- **`apps/child` is a Dioxus DESIGN PREVIEW only** (desktop/web — design iteration + the
+  `tools/ui-tests` web journey). It is **NOT the shipped child app**. The child app SHIPS
+  **native** as `platform/android` — VpnService / AccessibilityService / DeviceAdminReceiver
+  cannot be a webview, so the child must be native + the Rust core over JNI.
+- `platform/android` — **the SHIPPED child app**: native Android shell (Kotlin/Compose UI) +
+  `rust/bulwark-android` JNI cdylib (detached workspace). `platform/apple` = Rust-FFI + Swift
+  scaffold for a future iOS Network Extension (no installable app yet).
 - `tools/ui-tests` — Midscene UI-test harness (web + android).
 - `PLAN.md` §6 = product workflows A–D; `docs/finish-plan.md` = per-step tasks;
   `docs/agent-workflow.md` = orchestration + persistent agent roster.
