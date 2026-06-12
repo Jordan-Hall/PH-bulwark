@@ -122,7 +122,15 @@ fn endpoint_channel(t: &RelayTarget) -> Result<Endpoint, String> {
         let pinned = if ca_path.is_empty() {
             None
         } else {
-            std::fs::read(ca_path).ok()
+            match std::fs::read(ca_path) {
+                Ok(pem) => Some(pem),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => {
+                    return Err(format!(
+                        "pinned cluster CA at '{ca_path}' exists but is unreadable: {e}"
+                    ))
+                }
+            }
         };
         let tls = match pinned {
             Some(pem) => tonic::transport::ClientTlsConfig::new()
