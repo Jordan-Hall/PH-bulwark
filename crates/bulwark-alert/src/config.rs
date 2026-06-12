@@ -248,13 +248,21 @@ impl AlertConfig {
     /// `BULWARK_SMTP_PASSWORD` (auth), `BULWARK_ALERT_SUBJECT_PREFIX`.
     pub fn from_env() -> Result<Option<Self>> {
         let var = |k: &str| std::env::var(k).ok().filter(|s| !s.trim().is_empty());
-        match (
-            var(ENV_SMTP_HOST),
-            var(ENV_ALERT_FROM),
-            var(ENV_ALERT_RECIPIENTS),
-        ) {
-            (None, None, None) => Ok(None), // not configured — keep the sink off.
-            (Some(host), Some(from), Some(recipients_raw)) => {
+        // Key the alert-email switch on the ALERT-specific vars, NOT on
+        // BULWARK_SMTP_HOST: that host is shared with the password-reset mailer
+        // (`reset_mailer` reuses it), so SMTP_HOST being set for reset must not
+        // force the guardian-alert sink on. The alert sink turns on only when
+        // BOTH a from-address and recipients are configured; SMTP_HOST is then
+        // required as the transport.
+        match (var(ENV_ALERT_FROM), var(ENV_ALERT_RECIPIENTS)) {
+            (None, None) => Ok(None), // alert sink off (SMTP_HOST may still back reset email)
+            (Some(from), Some(recipients_raw)) => {
+                let host = var(ENV_SMTP_HOST).ok_or_else(|| {
+                    AlertError::Config(format!(
+                        "guardian-alert email needs {ENV_SMTP_HOST} when \
+                         {ENV_ALERT_FROM} + {ENV_ALERT_RECIPIENTS} are set"
+                    ))
+                })?;
                 let recipients: Vec<String> = recipients_raw
                     .split(',')
                     .map(|s| s.trim().to_string())
@@ -297,8 +305,9 @@ impl AlertConfig {
                 Ok(Some(cfg))
             }
             _ => Err(AlertError::Config(format!(
-                "incomplete email-alert config: set ALL of {ENV_SMTP_HOST}, \
-                 {ENV_ALERT_FROM}, {ENV_ALERT_RECIPIENTS} or none of them"
+                "incomplete email-alert config: set BOTH {ENV_ALERT_FROM} and \
+                 {ENV_ALERT_RECIPIENTS} (or neither). {ENV_SMTP_HOST} alone is \
+                 fine — it backs the password-reset mailer."
             ))),
         }
     }
@@ -343,6 +352,17 @@ mod tests {
 
         // Unset → sink off.
         assert!(matches!(AlertConfig::from_env(), Ok(None)));
+
+        // SMTP_HOST alone (set for the password-reset mailer) must NOT turn the
+        // guardian-alert sink on or error — the alert switch keys on ALERT_FROM
+        // + ALERT_RECIPIENTS, not the shared SMTP host. (Regression: a prod
+        // deploy that set SMTP_HOST for reset email crash-looped on this.)
+        std::env::set_var(ENV_SMTP_HOST, "smtp.example.com");
+        assert!(
+            matches!(AlertConfig::from_env(), Ok(None)),
+            "SMTP_HOST without ALERT_FROM/RECIPIENTS = reset-only, alert sink off"
+        );
+        std::env::remove_var(ENV_SMTP_HOST);
 
         // Full trio → Some, with parsed recipients + default TLS/port.
         std::env::set_var(ENV_SMTP_HOST, "smtp.example.com");
