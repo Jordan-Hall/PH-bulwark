@@ -1574,8 +1574,8 @@ pub fn Children() -> Element {
         if children.read().is_empty() && !children_busy() {
             div { class: "empty-state",
                 div { class: "empty-ic", dangerous_inner_html: "{svg(\"child\")}" }
-                p { class: "empty", "No children loaded yet." }
-                p { class: "empty-sub", "Load your roster, or pair a new child's device below." }
+                p { class: "empty", "No children here yet." }
+                p { class: "empty-sub", "Pair your first device below — it takes about a minute. Already paired one? Try \u{201c}Refresh roster\u{201d} above." }
             }
         }
         for child in children.read().clone().into_iter() {
@@ -1588,7 +1588,7 @@ pub fn Children() -> Element {
                     }
                     div { class: "child-guardians",
                         strong { "{child.guardian_account_ids.len()}" }
-                        "guardian(s)"
+                        if child.guardian_account_ids.len() == 1 { "guardian" } else { "guardians" }
                     }
                 }
                 ChildVpnRow { child: child.clone() }

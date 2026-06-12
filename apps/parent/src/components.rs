@@ -34,10 +34,11 @@ pub fn ChildVpnRow(child: ProtoChild) -> Element {
         div { class: "vpn-row",
             div { class: "vpn-field",
                 span { class: "vpn-label", "Filtering region" }
-                div { class: "vpn-seg",
+                div { class: "vpn-seg", role: "group", "aria-label": "Filtering region",
                     for (id, label, _ep) in CHILD_REGIONS.iter().copied() {
                         button {
                             class: if region() == id { "vpn-seg-btn vpn-seg-on" } else { "vpn-seg-btn" },
+                            "aria-pressed": region() == id,
                             onclick: move |_| region.set(id.to_string()),
                             "{label}"
                         }
@@ -46,14 +47,16 @@ pub fn ChildVpnRow(child: ProtoChild) -> Element {
             }
             div { class: "vpn-field",
                 span { class: "vpn-label", "Where filtering runs" }
-                div { class: "vpn-seg",
+                div { class: "vpn-seg", role: "group", "aria-label": "Where filtering runs",
                     button {
                         class: if filter_location() == 0 { "vpn-seg-btn vpn-seg-on" } else { "vpn-seg-btn" },
+                        "aria-pressed": filter_location() == 0,
                         onclick: move |_| filter_location.set(0),
                         "On the device"
                     }
                     button {
                         class: if filter_location() == 1 { "vpn-seg-btn vpn-seg-on" } else { "vpn-seg-btn" },
+                        "aria-pressed": filter_location() == 1,
                         onclick: move |_| filter_location.set(1),
                         "PH Bulwark Cloud"
                     }
@@ -151,7 +154,7 @@ pub fn ChildVpnRow(child: ProtoChild) -> Element {
                     let cls = if applied { "vpn-note" } else if failed { "vpn-note failed" } else { "vpn-note pending" };
                     let icon = if applied { "check" } else if failed { "alert" } else { "info" };
                     rsx! {
-                        div { class: "{cls}",
+                        div { class: "{cls}", role: "status",
                             span { dangerous_inner_html: "{svg(icon)}" }
                             "{n}"
                         }
