@@ -730,12 +730,19 @@ message ChildStatusRequest {
 
 // Desired-vs-applied status for the parent console. Child-reported state lives
 // HERE — never on ChildConfig, which stays the guardian's desired document.
-// Content-free: version numbers + a check-in timestamp only.
+// Content-free: version numbers, a check-in timestamp, and the guardian's own
+// desired ChildConfig (policy + routing only, like ChildConfig itself).
 message ChildConfigStatus {
   string child_id        = 1;
   uint64 desired_version = 2; // latest guardian-set config_version
   uint64 applied_version = 3; // last version the child reported applied (0 = none yet)
   int64  last_report_ts  = 4; // unix ms of the child's last check-in (0 = never / since restart)
+  // The guardian's current desired config document, echoed back so the parent
+  // console can seed its controls from what was last set (instead of hardcoded
+  // defaults a later Apply would silently revert unchanged fields to). No new
+  // auth surface: GetChildStatus already requires a guardian session scoped to
+  // this child — the same gate that WRITES this document via SetChildConfig.
+  ChildConfig desired    = 5;
 }
 
 service ChildControl {
