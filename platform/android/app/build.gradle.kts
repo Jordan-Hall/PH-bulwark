@@ -80,4 +80,9 @@ dependencies {
     // CONVENTIONAL on-device OCR (NOT a vision-LLM) for image/screenshot text;
     // the accessibility tree covers live text. ML Kit runs fully on-device.
     implementation("com.google.mlkit:text-recognition:16.0.1")
+
+    // QR scan for the pairing setup code (Apache-2.0 ZXing wrapper). Camera
+    // permission is requested at scan time by the embedded capture activity;
+    // the decoded text feeds the SAME setup-payload parser as the paste path.
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 }

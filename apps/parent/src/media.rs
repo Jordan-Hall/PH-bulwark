@@ -189,10 +189,52 @@ pub fn base64_encode(input: &[u8]) -> String {
     out
 }
 
-/// Copy `text` to the OS clipboard (the "copy recovery code" button). Best-effort:
-/// returns an error string the caller may ignore — the code is also shown as
-/// selectable text, so a clipboard failure is never blocking.
+/// Copy `text` to the OS clipboard (the "copy recovery code" / "copy setup
+/// code" buttons). Best-effort: returns an error string the caller may ignore —
+/// the code is also shown as selectable text, so a clipboard failure is never
+/// blocking. Desktop: `arboard`.
+#[cfg(not(target_os = "android"))]
 pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
     let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
     cb.set_text(text.to_string()).map_err(|e| e.to_string())
+}
+
+/// Android: `arboard` has no Android backend, so copy through the system
+/// webview — `navigator.clipboard.writeText` when the page context exposes it,
+/// else the hidden-textarea `document.execCommand('copy')` fallback (webviews
+/// don't always grant the async Clipboard API). The JS is fire-and-forget (the
+/// call sites show "Copied" optimistically and the code stays selectable), but
+/// availability is reported honestly: no real webview document provider =
+/// `Err`, never a silent no-op. On a single device the phone can't scan its
+/// own pairing QR, so this copy path IS the on-device pairing path.
+#[cfg(target_os = "android")]
+pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    use std::rc::Rc;
+    // Resolve the REAL document provider: `dioxus::document::eval` silently
+    // substitutes a no-op document when none is registered, which would fake a
+    // successful copy. Must run inside the Dioxus runtime — every call site is
+    // an event handler, which qualifies.
+    let doc = dioxus::core::try_consume_context::<Rc<dyn dioxus::document::Document>>()
+        .ok_or_else(|| "clipboard unavailable: no webview document context".to_string())?;
+    // JSON-encode the payload so quotes/newlines can't break out of the JS.
+    let literal =
+        serde_json::to_string(text).map_err(|e| format!("clipboard payload encode: {e}"))?;
+    let _eval = doc.eval(format!(
+        "(function(t){{\
+           if (navigator.clipboard && navigator.clipboard.writeText) {{\
+             navigator.clipboard.writeText(t);\
+             return;\
+           }}\
+           var ta = document.createElement('textarea');\
+           ta.value = t;\
+           ta.setAttribute('readonly', '');\
+           ta.style.position = 'fixed';\
+           ta.style.opacity = '0';\
+           document.body.appendChild(ta);\
+           ta.select();\
+           ta.setSelectionRange(0, t.length);\
+           try {{ document.execCommand('copy'); }} finally {{ document.body.removeChild(ta); }}\
+         }})({literal});"
+    ));
+    Ok(())
 }

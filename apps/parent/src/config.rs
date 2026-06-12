@@ -35,8 +35,50 @@ pub fn repo_root() -> std::path::PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()))
 }
 
+/// Android app-private files dir (`Context.getFilesDir()`, e.g.
+/// `/data/user/0/co.predatorhunters.bulwark.manager/files`) via the JNI context
+/// that dioxus' mobile glue registers with `ndk-context` before app start.
+/// `None` if any JNI step fails — callers fall back to the env-based chain.
+#[cfg(target_os = "android")]
+pub fn android_files_dir() -> Option<std::path::PathBuf> {
+    let ctx = ndk_context::android_context();
+    // SAFETY (audited FFI): vm()/context() are the live JavaVM + Activity
+    // pointers ndk-context was initialized with by dioxus-desktop's android
+    // glue; we only read through them from an attached thread.
+    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.ok()?;
+    let mut env = vm.attach_current_thread().ok()?;
+    let context = unsafe { jni::objects::JObject::from_raw(ctx.context().cast()) };
+    let files_dir = env
+        .call_method(&context, "getFilesDir", "()Ljava/io/File;", &[])
+        .ok()?
+        .l()
+        .ok()?;
+    let abs = env
+        .call_method(&files_dir, "getAbsolutePath", "()Ljava/lang/String;", &[])
+        .ok()?
+        .l()
+        .ok()?;
+    let s: String = env
+        .get_string(&jni::objects::JString::from(abs))
+        .ok()?
+        .into();
+    if s.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(s))
+}
+
+/// Per-user config dir. Android: the app-private files dir — the ONLY reliably
+/// writable location (`%LOCALAPPDATA%`/`$HOME` are unset in an app process and
+/// `temp_dir()` is the unwritable `/data/local/tmp`). The server choice,
+/// per-server sessions/tokens, and the pinned `cluster_ca.pem` that on-device
+/// pairing requires all live under here. Desktop resolution is unchanged.
 pub fn app_config_dir() -> std::path::PathBuf {
     use std::path::PathBuf;
+    #[cfg(target_os = "android")]
+    if let Some(files) = android_files_dir() {
+        return files.join("bulwark");
+    }
     if let Some(local) = std::env::var_os("LOCALAPPDATA").filter(|s| !s.is_empty()) {
         PathBuf::from(local).join("Bulwark")
     } else if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|s| !s.is_empty()) {
@@ -89,10 +131,10 @@ pub fn ffmpeg_display() -> String {
 /// install it (that's a one-time `certutil` the user runs); we only report
 /// whether it has been generated, and surface the trust command if needed.
 pub fn ca_pem_path() -> std::path::PathBuf {
-    let base = std::env::var("LOCALAPPDATA").unwrap_or_default();
-    std::path::Path::new(&base)
-        .join("Bulwark")
-        .join("bulwark-root-ca.pem")
+    // Identical `%LOCALAPPDATA%\Bulwark\...` path as before on Windows (that IS
+    // the config dir); on Android this resolves inside the app files dir
+    // instead of an unwritable relative `Bulwark\` path.
+    app_config_dir().join("bulwark-root-ca.pem")
 }
 
 /// The per-user segment store directory. MUST mirror
@@ -103,6 +145,14 @@ pub fn ca_pem_path() -> std::path::PathBuf {
 /// then `$XDG_DATA_HOME`, then `$HOME/.local/share`, else the temp dir.
 pub fn segments_dir() -> std::path::PathBuf {
     use std::path::PathBuf;
+    // Android: the local segment store never exists on the manager's phone (the
+    // child-side filter writes it on ITS device) — point at the app files dir
+    // so reads are a clean NotFound ("missing/purged") rather than touching the
+    // unreadable /data/local/tmp.
+    #[cfg(target_os = "android")]
+    if let Some(files) = android_files_dir() {
+        return files.join("bulwark-segments");
+    }
     if let Some(local) = std::env::var_os("LOCALAPPDATA").filter(|s| !s.is_empty()) {
         return PathBuf::from(local).join("Bulwark").join("segments");
     }

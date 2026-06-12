@@ -1,6 +1,7 @@
 package co.predatorhunters.bulwark
 
 import android.util.Base64
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.animateFloatAsState
@@ -57,6 +58,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import co.predatorhunters.bulwark.admin.EnrollmentRecord
 import co.predatorhunters.bulwark.core.RustBridge
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import java.io.File
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
@@ -465,11 +468,13 @@ private fun PairStep(
     // previous setup code); refreshed after a successful pin below.
     var caPinned by remember { mutableStateOf(File(caPath).exists()) }
 
-    // Full-setup-code path: the guardian copies the v2 pairing payload from the
-    // parent console and pastes it here. It carries the SAME single-use pair
-    // code plus the server address and (for https servers) the certificate this
-    // device must pin before connecting. Scanning the same payload as a QR code
-    // is a later increment — paste is the path that works today.
+    // Full-setup-code path: the guardian scans the console's setup QR with the
+    // camera (one tap) or pastes the copied payload. Both carry the SAME
+    // single-use pair code plus the server address and (for https servers) the
+    // certificate this device must pin before connecting.
+    val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
+        result.contents?.let { fullSetupCode = it }
+    }
     val payloadResult = remember(fullSetupCode) {
         if (fullSetupCode.isBlank()) null else parseSetupPayload(fullSetupCode)
     }
@@ -559,7 +564,7 @@ private fun PairStep(
             if (paired) {
                 "This device is linked to your family. Alerts will reach the guardian."
             } else {
-                "Paste the full setup code from the parent console, or pick a server and type the short code."
+                "Scan the setup QR from the parent console, paste the setup code, or pick a server and type the short code."
             },
             color = Slate,
             fontSize = 15.sp,
@@ -568,6 +573,21 @@ private fun PairStep(
 
         if (!paired) {
             Spacer(Modifier.height(20.dp))
+            OutlinedButton(
+                onClick = {
+                    scanLauncher.launch(
+                        ScanOptions()
+                            .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                            .setPrompt("Point the camera at the setup QR in PH Bulwark Manager")
+                            .setBeepEnabled(false)
+                            .setOrientationLocked(false),
+                    )
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Scan the setup QR")
+            }
+            Spacer(Modifier.height(10.dp))
             OutlinedTextField(
                 value = fullSetupCode,
                 onValueChange = { fullSetupCode = it },
@@ -575,7 +595,7 @@ private fun PairStep(
                 minLines = 2,
                 maxLines = 4,
                 label = { Text("Full setup code") },
-                placeholder = { Text("Paste the setup code copied from the parent console") },
+                placeholder = { Text("Or paste the setup code copied from the parent console") },
             )
             Spacer(Modifier.height(12.dp))
             if (payload != null) {

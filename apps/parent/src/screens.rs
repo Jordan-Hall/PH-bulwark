@@ -1329,7 +1329,7 @@ pub fn AddChildPanel() -> Element {
     rsx! {
         div { class: "box add-child",
             h3 { "Pair a new device" }
-            p { class: "sub", "Give the child a name and generate a setup code to paste or type on their device. Nothing is installed without you." }
+            p { class: "sub", "Give the child a name and generate a setup code to scan, paste, or type on their device. Nothing is installed without you." }
             label { class: "field",
                 span { "Child's name" }
                 input {
@@ -1365,7 +1365,7 @@ pub fn AddChildPanel() -> Element {
                         }.await;
                         match result {
                             Ok(pair) => {
-                                setup_note.set(Some("Setup code ready — copy and paste it on the child's device.".to_string()));
+                                setup_note.set(Some("Setup code ready — scan or paste it on the child's device.".to_string()));
                                 pair_code.set(Some(pair));
                             }
                             Err(e) => setup_error.set(Some(e.to_string())),
@@ -1396,13 +1396,12 @@ pub fn AddChildPanel() -> Element {
 
 /// The "Setup code" panel shown once a pair code is minted: the short code big
 /// and segmented (the type-it-by-hand fallback), a QR of the full v2 setup
-/// payload (rendered now; the child app's scanner is a coming increment — the
-/// copy/paste path is what works today), and a one-tap copy of the same JSON
-/// for the child app's paste field. The payload bundles the server address,
-/// this one-time code + expiry, the child's name, and — when the active server
-/// has a pinned CA — that public certificate, so the child device can make its
-/// first secure call. If the payload can't be built, the short code alone
-/// still pairs — never blocked.
+/// payload (the child app scans it via "Scan the setup QR"; copy/paste is the
+/// fallback), and a one-tap copy of the same JSON for the child app's paste
+/// field. The payload bundles the server address, this one-time code + expiry,
+/// the child's name, and — when the active server has a pinned CA — that
+/// public certificate, so the child device can make its first secure call. If
+/// the payload can't be built, the short code alone still pairs — never blocked.
 #[component]
 fn SetupCodePanel(pair: PairCodeUi) -> Element {
     let mut copied = use_signal(|| false);
@@ -1440,7 +1439,7 @@ fn SetupCodePanel(pair: PairCodeUi) -> Element {
                     }
                     div { class: "hint",
                         if qr_is_complete {
-                            "Use \u{201c}Copy setup code\u{201d} and paste it into PH Bulwark on your child's phone — it carries the server address and this one-time pairing code. (QR scanning in the child app is coming soon.)"
+                            "On your child's phone, tap \u{201c}Scan the setup QR\u{201d} in PH Bulwark and point it here — or use \u{201c}Copy setup code\u{201d} and paste it. It carries the server address and this one-time pairing code."
                         } else {
                             "This server's pinned certificate doesn't fit in a QR — use \u{201c}Copy setup code\u{201d} and paste it into PH Bulwark on your child's phone instead."
                         }
