@@ -171,10 +171,7 @@ impl fmt::Debug for WgClientConfig {
             .field("server_public_key", &PubKeyHex(&self.server_public_key))
             .field("keypair", &self.keypair)
             .field("assigned_address", &self.assigned_address)
-            .field(
-                "persistent_keepalive_secs",
-                &self.persistent_keepalive_secs,
-            )
+            .field("persistent_keepalive_secs", &self.persistent_keepalive_secs)
             .finish()
     }
 }
@@ -268,10 +265,7 @@ impl fmt::Debug for WgTunnel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WgTunnel")
             .field("noise", &"REDACTED")
-            .field(
-                "last_handshake",
-                &self.tunn.time_since_last_handshake(),
-            )
+            .field("last_handshake", &self.tunn.time_since_last_handshake())
             .finish()
     }
 }
