@@ -815,6 +815,34 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_analyzeTe
     string_to_jstring(&mut env, &json)
 }
 
+/// `external fun inspectionCaPem(caDir: String): String`
+///
+/// Return the per-install TLS-inspection ROOT CA in PEM (public cert only — the
+/// private key NEVER leaves the device keystore). `ca_dir` is the app-sandbox CA
+/// directory (`filesDir/ca`, the same `ca_dir` `startVpn` uses), so the returned
+/// root matches the CA the proxy presents. Kotlin installs it into the device
+/// trust store (`DevicePolicyManager.installCaCert` when Device Owner) so
+/// inspected HTTPS validates instead of "connection not private". Empty string
+/// on failure or empty `caDir` — never panics, never the private key.
+///
+/// # Safety
+/// JNI entry point. `ca_dir` is null-/UTF-8-validated.
+#[no_mangle]
+pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_inspectionCaPem(
+    mut env: JNIEnv,
+    _class: JClass,
+    ca_dir: JString,
+) -> jstring {
+    let ca_dir = jstring_to_string(&mut env, &ca_dir).unwrap_or_default();
+    let pem = if ca_dir.trim().is_empty() {
+        String::new()
+    } else {
+        bulwark_net::vpn::inspection_ca_pem(Some(std::path::PathBuf::from(ca_dir.trim())))
+            .unwrap_or_default()
+    };
+    string_to_jstring(&mut env, &pem)
+}
+
 /// `external fun redeemPairCode(endpoint: String, code: String, deviceId: String, caPath: String): String`
 ///
 /// Child enrollment path. The Android setup screen calls this after the guardian
