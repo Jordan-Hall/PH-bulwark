@@ -12,8 +12,14 @@ sleep 5
 
 # 1) Install must succeed (proves the APK + native ABIs are valid for Android).
 adb install -r platform/android/app/build/outputs/apk/debug/app-debug.apk
-adb shell pm list packages 2>/dev/null | tr -d "\r" | grep -q "package:co.predatorhunters.bulwark" \
-  || { echo "::error::APK did not install"; exit 1; }
+# Capture-then-match (NOT `... | grep -q`): under pipefail, grep -q exiting at
+# the first match can SIGPIPE adb/tr and fail the pipeline even though the
+# package IS installed — exactly the false negative this check produced.
+packages="$(adb shell pm list packages 2>/dev/null | tr -d '\r' || true)"
+case "$packages" in
+  *"package:co.predatorhunters.bulwark"*) ;;
+  *) echo "::error::APK did not install"; exit 1 ;;
+esac
 echo "✓ APK installed on Android $(adb shell getprop ro.build.version.release | tr -d '\r')"
 
 # 2) Best-effort launch, then assert NO native crash (the key signal:
