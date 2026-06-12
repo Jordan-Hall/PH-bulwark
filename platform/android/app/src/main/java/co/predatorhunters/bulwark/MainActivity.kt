@@ -210,6 +210,10 @@ class MainActivity : ComponentActivity() {
     private fun requestAntiRemoval() {
         if (Lockdown.isDeviceOwner(this)) {
             Lockdown.enforce(this)
+            // Managed device: install the per-install inspection CA into the
+            // system trust store so inspected HTTPS validates instead of showing
+            // "connection not private". No-op if already trusted.
+            runCatching { co.predatorhunters.bulwark.admin.CaTrust.ensureInstalled(this) }
             refreshLocalState()
             return
         }

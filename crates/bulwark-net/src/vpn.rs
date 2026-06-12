@@ -206,6 +206,20 @@ pub fn build_interceptor(
     Ok(Arc::new(NetInterceptor::with_keystore(net_cfg, keystore)?))
 }
 
+/// Load (or first-run generate) the per-install inspection CA for `ca_dir` and
+/// return its ROOT certificate in PEM. Public material only — the private key
+/// NEVER leaves the keystore (there is no path here that serializes it).
+///
+/// Same load path as [`build_interceptor`], so the returned root is
+/// byte-identical to the CA the proxy mints leaf certs under. The Android shell
+/// installs this into the device trust store (Device Owner →
+/// `DevicePolicyManager.installCaCert`) so inspected HTTPS validates instead of
+/// showing "connection not private". `None` ca_dir uses the in-memory dev
+/// keystore (tests only; refused on a real device by the CA loader).
+pub fn inspection_ca_pem(ca_dir: Option<std::path::PathBuf>) -> Result<String> {
+    Ok(build_interceptor(ca_dir)?.ca_cert_pem().to_string())
+}
+
 /// Android data path: start the TLS-inspecting proxy held by `interceptor` and
 /// run the transparent smoltcp pump over the `VpnService` fd, both pointed at
 /// `127.0.0.1:8080`, until `shutdown` is cancelled. The JNI `startVpn` builds
