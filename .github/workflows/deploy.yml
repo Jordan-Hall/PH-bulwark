@@ -93,10 +93,46 @@ jobs:
           BULWARK_PORT: ${{ vars.BULWARK_PORT }}
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Outbound guardian email (password reset + alerts). OPTIONAL: when
+          # BULWARK_SMTP_HOST is unset the deploy is byte-for-byte unchanged and
+          # the recovery-code reset path still works without email. The password
+          # is a GitHub SECRET (masked in logs); these reach the container via a
+          # root-only --env-file on the box, never `docker run -e` (so they don't
+          # show in `docker ps`/process args) and are never echoed here.
+          SMTP_HOST: ${{ vars.BULWARK_SMTP_HOST }}
+          SMTP_PORT: ${{ vars.BULWARK_SMTP_PORT }}
+          SMTP_TLS: ${{ vars.BULWARK_SMTP_TLS }}
+          SMTP_USERNAME: ${{ secrets.BULWARK_SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.BULWARK_SMTP_PASSWORD }}
+          ALERT_FROM: ${{ vars.BULWARK_ALERT_FROM }}
+          RESET_FROM: ${{ vars.BULWARK_RESET_FROM }}
+          RESET_TTL: ${{ vars.BULWARK_RESET_TOKEN_TTL_SECS }}
         run: |
           set -euo pipefail
           PORT="${BULWARK_PORT:-8443}"
           REF="${IMAGE}:${GITHUB_SHA}"
+
+          # Build the SMTP env-file as a base64 blob (single token: JSON-safe,
+          # no shell-special chars) and NEVER echo it, so it stays out of the
+          # Actions log. Empty when SMTP isn't configured → the box clears any
+          # stale file and the docker run gets no --env-file flag.
+          SMTP_B64=""
+          ENVFILE_FLAG=""
+          if [ -n "${SMTP_HOST:-}" ]; then
+            {
+              echo "BULWARK_SMTP_HOST=${SMTP_HOST}"
+              [ -n "${SMTP_PORT:-}" ]     && echo "BULWARK_SMTP_PORT=${SMTP_PORT}"
+              [ -n "${SMTP_TLS:-}" ]      && echo "BULWARK_SMTP_TLS=${SMTP_TLS}"
+              [ -n "${SMTP_USERNAME:-}" ] && echo "BULWARK_SMTP_USERNAME=${SMTP_USERNAME}"
+              [ -n "${SMTP_PASSWORD:-}" ] && echo "BULWARK_SMTP_PASSWORD=${SMTP_PASSWORD}"
+              [ -n "${ALERT_FROM:-}" ]    && echo "BULWARK_ALERT_FROM=${ALERT_FROM}"
+              [ -n "${RESET_FROM:-}" ]    && echo "BULWARK_RESET_FROM=${RESET_FROM}"
+              [ -n "${RESET_TTL:-}" ]     && echo "BULWARK_RESET_TOKEN_TTL_SECS=${RESET_TTL}"
+            } > smtp.env
+            SMTP_B64="$(base64 -w0 smtp.env)"
+            rm -f smtp.env
+            ENVFILE_FLAG="--env-file /var/lib/bulwark/smtp.env"
+          fi
           # `set -eu` (NOT -eux) on the instance so the GHCR token isn't echoed into
           # the SSM command log. The login cred is removed again with `docker logout`.
           cat > params.json <<JSON
@@ -110,10 +146,11 @@ jobs:
             "if [ ! -s /var/lib/bulwark/tls/server.crt ]; then TOK=\$(curl -s -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 300'); PUB_HOST=\$(curl -s -H \"X-aws-ec2-metadata-token: \$TOK\" http://169.254.169.254/latest/meta-data/public-hostname); PUB_IP=\$(curl -s -H \"X-aws-ec2-metadata-token: \$TOK\" http://169.254.169.254/latest/meta-data/public-ipv4); PUB_HOST=\${PUB_HOST:-\$PUB_IP}; openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout /var/lib/bulwark/tls/ca.key -out /var/lib/bulwark/tls/ca.crt -subj '/CN=PH Bulwark Cluster CA' -days 3650; openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout /var/lib/bulwark/tls/server.key -out /var/lib/bulwark/tls/server.csr -subj \"/CN=\$PUB_HOST\" -addext \"subjectAltName=DNS:\$PUB_HOST,IP:\$PUB_IP\"; openssl x509 -req -in /var/lib/bulwark/tls/server.csr -CA /var/lib/bulwark/tls/ca.crt -CAkey /var/lib/bulwark/tls/ca.key -CAcreateserial -days 825 -copy_extensions copyall -out /var/lib/bulwark/tls/server.crt; rm -f /var/lib/bulwark/tls/server.csr; chmod 600 /var/lib/bulwark/tls/ca.key /var/lib/bulwark/tls/server.key; fi",
             "chmod 600 /var/lib/bulwark/*.json 2>/dev/null || true",
             "chown -R 10001:10001 /var/lib/bulwark && chown root:root /var/lib/bulwark/tls/ca.key",
+            "if [ -n '${SMTP_B64}' ]; then printf '%s' '${SMTP_B64}' | base64 -d > /var/lib/bulwark/smtp.env && chmod 600 /var/lib/bulwark/smtp.env && chown 10001:10001 /var/lib/bulwark/smtp.env; else rm -f /var/lib/bulwark/smtp.env; fi",
             "echo '${GHCR_TOKEN}' | docker login ghcr.io -u '${GHCR_USER}' --password-stdin",
             "docker pull '${REF}'",
             "docker rm -f bulwark-server || true",
-            "docker run -d --name bulwark-server --restart unless-stopped -p ${PORT}:${PORT} -v /var/lib/bulwark:/var/lib/bulwark -e BULWARK_BIND=0.0.0.0:${PORT} -e BULWARK_ACCOUNTS=1 -e BULWARK_STATE_DIR=/var/lib/bulwark -e BULWARK_TLS_CERT=/var/lib/bulwark/tls/server.crt -e BULWARK_TLS_KEY=/var/lib/bulwark/tls/server.key '${REF}' --role all-in-one",
+            "docker run -d --name bulwark-server --restart unless-stopped -p ${PORT}:${PORT} -v /var/lib/bulwark:/var/lib/bulwark ${ENVFILE_FLAG} -e BULWARK_BIND=0.0.0.0:${PORT} -e BULWARK_ACCOUNTS=1 -e BULWARK_STATE_DIR=/var/lib/bulwark -e BULWARK_TLS_CERT=/var/lib/bulwark/tls/server.crt -e BULWARK_TLS_KEY=/var/lib/bulwark/tls/server.key '${REF}' --role all-in-one",
             "sleep 5",
             "docker ps --filter name=bulwark-server --format '{{.Status}}' | grep -q Up || { docker logs --tail 50 bulwark-server; exit 1; }",
             "docker logout ghcr.io || true",
