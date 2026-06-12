@@ -16,7 +16,10 @@ use crate::servers::{
 /// its FIRST secure call against a self-hosted/private-CA server. The CA is
 /// public certificate material, not a secret; the single-use pair code stays the
 /// only credential. `include_ca: false` builds the same payload without the CA
-/// (the QR fallback when a large pinned CA won't fit in a scannable code).
+/// (the QR fallback when a large pinned CA won't fit in a scannable code) — but
+/// when a pin EXISTS and was left out, the payload says so (`ca_omitted: true`)
+/// so the child app still asks for the full setup code instead of attempting an
+/// unpinned handshake that can only fail.
 pub fn setup_payload_v2(
     child_name: &str,
     pair_code: &str,
@@ -25,11 +28,9 @@ pub fn setup_payload_v2(
 ) -> Option<String> {
     let endpoint = cluster_endpoint();
     let region = selected_server_id(&saved_choice());
-    let ca_b64 = if include_ca {
-        pinned_ca_b64(&endpoint)
-    } else {
-        None
-    };
+    let pinned = pinned_ca_b64(&endpoint);
+    let ca_omitted = !include_ca && pinned.is_some();
+    let ca_b64 = if include_ca { pinned } else { None };
     build_setup_payload_v2(
         &region,
         &endpoint,
@@ -37,6 +38,7 @@ pub fn setup_payload_v2(
         expires_ts,
         child_name,
         ca_b64.as_deref(),
+        ca_omitted,
     )
 }
 
@@ -54,8 +56,11 @@ fn pinned_ca_b64(endpoint: &str) -> Option<String> {
 
 /// Pure payload-v2 assembly (see [`setup_payload_v2`]), split out so tests can
 /// exercise the wire shape without touching disk. `cluster_ca_pem_b64` is
-/// omitted entirely when no CA is pinned. This shape is the FIXED v2 contract
-/// the child app's scan + paste paths parse.
+/// omitted entirely when no CA is pinned; `ca_omitted: true` is added (only)
+/// when a pinned CA exists but was deliberately left out (the dense-QR
+/// fallback), so the child app can tell "no pin needed — public roots" apart
+/// from "pin exists — paste the full setup code". This shape is the FIXED v2
+/// contract the child app's scan + paste paths parse.
 pub fn build_setup_payload_v2(
     server_region: &str,
     server_endpoint: &str,
@@ -63,6 +68,7 @@ pub fn build_setup_payload_v2(
     expires_ts: i64,
     child_name: &str,
     cluster_ca_pem_b64: Option<&str>,
+    ca_omitted: bool,
 ) -> Option<String> {
     let mut payload = serde_json::json!({
         "v": 2,
@@ -77,6 +83,11 @@ pub fn build_setup_payload_v2(
             "cluster_ca_pem_b64".to_string(),
             serde_json::Value::String(ca.to_string()),
         );
+    }
+    if ca_omitted {
+        if let Some(map) = payload.as_object_mut() {
+            map.insert("ca_omitted".to_string(), serde_json::Value::Bool(true));
+        }
     }
     serde_json::to_string(&payload).ok()
 }

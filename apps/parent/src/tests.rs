@@ -262,6 +262,7 @@ fn setup_payload_v2_matches_the_fixed_contract() {
         1_750_000_000_000,
         " Ava ",
         Some("QkVHSU4gQ0VSVA=="),
+        false,
     )
     .expect("payload with CA builds");
     let v: serde_json::Value = serde_json::from_str(&with_ca).expect("payload is valid JSON");
@@ -272,6 +273,10 @@ fn setup_payload_v2_matches_the_fixed_contract() {
     assert_eq!(v["expires_ts"], 1_750_000_000_000_i64);
     assert_eq!(v["child_name"], "Ava");
     assert_eq!(v["cluster_ca_pem_b64"], "QkVHSU4gQ0VSVA==");
+    assert!(
+        v.get("ca_omitted").is_none(),
+        "CA included -> no ca_omitted marker"
+    );
 
     let without_ca = build_setup_payload_v2(
         "uk",
@@ -280,6 +285,7 @@ fn setup_payload_v2_matches_the_fixed_contract() {
         1,
         "Ava",
         None,
+        false,
     )
     .expect("payload without CA builds");
     let v: serde_json::Value = serde_json::from_str(&without_ca).expect("payload is valid JSON");
@@ -287,6 +293,27 @@ fn setup_payload_v2_matches_the_fixed_contract() {
         v.get("cluster_ca_pem_b64").is_none(),
         "no pinned CA -> the field is omitted entirely"
     );
+    assert!(
+        v.get("ca_omitted").is_none(),
+        "no pinned CA -> no ca_omitted marker (public-roots signal stays clean)"
+    );
+
+    // The dense-QR fallback: a pin EXISTS but is left out of the QR payload —
+    // the marker tells the child app to insist on the full setup code instead
+    // of attempting an unpinned handshake against a private-CA server.
+    let qr_fallback = build_setup_payload_v2(
+        "uk",
+        "https://family.example.test:8443",
+        "ABCD2345",
+        1,
+        "Ava",
+        None,
+        true,
+    )
+    .expect("QR-fallback payload builds");
+    let v: serde_json::Value = serde_json::from_str(&qr_fallback).expect("payload is valid JSON");
+    assert!(v.get("cluster_ca_pem_b64").is_none());
+    assert_eq!(v["ca_omitted"], true);
 
     // A realistic pinned CA (PEM ~1.8 KB -> base64 ~2.4 KB) still renders as a
     // QR via the low-error-correction fallback; the copy path never depends on it.
@@ -298,6 +325,7 @@ fn setup_payload_v2_matches_the_fixed_contract() {
         1,
         "Ava",
         Some(&big_ca),
+        false,
     )
     .expect("dense payload builds");
     assert!(pair_qr_svg(&dense).is_some());

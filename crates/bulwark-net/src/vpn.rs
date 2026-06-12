@@ -203,6 +203,12 @@ pub fn build_interceptor(
             Arc::new(DevInMemoryKeyStore::new())
         }
     };
+    // Serialize CA load-or-generate across in-process callers: startVpn and the
+    // JNI inspectionCaPem can race on FIRST RUN, and the file keystore's key +
+    // cert writes are not atomic together — an interleaving could persist a
+    // mismatched key/cert pair (every minted leaf would then fail validation).
+    static CA_INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _ca_init = CA_INIT.lock().unwrap_or_else(|e| e.into_inner());
     Ok(Arc::new(NetInterceptor::with_keystore(net_cfg, keystore)?))
 }
 
