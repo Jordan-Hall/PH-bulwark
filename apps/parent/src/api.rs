@@ -259,9 +259,12 @@ pub async fn set_child_config(
 
 /// Read a child's desired-vs-applied config status (`ChildControl.GetChildStatus`):
 /// the latest guardian-set version, the last version the child device reported
-/// applied (its config poll doubles as the ack), and when it last checked in.
-/// Content-free. Returns (desired_version, applied_version, last_report_ts).
-pub async fn get_child_status(child_id: &str) -> anyhow::Result<(u64, u64, i64)> {
+/// applied (its config poll doubles as the ack), when it last checked in, and the
+/// guardian's saved desired config document (seeds the console's draft controls).
+/// Content-free. Returns (desired_version, applied_version, last_report_ts, desired).
+pub async fn get_child_status(
+    child_id: &str,
+) -> anyhow::Result<(u64, u64, i64, Option<ChildConfig>)> {
     let token = guardian_token();
     if token.is_empty() {
         anyhow::bail!("login required for this server");
@@ -278,6 +281,7 @@ pub async fn get_child_status(child_id: &str) -> anyhow::Result<(u64, u64, i64)>
         status.desired_version,
         status.applied_version,
         status.last_report_ts,
+        status.desired,
     ))
 }
 
