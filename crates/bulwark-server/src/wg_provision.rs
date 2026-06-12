@@ -166,14 +166,21 @@ impl WgPeerStore {
             .unwrap_or(0)
     }
 
-    /// Persist the current state under the held lock (consistent), then write.
-    /// A write failure is logged, never fatal — in-memory stays authoritative.
-    fn persist_locked(&self, inner: &Inner) {
+    /// Persist the current state under the held lock (consistent). UNLIKE the
+    /// account/config stores (where in-memory stays authoritative), the JSON
+    /// file here IS the reconciler's only input — a grant that never reaches
+    /// it is a promise the tunnel can never keep, so a write failure must FAIL
+    /// the registration (the caller rolls the in-memory change back).
+    fn persist_locked(&self, inner: &Inner) -> Result<(), Status> {
         if let Some(file) = &self.persist {
             if let Err(e) = file.store(&inner.snapshot()) {
-                tracing::warn!(error = %e, "failed to persist wg peers; continuing in-memory");
+                tracing::error!(error = %e, "failed to persist wg peers — refusing the grant");
+                return Err(Status::unavailable(
+                    "could not record the peer enrollment on this region — try again",
+                ));
             }
         }
+        Ok(())
     }
 
     /// Register (or refresh) one device's WG peer. Pure allocation — the
@@ -224,14 +231,22 @@ impl WgPeerStore {
             Some(existing) => {
                 // Key rotation (reinstall / re-pair): the device keeps its
                 // stable tunnel address; only the key changes.
-                existing.public_key = public_key.clone();
-                existing.updated_ts = Self::now_ms();
-                Some(existing.address.clone())
+                let prev_key = std::mem::replace(&mut existing.public_key, public_key.clone());
+                let prev_ts = std::mem::replace(&mut existing.updated_ts, Self::now_ms());
+                Some((existing.address.clone(), prev_key, prev_ts))
             }
             None => None,
         };
-        if let Some(address) = rotated {
-            self.persist_locked(&inner);
+        if let Some((address, prev_key, prev_ts)) = rotated {
+            if let Err(e) = self.persist_locked(&inner) {
+                // Roll the rotation back so a later retry re-attempts the
+                // write instead of short-circuiting on the idempotent path.
+                if let Some(existing) = inner.by_device.get_mut(&device_id) {
+                    existing.public_key = prev_key;
+                    existing.updated_ts = prev_ts;
+                }
+                return Err(e);
+            }
             return Ok(address);
         }
 
@@ -251,13 +266,19 @@ impl WgPeerStore {
         inner.by_device.insert(
             device_id.clone(),
             PeerRow {
-                device_id,
+                device_id: device_id.clone(),
                 address: address.clone(),
                 public_key,
                 updated_ts: Self::now_ms(),
             },
         );
-        self.persist_locked(&inner);
+        if let Err(e) = self.persist_locked(&inner) {
+            // Roll the allocation back: the address was never durably granted,
+            // so it must not be consumed from the pool (and a retry must not
+            // hit the idempotent path and return Ok without persisting).
+            inner.by_device.remove(&device_id);
+            return Err(e);
+        }
         Ok(address)
     }
 }
@@ -611,6 +632,34 @@ mod tests {
         let json = std::fs::read_to_string(dir.join("wg_peers.json")).unwrap();
         assert!(json.contains(&test_key(9)), "rotated key persisted");
         assert!(!json.contains(&test_key(1)), "replaced key is gone");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persist_failure_fails_the_grant_and_rolls_back() {
+        let dir = std::env::temp_dir().join(format!(
+            "bulwark-wgpeers-rofail-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Squat a DIRECTORY on the store's file name: the atomic temp+rename in
+        // JsonFile::store cannot replace a directory, so every write fails —
+        // a portable stand-in for "state dir went read-only / disk full".
+        std::fs::create_dir_all(dir.join("wg_peers.json")).unwrap();
+
+        let store = WgPeerStore::with_state_dir(&dir).unwrap();
+        // The file IS the reconciler contract: an unpersistable enrollment must
+        // be REFUSED, not granted-and-lost.
+        let err = store.register_peer("dev-1", &test_key(1)).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+        // And rolled back: a retry must re-attempt the write (same error), not
+        // short-circuit on the idempotent path and return Ok without persisting.
+        let err = store.register_peer("dev-1", &test_key(1)).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unavailable);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
