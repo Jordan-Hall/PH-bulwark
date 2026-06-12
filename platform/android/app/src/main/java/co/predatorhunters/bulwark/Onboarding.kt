@@ -493,10 +493,13 @@ private fun PairStep(
     // A built-in cloud region serves a PUBLIC certificate (Let's Encrypt), so it
     // needs no pinned CA. A self-hosted https server may use a private CA: there
     // we still want the certificate up front (via the full setup code) rather
-    // than a failed handshake. So only require a CA for self-hosted https.
+    // than a failed handshake. The console only OMITS the CA from a v2 payload
+    // when it has no pin (= the server validates via public roots), so a payload
+    // without a CA is the honest "no pin needed" signal — only MANUAL self-hosted
+    // entry (no payload, no pin) still requires the CA up front.
     val isBuiltinEndpoint = Servers.any { it.id != "self" && it.endpoint == endpoint }
     val needsCa = endpoint.startsWith("https://") && !isBuiltinEndpoint &&
-        !caPinned && payload?.clusterCaPem == null
+        !caPinned && payload == null
     val endpointReady = endpoint.isNotBlank()
     val loading = state is PairingState.Loading
     val paired = alreadyPaired || state is PairingState.Success

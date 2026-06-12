@@ -85,7 +85,18 @@ fn cluster_endpoint(endpoint: &str, ca_path: &str) -> Result<Endpoint, String> {
         let pinned = if ca_path.is_empty() {
             None
         } else {
-            std::fs::read(ca_path).ok()
+            match std::fs::read(ca_path) {
+                Ok(pem) => Some(pem),
+                // No pin provisioned on this device -> public trust below.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                // A pin EXISTS but is unreadable: never silently downgrade a
+                // pinned (self-hosted / private-CA) server to public roots.
+                Err(e) => {
+                    return Err(format!(
+                        "pinned cluster CA at {ca_path} exists but is unreadable: {e}"
+                    ))
+                }
+            }
         };
         let tls = match pinned {
             // Private-CA path: pin the device-local CA so a self-hosted /
