@@ -18,10 +18,12 @@ use crate::servers::{cluster_ca_path_for_endpoint, cluster_endpoint, guardian_to
 
 /// Build a tonic [`Channel`] to the cluster.
 ///
-/// * If `BULWARK_CLUSTER_CA` is set (path to a PEM CA cert), pin it via
-///   [`ClientTlsConfig`] (tonic `tls-ring` feature). The cluster authenticates
-///   itself with a cert chaining to this root.
-/// * Otherwise dial in the clear — a dev/plaintext convenience only.
+/// * If a CA is pinned for this server (`BULWARK_CLUSTER_CA` or the per-server
+///   `cluster_ca.pem`), pin it via [`ClientTlsConfig`] — for self-hosted /
+///   private-CA servers whose cert public roots can't validate.
+/// * Otherwise, for `https://`, trust the PUBLIC roots (the default: the cloud
+///   regions serve a real Let's Encrypt cert). Plaintext `http://` is refused to
+///   anything but loopback by `plaintext_allowed`.
 ///
 /// Never panics: a bad CA path or unreachable endpoint returns `Err`, and the
 /// caller falls back to OFFLINE sample data.
@@ -48,18 +50,18 @@ pub async fn connect_channel_to(endpoint: &str, ca_path: Option<&str>) -> anyhow
     let mut builder = Endpoint::from_shared(endpoint.to_string())?;
 
     if let Some(ca_path) = ca_path.filter(|p| !p.trim().is_empty()) {
+        // Private-CA path (self-hosted / on-box CA): pin the provided root so the
+        // cluster authenticates with a cert chaining to it.
         let ca_pem = std::fs::read(ca_path)?;
         let tls = ClientTlsConfig::new().ca_certificate(Certificate::from_pem(&ca_pem));
         builder = builder.tls_config(tls)?;
     } else if endpoint.trim().to_ascii_lowercase().starts_with("https://") {
-        // tonic here is tls-ring with NO OS-root fallback compiled in: an https
-        // dial without a pinned CA can never validate. Fail with the fix instead
-        // of tonic's opaque transport error.
-        anyhow::bail!(
-            "https endpoint but no CA pinned for it: copy the server's ca.crt to {} (or set \
-             BULWARK_CLUSTER_CA to its path)",
-            cluster_ca_path_for_endpoint(endpoint).display()
-        );
+        // No pinned CA -> PUBLIC trust (the default now that the production
+        // regions serve a real Let's Encrypt cert on their domain). Pinning
+        // stays available above for self-hosted/private-CA setups; the SNI/
+        // server name is derived from the endpoint URI authority by tonic.
+        let tls = ClientTlsConfig::new().with_enabled_roots();
+        builder = builder.tls_config(tls)?;
     }
 
     Ok(builder.connect().await?)

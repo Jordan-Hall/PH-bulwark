@@ -135,7 +135,7 @@ core) reconciles to the desired state:
 |---|---|
 | `filtering_enabled` true→false | Stop the filtering pump / VpnService (or relax to always-on lockdown if managed); show *"Paused by guardian"*. |
 | `filtering_enabled` false→true | Start `BulwarkVpnService` (consent permitting — §4); run the netstack pump. |
-| `server_region` / `server_endpoint` | Reconnect the cluster client + restart the TLS inspection/pump against the new endpoint; re-validate the per-server pinned CA; re-scope alerts/heartbeats to the new server. (Matches the "on server switch" requirement already noted in `app-pairing-and-regions.md`.) |
+| `server_region` / `server_endpoint` | Reconnect the cluster client + restart the TLS inspection/pump against the new endpoint; trust the public roots for a public-cert region, or re-validate the per-server pinned CA when one is provisioned (private/self-hosted); re-scope alerts/heartbeats to the new server. (Matches the "on server switch" requirement already noted in `app-pairing-and-regions.md`.) |
 | `profile` | Set the `bulwark-policy` `AgeProfile` + thresholds used by `analyzeText`/verdict evaluation. |
 | `require_always_on` | If Device Owner: `Lockdown.enforce` (always-on VPN, fail-closed). Else: surface "ask the guardian to set this device up as managed" — cannot be forced. |
 

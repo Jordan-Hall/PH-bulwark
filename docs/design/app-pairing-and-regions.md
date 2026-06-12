@@ -138,13 +138,16 @@ copies — **v2, shipped in the Manager console 2026-06-11**):
 }
 ```
 
-`cluster_ca_pem_b64` carries the console's pinned cluster CA for the active
-server (`sessions/<server_hash>/cluster_ca.pem`), so the child device can make
-its FIRST TLS call against a self-hosted/private-CA server with no manual CA
-provisioning. It is public certificate material, not a secret — the short-lived,
-single-use `pair_code` remains the only credential. If a large CA makes the QR
-too dense to encode, the console falls back to a QR without it; the "Copy setup
-code" paste path always carries the complete payload.
+`cluster_ca_pem_b64` is OPTIONAL. The cloud regions (UK/London, US) now serve a
+real public certificate (Let's Encrypt on `api.predatorhunters.co.uk` /
+`vpn.predatorhunters.co.uk`), so the child device validates them with the
+standard public trust store and needs no pinned CA — the field is simply
+omitted. It is carried only for a **self-hosted / private-CA** server, so the
+child can make its FIRST TLS call there with no manual CA provisioning. It is
+public certificate material, not a secret — the short-lived, single-use
+`pair_code` remains the only credential. If a large CA makes the QR too dense to
+encode, the console falls back to a QR without it; the "Copy setup code" paste
+path always carries the complete payload.
 
 - **QR (default — phone-to-phone, no extra hardware).** After "Add child", the parent
   app renders the payload as a QR. The child app opens the camera, scans it, and
@@ -187,7 +190,8 @@ bulwark-server --role all-in-one
 
 For production self-hosting:
 
-- Prefer TLS and set `BULWARK_CLUSTER_CA` in the guardian app if using a private CA.
+- Prefer TLS. With a publicly-trusted cert (e.g. Let's Encrypt) no pin is needed.
+  Set `BULWARK_CLUSTER_CA` in the guardian app only when using a private CA.
 - Keep `BULWARK_STATE_DIR` durable, backed up, and private.
 - Provision SMTP/FCM only if alerts need email/push fan-out.
 - Client heavy-media offload still needs client mTLS material; alert/review can
