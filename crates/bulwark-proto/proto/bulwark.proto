@@ -758,6 +758,56 @@ service ChildControl {
 }
 
 // ---------------------------------------------------------------------------
+// WgProvision service — WireGuard peer provisioning for FILTER_ON_SERVER.
+// The child device registers its WireGuard PUBLIC key (the private key NEVER
+// leaves the device — same invariant as the per-install inspection CA) and
+// learns its assigned tunnel address + the region's endpoint material.
+//   * DEVICE-authenticated: device_id + the per-device token minted at pairing
+//     (PairResult.device_token) — the same gate as ChildControl Get/Stream.
+//   * Idempotent: re-registering the same device+key returns the SAME address;
+//     a NEW key for the same device is a key rotation (address kept stable).
+//   * DECOUPLED from wg(8): the server only persists the DESIRED peer set to
+//     `<BULWARK_STATE_DIR>/wg_peers.json` (/var/lib/bulwark/wg_peers.json on a
+//     region box); an on-box reconciler applies it with
+//     deploy/wireguard/wg-peers.sh. A grant is a PROMISE of enrollment, live
+//     after the next reconcile pass — not an already-open tunnel.
+// Content-free: keys, addresses, endpoints only — never message/media.
+// ---------------------------------------------------------------------------
+
+message RegisterWgPeerRequest {
+  string device_id     = 1; // the enrolled supervised device (same id as everywhere else)
+  string device_token  = 2; // per-device credential from PairResult.device_token
+  // The device's WireGuard PUBLIC key (44-char base64 of 32 bytes), generated
+  // on-device (boringtun). NEVER the private key — the server validates shape
+  // only (a public and private key are indistinguishable by shape, so keeping
+  // the private key on-device is the CLIENT's enrollment invariant).
+  string wg_public_key = 3;
+}
+
+message WgPeerGrant {
+  // Assigned tunnel address, e.g. "10.8.0.7" — stable per device across
+  // re-registers and key rotations. The client configures it as a /32.
+  string assigned_address  = 1;
+  string server_public_key = 2; // the region's WG public key (base64)
+  string server_endpoint   = 3; // host:port, e.g. "vpn.predatorhunters.co.uk:51820"
+  uint32 keepalive_secs    = 4; // PersistentKeepalive the client should set (25)
+  // HONEST server-side-filtering flag: TRUE only when the bulwark-net engine is
+  // actually inspecting the wg0 forward path on this region (phase 3 of
+  // docs/design/server-vpn-mode-and-ca-trust.md §4). While FALSE the tunnel is
+  // transport/NAT ONLY — a child whose guardian expects filtering must NOT be
+  // routed through an unfiltered exit, so the client keeps filtering ON-DEVICE
+  // (or declines the tunnel) when this is false. Never set aspirationally.
+  bool   filter_active     = 5;
+}
+
+// Device-facing WireGuard provisioning (auth: the pairing-minted device token).
+service WgProvision {
+  // Register/refresh this device's WG peer enrollment and learn its grant.
+  // Safe to call on every tunnel bring-up (idempotent; rotation-aware).
+  rpc RegisterWgPeer(RegisterWgPeerRequest) returns (WgPeerGrant);
+}
+
+// ---------------------------------------------------------------------------
 // ClusterControl service — membership / health / work queue (bulwark-cluster)
 // ---------------------------------------------------------------------------
 

@@ -12,6 +12,7 @@ use bulwark_proto::v1::child_control_server::ChildControlServer;
 use bulwark_proto::v1::offload_server::{Offload, OffloadServer};
 use bulwark_proto::v1::review_server::ReviewServer;
 use bulwark_proto::v1::tamper_server::TamperServer;
+use bulwark_proto::v1::wg_provision_server::WgProvisionServer;
 use bulwark_proto::v1::{
     Action, AlertAck, AlertAckBatch, AlertBatch, AlertEvent, AnalysisBatch, AnalysisRequest,
     Category, DeviceProfile, OffloadPolicy, RefreshOffloadRequest, Severity, Verdict, VerdictBatch,
@@ -23,6 +24,7 @@ use crate::accounts::{AccountStore, AccountsService};
 use crate::child_control::{ChildConfigStore, ChildControlService};
 use crate::relay::{AlertHub, ReviewService};
 use crate::tamper::{self, TamperService};
+use crate::wg_provision::{WgPeerStore, WgProvisionService};
 use crate::{default_offload_policy, AnalyzerRegistry, ServerConfig, ServerRole};
 
 fn to_status(e: bulwark_core::Error) -> Status {
@@ -399,6 +401,20 @@ pub async fn run(
             };
             router = router.add_service(ChildControlServer::new(ChildControlService::new(
                 child_config,
+                accounts.clone(),
+            )));
+            // WireGuard peer provisioning (FILTER_ON_SERVER): device-token-
+            // authenticated against the SAME accounts store. The handler only
+            // persists the DESIRED peer set (wg_peers.json under the state
+            // dir) — an on-box reconciler applies it with
+            // deploy/wireguard/wg-peers.sh; the gRPC path never touches wg(8).
+            // Region material comes from BULWARK_WG_* env (from_env).
+            let wg_peers = match &cfg.state_dir {
+                Some(dir) => WgPeerStore::with_state_dir(dir)?,
+                None => WgPeerStore::new(),
+            };
+            router = router.add_service(WgProvisionServer::new(WgProvisionService::from_env(
+                wg_peers,
                 accounts.clone(),
             )));
             // Enable the EMAIL-based password-reset path automatically when SMTP is
