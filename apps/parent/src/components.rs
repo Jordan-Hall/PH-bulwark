@@ -215,19 +215,20 @@ pub fn AlertCard(alert: Alert, on_decide: EventHandler<bool>) -> Element {
     // Cohesive icon + tint per alert family: grooming/protection-status read as a
     // gentle warning; content blocks read as a calm "kept safe"; CSAM is withheld.
     let is_grooming = alert.category == Category::Grooming;
-    let (ic_cls, ic_name) = if is_csam {
-        ("alert-ic csam", "eye-off")
+    let (card_cls, eyebrow, ic_cls, ic_name) = if is_csam {
+        ("alert-card alert-withheld", "Blocked — never stored", "alert-ic csam", "eye-off")
     } else if is_grooming {
-        ("alert-ic warn", "alert")
+        ("alert-card alert-serious", "Needs your attention", "alert-ic warn", "alert")
     } else {
-        ("alert-ic block", "shield-check")
+        ("alert-card alert-handled", "Handled for you", "alert-ic block", "shield-check")
     };
 
     rsx! {
-        div { class: "alert-card",
+        div { class: "{card_cls}",
             div { class: "alert-top",
                 span { class: "{ic_cls}", dangerous_inner_html: "{svg(ic_name)}" }
                 div { class: "alert-head",
+                    div { class: "alert-eyebrow", "{eyebrow}" }
                     div { class: "ttl", "{alert.title}" }
                     div { class: "meta", "{alert.device} \u{00b7} {alert.when}" }
                 }
