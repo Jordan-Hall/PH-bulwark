@@ -243,8 +243,11 @@ shippable in reviewable increments. Status as of **2026-06-10**.
 - **Native Android onboarding** — guided one-permission-at-a-time setup journey +
   proper VpnService-consent flow (the model the Dioxus child mirrors).
 
-### Workflow A — Dioxus app suite: code-split + full Dioxus stack (incl. router)
-**The Dioxus apps are the main UI** (`apps/parent` console, `apps/child` shield).
+### Workflow A — Dioxus console + child design preview (code-split + router)
+**`apps/parent` (the guardian console) is the shipped Dioxus app.** `apps/child` is a
+Dioxus **design preview** of the child onboarding journey (desktop/web), NOT the shipped
+child — the child ships **native** (`platform/android`: VpnService/Accessibility/DeviceAdmin
++ Rust JNI core), because those OS services can't be a webview.
 Split each single-file app into a maintainable module tree (lib+bin, `screens/`,
 `components/`, `state/`, `api/`, `theme`), share a theme-parameterised
 `bulwark-ui-kit`, and adopt **`dioxus-router`** (typed `Route` enum, `Outlet`,

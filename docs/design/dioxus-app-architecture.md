@@ -1,10 +1,16 @@
 # Dioxus app architecture — code-split, shared UI kit, refactor plan
 
-Status: design (2026-06-10). Targets `apps/parent` (PH Bulwark Manager) and
-`apps/child` (PH Bulwark Shield). Both are pinned to **Dioxus `0.8.0-alpha.0`**
+Status: design (2026-06-10). Targets `apps/parent` (PH Bulwark Manager — **the
+shipped Dioxus app**) and `apps/child` (a Dioxus **design preview** of the child
+onboarding journey, desktop/web only). Both are pinned to **Dioxus `0.8.0-alpha.0`**
 and are **detached cargo workspaces** (`[workspace]` with no members in each
-`Cargo.toml`) so the engine's `cargo build --workspace` never pulls the Dioxus
-tree. This doc keeps those two constraints.
+`Cargo.toml`) so the engine's `cargo build --workspace` never pulls the Dioxus tree.
+
+> **Important:** `apps/child` is **not** the shipped child app. The child ships
+> **native** (`platform/android`: VpnService / AccessibilityService /
+> DeviceAdminReceiver + the Rust core over JNI) because those OS services cannot be
+> a webview. `apps/child` exists only to iterate the journey's design and drive the
+> `tools/ui-tests` web journey.
 
 ## 1. Goals and non-goals
 
