@@ -95,9 +95,11 @@ async fn main() -> anyhow::Result<()> {
         ))
     });
 
-    // Email sink: SMTP via env (BULWARK_SMTP_HOST + BULWARK_ALERT_FROM +
-    // BULWARK_ALERT_RECIPIENTS, see AlertConfig::from_env), or None. A partial/
-    // invalid config fails at startup rather than silently dropping alerts.
+    // Guardian-ALERT email sink: on only when BULWARK_ALERT_FROM +
+    // BULWARK_ALERT_RECIPIENTS are set (BULWARK_SMTP_HOST is the shared
+    // transport — it may be set purely for the password-reset mailer, which
+    // must NOT force a static alert recipient). A partial config fails at
+    // startup rather than silently dropping alerts.
     let email_sink: Option<Arc<dyn bulwark_alert::AlertSink>> =
         match bulwark_alert::AlertConfig::from_env().map_err(|e| anyhow::anyhow!(e))? {
             Some(cfg) => {
@@ -107,7 +109,10 @@ async fn main() -> anyhow::Result<()> {
                 Some(Arc::new(sink))
             }
             None => {
-                tracing::info!("no email alert sink (BULWARK_SMTP_HOST unset)");
+                tracing::info!(
+                    "no guardian-alert email sink (BULWARK_ALERT_FROM/RECIPIENTS unset); \
+                     password-reset mail is independent and uses BULWARK_SMTP_HOST + BULWARK_RESET_FROM"
+                );
                 None
             }
         };
