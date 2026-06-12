@@ -965,16 +965,40 @@ impl TxToken for TunTxToken<'_> {
 /// TCP socket buffer per flow, each direction (64 KiB).
 const FLOW_BUF: usize = 64 * 1024;
 
-/// Build the smoltcp interface over `device` for TRANSPARENT capture: `any_ip` so it
-/// accepts packets addressed to ANY destination (the device's real traffic), with a
-/// dummy in-subnet address as the netstack's own identity.
+/// Identity the netstack presents on the TUN: the gateway the Android
+/// `VpnService` advertises (`addAddress 10.0.0.2/32`, `addDnsServer 10.0.0.1`).
+/// Using `10.0.0.1` puts the client `10.0.0.2` on-link, so egress to the client
+/// needs no router, and lets the default route below name OUR OWN address as the
+/// any_ip gateway.
+const NETSTACK_GATEWAY: Ipv4Address = Ipv4Address::new(10, 0, 0, 1);
+
+/// Build the smoltcp interface over `device` for TRANSPARENT capture.
+///
+/// `any_ip` lets the interface accept packets addressed to ANY destination (the
+/// device's real traffic). But in smoltcp 0.12 `any_ip` is NOT sufficient on its
+/// own: `process_ipv4` only accepts a packet to a non-local destination when a
+/// route prefix resolves that destination to one of the interface's OWN
+/// addresses (otherwise: "Rejecting IPv4 packet; no matching routes"). So we:
+///   * give the interface the client-subnet gateway `10.0.0.1/24` as its
+///     identity — the client `10.0.0.2` is then on-link for replies; and
+///   * add a default IPv4 route via that same `10.0.0.1`, so EVERY captured
+///     destination resolves to a local gateway and is accepted on ingress.
+///
+/// Without the default route the pump rejected every public-IP SYN on ingress —
+/// the device had DNS (which bypasses smoltcp) but no TCP (the on-device
+/// blackhole). IPv4-only by design: v6 is dropped in `handle_inbound`, so no v6
+/// route is needed (it would never be consulted).
 fn build_interface(device: &mut TunPhy) -> Interface {
     let config = Config::new(HardwareAddress::Ip);
     let mut iface = Interface::new(config, device, SmolInstant::now());
     iface.set_any_ip(true);
     iface.update_ip_addrs(|addrs| {
-        let _ = addrs.push(IpCidr::new(IpAddress::v4(10, 64, 0, 1), 24));
+        let _ = addrs.push(IpCidr::new(IpAddress::Ipv4(NETSTACK_GATEWAY), 24));
     });
+    iface
+        .routes_mut()
+        .add_default_ipv4_route(NETSTACK_GATEWAY)
+        .expect("fresh routes table has room for one default route");
     iface
 }
 
@@ -1327,5 +1351,116 @@ mod tests {
         // The DNS payload extractor must not mistake a TCP packet for UDP.
         let tcp = ipv4_tcp_syn(443);
         assert!(v4_udp_payload(&tcp).is_none());
+    }
+
+    /// REGRESSION (device blackhole): with `any_ip` on, smoltcp only ACCEPTS an
+    /// inbound packet addressed to a non-local destination if a route prefix
+    /// resolves that destination to one of the interface's own addresses
+    /// (smoltcp 0.12 `process_ipv4`: "Rejecting IPv4 packet; no matching
+    /// routes"). The old `build_interface` set `any_ip` but added NO route, so
+    /// every captured SYN to a public IP was dropped on INGRESS — the per-flow
+    /// listener never saw it and no SYN-ACK was ever emitted toward the client.
+    /// DNS still worked only because it bypasses smoltcp entirely.
+    ///
+    /// This drives a real client SYN (10.0.0.2 -> a public dst) through the
+    /// interface + listener and asserts the interface EMITS a reply addressed
+    /// BACK to the client. It FAILS against `10.64.0.1/24` + no-route and PASSES
+    /// once the identity is on the client subnet AND a default route makes any
+    /// destination locally routable.
+    #[test]
+    fn captured_syn_to_public_dst_emits_synack_to_client() {
+        let fake = FakeTun {
+            sent: std::sync::Mutex::new(Vec::new()),
+        };
+        let mut phy = TunPhy::new(&fake, 1500);
+        let mut iface = build_interface(&mut phy);
+        let mut sockets = SocketSet::new(Vec::new());
+
+        // Per-flow transparent listener bound to the captured destination.
+        let dst = IpEndpoint::new(IpAddress::v4(93, 184, 216, 34), 443);
+        let _h = open_proxy_listener(&mut sockets, dst).expect("listener opens");
+
+        // The exact packet shape the Android TUN delivers: SYN from 10.0.0.2,
+        // with valid IP + TCP checksums (smoltcp verifies them on ingress).
+        let mut syn = ipv4_tcp_syn(443);
+        {
+            let (src, dst) = {
+                let ip = Ipv4Packet::new_checked(&syn[..]).unwrap();
+                (
+                    IpAddress::Ipv4(ip.src_addr()),
+                    IpAddress::Ipv4(ip.dst_addr()),
+                )
+            };
+            let ihl = (syn[0] & 0x0f) as usize * 4;
+            {
+                let mut tcp = TcpPacket::new_unchecked(&mut syn[ihl..]);
+                tcp.fill_checksum(&src, &dst);
+            }
+            let mut ip = Ipv4Packet::new_unchecked(&mut syn[..]);
+            ip.fill_checksum();
+        }
+        phy.stage(syn);
+        iface.poll(SmolInstant::now(), &mut phy, &mut sockets);
+
+        // The interface must have emitted a SYN-ACK back to the client. Before
+        // the fix nothing is emitted because the SYN is rejected on ingress.
+        let sent = fake.sent.lock().unwrap();
+        let reply = sent.iter().find_map(|p| parse_packet(p)).expect(
+            "interface must emit a reply to the captured SYN (none means the SYN \
+             was rejected on ingress: any_ip with no matching route)",
+        );
+        assert_eq!(
+            reply.dst.to_string(),
+            "10.0.0.2",
+            "the SYN-ACK must be addressed back to the client TUN address"
+        );
+        assert_eq!(
+            reply.src.to_string(),
+            "93.184.216.34",
+            "and sourced AS the original destination (transparent capture)"
+        );
+        assert!(
+            matches!(reply.transport, Transport::Tcp { syn: true, .. }),
+            "the emitted reply must be a SYN-ACK"
+        );
+    }
+
+    /// Narrower invariant guarding the same regression via the public smoltcp
+    /// API alone (no packet pump): `any_ip` capture requires a route prefix that
+    /// names one of the interface's own addresses as its gateway, so the
+    /// interface must OWN the client-subnet gateway it routes through. (The
+    /// default-route half — that a public destination resolves to that gateway
+    /// — is exercised end-to-end by `captured_syn_to_public_dst_emits_synack_to_client`;
+    /// `Routes::lookup` is private to smoltcp so it can't be asserted directly.)
+    #[test]
+    fn build_interface_owns_the_client_subnet_gateway() {
+        struct Dummy;
+        impl crate::tun::TunDevice for Dummy {
+            fn up(&mut self, _c: &crate::tun::TunConfig) -> crate::Result<()> {
+                Ok(())
+            }
+            fn recv(&self, _b: &mut [u8]) -> crate::Result<usize> {
+                Ok(0)
+            }
+            fn send(&self, p: &[u8]) -> crate::Result<usize> {
+                Ok(p.len())
+            }
+            fn close(&mut self) -> crate::Result<()> {
+                Ok(())
+            }
+            fn backend(&self) -> &'static str {
+                "dummy"
+            }
+        }
+        let dummy = Dummy;
+        let mut phy = TunPhy::new(&dummy, 1500);
+        let iface = build_interface(&mut phy);
+        // The interface must own the client-subnet gateway 10.0.0.1 so that a
+        // route naming it as via_router satisfies smoltcp's any_ip ingress gate
+        // and the client 10.0.0.2 is on-link for egress.
+        assert!(
+            iface.has_ip_addr(IpAddress::v4(10, 0, 0, 1)),
+            "interface must own the 10.0.0.1 gateway the TUN advertises"
+        );
     }
 }
