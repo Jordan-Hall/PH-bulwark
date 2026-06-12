@@ -64,6 +64,13 @@ class MainActivity : ComponentActivity() {
     private var paired by mutableStateOf(false)
     private var enrollment by mutableStateOf<EnrollmentRecord?>(null)
 
+    /**
+     * Honest status: the guardian may have asked for server-side ("cloud")
+     * filtering, but that data path is still staged — we keep filtering
+     * on-device and only surface the request. Sourced from [ChildConfigSync].
+     */
+    private var cloudFilteringRequested by mutableStateOf(false)
+
     /** "Force the journey" — set when the guardian taps "Review setup" on the dashboard. */
     private var forceJourney by mutableStateOf(false)
 
@@ -107,6 +114,7 @@ class MainActivity : ComponentActivity() {
             vpnRunning = vpnRunning,
             antiRemovalOn = antiRemovalOn,
             paired = paired,
+            cloudFilteringRequested = cloudFilteringRequested,
         )
         val onboardingDone = prefs().getBoolean(KEY_ONBOARDING_DONE, false)
         val showDashboard = !forceJourney && onboardingDone && isFullySetUp(state)
@@ -245,6 +253,7 @@ class MainActivity : ComponentActivity() {
         antiRemovalOn = Lockdown.isDeviceOwner(this) || Lockdown.isActiveAdmin(this)
         paired = Enrollment.isEnrolled(this)
         enrollment = Enrollment.record(this)
+        cloudFilteringRequested = ChildConfigSync.cloudFilteringRequested(this)
     }
 
     private fun prefs() = getSharedPreferences(PREFS, Context.MODE_PRIVATE)

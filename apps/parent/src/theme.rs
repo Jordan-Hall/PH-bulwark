@@ -64,6 +64,10 @@ pub const CSS: &str = r#"
 
 * { box-sizing: border-box; }
 body { margin: 0; font-family: var(--body); background: var(--paper); color: var(--ink); -webkit-font-smoothing: antialiased; }
+::selection { background: rgba(87,166,57,.25); color: var(--navy-ink); }
+button:focus-visible, a:focus-visible, input[type='radio']:focus-visible, select:focus-visible {
+  outline: 2px solid var(--green); outline-offset: 2px;
+}
 
 /* ======================================================================
    CONSOLE SHELL — a bright, calm dashboard.
@@ -168,8 +172,8 @@ button { border: 0; border-radius: var(--r-xs); padding: 9px 16px; font-size: 13
 .ghost:hover { border-color: var(--navy); color: var(--navy); }
 .danger-link { color: var(--rose-ink); }
 .danger-link:hover { border-color: var(--rose-line); color: var(--rose-ink); background: var(--rose-tint); }
-.deny, .disconnect { background: var(--card); color: var(--rose-ink); border: 1px solid var(--rose-line); }
-.deny:hover, .disconnect:hover { background: var(--rose-tint); }
+.deny, .disconnect { background: var(--card); color: var(--rose-ink); border: 1px solid var(--rose-line); transition: background .18s, border-color .18s; }
+.deny:hover, .disconnect:hover { background: var(--rose-tint); border-color: #E4A893; }
 button:disabled { opacity: .55; cursor: not-allowed; box-shadow: none; }
 .small-btn { padding: 6px 12px; font-size: 12.5px; flex: 0 0 auto; }
 .connect, .disconnect { padding: 10px 22px; }
@@ -219,7 +223,7 @@ input.url:focus, .field input:focus { outline: none; border-color: var(--green);
   width: 58px; height: 58px; border-radius: 50%; display: grid; place-items: center; margin-bottom: 4px;
   background: var(--green-tint); border: 1px solid var(--green-line);
 }
-.empty-ic svg { width: 28px; height: 28px; }
+.empty-ic svg { width: 28px; height: 28px; color: var(--green-deep); }
 .empty-state .empty { margin: 0; font-family: var(--display); font-weight: 600; font-size: 18px; color: var(--navy-ink); }
 .empty-sub { color: var(--muted); font-size: 13.5px; max-width: 380px; margin: 0; line-height: 1.55; }
 .empty { color: var(--muted); }
@@ -293,12 +297,18 @@ input.url:focus, .field input:focus { outline: none; border-color: var(--green);
 .vpn-field { display: grid; gap: 8px; margin: 0; }
 .vpn-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .07em; font-weight: 700; }
 .vpn-seg { display: inline-flex; gap: 4px; background: var(--card-soft); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 4px; align-self: flex-start; flex-wrap: wrap; }
-.vpn-seg-btn { background: transparent; color: var(--ink-2); border: 0; border-radius: var(--r-xs); padding: 8px 14px; font-size: 13px; font-weight: 600; cursor: pointer; transition: background .16s, color .16s; }
-.vpn-seg-btn:hover { color: var(--navy); }
+.vpn-seg-btn { background: transparent; color: var(--ink-2); border: 0; border-radius: var(--r-xs); padding: 8px 14px; font-size: 13px; font-weight: 600; cursor: pointer; transition: background .18s, color .18s; }
+.vpn-seg-btn:hover { color: var(--navy); background: rgba(15,61,92,.05); }
 .vpn-seg-on { background: var(--navy); color: #fff; box-shadow: 0 6px 14px -8px rgba(15,61,92,.6); }
-.vpn-seg-on:hover { color: #fff; }
+.vpn-seg-on:hover { color: #fff; background: var(--navy); }
 .vpn-controls { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
-.vpn-select { background: var(--card); border: 1.5px solid var(--line); color: var(--ink); border-radius: var(--r-sm); padding: 10px 12px; font: inherit; font-size: 14px; font-weight: 500; min-width: 150px; transition: border-color .18s, box-shadow .18s; }
+.vpn-select {
+  appearance: none; -webkit-appearance: none;
+  background: var(--card) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path d='M1 1.5l5 5 5-5' fill='none' stroke='%2346555F' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/></svg>") no-repeat right 12px center;
+  border: 1.5px solid var(--line); color: var(--ink); border-radius: var(--r-sm);
+  padding: 10px 34px 10px 12px; font: inherit; font-size: 14px; font-weight: 500; min-width: 150px;
+  cursor: pointer; transition: border-color .18s, box-shadow .18s;
+}
 .vpn-select:focus { outline: none; border-color: var(--green); box-shadow: 0 0 0 3px rgba(87,166,57,.16); }
 
 /* The protection toggle is the hero control of the card */
@@ -323,7 +333,12 @@ input.url:focus, .field input:focus { outline: none; border-color: var(--green);
 }
 .vpn-note.pending { color: #7c5410; background: var(--amber-tint); border-color: var(--amber-line); }
 .vpn-note.failed { color: var(--rose-ink); background: var(--rose-tint); border-color: var(--rose-line); }
-.vpn-hint { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; background: var(--card-soft); border: 1px solid var(--line); border-radius: var(--r-sm); color: var(--ink-2); font-size: 12.5px; line-height: 1.45; }
+.vpn-hint {
+  display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; max-width: 640px;
+  background: var(--navy-tint); border: 1px solid #CBDEE9; border-radius: var(--r-sm);
+  color: var(--navy-ink); font-size: 12.5px; line-height: 1.45;
+  margin-top: -6px; animation: fade-up .35s cubic-bezier(.2,.8,.2,1) both;
+}
 .vpn-hint svg { width: 15px; height: 15px; flex: none; margin-top: 1px; color: var(--navy); }
 
 /* ======================================================================
@@ -603,5 +618,6 @@ table.cov { width: 100%; border-collapse: separate; border-spacing: 0; font-size
   .gate-title { font-size: 25px; }
   .app { padding: 18px 16px 48px; }
   .vpn-apply { margin-left: 0; }
+  .alert-body { padding: 6px 16px 16px; }
 }
 "#;

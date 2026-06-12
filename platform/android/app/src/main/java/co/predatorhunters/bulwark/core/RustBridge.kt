@@ -104,7 +104,9 @@ object RustBridge {
      * console shows ("applied ✓ vN"), and the Rust bridge live-applies the
      * fetched strictness band when the config is not older than it. Returns JSON:
      * `{ ok: true, filtering_enabled, server_region, server_endpoint, profile,
-     *    require_always_on, config_version, updated_ts }` or `{ ok: false, error }`.
+     *    require_always_on, config_version, updated_ts, filter_location }` or
+     * `{ ok: false, error }`. `filter_location` is "on_device" (default) or
+     * "on_server" (cloud filtering — staged; the child still filters on-device).
      * [deviceToken] is the per-device credential minted at pairing
      * (`PairResult.device_token`; "" for legacy token-less enrollments) — sent
      * so the server can authenticate this device's config fetch.
