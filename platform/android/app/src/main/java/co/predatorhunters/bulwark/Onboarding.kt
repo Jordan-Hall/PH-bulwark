@@ -493,13 +493,14 @@ private fun PairStep(
     // A built-in cloud region serves a PUBLIC certificate (Let's Encrypt), so it
     // needs no pinned CA. A self-hosted https server may use a private CA: there
     // we still want the certificate up front (via the full setup code) rather
-    // than a failed handshake. The console only OMITS the CA from a v2 payload
-    // when it has no pin (= the server validates via public roots), so a payload
-    // without a CA is the honest "no pin needed" signal — only MANUAL self-hosted
-    // entry (no payload, no pin) still requires the CA up front.
+    // than a failed handshake. A payload without a CA normally means the server
+    // validates via public roots — EXCEPT when it says `ca_omitted` (the console
+    // pins a CA but the QR was too dense to carry it; the copy button has the
+    // full code). Manual self-hosted entry (no payload, no pin) also requires
+    // the CA up front.
     val isBuiltinEndpoint = Servers.any { it.id != "self" && it.endpoint == endpoint }
-    val needsCa = endpoint.startsWith("https://") && !isBuiltinEndpoint &&
-        !caPinned && payload == null
+    val needsCa = endpoint.startsWith("https://") && !isBuiltinEndpoint && !caPinned &&
+        (payload == null || (payload.clusterCaPem == null && payload.caOmitted))
     val endpointReady = endpoint.isNotBlank()
     val loading = state is PairingState.Loading
     val paired = alreadyPaired || state is PairingState.Success
@@ -624,7 +625,11 @@ private fun PairStep(
                         DetailLine("Code", payload.pairCode)
                         DetailLine(
                             "Certificate",
-                            if (payload.clusterCaPem != null) "Included — pinned before connecting" else "Not included",
+                            when {
+                                payload.clusterCaPem != null -> "Included — pinned before connecting"
+                                payload.caOmitted -> "Not in this code — paste the full setup code"
+                                else -> "Not needed — server uses a public certificate"
+                            },
                         )
                     }
                 }
@@ -693,7 +698,7 @@ private fun PairStep(
                     )
                 needsCa && payload != null ->
                     Text(
-                        "This setup code doesn't include the certificate this secure server needs. Ask for a new full setup code from the parent console.",
+                        "The QR version of this setup code doesn't carry the certificate this secure server needs. Use the parent console's copy button and paste the full setup code instead.",
                         color = Warn,
                         fontSize = 13.sp,
                     )
@@ -1264,6 +1269,12 @@ internal data class SetupPayload(
     val childName: String,
     /** Decoded cluster CA PEM text, or null when the payload carried none. */
     val clusterCaPem: String?,
+    /**
+     * True when the console HAS a pinned CA for this server but left it out of
+     * this payload (the dense-QR fallback) — pairing must wait for the full
+     * setup code rather than attempt an unpinned handshake that can only fail.
+     */
+    val caOmitted: Boolean,
 ) {
     /** Client-side expiry check so an expired code never even hits the server. */
     fun isExpired(now: Long = System.currentTimeMillis()): Boolean =
@@ -1321,6 +1332,7 @@ internal fun parseSetupPayload(raw: String): SetupPayloadResult {
             expiresTs = obj.optLong("expires_ts", 0L),
             childName = obj.optString("child_name"),
             clusterCaPem = caPem,
+            caOmitted = obj.optBoolean("ca_omitted", false),
         ),
     )
 }
