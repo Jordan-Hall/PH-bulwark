@@ -43,11 +43,39 @@ prose/comments use the protective terms.
 | NDK | `C:/Android/sdk/ndk/26.3.11579264` (`ANDROID_NDK_HOME`) |
 | adb | `C:/Android/sdk/platform-tools/adb.exe` — Pixel serial `32161FDH20039M` |
 | Dioxus | `dx build --platform web` (wasm) / `dx build --platform android --device <id>` |
+| Manager desktop | from `apps/parent`: `cargo build --release` (Win/macOS/Linux console exe) |
+| Manager on Android | from `apps/parent`: `dx build --platform android --device 32161FDH20039M` — **MUST pass `--device`** or dx builds x86_64-only (→ `INSTALL_FAILED_NO_MATCHING_ABIS` on the arm64 Pixel). Export the NDK `CC_/AR_/CARGO_TARGET_*_LINKER` vars first (ring needs `cc`). App id `co.predatorhunters.bulwark.manager` coexists with the child. |
 | gh CLI | `C:\tools\gh\bin\gh.exe` |
 
 **Pitfalls:** piping (`cmd | tail`) masks exit codes — capture `$LASTEXITCODE` and grep
 the log file instead. rusqlite/`bulwark-store` does not build on this host (SAC, os
 error 4551) — it builds on CI/Linux; keep it out of android/local-only dep trees.
+- **Stale build artifacts:** cargo hardlinks outputs, so an artifact's mtime can read
+  *older* than the source change that should have rebuilt it (a Jun-11 `.so`/`.exe`
+  after a Jun-12 edit). When the VPN data path matters, rebuild the `.so` FIRST
+  (`touch crates/bulwark-net/src/vpn/netstack.rs` then `cargo ndk … build --release`),
+  confirm the jniLibs `.so` date updated, THEN `gradlew assembleDebug`. Verify on-device
+  with a fresh install — don't trust a "BUILD SUCCESSFUL" that may have packaged an old `.so`.
+- **SMTP ↔ alert coupling (prod-crash class):** `BULWARK_SMTP_HOST` is shared by the
+  password-reset mailer AND the guardian-alert mailer. The alert mailer turns on with
+  `BULWARK_ALERT_FROM`+`BULWARK_ALERT_RECIPIENTS` and errors at boot if only one is set —
+  set BOTH or NEITHER. Reset email needs only `BULWARK_SMTP_HOST`+`BULWARK_RESET_FROM`
+  (+`_USERNAME`/`_PASSWORD`); do NOT set `BULWARK_ALERT_FROM` alone.
+
+## Deployment & infra (live, 2026-06)
+
+- **Server:** single EC2 `i-0a3aa9dc27f8e1c91` (eu-west-2, IP `35.179.110.106`), gRPC+TLS
+  on `:8443`, `--features onnx,whisper,ffmpeg`, fail-CLOSED. CI builds the image → SSM
+  `docker pull` redeploy (`deploy.yml`, no SSH). The `default` AWS profile is the scoped
+  `ph-bulwark-deployer` (ssm:SendCommand ONLY) — it CAN recover a downed box directly via
+  `aws ssm send-command` (image must be on the box or re-pulled with a GHCR login).
+- **Domain/CA:** moving clients off the raw EC2 hostname to `api.`/`vpn.predatorhunters.co.uk`
+  (DNS-only A records on Cloudflare → the box) + a real Let's Encrypt cert, which REMOVES
+  the self-signed cluster-CA pinning (no `cluster_ca` in the pairing payload). In progress.
+- **Email:** `predatorhunters.co.uk` — SES (eu-west-2, domain DKIM-verified, transactional
+  reset codes; prod-access pending) + Tuta (human mailboxes). DNS on Cloudflare (token in
+  `~/.cf-token.txt`, rotate when idle). SES SMTP user = `ph-bulwark-smtp`.
+- Per-PR **user authorization is required to merge** (master push auto-deploys to prod).
 
 ## Workflow rules
 
