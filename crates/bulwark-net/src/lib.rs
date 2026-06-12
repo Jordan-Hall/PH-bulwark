@@ -88,6 +88,8 @@ pub use truststore::StoreScope;
 #[cfg(target_os = "android")]
 pub use tun::open_tun_from_fd;
 pub use tun::{open_tun, TunConfig, TunDevice};
+#[cfg(target_os = "linux")]
+pub use vpn::transparent::run_transparent_listener;
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 pub use vpn::{
     elevation_command, is_elevated, run_vpn, wintun_available, CancellationToken, VpnConfig,

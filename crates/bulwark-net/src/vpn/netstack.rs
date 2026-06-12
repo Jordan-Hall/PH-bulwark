@@ -821,7 +821,7 @@ fn decide(summary: &PacketSummary, blocklist: &crate::blocklist::HostBlocklist) 
 /// Open a TCP tunnel to the TLS-inspecting proxy via HTTP `CONNECT authority`, so the flow is
 /// decrypted + content-filtered. Returns the established stream once the proxy answers
 /// 2xx. `authority` is the `host:port` from [`FlowAction::ProxyConnect`].
-async fn connect_via_proxy(proxy: SocketAddr, authority: &str) -> Result<TcpStream> {
+pub(crate) async fn connect_via_proxy(proxy: SocketAddr, authority: &str) -> Result<TcpStream> {
     let mut stream = TcpStream::connect(proxy)
         .await
         .map_err(|e| NetError::tun(format!("VPN bridge: connect proxy {proxy}: {e}")))?;
@@ -877,7 +877,7 @@ fn parse_status_code(resp: &[u8]) -> Result<u16> {
 
 /// Bidirectionally splice a captured client flow and its proxy tunnel until either
 /// half closes (half-close aware via `copy_bidirectional`).
-async fn splice<A, B>(client: &mut A, proxy: &mut B) -> Result<()>
+pub(crate) async fn splice<A, B>(client: &mut A, proxy: &mut B) -> Result<()>
 where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
