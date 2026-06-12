@@ -1585,6 +1585,10 @@ pub fn Children() -> Element {
                     div { class: "child-id",
                         div { class: "child-name", "{child.child_name}" }
                         div { class: "child-device mono", "device {child.device_id}" }
+                        span { class: "child-care",
+                            span { dangerous_inner_html: "{svg(\"shield-check\")}" }
+                            "In your care"
+                        }
                     }
                     div { class: "child-guardians",
                         strong { "{child.guardian_account_ids.len()}" }

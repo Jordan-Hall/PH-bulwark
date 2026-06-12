@@ -4,6 +4,7 @@ import android.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -13,6 +14,7 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -47,6 +49,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -749,7 +752,7 @@ private fun DoneStep(state: SetupState, onFinish: () -> Unit) {
         )
         Spacer(Modifier.height(10.dp))
         Text(
-            "This device is set up and watching for harmful content. You're all done.",
+            "All set. PH Bulwark now quietly keeps this device safe — and it never hides what it's doing.",
             color = Slate,
             fontSize = 16.sp,
             textAlign = TextAlign.Center,
@@ -794,20 +797,40 @@ internal fun StatusDashboard(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        Image(
-            painter = painterResource(R.drawable.bulwark_logo),
-            contentDescription = "PH Bulwark Shield",
-            modifier = Modifier
-                .size(72.dp)
-                .clip(RoundedCornerShape(16.dp)),
-        )
-        Text("PH Bulwark Shield", color = Navy, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
         val allOn = isFullySetUp(state)
+        Box(
+            Modifier
+                .size(112.dp)
+                .clip(CircleShape)
+                .background(if (allOn) Color(0x1F57A639) else Color(0x1F996D14)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Image(
+                painter = painterResource(R.drawable.bulwark_logo),
+                contentDescription = "PH Bulwark Shield",
+                modifier = Modifier
+                    .size(76.dp)
+                    .clip(RoundedCornerShape(18.dp)),
+            )
+        }
+        Text("PH BULWARK", color = Slate, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
         Text(
-            if (allOn) "Protection is active" else "Protection needs attention",
+            if (allOn) "You're protected" else "Almost protected",
+            color = Navy,
+            fontSize = 26.sp,
+            fontWeight = FontWeight.ExtraBold,
+            textAlign = TextAlign.Center,
+        )
+        Text(
+            if (allOn) {
+                "PH Bulwark is quietly keeping this device safe."
+            } else {
+                "A couple of things need a quick fix — the buttons below will sort it."
+            },
             color = if (allOn) Good else Warn,
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.Center,
         )
 
         Card(
@@ -823,12 +846,24 @@ internal fun StatusDashboard(
                 SummaryRow("Network filtering on", state.vpnReady)
                 SummaryRow("Anti-removal", state.antiRemovalOn, optionalWhenOff = true)
                 if (state.cloudFilteringRequested) {
-                    Text(
-                        "Cloud filtering requested — rolling out; protecting on-device meanwhile",
-                        color = Slate,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
-                    )
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFFEAF1F6))
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.Top,
+                    ) {
+                        Text("☁", color = Sky, fontSize = 14.sp)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "Your guardian asked for cloud filtering — it's on its way. Until then, protection keeps running right here on this device.",
+                            color = Navy,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            lineHeight = 16.sp,
+                        )
+                    }
                 }
             }
         }
@@ -1015,18 +1050,26 @@ private fun PermissionScaffold(
 private fun ProgressDots(current: Int, total: Int) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
         repeat(total) { i ->
-            val active = current >= 0 && i <= current
             val widthDp by animateFloatAsState(
-                targetValue = if (i == current) 28f else 9f,
-                animationSpec = tween(280),
+                targetValue = if (i == current) 30f else 9f,
+                animationSpec = tween(320),
                 label = "dot$i",
+            )
+            val dotColor by animateColorAsState(
+                targetValue = when {
+                    i == current -> Sky
+                    current >= 0 && i < current -> Good
+                    else -> Color(0xFFD3DEE7)
+                },
+                animationSpec = tween(320),
+                label = "dotColor$i",
             )
             Box(
                 Modifier
                     .height(9.dp)
                     .width(widthDp.dp)
                     .clip(RoundedCornerShape(50))
-                    .background(if (active) Sky else Color(0xFFD3DEE7)),
+                    .background(dotColor),
             )
         }
     }
@@ -1036,12 +1079,21 @@ private fun ProgressDots(current: Int, total: Int) {
 private fun StepIcon(emoji: String) {
     Box(
         Modifier
-            .size(84.dp)
+            .size(96.dp)
             .clip(CircleShape)
-            .background(Color(0xFFEAF1F6)),
+            .background(Color(0x143AA0DC)),
         contentAlignment = Alignment.Center,
     ) {
-        Text(emoji, fontSize = 40.sp)
+        Box(
+            Modifier
+                .size(80.dp)
+                .clip(CircleShape)
+                .background(Brush.verticalGradient(listOf(Color(0xFFEFF6FA), Color(0xFFDDEAF3))))
+                .border(1.dp, Color(0xFFCBDEE9), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(emoji, fontSize = 38.sp)
+        }
     }
 }
 
