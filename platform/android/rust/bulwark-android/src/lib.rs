@@ -64,12 +64,13 @@ use tonic::transport::Endpoint;
 pub mod flow;
 pub mod relay;
 
-/// Build a tonic `Endpoint` for a child→cluster RPC, pinning the cluster CA for
-/// `https://` (the production regions use an on-box self-signed CA that public
-/// webpki roots can never validate). `ca_path` is the device-local pinned CA
-/// (Kotlin: `filesDir/cluster_ca.pem`, provisioned at pairing). An https
-/// endpoint with no readable pin is REFUSED with an actionable message —
-/// never an opaque tonic transport error, never a silent plaintext fall-back.
+/// Build a tonic `Endpoint` for a child→cluster RPC. For `https://`: if a
+/// device-local CA is provisioned (`ca_path` non-empty + readable PEM) it is
+/// PINNED (self-hosted / private-CA servers whose cert public roots can't
+/// validate); otherwise the connection trusts the PUBLIC webpki roots (the
+/// default now that the cloud regions serve a real Let's Encrypt cert on their
+/// domain). `http://` is left as-is; we never silently fall back to plaintext
+/// for an https endpoint. SNI is derived from the endpoint URI host by tonic.
 fn cluster_endpoint(endpoint: &str, ca_path: &str) -> Result<Endpoint, String> {
     let endpoint = endpoint.trim();
     if !(endpoint.starts_with("http://") || endpoint.starts_with("https://")) {
@@ -80,16 +81,24 @@ fn cluster_endpoint(endpoint: &str, ca_path: &str) -> Result<Endpoint, String> {
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(10));
     if endpoint.to_ascii_lowercase().starts_with("https://") {
-        let pem = std::fs::read(ca_path.trim()).map_err(|e| {
-            format!(
-                "this server uses HTTPS but its pinned CA isn't on the device yet ({ca_path}): {e}"
-            )
-        })?;
-        let tls = tonic::transport::ClientTlsConfig::new()
-            .ca_certificate(tonic::transport::Certificate::from_pem(pem));
+        let ca_path = ca_path.trim();
+        let pinned = if ca_path.is_empty() {
+            None
+        } else {
+            std::fs::read(ca_path).ok()
+        };
+        let tls = match pinned {
+            // Private-CA path: pin the device-local CA so a self-hosted /
+            // on-box cert validates.
+            Some(pem) => tonic::transport::ClientTlsConfig::new()
+                .ca_certificate(tonic::transport::Certificate::from_pem(pem)),
+            // No pin on the device -> PUBLIC trust (the default for the cloud
+            // regions' Let's Encrypt cert). Never a silent plaintext fall-back.
+            None => tonic::transport::ClientTlsConfig::new().with_enabled_roots(),
+        };
         ep = ep
             .tls_config(tls)
-            .map_err(|e| format!("could not apply the pinned CA: {e}"))?;
+            .map_err(|e| format!("could not configure TLS for this server: {e}"))?;
     }
     Ok(ep)
 }

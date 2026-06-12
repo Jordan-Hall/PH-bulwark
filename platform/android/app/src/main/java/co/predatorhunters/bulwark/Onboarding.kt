@@ -90,7 +90,7 @@ internal val Servers = listOf(
     ServerOption(
         "uk",
         "UK - London",
-        "https://ec2-35-179-110-106.eu-west-2.compute.amazonaws.com:8443",
+        "https://api.predatorhunters.co.uk:8443",
     ),
     ServerOption("us", "US cloud", "https://us.cloud.phbulwark.app"),
     ServerOption("self", "Self-hosted", ""),
@@ -484,10 +484,13 @@ private fun PairStep(
 
     val endpoint = payload?.serverEndpoint ?: resolveEndpoint(selectedServer, selfHosted)
     val normalizedCode = payload?.pairCode ?: normalizedPairCode(code)
-    // An https server can only ever be contacted VERIFIED: it needs its
-    // certificate pinned first (carried by the full setup code). Be honest up
-    // front instead of letting the connection fail with a technical error.
-    val needsCa = endpoint.startsWith("https://") && !caPinned && payload?.clusterCaPem == null
+    // A built-in cloud region serves a PUBLIC certificate (Let's Encrypt), so it
+    // needs no pinned CA. A self-hosted https server may use a private CA: there
+    // we still want the certificate up front (via the full setup code) rather
+    // than a failed handshake. So only require a CA for self-hosted https.
+    val isBuiltinEndpoint = Servers.any { it.id != "self" && it.endpoint == endpoint }
+    val needsCa = endpoint.startsWith("https://") && !isBuiltinEndpoint &&
+        !caPinned && payload?.clusterCaPem == null
     val endpointReady = endpoint.isNotBlank()
     val loading = state is PairingState.Loading
     val paired = alreadyPaired || state is PairingState.Success

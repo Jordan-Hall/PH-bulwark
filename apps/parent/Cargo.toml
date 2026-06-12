@@ -28,7 +28,7 @@ dioxus = { version = "0.8.0-alpha.0", features = ["router"] }
 # LEGITIMATE services — AlertRelay (guardian alerts) + Review (approve/deny) +
 # read-only coverage. It does NOT import any device-control surface.
 bulwark-proto = { path = "../../crates/bulwark-proto" }
-tonic = { version = "0.14", features = ["tls-ring"] }
+tonic = { version = "0.14", features = ["tls-ring", "tls-webpki-roots"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

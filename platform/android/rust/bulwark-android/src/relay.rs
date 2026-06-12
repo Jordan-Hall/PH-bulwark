@@ -33,12 +33,12 @@ pub struct RelayTarget {
     pub device_id: String,
     pub child_id: String,
     pub family_id: String,
-    /// Path to the pinned cluster CA PEM (`cluster_ca` in the device config —
+    /// Path to a pinned cluster CA PEM (`cluster_ca` in the device config —
     /// Kotlin points at `filesDir/cluster_ca.pem`, provisioned at pairing).
-    /// REQUIRED for `https://` endpoints: the production regions use an on-box
-    /// self-signed CA that public roots will never validate. Empty + https →
-    /// the relay stays off (honest: better silent-off than connecting to an
-    /// unverified server).
+    /// OPTIONAL for `https://`: when present it is pinned (self-hosted /
+    /// private-CA servers); when absent the relay connects over PUBLIC trust
+    /// (the cloud regions' Let's Encrypt cert). Empty no longer turns the relay
+    /// off — a public-cert server is reached normally.
     pub cluster_ca: String,
     /// Per-device bearer token minted at pairing (`PairResult.device_token`,
     /// persisted by the Kotlin enrollment store and carried in the device
@@ -115,18 +115,20 @@ fn endpoint_channel(t: &RelayTarget) -> Result<Endpoint, String> {
         .to_ascii_lowercase()
         .starts_with("https://")
     {
-        // Production regions use an on-box self-signed cluster CA — public
-        // webpki roots will never validate it, so the pin is REQUIRED. No pin
-        // file on the device → fail here (relay stays off; local alerts +
-        // the server's missed-heartbeat sweep remain the coverage).
-        let pem = std::fs::read(t.cluster_ca.trim()).map_err(|e| {
-            format!(
-                "https relay endpoint needs the pinned cluster CA at '{}': {e}",
-                t.cluster_ca
-            )
-        })?;
-        let tls = tonic::transport::ClientTlsConfig::new()
-            .ca_certificate(tonic::transport::Certificate::from_pem(pem));
+        // Pin a provisioned CA when present (self-hosted / private-CA servers);
+        // otherwise trust the PUBLIC roots (the cloud regions' Let's Encrypt
+        // cert). The relay no longer stays off just because no CA is pinned.
+        let ca_path = t.cluster_ca.trim();
+        let pinned = if ca_path.is_empty() {
+            None
+        } else {
+            std::fs::read(ca_path).ok()
+        };
+        let tls = match pinned {
+            Some(pem) => tonic::transport::ClientTlsConfig::new()
+                .ca_certificate(tonic::transport::Certificate::from_pem(pem)),
+            None => tonic::transport::ClientTlsConfig::new().with_enabled_roots(),
+        };
         ep = ep.tls_config(tls).map_err(|e| format!("tls config: {e}"))?;
     }
     Ok(ep)
