@@ -32,6 +32,12 @@ object ChildConfigSync {
     private const val PREFS = "bulwark_child_config"
     private const val KEY_APPLIED_VERSION = "applied_config_version"
     private const val KEY_APPLIED_PROFILE = "applied_profile"
+    private const val KEY_APPLIED_FILTER_LOCATION = "applied_filter_location"
+
+    // Where the guardian asked filtering to run. Only on-device exists today;
+    // on-server is staged (the server-side data path isn't built yet).
+    private const val FILTER_ON_DEVICE = "on_device"
+    private const val FILTER_ON_SERVER = "on_server"
 
     /** Last config_version this device successfully applied (0 = none yet). */
     fun appliedVersion(ctx: Context): Long =
@@ -45,6 +51,22 @@ object ChildConfigSync {
      */
     fun appliedProfile(ctx: Context): String =
         prefs(ctx).getString(KEY_APPLIED_PROFILE, "") ?: ""
+
+    /**
+     * Where the guardian asked filtering to run: "on_device" (the default, and
+     * the only path that exists today) or "on_server" (route through the region
+     * for server-side filtering + IP anonymise). HONEST STATUS ONLY: the
+     * server-side data path is still staged, so this NEVER changes how filtering
+     * runs — the child keeps filtering on-device whatever this says. The UI reads
+     * it to tell the guardian a requested cloud-filtering mode is rolling out.
+     * Defaults to on-device for older servers that omit the field.
+     */
+    fun appliedFilterLocation(ctx: Context): String =
+        prefs(ctx).getString(KEY_APPLIED_FILTER_LOCATION, FILTER_ON_DEVICE) ?: FILTER_ON_DEVICE
+
+    /** True when the guardian requested server-side ("cloud") filtering. */
+    fun cloudFilteringRequested(ctx: Context): Boolean =
+        appliedFilterLocation(ctx) == FILTER_ON_SERVER
 
     /**
      * Fetch the desired config from the enrolled server and reconcile the VPN.
@@ -87,6 +109,25 @@ object ChildConfigSync {
         if (profile.isNotEmpty() && profile != appliedProfile(ctx)) {
             prefs(ctx).edit().putString(KEY_APPLIED_PROFILE, profile).apply()
             Log.i(TAG, "applied guardian strictness band $profile")
+        }
+
+        // Reconcile WHERE filtering should run (older servers omit the field, so
+        // default to on-device). HONESTY: the server-side data path is still
+        // staged — when the guardian asks for "on_server" we persist the request
+        // so the UI can surface it, but we do NOT change the data path: filtering
+        // stays on-device below exactly as today. No VpnService behaviour changes.
+        val filterLocation =
+            obj.optString("filter_location", FILTER_ON_DEVICE).ifBlank { FILTER_ON_DEVICE }
+        if (filterLocation != appliedFilterLocation(ctx)) {
+            prefs(ctx).edit().putString(KEY_APPLIED_FILTER_LOCATION, filterLocation).apply()
+            Log.i(
+                TAG,
+                if (filterLocation == FILTER_ON_SERVER) {
+                    "guardian requested cloud filtering — rolling out; protecting on-device meanwhile"
+                } else {
+                    "filtering location set to on-device"
+                },
+            )
         }
 
         val filteringEnabled = obj.optBoolean("filtering_enabled", true)
