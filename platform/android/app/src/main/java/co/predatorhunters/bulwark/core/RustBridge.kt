@@ -80,6 +80,22 @@ object RustBridge {
         java.io.File(ctx.filesDir, "cluster_ca.pem").absolutePath
 
     /**
+     * The per-install TLS-inspection ROOT CA in PEM (public cert only — the
+     * private key NEVER leaves the device keystore). [caDir] is the app-sandbox
+     * CA directory ([inspectionCaDir]); the returned root is byte-identical to
+     * the CA the on-device proxy mints leaf certs under. Install it into the
+     * device trust store so inspected HTTPS validates instead of showing
+     * "connection not private". Empty when the CA can't be loaded/generated.
+     * See [CaTrust][co.predatorhunters.bulwark.admin.CaTrust].
+     */
+    external fun inspectionCaPem(caDir: String): String
+
+    /** App-sandbox directory the inspection CA persists in (`filesDir/ca`); the
+     *  same `ca_dir` passed to [startVpn]'s config so the cert matches the proxy. */
+    fun inspectionCaDir(ctx: android.content.Context): String =
+        java.io.File(ctx.filesDir, "ca").absolutePath
+
+    /**
      * Fetch this device's guardian-set desired runtime config (the remote
      * "VPN switch": filtering on/off, region/server, strictness band) from the
      * ChildControl service on the enrolled server. CONTENT-FREE: policy and
