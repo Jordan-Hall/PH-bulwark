@@ -184,6 +184,18 @@ a longer-term reach into SMS/calls. Each workflow has a dedicated design doc and
 shippable in reviewable increments. Status as of **2026-06-10**.
 
 ### Just shipped (foundation for these workflows)
+- **Cluster on a real domain + public TLS, public-trust clients, Android CA install
+  (2026-06-12)** — the cluster is live at `https://api.predatorhunters.co.uk:8443`
+  (+ `vpn.` SAN) behind an auto-issued **Let's Encrypt** cert (acme.sh DNS-01 via
+  Cloudflare on the box; self-signed cluster CA as the fallback). Clients moved to
+  **public-trust-by-default, pin-optional** (parent console `tls-webpki-roots`;
+  child/relay JNI trust public roots when no CA is pinned), so a CA-less pairing
+  payload pairs cleanly while private-CA pinning stays for self-hosted. And the
+  per-install **TLS-inspection CA now installs into the device trust store** —
+  `bulwark-net::vpn::inspection_ca_pem` exports the public root over JNI
+  (`inspectionCaPem`) and `CaTrust` installs it via `DevicePolicyManager.installCaCert`
+  when Device Owner (fixes "connection not private"; non-managed devices fall back to
+  the OCR path). → [`docs/design/server-vpn-mode-and-ca-trust.md`](docs/design/server-vpn-mode-and-ca-trust.md).
 - **Transparent VPN pump, wired end-to-end** — `bulwark-net::vpn::run_netstack`
   (fd-driven smoltcp pump: per-flow TCP terminate → TLS inspection `CONNECT` → splice; DNS
   forward; QUIC drop) is now driven by `vpn::run_android_data_path`, which starts
