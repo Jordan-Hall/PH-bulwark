@@ -135,6 +135,21 @@ pre-existing accounts on it). Until it's managed:
    indicator, and the Pixel install check (post-loop, on-device).
 2. **WG server hardening:** per-device peers + lifecycle, SG UDP 51820, idempotent
    provisioning folded into the deploy (or a sibling role); keep it OFF by default.
+   **Provisioning contract (server side):** the child calls
+   `WgProvision.RegisterWgPeer` (device-token auth, public key only) and receives
+   `{assigned_address, server_public_key, server_endpoint, keepalive_secs,
+   filter_active}`. The gRPC handler never touches wg(8): it persists the desired
+   peer set to `${BULWARK_STATE_DIR}/wg_peers.json`
+   (`/var/lib/bulwark/wg_peers.json` on the region box) and an on-box reconciler
+   (cron/SSM, root) applies it:
+   `jq -r '.peers[] | [.device_id, .public_key] | @tsv' /var/lib/bulwark/wg_peers.json |
+   while IFS=$'\t' read -r dev key; do bulwark-wg-peers add-peer "$dev" "$key"; done`.
+   The file is sorted by address (= allocation order) and peers are never removed
+   in this increment, so wg-peers.sh's lowest-free allocation converges on the
+   granted addresses; an `add-peer --ip` pin must land before any deregistration
+   flow. Env knobs: `BULWARK_WG_SERVER_PUBLIC_KEY` (required for grants),
+   `BULWARK_WG_ENDPOINT`, `BULWARK_WG_KEEPALIVE_SECS`, `BULWARK_WG_FILTER_ACTIVE`
+   (stays unset/false until phase 3 is actually in-path).
 3. **`bulwark-net` proxy in the `wg0` forward path** on the region (reuse the engine).
 4. **`filter_location` in the proto + ChildConfig + parent toggle** (additive).
 5. **boringtun client in the Android shell** + reconcile (bring tunnel up/down on
