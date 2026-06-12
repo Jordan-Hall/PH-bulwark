@@ -12,13 +12,12 @@
 //! handshake messages are formatted into caller buffers, never sent.
 //!
 //! ## NOT yet wired (honest — later increments)
-//! * **No socket pump.** Nothing opens a UDP socket, transmits a handshake, or
-//!   retries; [`WgTunnel`] only transforms byte buffers in memory.
+//! * **Socket pump: shipped as [`super::wg_pump`].** This module itself still
+//!   only transforms byte buffers in memory; the pump owns the UDP socket,
+//!   the handshake bring-up/retries, and the 100 ms `update_timers` task.
 //! * **No data-path integration.** `run_android_data_path` / `run_netstack`
 //!   do not call into this module yet — captured flows still terminate at the
 //!   local TLS-inspecting proxy regardless of `filter_location`.
-//! * **No timer task.** The future pump must drive [`WgTunnel::update_timers`]
-//!   roughly every 100 ms (boringtun's contract) and send whatever it emits.
 //! * **No key provisioning.** The device keypair is generated in memory by the
 //!   caller; wrapping the private key in the OS keystore (the same discipline
 //!   as the inspection CA) and registering the public key with the region at
@@ -43,8 +42,8 @@ use boringtun::noise::{Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
 
 /// Default WireGuard endpoint of the filter region (`host:port`, UDP). Kept as
-/// a string — the scaffold performs **no DNS resolution** (no network in this
-/// increment); the future socket pump resolves it when it opens the socket.
+/// a string — this module performs **no DNS resolution**; the socket pump
+/// ([`super::wg_pump`]) resolves it when it opens the socket.
 pub const DEFAULT_SERVER_ENDPOINT: &str = "vpn.predatorhunters.co.uk:51820";
 
 /// Default persistent-keepalive interval in seconds (the WireGuard-conventional
@@ -53,7 +52,10 @@ pub const DEFAULT_KEEPALIVE_SECS: u16 = 25;
 
 /// Per-packet encryption overhead WireGuard adds to a tunnelled IP packet.
 /// [`WgTunnel::encapsulate`]'s `dst` buffer must be at least
-/// `src.len() + WG_OVERHEAD` bytes (boringtun's documented requirement).
+/// `max(src.len() + WG_OVERHEAD, 148)` bytes — boringtun's documented
+/// requirement is "at least src.len() + 32, and no less than 148 bytes",
+/// because any call may emit a 148-byte handshake initiation instead of a
+/// data packet (and it panics on a smaller buffer).
 pub const WG_OVERHEAD: usize = 32;
 
 /// The device's static WireGuard keypair (Curve25519).
@@ -185,7 +187,7 @@ impl fmt::Debug for WgClientConfig {
 /// caller-supplied buffer and reports what to do with them via [`TunnResult`]
 /// (`WriteToNetwork` → send to `server_endpoint` over UDP; `WriteToTunnelV4/6`
 /// → hand the decrypted IP packet back to the netstack). The socket pump that
-/// acts on those results is a later increment — see the module docs.
+/// acts on those results is [`super::wg_pump`].
 pub struct WgTunnel {
     tunn: Tunn,
 }
@@ -212,7 +214,9 @@ impl WgTunnel {
     }
 
     /// Encrypt one plaintext IP packet (from the netstack) for the region.
-    /// `dst` must be at least `packet.len() +` [`WG_OVERHEAD`] bytes.
+    /// `dst` must be at least `max(packet.len() + WG_OVERHEAD, 148)` bytes —
+    /// boringtun panics below that (any call can emit a 148-byte handshake
+    /// initiation instead of a data packet).
     ///
     /// With no established session the packet is queued internally and a
     /// handshake initiation comes back as `WriteToNetwork` instead — still no
@@ -221,10 +225,13 @@ impl WgTunnel {
         self.tunn.encapsulate(packet, dst)
     }
 
-    /// Decrypt one UDP datagram received from the region. `dst` must be at
-    /// least `datagram.len()` bytes. After a `WriteToNetwork` result the
-    /// caller must keep calling `decapsulate(None, &[], dst)` until it returns
-    /// `Done` (boringtun's queued-response contract).
+    /// Decrypt one UDP datagram received from the region. Size `dst` like
+    /// [`WgTunnel::encapsulate`]'s buffer (`max(MTU + WG_OVERHEAD, 148)`):
+    /// the repeated-call flush below re-encapsulates queued plaintext into
+    /// `dst`, so `datagram.len()` alone is not enough. After a
+    /// `WriteToNetwork` result the caller must keep calling
+    /// `decapsulate(None, &[], dst)` until it returns `Done` (boringtun's
+    /// queued-response contract).
     pub fn decapsulate<'a>(
         &mut self,
         src_addr: Option<IpAddr>,
@@ -234,10 +241,10 @@ impl WgTunnel {
         self.tunn.decapsulate(src_addr, datagram, dst)
     }
 
-    /// Drive retries/keepalives/rekeys. The future pump calls this ~every
-    /// 100 ms and transmits any `WriteToNetwork` it returns; until that pump
-    /// exists this is exercised by tests only. `dst` needs ≥ 148 bytes (the
-    /// largest timer-emitted message is a handshake initiation).
+    /// Drive retries/keepalives/rekeys. The socket pump ([`super::wg_pump`])
+    /// calls this ~every 100 ms and transmits any `WriteToNetwork` it
+    /// returns. `dst` needs ≥ 148 bytes (the largest timer-emitted message is
+    /// a handshake initiation).
     pub fn update_timers<'a>(&mut self, dst: &'a mut [u8]) -> TunnResult<'a> {
         self.tunn.update_timers(dst)
     }
@@ -253,8 +260,7 @@ impl WgTunnel {
     }
 
     /// Time since the last completed handshake — `None` until the first one
-    /// completes (always `None` in this increment: nothing transports the
-    /// handshake yet).
+    /// completes (the socket pump uses this as its "tunnel up" signal).
     pub fn time_since_last_handshake(&self) -> Option<Duration> {
         self.tunn.time_since_last_handshake()
     }
@@ -344,8 +350,10 @@ mod tests {
     #[test]
     fn debug_never_renders_private_key_material() {
         // Crown-jewel discipline: Debug-format every type that touches the
-        // private key and prove the key bytes (raw AND clamped forms) are
-        // absent while the redaction marker is present.
+        // private key and prove the key bytes (read back via the
+        // module-private accessor) are absent while the redaction marker is
+        // present. (x25519-dalek stores raw bytes; clamping happens at DH
+        // time, so to_bytes() == the raw input here.)
         let raw = [0x42u8; 32];
         let kp = WgKeypair::from_private_bytes(raw);
         let clamped_hex = hex(&kp.private.to_bytes()); // module-private access

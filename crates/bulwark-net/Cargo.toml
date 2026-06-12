@@ -28,9 +28,10 @@ default = []
 # Build the real Windows TUN backend (wintun). Implied on windows targets via
 # cfg in the source; the feature exists so non-windows CI can opt in for docs.
 windows-tun = []
-# Phase-5 groundwork: userspace WireGuard CLIENT (noise state machine only — no
-# socket pump yet) for `ChildConfig.filter_location == FILTER_ON_SERVER`.
-# Default OFF so the default build is unchanged; compiles `vpn::wg`.
+# Phase-5: userspace WireGuard CLIENT (noise state machine `vpn::wg` + UDP
+# socket pump `vpn::wg_pump`; no data-path integration yet) for
+# `ChildConfig.filter_location == FILTER_ON_SERVER`.
+# Default OFF so the default build is unchanged.
 wg-client = ["dep:boringtun", "dep:rand_core"]
 
 [dependencies]
