@@ -11,6 +11,11 @@ name: deploy
 #   var    AWS_REGION        e.g. eu-west-2
 #   var    AWS_INSTANCE_ID   the EC2 instance id (SSM-managed)
 #   var    BULWARK_PORT        optional, default 8443
+#   var    BULWARK_WG_ENABLED  optional; 'true' = also stand up the WireGuard
+#                              endpoint (deploy/wireguard/) on the box after the
+#                              redeploy. Unset/other = the WG steps are SKIPPED
+#                              and the deploy is byte-for-byte unchanged.
+#   var    BULWARK_WG_PORT     optional, default 51820 (read only when WG enabled)
 # The instance needs SSM (AmazonSSMManagedInstanceCore) + outbound HTTPS to ghcr.io.
 
 on:
@@ -80,6 +85,12 @@ jobs:
       contents: read
       packages: read
     steps:
+      # Only the opt-in WireGuard step needs repo files (deploy/wireguard/);
+      # the docker redeploy itself is checkout-free. Skipped unless enabled.
+      - name: Check out deploy/wireguard (opt-in WG endpoint only)
+        if: ${{ vars.BULWARK_WG_ENABLED == 'true' }}
+        uses: actions/checkout@v5
+
       - name: Configure AWS credentials (scoped deploy user)
         uses: aws-actions/configure-aws-credentials@v6
         with:
@@ -184,4 +195,70 @@ jobs:
             sleep 10
           done
           echo "=== server output ==="
+          aws ssm get-command-invocation --command-id "$CID" --instance-id "$IID" --query StandardOutputContent --output text
+
+      # ---- OPT-IN: WireGuard endpoint for the server-side filter mode ----------
+      # Phase 2 of docs/design/server-vpn-mode-and-ca-trust.md (§1/§4): installs
+      # wireguard, ships deploy/wireguard/wg-peers.sh to /usr/local/sbin, and
+      # idempotently ensures wg0 is up (adds NO peers). Gated on the repo var
+      # BULWARK_WG_ENABLED == 'true' — unset means this step and the checkout are
+      # skipped and the deploy is unchanged. It does NOT put the filter in the
+      # wg0 forward path (Phase 3) and does NOT open UDP 51820 — that stays a
+      # deliberate manual step (deploy/aws: terraform apply -var wg_enabled=true);
+      # WireGuard ignores unauthenticated packets, so the ordering is safe.
+      # NEVER cat wg0.conf here (it holds the server PRIVATE key); init prints
+      # only public material and list-peers redacts child endpoints by default.
+      # (wireguard-tools is GPL OS tooling run as a separate process on our own
+      # box — owner-approved exception, see CLAUDE.md Hard constraints.)
+      - name: "WireGuard endpoint via SSM (opt-in: BULWARK_WG_ENABLED)"
+        if: ${{ vars.BULWARK_WG_ENABLED == 'true' }}
+        env:
+          IID: ${{ vars.AWS_INSTANCE_ID }}
+          WG_PORT: ${{ vars.BULWARK_WG_PORT }}
+        run: |
+          set -euo pipefail
+          PORT="${WG_PORT:-51820}"
+          # The var is spliced into JSON + the remote shell line below — refuse
+          # anything that isn't a plain port number.
+          [[ "$PORT" =~ ^[0-9]{1,5}$ ]] || { echo "::error::BULWARK_WG_PORT must be numeric"; exit 1; }
+          # Ship the peer tool as base64 (single JSON-safe token, same pattern as
+          # SMTP_B64 above). It carries no secrets — it's a script from the repo.
+          PEERS_B64="$(base64 -w0 deploy/wireguard/wg-peers.sh)"
+          # `set -eu` (NOT -eux) on the instance, matching the redeploy step.
+          # The SSM shell starts with HOME=/ — export HOME=/root first.
+          cat > params-wg.json <<JSON
+          {"commands":[
+            "set -eu",
+            "export HOME=/root",
+            "export DEBIAN_FRONTEND=noninteractive",
+            "echo '[wg] ensure wireguard is installed'",
+            "command -v wg >/dev/null 2>&1 || { apt-get update -y -q && apt-get install -y -q wireguard; }",
+            "wg --version || true",
+            "printf '%s' '${PEERS_B64}' | base64 -d > /usr/local/sbin/bulwark-wg-peers && chmod 700 /usr/local/sbin/bulwark-wg-peers",
+            "echo '[wg] peer tool installed:' && /usr/local/sbin/bulwark-wg-peers version",
+            "WG_PORT=${PORT} /usr/local/sbin/bulwark-wg-peers init",
+            "/usr/local/sbin/bulwark-wg-peers list-peers || true"
+          ]}
+          JSON
+          CID=$(aws ssm send-command --instance-ids "$IID" \
+            --document-name AWS-RunShellScript --comment "PH Bulwark WireGuard endpoint (opt-in)" \
+            --parameters file://params-wg.json --query Command.CommandId --output text)
+          echo "SSM command: $CID"
+          for i in $(seq 1 30); do
+            ST=$(aws ssm get-command-invocation --command-id "$CID" --instance-id "$IID" --query Status --output text 2>/dev/null || echo Pending)
+            echo "status: $ST"
+            case "$ST" in
+              Success) break;;
+              Failed|Cancelled|TimedOut)
+                echo "::error::SSM wireguard setup $ST"
+                aws ssm get-command-invocation --command-id "$CID" --instance-id "$IID" --query StandardErrorContent --output text
+                exit 1;;
+            esac
+            sleep 10
+          done
+          # A slow first-time install can stay Pending/InProgress for all 30
+          # polls — falling through silently would paint a green step over a
+          # box whose wg0 may never have come up.
+          [ "$ST" = "Success" ] || { echo "::error::SSM wireguard setup timed out (last status: $ST)"; exit 1; }
+          echo "=== wireguard output ==="
           aws ssm get-command-invocation --command-id "$CID" --instance-id "$IID" --query StandardOutputContent --output text

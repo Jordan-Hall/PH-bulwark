@@ -14,7 +14,11 @@ prose/comments use the protective terms.
 
 ## Hard constraints (non-negotiable)
 
-- **Licensing:** MIT/Apache/permissive only — **no GPL** anywhere (tun2proxy was removed for this).
+- **Licensing:** MIT/Apache/permissive only — **no GPL** in anything built, linked, or
+  shipped (tun2proxy was removed for this). **Owner-approved exception (2026-06-13): GPL
+  OPS TOOLING run as a separate process on our own infrastructure is OK** (e.g. acme.sh,
+  wireguard-tools on the EC2 box — same class as bash/Linux already there); it must never
+  be linked into or redistributed with the product.
 - **CSAM:** never stored, never remediated/served — always blocked + reported (NCMEC path).
 - **No raw grooming dataset or live model weights in public releases.**
 - **No crowd-sourced public accusations** — private per-child block + law-enforcement escalation only.
