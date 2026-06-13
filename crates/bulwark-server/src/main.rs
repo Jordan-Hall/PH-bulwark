@@ -61,6 +61,21 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // Staff admin (internal operators console): OFF by default; opt in with
+    // BULWARK_STAFF=1. Same plaintext refusal as accounts mode — staff
+    // passwords and TOTP codes must never cross the network in clear.
+    let staff_enabled = matches!(
+        std::env::var("BULWARK_STAFF").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    );
+    if staff_enabled && tls_cert_pem.is_none() && !allow_plaintext {
+        anyhow::bail!(
+            "refusing to start: staff mode (BULWARK_STAFF=1) over plaintext would send \
+             staff passwords and TOTP codes in clear. Set BULWARK_TLS_CERT/BULWARK_TLS_KEY \
+             (PEM file paths), or BULWARK_ALLOW_PLAINTEXT=1 for local development only."
+        );
+    }
+
     let cfg = ServerConfig {
         role,
         bind,
@@ -69,6 +84,7 @@ async fn main() -> anyhow::Result<()> {
         tls_cert_pem,
         tls_key_pem,
         client_ca_pem,
+        staff_enabled,
     };
 
     // Text + buffered-video dispatch (image/audio stay on the device fast path /

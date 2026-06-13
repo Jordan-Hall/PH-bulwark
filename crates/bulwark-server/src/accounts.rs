@@ -80,7 +80,7 @@ fn argon2() -> Argon2<'static> {
 
 /// Hash `secret` (password or recovery code) to a self-describing PHC string
 /// (`$argon2id$v=19$m=...$<salt>$<hash>`). The salt is fresh per call.
-fn argon2_hash(rng: &SystemRandom, secret: &[u8]) -> Result<String, AccountError> {
+pub(crate) fn argon2_hash(rng: &SystemRandom, secret: &[u8]) -> Result<String, AccountError> {
     let mut salt_bytes = [0u8; 16];
     rng.fill(&mut salt_bytes)
         .map_err(|_| AccountError::Internal)?;
@@ -93,7 +93,7 @@ fn argon2_hash(rng: &SystemRandom, secret: &[u8]) -> Result<String, AccountError
 
 /// Constant-time verify of `secret` against a stored Argon2id PHC string. A
 /// malformed PHC string (corrupt row) verifies as `false`, never panics.
-fn argon2_verify(phc: &str, secret: &[u8]) -> bool {
+pub(crate) fn argon2_verify(phc: &str, secret: &[u8]) -> bool {
     match PasswordHash::new(phc) {
         Ok(parsed) => argon2().verify_password(secret, &parsed).is_ok(),
         Err(_) => false,
@@ -159,7 +159,7 @@ fn session_ttl_ms() -> i64 {
 
 /// Is a session issued at `issued_ms` still valid at `now_ms` for `ttl_ms`? Pure
 /// (unit-tested): rejects future-dated and past-TTL tokens.
-fn session_live(issued_ms: i64, now_ms: i64, ttl_ms: i64) -> bool {
+pub(crate) fn session_live(issued_ms: i64, now_ms: i64, ttl_ms: i64) -> bool {
     now_ms >= issued_ms && now_ms.saturating_sub(issued_ms) < ttl_ms
 }
 
@@ -170,7 +170,7 @@ const DEFAULT_LOGIN_MAX_FAILS: u32 = 5;
 const DEFAULT_LOGIN_WINDOW_SECS: i64 = 15 * 60;
 
 /// `(max_fails, window_ms)` from the environment, else the defaults.
-fn login_throttle_params() -> (u32, i64) {
+pub(crate) fn login_throttle_params() -> (u32, i64) {
     let max = std::env::var("BULWARK_LOGIN_MAX_FAILS")
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
@@ -187,19 +187,19 @@ fn login_throttle_params() -> (u32, i64) {
 
 /// Per-email failed-login counter within a sliding window.
 #[derive(Clone)]
-struct LoginThrottle {
-    fails: u32,
-    window_start_ms: i64,
+pub(crate) struct LoginThrottle {
+    pub(crate) fails: u32,
+    pub(crate) window_start_ms: i64,
 }
 
 /// Is this email currently locked out? Pure (unit-tested).
-fn throttle_locked(t: &LoginThrottle, now_ms: i64, window_ms: i64, max: u32) -> bool {
+pub(crate) fn throttle_locked(t: &LoginThrottle, now_ms: i64, window_ms: i64, max: u32) -> bool {
     t.fails >= max && now_ms.saturating_sub(t.window_start_ms) <= window_ms
 }
 
 /// Record one failed login: start a fresh window if the old one elapsed, else
 /// increment within it. Pure (unit-tested).
-fn record_failure(t: &mut LoginThrottle, now_ms: i64, window_ms: i64) {
+pub(crate) fn record_failure(t: &mut LoginThrottle, now_ms: i64, window_ms: i64) {
     if now_ms.saturating_sub(t.window_start_ms) > window_ms {
         t.fails = 1;
         t.window_start_ms = now_ms;
@@ -1202,7 +1202,7 @@ impl AccountStore {
 }
 
 /// Lowercase + trim an email for use as the account key.
-fn normalize_email(email: &str) -> String {
+pub(crate) fn normalize_email(email: &str) -> String {
     email.trim().to_ascii_lowercase()
 }
 
@@ -1228,7 +1228,7 @@ fn normalize_recovery_code(code: &str) -> String {
 }
 
 /// Lowercase-hex encode (no deps).
-fn to_hex(bytes: &[u8]) -> String {
+pub(crate) fn to_hex(bytes: &[u8]) -> String {
     const H: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -1243,13 +1243,13 @@ fn to_hex(bytes: &[u8]) -> String {
 /// the map) cannot stand in for a guardian. Unsalted SHA-256 is sufficient here:
 /// tokens carry 256 bits of CSPRNG entropy ([`TOKEN_BYTES`]), so dictionary /
 /// rainbow-table precomputation does not apply (unlike passwords, which use a KDF).
-fn token_hash(token: &str) -> String {
+pub(crate) fn token_hash(token: &str) -> String {
     to_hex(ring::digest::digest(&ring::digest::SHA256, token.trim().as_bytes()).as_ref())
 }
 
 /// Decode an exactly-`N`-byte lowercase-hex string into `[u8; N]`. `None` on a
 /// wrong-length or non-hex string (a corrupt snapshot row is skipped, not fatal).
-fn from_hex_array<const N: usize>(s: &str) -> Option<[u8; N]> {
+pub(crate) fn from_hex_array<const N: usize>(s: &str) -> Option<[u8; N]> {
     if s.len() != N * 2 {
         return None;
     }
