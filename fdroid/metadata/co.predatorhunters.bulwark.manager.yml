@@ -1,0 +1,47 @@
+Categories:
+  - Security
+  - System
+
+License: Apache-2.0 OR MIT
+
+AuthorName: Predator Hunters
+AuthorEmail: support@predatorhunters.co.uk
+WebSite: https://predatorhunters.co.uk
+SourceCode: https://github.com/Jordan-Hall/PH-bulwark
+IssueTracker: https://github.com/Jordan-Hall/PH-bulwark/issues
+
+Summary: Guardian console for PH Bulwark child-safety
+
+Description: |-
+  PH Bulwark Manager is the guardian console for PH Bulwark. A parent or legal
+  guardian signs in to their own account to pair a child's device, review
+  content-free, redacted safety alerts (signs of grooming, blocked unsafe
+  content), approve or keep blocks, and choose which region's server their
+  family's data routes through. It pairs with the child app
+  (co.predatorhunters.bulwark) that runs the on-device content filter.
+
+  No raw messages or media ever reach the Manager — only redacted snippets,
+  hashes, and safe (blurred) thumbnails. Illegal child-abuse imagery is never
+  shown: it is blocked and reported, never transmitted to the guardian.
+
+  Notifications use UnifiedPush — a self-hosted, free and open-source push
+  service — so the console can receive alerts on a separate device without any
+  Google or Apple push dependency. The server only ever POSTs a redacted,
+  content-free alert to the guardian's own distributor endpoint.
+
+  Distribution note: this is a self-hosted F-Droid mirror of the signed APK
+  published on GitHub Releases. Versions are added manually by the repo
+  operator; for automatic update tracking against GitHub Releases use Obtainium
+  (see the project's docs/distribution.md).
+
+# AntiFeatures: NonFreeAssets covers the trademarked Predator Hunters brand
+# logo/launcher icon (not under the code's permissive licence). No code is
+# non-free, and notifications use the FOSS UnifiedPush path (no proprietary push
+# SDK), so there is nothing to flag for tracking/ads.
+AntiFeatures:
+  - NonFreeAssets
+
+# Binary-drop repo (see the child app metadata): no Builds: block, so both
+# checks are None. Obtainium handles GitHub-release auto-tracking.
+AutoUpdateMode: None
+UpdateCheckMode: None

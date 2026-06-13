@@ -2,7 +2,8 @@
 //! api/servers/state seams across the new module boundaries.
 
 use crate::api::{
-    open_pending_review_stream_from, request_with_bearer, review_request_at, submit_decision_to,
+    open_pending_review_stream_from, register_push_target_to, review_request_at,
+    submit_decision_to, with_bearer,
 };
 use crate::media::{build_setup_payload_v2, pair_qr_svg};
 use crate::servers::{
@@ -43,11 +44,18 @@ struct CapturedFilter {
     filter: DeviceFilter,
 }
 
+#[derive(Clone, Debug)]
+struct CapturedPush {
+    auth: Option<String>,
+    target: PushTarget,
+}
+
 #[derive(Clone)]
 struct FakeReview {
     events: Arc<Vec<AlertEvent>>,
     decisions: Arc<Mutex<Vec<CapturedDecision>>>,
     filters: Arc<Mutex<Vec<CapturedFilter>>>,
+    pushes: Arc<Mutex<Vec<CapturedPush>>>,
     ack_applied: bool,
 }
 
@@ -57,6 +65,7 @@ impl FakeReview {
             events: Arc::new(events),
             decisions: Arc::new(Mutex::new(Vec::new())),
             filters: Arc::new(Mutex::new(Vec::new())),
+            pushes: Arc::new(Mutex::new(Vec::new())),
             ack_applied: true,
         }
     }
@@ -92,8 +101,14 @@ impl Review for FakeReview {
 
     async fn register_push_target(
         &self,
-        _req: Request<PushTarget>,
+        req: Request<PushTarget>,
     ) -> Result<Response<PushAck>, Status> {
+        let auth = auth_header(&req);
+        let target = req.into_inner();
+        self.pushes
+            .lock()
+            .expect("pushes lock")
+            .push(CapturedPush { auth, target });
         Ok(Response::new(PushAck { ok: true }))
     }
 
@@ -163,9 +178,12 @@ impl Drop for TestReviewServer {
 
 #[test]
 fn server_choice_resolves_regions_and_self_hosted() {
-    assert!(resolve_endpoint("").contains("eu-west-2"));
-    assert!(resolve_endpoint("cloud").contains("eu-west-2"));
-    assert!(resolve_endpoint("unknown").contains("eu-west-2"));
+    // Empty / "cloud" / unknown all resolve to the default UK region, which is
+    // now the domain-named London gateway (the raw eu-west-2 EC2 hostname was
+    // retired in the api.predatorhunters.co.uk migration).
+    assert!(resolve_endpoint("").contains("api.predatorhunters.co.uk"));
+    assert!(resolve_endpoint("cloud").contains("api.predatorhunters.co.uk"));
+    assert!(resolve_endpoint("unknown").contains("api.predatorhunters.co.uk"));
     assert_eq!(resolve_endpoint("us"), "https://us.cloud.phbulwark.app");
     assert_eq!(
         resolve_endpoint("https://family.example.test:8443"),
@@ -384,7 +402,7 @@ fn decision_request_and_bearer_metadata_are_stable() {
     assert_eq!(req.scope, ReviewScope::ThisHost as i32);
     assert_eq!(req.ts, 123);
 
-    let request = request_with_bearer(req, " token-123 ");
+    let request = with_bearer(req, " token-123 ");
     assert_eq!(
         request
             .metadata()
@@ -472,6 +490,33 @@ async fn parent_submit_decision_surfaces_unapplied_ack() {
     .await
     .expect_err("unapplied ack should surface as an error");
     assert!(err.to_string().contains("did not apply"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parent_registers_push_target_with_bearer_token() {
+    let fake = FakeReview::with_events(Vec::new());
+    let server = TestReviewServer::spawn(fake.clone()).await;
+    wait_for_server(&server.endpoint).await;
+
+    register_push_target_to(
+        &server.endpoint,
+        "guardian-token",
+        "guardian-device-1",
+        "https://ntfy.sh/family-abc123",
+    )
+    .await
+    .expect("register fake push target");
+
+    let pushes = fake.pushes.lock().expect("pushes lock");
+    assert_eq!(pushes.len(), 1);
+    // Same authenticated path as approve/deny: the guardian session token rides
+    // as `authorization: Bearer …` so the server can gate registration.
+    assert_eq!(pushes[0].auth.as_deref(), Some("Bearer guardian-token"));
+    assert_eq!(pushes[0].target.device_id, "guardian-device-1");
+    assert_eq!(
+        pushes[0].target.push_endpoint,
+        "https://ntfy.sh/family-abc123"
+    );
 }
 
 fn fake_alert(
