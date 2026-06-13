@@ -4,6 +4,7 @@
 
 use dioxus::prelude::*;
 
+use crate::assets::logo_mark_data_uri;
 use crate::components::{ClosingCta, SiteFooter};
 use crate::icons::svg;
 use crate::pages::{About, Approach, Contact, Home, Research};
@@ -79,7 +80,7 @@ fn NavBar() -> Element {
         nav { class: "nav",
             div { class: "nav-inner",
                 Link { class: "brand", to: Route::Home {},
-                    span { class: "brand-glyph", dangerous_inner_html: svg("shield") }
+                    img { class: "brand-mark", src: "{logo_mark_data_uri()}", alt: "Predator Hunters" }
                     span { class: "brand-name",
                         b { "Predator Hunters" }
                         span { "Research" }

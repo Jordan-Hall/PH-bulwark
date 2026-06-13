@@ -7,13 +7,15 @@
 //! nav/hero use the bespoke inline-SVG `shield` glyph from `icons.rs` instead,
 //! which we can tint to the dark palette precisely.
 
-/// The official Predator Hunters lockup as a `data:` URI (JPEG). Decoded on
-/// call; cache in a `use_memo` if rendered repeatedly.
-pub fn logo_data_uri() -> String {
+/// The shield MARK as a transparent-background `data:` URI (PNG) — the white
+/// field was flood-filled out of `branding/logo.jpg` so the mark sits directly
+/// on the dark stage with no chip. Used for the nav + footer brand lockup.
+/// Decoded on call; cache in a `use_memo` if rendered repeatedly.
+pub fn logo_mark_data_uri() -> String {
     // Relative to THIS file (apps/research/src/assets.rs): ../../../ climbs
     // src → apps/research → apps → repo root.
-    const BYTES: &[u8] = include_bytes!("../../../branding/logo.jpg");
-    format!("data:image/jpeg;base64,{}", base64_encode(BYTES))
+    const BYTES: &[u8] = include_bytes!("../../../branding/logo-mark.png");
+    format!("data:image/png;base64,{}", base64_encode(BYTES))
 }
 
 /// Minimal standard-alphabet base64 encoder (RFC 4648, `=` padded). Hand-rolled

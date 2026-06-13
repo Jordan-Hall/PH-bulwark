@@ -168,10 +168,8 @@ em.em { font-style: italic; color: var(--head); }
   backdrop-filter: blur(16px) saturate(140%); -webkit-backdrop-filter: blur(16px) saturate(140%);
   box-shadow: 0 18px 40px -28px rgba(0,0,0,.9); }
 .brand { display: inline-flex; align-items: center; gap: 11px; min-width: 0; }
-.brand-glyph { width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; flex: none;
-  background: var(--grad-soft); border: 1px solid var(--hair-strong); color: var(--orange);
-  box-shadow: inset 0 0 18px -8px var(--orange); }
-.brand-glyph svg { width: 17px; height: 17px; }
+.brand-mark { height: 30px; width: auto; display: block; flex: none;
+  filter: drop-shadow(0 2px 7px rgba(0,0,0,.45)); }
 .brand-name { display: flex; flex-direction: column; line-height: 1; }
 .brand-name b { font-family: var(--sans); font-weight: 700; font-size: .98rem; letter-spacing: .01em; color: var(--head); }
 .brand-name span { font-family: var(--mono); font-size: .6rem; letter-spacing: .34em; text-transform: uppercase; color: var(--muted); margin-top: 4px; }
