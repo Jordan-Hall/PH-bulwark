@@ -92,6 +92,17 @@ class BulwarkAccessibilityService : AccessibilityService() {
     private var lastOcrAtMs = 0L
 
     /**
+     * Low-priority single-thread executor for the screenshot callback + Tesseract
+     * pass, so a full-screen OCR never runs on the AccessibilityService main
+     * thread (which would stall subsequent events / blocking overlays). UI actions
+     * triggered downstream ([blockContent]) already main-post themselves.
+     */
+    private val ocrExecutor: java.util.concurrent.Executor =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "bulwark-ocr").apply { priority = Thread.MIN_PRIORITY }
+        }
+
+    /**
      * Throttle gate for the screenshot-OCR fallback. Only on API 30+ (where
      * [takeScreenshot] exists) and at most once per [OCR_INTERVAL_MS] — the OS
      * also rate-limits `takeScreenshot` (~1/s), and each tick is a full OCR pass,
@@ -116,7 +127,7 @@ class BulwarkAccessibilityService : AccessibilityService() {
         runCatching {
             takeScreenshot(
                 Display.DEFAULT_DISPLAY,
-                mainExecutor,
+                ocrExecutor,
                 object : TakeScreenshotCallback {
                     override fun onSuccess(result: ScreenshotResult) {
                         val hb = result.hardwareBuffer

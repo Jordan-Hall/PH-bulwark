@@ -1,11 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Bulwark on-device text capture: reads rendered chat text + notifications for
      the monitored messaging apps so end-to-end-encrypted conversations can be
-     checked on-device. canRetrieveWindowContent is required to read the tree. -->
+     checked on-device. canRetrieveWindowContent is required to read the tree.
+     canTakeScreenshot (API 30+) enables the conventional-OCR fallback for text
+     the view tree can't expose (canvas/bitmap-rendered chat) — see
+     BulwarkAccessibilityService.captureAndOcr; without it takeScreenshot always
+     hits the failure callback and the OCR path is dead. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowContentChanged|typeViewTextChanged|typeNotificationStateChanged|typeWindowStateChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagDefault|flagIncludeNotImportantViews|flagReportViewIds"
     android:canRetrieveWindowContent="true"
+    android:canTakeScreenshot="true"
     android:notificationTimeout="100"
     android:description="@string/a11y_description" />
