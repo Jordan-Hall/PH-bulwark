@@ -174,5 +174,6 @@ dependencies {
     // class; NNAPI accelerator when present, CPU otherwise (Nsfw capability-
     // detects, same as the Camera app's NsfwGate). A vision classifier, never an
     // LLM, never a proprietary SDK. See docs/design/on-device-agent.md.
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.19.2")
+    // 1.22.0 ships 16 KB-page-aligned native libs (incl. the 4j_jni bridge) (Android 15 requirement).
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.22.0")
 }

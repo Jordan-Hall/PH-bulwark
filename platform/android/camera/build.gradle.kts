@@ -118,5 +118,6 @@ dependencies {
 
     // ONNX Runtime Android (MIT) — runs the bundled NSFW model fully on-device.
     // NNAPI accelerator when present, CPU otherwise (NsfwGate capability-detects).
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.19.2")
+    // 1.22.0 ships 16 KB-page-aligned native libs (incl. the 4j_jni bridge) (Android 15 requirement).
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.22.0")
 }
