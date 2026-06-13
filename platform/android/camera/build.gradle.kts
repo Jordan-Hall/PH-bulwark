@@ -6,6 +6,8 @@
 // its manifest declares NO network permission — captures are checked by an
 // on-device NSFW model and either saved locally or dropped from memory.
 // Nothing can leave the device.
+import java.util.Base64
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -68,9 +70,33 @@ android {
     // (no inflater pressure on an 88 MB asset).
     androidResources { noCompress += "onnx" }
 
+    // Release signing is configured ONLY when the keystore is provided via env
+    // (the FOSS release CI — android-release.yml — sets the ANDROID_* secrets).
+    // Without it the release stays UNSIGNED and the debug build is unaffected;
+    // no keystore ever lives in the repo. This is the SAME env-driven block as
+    // :app so the camera APK can ship signed through the self-hosted FOSS path
+    // (see docs/distribution.md).
+    signingConfigs {
+        create("release") {
+            val b64 = System.getenv("ANDROID_KEYSTORE_BASE64")
+            if (!b64.isNullOrBlank()) {
+                val ks = File.createTempFile("release", ".keystore")
+                ks.writeBytes(Base64.getDecoder().decode(b64))
+                storeFile = ks
+                storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("ANDROID_KEY_ALIAS")
+                keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
-        // Unsigned release is fine: store-publish only uploads :app's bundle.
-        release { isMinifyEnabled = false }
+        release {
+            isMinifyEnabled = false
+            if (!System.getenv("ANDROID_KEYSTORE_BASE64").isNullOrBlank()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
     }
 }
 

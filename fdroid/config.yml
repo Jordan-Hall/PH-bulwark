@@ -1,0 +1,42 @@
+# Self-hosted F-Droid repository — PH Bulwark
+#
+# This is a BINARY-DROP repo (a signed-APK mirror), NOT a build-from-source
+# repo. The operator drops the signed app-release.apk / camera-release.apk from
+# a GitHub Release into repo/, runs `fdroid update -c`, then rsyncs repo/ to the
+# dist host. See README.md for the full operator runbook.
+#
+# SECURITY: this file contains NO secrets. The repo signing keystore is held
+# OFFLINE and supplied to `fdroid` at run time via keystorepass/keypass on the
+# operator's machine (env or an untracked local config). NEVER add a keystore,
+# keystorepass, or keypass value here — fdroid/.gitignore blocks the key files.
+
+# The public URL clients add as a repository (add-repo link + QR in
+# docs/distribution.md). `fdroid update` signs index-v1/index-v2 against the
+# offline key and writes them under repo/.
+repo_url: "https://dist.predatorhunters.co.uk/fdroid/repo"
+repo_name: "PH Bulwark"
+repo_description: >-
+  Self-hosted F-Droid repository for PH Bulwark — a consensual, guardian-
+  installed child-safety content-filtering VPN, and its companion local-only
+  safe camera. Signed APKs only; the repo signing key is held offline.
+repo_icon: "icon.png"
+
+# Archive policy: keep the 4 most recent versions of each app live in repo/;
+# older versions roll into an archive/ section (a separate, optional archive
+# repo URL). Bump if you want a longer live history.
+archive_older: 4
+archive_url: "https://dist.predatorhunters.co.uk/fdroid/archive"
+archive_name: "PH Bulwark (archive)"
+archive_description: >-
+  Older PH Bulwark releases, retired from the main repo by the archive policy.
+
+# Tools fdroidserver needs on the operator's machine. Adjust to local paths.
+# (NDK is NOT required — this repo never builds from source.)
+sdk_path: "$ANDROID_HOME"
+
+# The keystore + its passwords are intentionally absent. `fdroid init` creates
+# the keystore once, offline; the operator then passes its secrets locally, e.g.
+#   export keystorepass=... keypass=...
+#   fdroid update -c
+# or via an untracked ~/.config or a CI secret on a trusted runner. They MUST
+# NOT be committed.
