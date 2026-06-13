@@ -27,7 +27,7 @@ pub fn ClosingCta() -> Element {
                             span { class: "grad-text", "children safer." }
                         }
                         p { class: "lede",
-                            "We are a small, self-funded team four years into the work. If you fund frontier safety research, build alongside us, or want to put these models to work protecting children, we want to talk."
+                            "We are a small, self-funded team, four years into this. If you fund safety research, want to build with us, or want to put these models to work protecting children, get in touch."
                         }
                         div { class: "cta-actions",
                             Link { class: "btn btn-primary", to: Route::Contact {},
@@ -59,7 +59,7 @@ pub fn SiteFooter() -> Element {
                             span { class: "brand-tag", "Research" }
                         }
                         p { class: "footer-blurb",
-                            "An independent child-safety AI lab. We build privacy-preserving models that run on a child's own device — detecting unsafe content and predatory conversation patterns, storing nothing."
+                            "An independent child-safety AI lab. We build small models that run on a child's own phone, catch unsafe content and the way predators talk, and store nothing."
                         }
                     }
                     div {
@@ -93,7 +93,7 @@ pub fn SiteFooter() -> Element {
                 div { class: "footer-bottom",
                     p { "© 2026 Predator Hunters Research. All rights reserved." }
                     p { class: "legal",
-                        "Independent research & journalism. We report only on matters concluded in court and on the public record — never pre-trial — and operate independently of any law-enforcement agency. Models run on-device; no raw messages or media are stored."
+                        "Independent research and journalism. We report only on cases that have been to court and are on the public record, never before a trial, and we work independently of any police force. The models run on the phone, and no raw messages or images are kept."
                     }
                 }
             }

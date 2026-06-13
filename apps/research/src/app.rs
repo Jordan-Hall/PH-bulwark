@@ -4,10 +4,10 @@
 
 use dioxus::prelude::*;
 
-use crate::assets::ph_logo_data_uri;
+use crate::assets::{favicon_data_uri, ph_logo_data_uri};
 use crate::components::{ClosingCta, SiteFooter};
 use crate::icons::svg;
-use crate::pages::{About, Approach, Contact, Home, Research};
+use crate::pages::{About, Approach, Contact, Home, Research, Systems};
 use crate::theme::STYLE;
 
 /// Colour scheme. Provided as a `Signal<Theme>` context by `App`, toggled from
@@ -26,6 +26,8 @@ pub enum Route {
     Home {},
     #[route("/research")]
     Research {},
+    #[route("/systems")]
+    Systems {},
     #[route("/approach")]
     Approach {},
     #[route("/about")]
@@ -41,6 +43,7 @@ pub fn App() -> Element {
     let theme = use_context_provider(|| Signal::new(Theme::Dark));
     let mode = if theme() == Theme::Light { "light" } else { "dark" };
     rsx! {
+        dioxus::document::Link { rel: "icon", href: "{favicon_data_uri()}" }
         style { {STYLE} }
         div { class: "theme-root", "data-theme": "{mode}",
             div { class: "stage-bg" }
@@ -85,6 +88,7 @@ fn NavBar() -> Element {
                 }
                 div { class: "nav-links",
                     Link { class: nav_class(&route, &Route::Research {}), to: Route::Research {}, "Research" }
+                    Link { class: nav_class(&route, &Route::Systems {}), to: Route::Systems {}, "Systems" }
                     Link { class: nav_class(&route, &Route::Approach {}), to: Route::Approach {}, "Approach" }
                     Link { class: nav_class(&route, &Route::About {}), to: Route::About {}, "About" }
                     Link { class: nav_class(&route, &Route::Contact {}), to: Route::Contact {}, "Contact" }

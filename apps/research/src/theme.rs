@@ -98,7 +98,9 @@ body { margin: 0; }
   min-height: 100dvh; background: var(--bg); color: var(--ink);
   font-family: var(--sans); font-size: 17px; line-height: 1.7;
   -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
-  overflow-x: hidden; transition: background .4s ease, color .4s ease;
+  /* `clip` (not `hidden`) prevents horizontal overflow WITHOUT creating a
+     scroll container, so the sticky nav keeps working. */
+  overflow-x: clip; transition: background .4s ease, color .4s ease;
 }
 ::selection { background: rgba(245,130,32,.28); color: #FFF3E8; }
 a { color: inherit; text-decoration: none; }
