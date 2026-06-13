@@ -257,3 +257,77 @@ fn unprotect(_wrapped: &[u8]) -> Result<Vec<u8>> {
         "DPAPI is Windows-only; use the platform keystore for this OS",
     ))
 }
+
+// ---------------------------------------------------------------------------
+// Windows-only tests — exercise the REAL DPAPI round-trip (this is the
+// production Windows backend for the crown-jewel CA key, so it is verified on
+// the Windows host rather than only documented). cfg-gated off elsewhere.
+// ---------------------------------------------------------------------------
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn temp_store() -> (DpapiKeyStore, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "bulwark-dpapiks-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        (DpapiKeyStore::new(dir.clone()), dir)
+    }
+
+    #[test]
+    fn protect_unprotect_roundtrips() {
+        // Bare FFI round-trip: CryptProtectData -> CryptUnprotectData == identity.
+        let secret = b"fake-pkcs8-der-crown-jewel";
+        let wrapped = protect(secret).unwrap();
+        assert_ne!(
+            wrapped.as_slice(),
+            secret,
+            "ciphertext must not be plaintext"
+        );
+        assert_eq!(unprotect(&wrapped).unwrap(), secret);
+    }
+
+    #[test]
+    fn store_roundtrips_key_and_cert_and_deletes() {
+        let (ks, dir) = temp_store();
+        assert_eq!(ks.tier(), KeyStoreTier::OsWrappedAtRest);
+        assert!(ks.tier().is_production_grade());
+        assert!(!ks.exists());
+        assert!(ks.load_key().is_err(), "no key -> fail-closed error");
+        assert_eq!(ks.load_public_cert().unwrap(), None);
+
+        ks.store_key(b"fake-pkcs8-der").unwrap();
+        ks.store_public_cert(b"fake-cert-der").unwrap();
+        assert!(ks.exists());
+        assert_eq!(ks.load_key().unwrap(), b"fake-pkcs8-der");
+        assert_eq!(ks.load_public_cert().unwrap().unwrap(), b"fake-cert-der");
+
+        // On-disk key file is DPAPI ciphertext, never the plaintext DER.
+        let on_disk = std::fs::read(ks.key_path()).unwrap();
+        assert_ne!(on_disk, b"fake-pkcs8-der", "stored key must be wrapped");
+
+        ks.delete_key().unwrap();
+        assert!(!ks.exists());
+        assert!(ks.load_key().is_err(), "deleted key -> fail-closed");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn tampered_ciphertext_fails_closed() {
+        // A corrupted blob must not unwrap to anything — DPAPI integrity check
+        // is the fail-closed boundary (no silent plaintext pass-through).
+        let wrapped = protect(b"secret").unwrap();
+        let mut bad = wrapped.clone();
+        let last = bad.len() - 1;
+        bad[last] ^= 0xff;
+        assert!(
+            unprotect(&bad).is_err(),
+            "tampered blob must fail to unwrap"
+        );
+    }
+}

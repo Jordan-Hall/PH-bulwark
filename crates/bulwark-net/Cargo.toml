@@ -46,6 +46,12 @@ hudsucker.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
 rcgen.workspace = true
+# AES-256-GCM + SystemRandom for the encrypted-file CA keystore fallback
+# (`ca::enc_file`) on platforms without a hardware/OS key-wrapping facility.
+# Already in this crate's tree transitively via rcgen + rustls, so listing it
+# directly adds NO new crate to the dependency graph (Apache-2.0/ISC/MIT, on the
+# deny.toml allowlist with the documented OpenSSL-notice exception).
+ring.workspace = true
 
 # Async runtime + plumbing.
 tokio.workspace = true
