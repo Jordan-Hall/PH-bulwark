@@ -43,7 +43,6 @@ pub fn App() -> Element {
     let mode = if theme() == Theme::Light { "light" } else { "dark" };
     rsx! {
         dioxus::document::Link { rel: "icon", href: "{favicon_data_uri()}" }
-        dioxus::document::Stylesheet { href: asset!("/assets/main.css") }
         div { class: "theme-root", "data-theme": "{mode}",
             div { class: "stage-bg" }
             div { class: "stage-grid" }

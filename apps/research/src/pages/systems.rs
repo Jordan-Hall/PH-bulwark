@@ -10,6 +10,7 @@ use crate::icons::svg;
 #[component]
 pub fn Systems() -> Element {
     rsx! {
+        dioxus::document::Title { "Systems · Predator Hunters Research" }
         header { class: "page-head",
             div { class: "wrap",
                 p { class: "eyebrow rise d1", "Systems" }

@@ -25,6 +25,7 @@ const PRINCIPLES: [(&str, &str); 6] = [
 #[component]
 pub fn Approach() -> Element {
     rsx! {
+        dioxus::document::Title { "Approach · Predator Hunters Research" }
         header { class: "page-head",
             div { class: "wrap",
                 p { class: "eyebrow rise d1", "Approach" }
