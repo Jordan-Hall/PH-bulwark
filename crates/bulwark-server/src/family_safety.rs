@@ -30,7 +30,7 @@
 //! module — the same shape as [`crate::child_control::ChildConfigStore`]; we
 //! deliberately do NOT pull in `bulwark-store`/rusqlite, which does not build
 //! on the Windows host). SOS events are relayed, not stored: the live stream
-//! + email/push sink are the delivery paths, and the ack tells the child
+//! and the email/push sink are the delivery paths, and the ack tells the child
 //! HONESTLY whether a guardian path took the alert.
 
 use std::path::Path;
@@ -176,7 +176,7 @@ impl SafetyBroadcastStore {
             .cloned()
             .map(BroadcastRow::into_proto)
             .collect();
-        out.sort_by(|a, b| b.issued_ts.cmp(&a.issued_ts));
+        out.sort_by_key(|b| std::cmp::Reverse(b.issued_ts)); // newest first
         out
     }
 }
@@ -514,14 +514,23 @@ fn sha256_hex(s: &str) -> String {
 }
 
 /// Constant-time compare of the presented staff token against the stored
-/// sha256-hex digest (both sides hashed, so length never leaks either).
+/// sha256-hex digest. Both sides are sha256-hex (fixed 64 chars), so length
+/// never leaks and the fold below runs the full width regardless of where the
+/// first mismatch is — no early-out timing oracle. (`ring`'s own
+/// `verify_slices_are_equal` is deprecated as an internal API, so we keep a
+/// tiny explicit constant-time fold here.)
 fn token_matches(expected_sha256_hex: &str, presented: &str) -> bool {
     let presented_hex = sha256_hex(presented.trim());
-    ring::constant_time::verify_slices_are_equal(
-        presented_hex.as_bytes(),
-        expected_sha256_hex.as_bytes(),
-    )
-    .is_ok()
+    let a = presented_hex.as_bytes();
+    let b = expected_sha256_hex.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// Random hex id for a broadcast (a routing key, not a secret). Falls back to
