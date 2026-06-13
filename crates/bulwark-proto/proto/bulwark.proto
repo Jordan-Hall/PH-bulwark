@@ -933,3 +933,139 @@ service ClusterControl {
   rpc Dequeue(DequeueRequest) returns (DequeueResponse);
   rpc Drain(DrainRequest) returns (DrainResponse);
 }
+
+// ---------------------------------------------------------------------------
+// StaffAdmin service — INTERNAL Predator Hunters operators console (NOT
+// guardian-facing). Staff accounts live in a SEPARATE store + token namespace
+// from guardian Accounts, so a guardian session can never authorize a staff
+// RPC and vice versa. CONTENT-FREE BY SHAPE: ids, counts, versions,
+// timestamps, and hashes only — never message/media text, alert payloads,
+// child names, or per-peer identities. Every staff action is appended to a
+// tamper-evident hash-chain audit log. See docs/design/staff-management-system.md.
+// ---------------------------------------------------------------------------
+
+// Staff RBAC role — exactly one per staff account.
+enum StaffRole {
+  STAFF_ROLE_UNSPECIFIED = 0;
+  SUPPORT                = 1; // guardian-account support (metadata only, never content)
+  SAFETY_OFFICER         = 2; // NCMEC escalation workflow (case ids + hashes only)
+  OPERATOR               = 3; // fleet/region health + capacity
+  ADMIN                  = 4; // everything, incl. CreateStaff + audit query
+}
+
+// Create a staff account. BOOTSTRAP-GATED: while ZERO staff accounts exist the
+// caller presents the operator-set bootstrap code (BULWARK_STAFF_BOOTSTRAP_CODE,
+// compared by sha256 digest) and the new account is forced to ADMIN; once any
+// staff account exists, the bootstrap path is dead forever and `token` must be
+// a live ADMIN staff session (also accepted via Bearer metadata).
+message CreateStaffRequest {
+  string    token          = 1; // ADMIN staff session (empty on bootstrap)
+  string    bootstrap_code = 2; // one-time bootstrap credential (empty otherwise)
+  string    email          = 3;
+  string    password       = 4; // Argon2id PHC at rest; never stored plaintext
+  string    display_name   = 5;
+  StaffRole role           = 6; // ignored on bootstrap (forced ADMIN)
+}
+
+message StaffAck {
+  string staff_id = 1;
+  bool   created  = 2;
+  string detail   = 3;
+  // ONE-TIME TOTP enrollment material, returned ONLY on a successful create and
+  // never recoverable through any RPC afterwards: the base32 shared secret plus
+  // a ready-made otpauth:// URI for the authenticator app.
+  string totp_secret_base32 = 4;
+  string otpauth_uri        = 5;
+}
+
+// Staff sign-in: password AND a live TOTP code (mandatory 2FA). Throttled per
+// email like guardian login; wrong email/password/code are indistinguishable.
+message StaffLoginRequest {
+  string email     = 1;
+  string password  = 2;
+  string totp_code = 3; // 6 digits, 30s step, +/-1 step skew; replay refused
+}
+
+message StaffSession {
+  string    token     = 1; // opaque bearer; stored server-side as sha256 digest only
+  string    staff_id  = 2;
+  StaffRole role      = 3;
+  int64     issued_ts = 4; // unix epoch millis; SHORT TTL (default 2h)
+}
+
+message RegionsRequest {
+  string token = 1; // any staff role (read-only, content-free)
+}
+
+// Content-free region snapshot. Counts and gauges ONLY — never peer
+// identities, device ids, child ids, or addresses of enrolled families.
+message RegionInfo {
+  string region                = 1; // "uk" | "us" | ...
+  string endpoint              = 2; // the gRPC endpoint guardians connect to
+  bool   probed                = 3; // false until live probing ships (increment 4)
+  bool   healthy               = 4; // meaningful only when probed == true
+  string deploy_version        = 5; // serving binary version
+  int64  tls_cert_expiry_ts    = 6; // unix ms; 0 = unknown
+  uint32 wg_peer_count         = 7; // COUNT only — never peer identities
+  uint32 enrolled_device_count = 8; // COUNT only
+  int64  ts                    = 9; // snapshot time, unix ms
+}
+
+message Regions {
+  repeated RegionInfo regions = 1;
+}
+
+message FleetHealthRequest {
+  string token  = 1;
+  string region = 2; // required; unknown region -> NOT_FOUND
+}
+
+// Per-region health: the RegionInfo summary plus per-node ClusterControl
+// HealthStatus snapshots (queue depth / latency / load — already content-free).
+message FleetHealth {
+  string region            = 1;
+  RegionInfo info          = 2;
+  repeated HealthStatus nodes = 3; // empty until increment 4 joins ClusterControl
+}
+
+// Query the tamper-evident staff audit chain. ADMIN only. The page reports
+// `chain_ok` (the chain re-verified at read time), so silent tampering with
+// the at-rest log is surfaced to the console on every query.
+message StaffAuditQuery {
+  string token     = 1;
+  uint64 after_seq = 2; // return entries with seq >= this (cursor)
+  uint32 limit     = 3; // 0 = server default (100), capped at 1000
+}
+
+// One audit entry. Content-free: actor + action + target ID + chain hash.
+message StaffAuditEntry {
+  uint64    seq        = 1;
+  int64     ts         = 2; // unix ms
+  string    staff_id   = 3; // actor ("bootstrap" for the first-account create)
+  StaffRole role       = 4;
+  string    action     = 5; // e.g. "staff.create", "staff.login", "fleet.list_regions"
+  string    target     = 6; // content-free id (staff_id / region / case id)
+  string    detail     = 7; // short content-free note
+  string    entry_hash = 8; // sha256 hex: H(prev_hash || canonical(entry))
+}
+
+message StaffAuditPage {
+  repeated StaffAuditEntry entries = 1;
+  uint64 next_seq = 2; // pass back as after_seq for the next page
+  bool   chain_ok = 3; // chain verified intact at read time
+}
+
+service StaffAdmin {
+  // Bootstrap-gated staff onboarding (see CreateStaffRequest). TOTP enrollment
+  // material is returned exactly once in the ack.
+  rpc CreateStaff(CreateStaffRequest) returns (StaffAck);
+  // Password + mandatory TOTP -> short-TTL staff session. Throttled per email.
+  rpc StaffLogin(StaffLoginRequest) returns (StaffSession);
+  // Content-free region list (any staff role). Audited like every staff action.
+  rpc ListRegions(RegionsRequest) returns (Regions);
+  // Content-free per-region health (any staff role). Audited.
+  rpc GetFleetHealth(FleetHealthRequest) returns (FleetHealth);
+  // Tamper-evident audit log query (ADMIN only). Audited (yes, querying the
+  // audit log is itself an audited action).
+  rpc QueryStaffAudit(StaffAuditQuery) returns (StaffAuditPage);
+}

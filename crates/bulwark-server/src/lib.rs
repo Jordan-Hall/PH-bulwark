@@ -25,6 +25,7 @@ pub mod persist;
 pub mod relay;
 pub mod reset_mailer;
 pub mod service;
+pub mod staff;
 pub mod tamper;
 pub mod wg_provision;
 
@@ -32,6 +33,7 @@ pub use accounts::{AccountStore, AccountsService};
 pub use child_control::{ChildConfigStore, ChildControlService};
 pub use relay::{AlertHub, ReviewService};
 pub use reset_mailer::ResetMailer;
+pub use staff::{StaffAdminService, StaffStore};
 pub use tamper::TamperService;
 pub use wg_provision::{WgPeerStore, WgProvisionService};
 
@@ -80,6 +82,11 @@ pub struct ServerConfig {
     /// this directory and reloaded on startup (the `persist` module). `None`
     /// (default) = pure in-memory, so dev/tests are unaffected.
     pub state_dir: Option<std::path::PathBuf>,
+    /// Mount the internal `StaffAdmin` service (PH staff operators console).
+    /// OFF by default — a guardian-facing node exposes no staff surface unless
+    /// explicitly enabled (`BULWARK_STAFF=1`). Staff accounts live in a
+    /// SEPARATE store + token namespace from guardian accounts.
+    pub staff_enabled: bool,
 }
 
 impl Default for ServerConfig {
@@ -92,6 +99,7 @@ impl Default for ServerConfig {
             client_ca_pem: None,
             accounts_enabled: false,
             state_dir: None,
+            staff_enabled: false,
         }
     }
 }

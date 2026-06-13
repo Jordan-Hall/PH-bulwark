@@ -11,6 +11,7 @@ use bulwark_proto::v1::analysis_server::{Analysis, AnalysisServer};
 use bulwark_proto::v1::child_control_server::ChildControlServer;
 use bulwark_proto::v1::offload_server::{Offload, OffloadServer};
 use bulwark_proto::v1::review_server::ReviewServer;
+use bulwark_proto::v1::staff_admin_server::StaffAdminServer;
 use bulwark_proto::v1::tamper_server::TamperServer;
 use bulwark_proto::v1::wg_provision_server::WgProvisionServer;
 use bulwark_proto::v1::{
@@ -23,6 +24,7 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::accounts::{AccountStore, AccountsService};
 use crate::child_control::{ChildConfigStore, ChildControlService};
 use crate::relay::{AlertHub, ReviewService};
+use crate::staff::{StaffAdminService, StaffStore};
 use crate::tamper::{self, TamperService};
 use crate::wg_provision::{WgPeerStore, WgProvisionService};
 use crate::{default_offload_policy, AnalyzerRegistry, ServerConfig, ServerRole};
@@ -362,6 +364,23 @@ pub async fn run(
             });
         }
         router = router.add_service(TamperServer::new(tamper));
+
+        // StaffAdmin (internal PH operators console) — separate staff account
+        // store + token namespace (a guardian session can never authorize a
+        // staff RPC and vice versa); content-free by message shape; every
+        // staff action is appended to a tamper-evident audit chain. Mounted
+        // only when explicitly enabled (BULWARK_STAFF=1).
+        if cfg.staff_enabled {
+            let staff = match &cfg.state_dir {
+                Some(dir) => StaffStore::with_state_dir(dir)?,
+                None => StaffStore::new(),
+            }
+            .with_bootstrap_from_env();
+            router = router.add_service(StaffAdminServer::new(StaffAdminService::from_env(staff)));
+            tracing::info!(
+                "staff admin ENABLED — separate staff accounts, TOTP required, every action audited"
+            );
+        }
 
         // Review (+ optional Accounts) depends on the deployment mode:
         //   * accounts_enabled = false (DEFAULT, single-home/dev): device-scoped
