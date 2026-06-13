@@ -474,6 +474,87 @@ impl ReviewService {
     }
 }
 
+/// SSRF guard for a registered UnifiedPush endpoint. The server POSTs the
+/// redacted alert payload to this URL on every alert, so an attacker who could
+/// store an arbitrary value here could aim the server at internal/metadata
+/// services. Require an `https` URL to a **public** host; reject loopback,
+/// private (RFC1918 / ULA), link-local (incl. the `169.254.169.254` cloud
+/// metadata IP), unspecified and multicast literals.
+///
+/// A self-hoster running an `http`/private-network ntfy can opt out of both the
+/// scheme and the address checks with `BULWARK_PUSH_ALLOW_INSECURE_ENDPOINTS=1`.
+/// Hostnames are NOT resolved here (DNS resolution at registration is itself an
+/// SSRF/rebind surface); the guardian-auth gate above is the primary control —
+/// only an authenticated guardian, scoped to the device, can register at all.
+fn validate_push_endpoint(endpoint: &str) -> Result<(), Status> {
+    let allow_insecure =
+        std::env::var_os("BULWARK_PUSH_ALLOW_INSECURE_ENDPOINTS").is_some_and(|v| !v.is_empty());
+    let url = url::Url::parse(endpoint)
+        .map_err(|_| Status::invalid_argument("push_endpoint must be a valid absolute URL"))?;
+    match url.scheme() {
+        "https" => {}
+        "http" if allow_insecure => {}
+        _ => {
+            return Err(Status::invalid_argument(
+                "push_endpoint must be an https URL (set BULWARK_PUSH_ALLOW_INSECURE_ENDPOINTS=1 \
+                 to allow http for a self-hosted distributor on a trusted network)",
+            ));
+        }
+    }
+    match url.host() {
+        None => {
+            return Err(Status::invalid_argument(
+                "push_endpoint must include a host",
+            ));
+        }
+        Some(url::Host::Ipv4(ip)) if !allow_insecure && !is_public_v4(ip) => {
+            return Err(Status::invalid_argument(
+                "push_endpoint must not point at a private/loopback/link-local address (SSRF guard)",
+            ));
+        }
+        Some(url::Host::Ipv6(ip)) if !allow_insecure && !is_public_v6(ip) => {
+            return Err(Status::invalid_argument(
+                "push_endpoint must not point at a private/loopback/link-local address (SSRF guard)",
+            ));
+        }
+        // A public IP literal, or a domain (resolved at send time, not here).
+        Some(_) => {}
+    }
+    Ok(())
+}
+
+/// `true` only for a globally-routable IPv4 (rejects loopback/private/link-local/
+/// unspecified/broadcast/multicast/documentation ranges).
+fn is_public_v4(ip: std::net::Ipv4Addr) -> bool {
+    !(ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+        || ip.is_documentation())
+}
+
+/// `true` only for a globally-routable IPv6 (rejects loopback/unspecified/
+/// multicast, ULA `fc00::/7`, link-local `fe80::/10`, and IPv4-mapped private
+/// addresses). Uses manual masks for ULA/link-local since the std helpers are
+/// still unstable.
+fn is_public_v6(ip: std::net::Ipv6Addr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+        return false;
+    }
+    let seg0 = ip.segments()[0];
+    let link_local = (seg0 & 0xffc0) == 0xfe80; // fe80::/10
+    let unique_local = (seg0 & 0xfe00) == 0xfc00; // fc00::/7
+    if link_local || unique_local {
+        return false;
+    }
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return is_public_v4(v4);
+    }
+    true
+}
+
 #[tonic::async_trait]
 impl bulwark_proto::v1::review_server::Review for ReviewService {
     async fn submit_decision(
@@ -559,6 +640,8 @@ impl bulwark_proto::v1::review_server::Review for ReviewService {
         &self,
         req: Request<PushTarget>,
     ) -> Result<Response<PushAck>, Status> {
+        // Bearer token (if any) for accounts-mode authentication.
+        let meta_token = crate::accounts::bearer_token(&req);
         let target = req.into_inner();
         if target.device_id.trim().is_empty() {
             return Err(Status::invalid_argument("device_id is required"));
@@ -566,6 +649,34 @@ impl bulwark_proto::v1::review_server::Review for ReviewService {
         if target.push_endpoint.trim().is_empty() {
             return Err(Status::invalid_argument("push_endpoint is required"));
         }
+        // SSRF guard: `push_endpoint` becomes a server-side POST target that
+        // `UnifiedPushTransport::send` dereferences on EVERY alert. Reject
+        // anything that isn't an https URL to a public host (no loopback /
+        // private / link-local / metadata addresses) before it is stored.
+        validate_push_endpoint(target.push_endpoint.trim())?;
+
+        // SECURITY: when accounts are wired, registering a push endpoint must be
+        // AUTHENTICATED and SCOPED to one of the guardian's own devices — else any
+        // caller reaching `Review.RegisterPushTarget` could overwrite another
+        // guardian's endpoint or register an arbitrary POST target (SSRF / push
+        // disruption). Mirrors the gate on submit_decision / stream_pending_reviews.
+        if let Some(store) = &self.accounts {
+            let token = meta_token.unwrap_or_default();
+            if token.is_empty() {
+                return Err(Status::unauthenticated(
+                    "a session token (authorization: Bearer …) is required to register a push endpoint",
+                ));
+            }
+            let gscope = store
+                .guardian_scope(&token)
+                .ok_or_else(|| Status::unauthenticated("invalid session token"))?;
+            if !gscope.device_ids.contains(target.device_id.trim()) {
+                return Err(Status::permission_denied(
+                    "guardian is not assigned to this device",
+                ));
+            }
+        }
+
         self.hub.register_push(target);
         Ok(Response::new(PushAck { ok: true }))
     }
@@ -880,7 +991,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn register_push_target_requires_token() {
+    async fn register_push_target_rejects_empty_endpoint() {
         let hub = AlertHub::new();
         let svc = ReviewService::new(hub);
         let t = PushTarget {
@@ -893,6 +1004,66 @@ mod tests {
             .await
             .expect_err("must reject empty endpoint");
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn register_push_target_accepts_public_https() {
+        // No account store → auth gate is skipped, isolating endpoint validation.
+        let svc = ReviewService::new(AlertHub::new());
+        svc.register_push_target(Request::new(PushTarget {
+            device_id: "kids-tablet".into(),
+            push_endpoint: "https://ntfy.sh/abc123".into(),
+            ..Default::default()
+        }))
+        .await
+        .expect("public https endpoint accepted");
+    }
+
+    #[tokio::test]
+    async fn register_push_target_bad_endpoints_are_invalid_argument() {
+        // The SSRF guard rejects non-https, cloud-metadata, loopback and private
+        // literals, and unparseable input (auth gate skipped — accounts None).
+        let svc = ReviewService::new(AlertHub::new());
+        for bad in [
+            "http://ntfy.sh/abc",
+            "https://169.254.169.254/latest/meta",
+            "https://127.0.0.1/x",
+            "https://10.0.0.5/x",
+            "https://[::1]/x",
+            "not-a-url",
+        ] {
+            let err = svc
+                .register_push_target(Request::new(PushTarget {
+                    device_id: "kids-tablet".into(),
+                    push_endpoint: bad.into(),
+                    ..Default::default()
+                }))
+                .await
+                .expect_err("must reject");
+            assert_eq!(
+                err.code(),
+                tonic::Code::InvalidArgument,
+                "endpoint {bad} should be InvalidArgument"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn register_push_target_requires_auth_in_accounts_mode() {
+        use crate::accounts::AccountStore;
+        // Accounts wired → registering an endpoint needs a valid session token
+        // bound to the device, else anyone could aim the server's per-alert POST
+        // at a target of their choosing or clobber another guardian's endpoint.
+        let svc = ReviewService::with_accounts(AlertHub::new(), AccountStore::new());
+        let err = svc
+            .register_push_target(Request::new(PushTarget {
+                device_id: "kids-tablet".into(),
+                push_endpoint: "https://ntfy.sh/abc123".into(),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("must require a session token");
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }
 
     #[tokio::test]

@@ -739,6 +739,7 @@ dependencies = [
  "tonic-health",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
