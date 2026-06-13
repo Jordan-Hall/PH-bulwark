@@ -1,0 +1,28 @@
+[package]
+name = "research-site"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "Predator Hunters Research — public site for the child-safety AI lab (all-Rust Dioxus 0.8 web app)."
+
+# This is a PUBLIC, client-rendered web property — distinct from the guardian
+# console (apps/parent) and the child app (platform/android). It ships as a
+# wasm bundle to research.predatorhunters.co.uk. The renderer comes from the
+# platform feature, mirroring the other Dioxus apps in this repo:
+#   * `web`     — the SHIPPED target (`dx build --platform web` → wasm).
+#   * `desktop` — host-checkable preview window (`cargo run`), handy on Windows.
+[features]
+default = ["web"]
+web = ["dioxus/web"]
+desktop = ["dioxus/desktop"]
+
+[dependencies]
+# Dioxus 0.8 + the router, pinned to the SAME alpha apps/parent is proven
+# against (its committed Cargo.lock resolves this exact build). The router
+# drives the multi-page lab site (Home / Research / Approach / About / Contact).
+dioxus = { version = "0.8.0-alpha.0", features = ["router"] }
+
+# Detached from the engine cargo workspace (like apps/parent and apps/child) so
+# the verified `cargo build --workspace` never drags in the heavy UI tree. This
+# crate builds on its own: `cd apps/research && cargo check --target wasm32-unknown-unknown`.
+[workspace]

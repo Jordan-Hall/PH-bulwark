@@ -1,0 +1,44 @@
+# Caddy config for research.predatorhunters.co.uk.
+#
+# Caddy obtains + renews a real Let's Encrypt cert via the Cloudflare DNS-01
+# challenge (token in $CF_API_TOKEN, passed by the deploy as a root-only
+# env-file). That gives the origin a publicly-trusted cert, so Cloudflare can
+# proxy in "Full (strict)" mode. Cert/key state lives in /data (a host volume),
+# so renewals survive container restarts. DNS-01 means inbound :80 is NOT needed
+# for issuance — but :80 is kept for the HTTP→HTTPS redirect.
+
+{
+	email admin@predatorhunters.co.uk
+}
+
+research.predatorhunters.co.uk {
+	encode zstd gzip
+
+	tls {
+		dns cloudflare {env.CF_API_TOKEN}
+	}
+
+	# Liveness probe (matched before the SPA handler).
+	handle /healthz {
+		respond "ok" 200
+	}
+
+	# Everything else: the static SPA, with client-routing fallback.
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+
+		# Long-cache the immutable, content-hashed bundle assets…
+		@assets path *.wasm *.js *.css *.woff *.woff2 *.png *.jpg *.jpeg *.svg
+		header @assets Cache-Control "public, max-age=604800"
+		# …but never cache the HTML shell, so a deploy is picked up at once.
+		header /index.html Cache-Control "no-cache"
+	}
+
+	header {
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+}
