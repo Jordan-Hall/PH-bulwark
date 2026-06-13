@@ -120,6 +120,91 @@ pub fn session_dir_for_endpoint(endpoint: &str) -> std::path::PathBuf {
         .join(server_session_key(endpoint))
 }
 
+// ---------------------------------------------------------------------------
+// Remote-push (UnifiedPush) registration state — see docs/design/parent-notifications.md
+// ---------------------------------------------------------------------------
+
+/// Where this guardian device's stable id is persisted. It is a routing handle
+/// only (the server keys its push-target map by it so a re-registration
+/// OVERWRITES rather than accumulating) — NOT a credential and NOT scoped on by
+/// the server. Lives in the per-user config dir, NOT per-server, so the same
+/// device presents one identity to every region it registers with.
+pub fn guardian_device_id_path() -> std::path::PathBuf {
+    app_config_dir().join("guardian_device_id.txt")
+}
+
+/// Read (or mint-and-persist) this Manager install's guardian device id. A
+/// 16-byte random hex token generated once with `ring`'s CSPRNG — the same
+/// primitive the app-lock PIN uses. On any I/O failure we fall back to an
+/// in-memory id for this run (registration still works; it just won't be stable
+/// across restarts on a read-only profile).
+pub fn guardian_device_id() -> String {
+    let path = guardian_device_id_path();
+    if let Some(existing) = std::fs::read_to_string(&path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return existing;
+    }
+    let id = mint_device_id();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&path, &id);
+    id
+}
+
+/// 16 random bytes as lowercase hex (`ring` CSPRNG). Not security-sensitive on
+/// its own — it's a routing handle — but minting it randomly avoids any
+/// cross-install collision in the server's push-target map.
+fn mint_device_id() -> String {
+    use ring::rand::SecureRandom;
+    let rng = ring::rand::SystemRandom::new();
+    let mut bytes = [0u8; 16];
+    if rng.fill(&mut bytes).is_err() {
+        // Deterministic-but-unique-enough fallback: time-seeded. Never panics.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        return format!("mgr-{nanos:032x}");
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Where the guardian's pasted UnifiedPush endpoint URL is persisted. Per-user
+/// (not per-server): one device has one push distributor endpoint, registered
+/// with whichever region the guardian is signed into. A plain routing URL — no
+/// alert content, no credential.
+pub fn push_endpoint_path() -> std::path::PathBuf {
+    app_config_dir().join("push_endpoint.txt")
+}
+
+pub fn saved_push_endpoint() -> String {
+    std::fs::read_to_string(push_endpoint_path())
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default()
+}
+
+pub fn save_push_endpoint(endpoint: &str) -> std::io::Result<()> {
+    let path = push_endpoint_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, endpoint.trim())
+}
+
+pub fn clear_push_endpoint() -> std::io::Result<()> {
+    match std::fs::remove_file(push_endpoint_path()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 pub fn server_session_key(endpoint: &str) -> String {
     // FNV-1a: small deterministic key for local filenames; not security-sensitive.
     let mut hash: u64 = 0xcbf29ce484222325;

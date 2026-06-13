@@ -6,17 +6,19 @@ open-source channels — no Google Play, no proprietary services.** The release 
 them to a GitHub Release; the three channels below all draw from those signed
 assets.
 
-Two shipping APKs (the Manager / `apps/parent` is separate and not covered here):
+Three shipping APKs — the child filter and safe camera (one Gradle project) plus
+the guardian console (a `dx`-built Dioxus app on a detached workspace):
 
 | App | Package | Release asset | What it is |
 |---|---|---|---|
 | PH Bulwark (child) | `co.predatorhunters.bulwark` | `app-release.apk` | Guardian-installed child-safety content filter (VpnService + opt-in on-screen text reader). |
 | PH Bulwark Camera | `co.predatorhunters.bulwark.camera` | `camera-release.apk` | Local-only safe camera; declares **no** network permission. |
+| PH Bulwark Manager | `co.predatorhunters.bulwark.manager` | `manager-release.apk` | Guardian console (`apps/parent`): pair devices, review redacted alerts, approve/keep blocks. |
 
-> The asset names `app-release.apk` and `camera-release.apk` are fixed contract:
-> they are produced under those exact names by the release workflow and matched
-> verbatim by the Obtainium regexes below and the F-Droid mirror. Do not rename
-> one without the others.
+> The asset names `app-release.apk`, `camera-release.apk`, and
+> `manager-release.apk` are fixed contract: they are produced under those exact
+> names by the release workflow and matched verbatim by the Obtainium regexes
+> below and the F-Droid mirror. Do not rename one without the others.
 
 ## Signing
 
@@ -25,7 +27,11 @@ are present (`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
 `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`). Both `:app` and `:camera`
 build.gradle self-gate their signing config on these, so an absent keystore
 yields **unsigned** APKs plus a CI notice — the build never fails for want of a
-key. The keystore is **never** committed; it lives only as CI secrets / offline.
+key. The Manager is built by `dx`, which has **no Android signing config of its
+own** (its only codesign support is Apple/iOS), so its job signs the APK
+explicitly with `zipalign` + `apksigner` using the **same** four secrets, gated
+the same way (present => signed, absent => unsigned + notice). The keystore is
+**never** committed; it lives only as CI secrets / offline.
 
 A single, stable upgrade key matters: Obtainium and F-Droid both verify that an
 update is signed by the **same** key as the installed APK, so re-signing with a
@@ -79,8 +85,8 @@ manual. Point Obtainium at the releases repo:
 https://github.com/Jordan-Hall/PH-bulwark
 ```
 
-Two apps share one releases repo, so add **two** Obtainium sources, each pinned
-to its own asset by `apkFilterRegEx`:
+Three apps share one releases repo, so add **three** Obtainium sources, each
+pinned to its own asset by `apkFilterRegEx`:
 
 Child filter — `co.predatorhunters.bulwark`:
 
@@ -106,8 +112,21 @@ Safe camera — `co.predatorhunters.bulwark.camera`:
 }
 ```
 
-The `apkFilterRegEx` values (`app-release\.apk$` / `camera-release\.apk$`) must
-stay in lock-step with the asset names the release workflow uploads.
+Guardian console — `co.predatorhunters.bulwark.manager`:
+
+```json
+{
+  "id": "co.predatorhunters.bulwark.manager",
+  "url": "https://github.com/Jordan-Hall/PH-bulwark",
+  "author": "Predator Hunters",
+  "name": "PH Bulwark Manager",
+  "additionalSettings": "{\"apkFilterRegEx\":\"manager-release\\\\.apk$\",\"invertAPKFilter\":false,\"verifyLatestTag\":false,\"versionExtractionRegEx\":\"\",\"matchGroupToUse\":\"\",\"trackOnly\":false,\"versionDetection\":true,\"releaseDateAsVersion\":false}"
+}
+```
+
+The `apkFilterRegEx` values (`app-release\.apk$` / `camera-release\.apk$` /
+`manager-release\.apk$`) must stay in lock-step with the asset names the release
+workflow uploads.
 
 ---
 
@@ -145,9 +164,12 @@ mandatory app signing and a clean security model. Notes for a future submission:
 - **Push: ntfy / UnifiedPush replaces FCM.** To stay free of proprietary Google
   services these FOSS builds use [UnifiedPush](https://unifiedpush.org) with an
   [ntfy](https://ntfy.sh) distributor for guardian alerts, not Firebase Cloud
-  Messaging. The push **code** is handled in a separate PR; this document only
-  records the distribution implication (no FCM dependency, so the APKs stay
-  Google-service-free and installable on de-Googled devices).
+  Messaging. The Manager registers a self-hosted UnifiedPush endpoint with the
+  server's authenticated `Review.RegisterPushTarget` RPC; the **native receiver**
+  (the Kotlin UnifiedPush connector that supplies the endpoint URL and surfaces
+  incoming pushes) is tracked in [`design/parent-notifications.md`](design/parent-notifications.md).
+  The distribution implication is unchanged: no FCM dependency, so the APKs stay
+  Google-service-free and installable on de-Googled devices.
 - **Framing.** Throughout, PH Bulwark is a consensual, openly-visible
   child-protection content filter on a guardian-owned device — never described as
   covert monitoring or surveillance (see [`FRAMING.md`](FRAMING.md)).

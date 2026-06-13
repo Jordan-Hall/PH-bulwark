@@ -8,14 +8,16 @@ use bulwark_proto::v1::review_client::ReviewClient;
 use bulwark_proto::v1::{
     AccountAck, AlertEvent, AlertKind, ChangePasswordRequest, Child as ProtoChild, ChildConfig,
     ChildStatusRequest, CreateAccountRequest, CreatePairCodeRequest, DeviceFilter,
-    ListChildrenRequest, ListSafetyBroadcastsRequest, LoginRequest, PairCode,
+    ListChildrenRequest, ListSafetyBroadcastsRequest, LoginRequest, PairCode, PushTarget,
     RequestPasswordResetAck, RequestPasswordResetRequest, ResetPasswordAck, ResetPasswordRequest,
     ReviewDecision, ReviewRequest, ReviewScope, SafetyBroadcast, Session, SetChildConfigRequest,
 };
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 use tonic::Streaming;
 
-use crate::servers::{cluster_ca_path_for_endpoint, cluster_endpoint, guardian_token};
+use crate::servers::{
+    cluster_ca_path_for_endpoint, cluster_endpoint, guardian_device_id, guardian_token,
+};
 
 /// Build a tonic [`Channel`] to the cluster.
 ///
@@ -386,7 +388,7 @@ pub async fn submit_decision_on(
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
     let req = review_request_at(alert_id, device_id, approve, ts);
-    let request = request_with_bearer(req, token);
+    let request = with_bearer(req, token);
 
     let ack = client.submit_decision(request).await?.into_inner();
     if !ack.applied {
@@ -411,12 +413,15 @@ pub fn review_request_at(alert_id: &str, device_id: &str, approve: bool, ts: i64
     }
 }
 
-pub fn request_with_bearer(req: ReviewRequest, token: &str) -> tonic::Request<ReviewRequest> {
-    // In accounts mode the server requires a guardian session token on the
-    // decision RPC (it scopes the approve/deny to the guardian's assigned
-    // children). Attach the SAME guardian token the alert stream uses, as
-    // `authorization: Bearer <token>` metadata. A single-home / no-accounts server
-    // ignores it, so an unset token still works there.
+/// Attach `authorization: Bearer <token>` metadata to ANY request body.
+///
+/// In accounts mode the server requires a guardian session token on the
+/// decision RPC (it scopes the approve/deny to the guardian's assigned children)
+/// AND on `Review.RegisterPushTarget` (else any caller could aim the server's
+/// per-alert POST at an endpoint of their choosing — SSRF / push disruption).
+/// Attach the SAME guardian token the alert stream uses. A single-home /
+/// no-accounts server ignores it, so an unset token still works there.
+pub fn with_bearer<T>(req: T, token: &str) -> tonic::Request<T> {
     let mut request = tonic::Request::new(req);
     let token = token.trim();
     if !token.is_empty() {
@@ -425,6 +430,89 @@ pub fn request_with_bearer(req: ReviewRequest, token: &str) -> tonic::Request<Re
         }
     }
     request
+}
+
+/// Register this Manager device's self-hosted UnifiedPush endpoint with the
+/// cluster's `Review.RegisterPushTarget`, so guardian alerts can be relayed to
+/// THIS device when the guardian is away from the child's device.
+///
+/// AUTHENTICATED: carries the guardian's existing session token as
+/// `authorization: Bearer …` — the server REQUIRES it in accounts mode and the
+/// registration is rejected without it (we never weaken that). The endpoint URL
+/// is the guardian's own UnifiedPush distributor route (e.g. an `ntfy` topic
+/// URL); the server validates it (https + public host, SSRF guard) before
+/// storing it. No alert content is sent here — this is a routing handle only.
+/// GATE: native remote push is OFF until per-guardian scoped fan-out ships
+/// (issue #140). Today the server's `UnifiedPushFanoutSink` POSTs every raised
+/// alert to EVERY registered endpoint (`AlertHub::push_tokens`), so enrolling
+/// this device would let a guardian receive other families' redacted alerts —
+/// a cross-tenant leak. So the client does NOT call the registration RPC yet:
+/// the endpoint is saved on-device only. The #140 PR flips this to `true` (and
+/// adds the scoped routing), at which point registration activates with no other
+/// change. Kept a compile-time const, not an env flag, so master is never one
+/// runtime toggle away from the leak.
+const NATIVE_PUSH_ENABLED: bool = false;
+
+pub async fn register_push_target(endpoint: &str) -> anyhow::Result<()> {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        anyhow::bail!("a UnifiedPush endpoint URL is required");
+    }
+    if NATIVE_PUSH_ENABLED {
+        let token = guardian_token();
+        if token.is_empty() {
+            anyhow::bail!("sign in required to register notifications for this server");
+        }
+        let channel = connect_channel().await?;
+        register_push_target_on(channel, &token, &guardian_device_id(), endpoint).await
+    } else {
+        // Inert until #140: saved on-device by the caller; not sent to the cluster.
+        Ok(())
+    }
+}
+
+pub async fn register_push_target_on(
+    channel: Channel,
+    token: &str,
+    device_id: &str,
+    endpoint: &str,
+) -> anyhow::Result<()> {
+    let mut client = ReviewClient::new(channel);
+    let request = with_bearer(
+        PushTarget {
+            device_id: device_id.to_string(),
+            push_endpoint: endpoint.to_string(),
+            platform: push_platform().to_string(),
+        },
+        token,
+    );
+    let ack = client.register_push_target(request).await?.into_inner();
+    if !ack.ok {
+        anyhow::bail!("the cluster declined the push registration");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub async fn register_push_target_to(
+    endpoint: &str,
+    token: &str,
+    device_id: &str,
+    push_endpoint: &str,
+) -> anyhow::Result<()> {
+    let channel = connect_channel_to(endpoint, None).await?;
+    register_push_target_on(channel, token, device_id, push_endpoint).await
+}
+
+/// The `platform` field the server records alongside the endpoint. The Manager
+/// ships native on Android and as a desktop console elsewhere; the value is
+/// advisory routing metadata only.
+pub fn push_platform() -> &'static str {
+    if cfg!(target_os = "android") {
+        "android"
+    } else {
+        "desktop"
+    }
 }
 
 /// Pull a retained clip from the cluster over `Review.FetchSegment` (for a guardian

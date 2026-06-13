@@ -1,16 +1,20 @@
 name: android-release
 
-# Build the SIGNED child + camera release APKs and attach them to the GitHub
-# Release, so the self-hosted FOSS distribution channels can pull them:
+# Build the SIGNED Android release APKs and attach them to the GitHub Release,
+# so the self-hosted FOSS distribution channels can pull them:
 #   * Obtainium points straight at these Release assets (auto-updates by tag);
 #   * the self-hosted F-Droid repo (fdroid/) mirrors the same APKs;
 #   * Accrescent takes the signed child APK for its own submission/signing.
 # See docs/distribution.md for the full channel map.
 #
-# Two shipping APKs come out of one Gradle project:
-#   :app     -> co.predatorhunters.bulwark         (child VpnService filter)  -> app-release.apk
-#   :camera  -> co.predatorhunters.bulwark.camera  (local-only safe camera)  -> camera-release.apk
-# The Manager (apps/parent, Dioxus) is a SEPARATE artifact and out of scope here.
+# THREE shipping APKs, from TWO build systems:
+#   :app     -> co.predatorhunters.bulwark          (child VpnService filter)  -> app-release.apk      } gradle (release-apks job)
+#   :camera  -> co.predatorhunters.bulwark.camera   (local-only safe camera)   -> camera-release.apk   }
+#   Manager  -> co.predatorhunters.bulwark.manager  (guardian console, Dioxus) -> manager-release.apk  } dx (manager-apk job)
+# The Manager (apps/parent) is a `dx`-built Dioxus app on a DETACHED workspace,
+# so it gets its OWN job (manager-apk) — see that job's header for the two
+# dx-on-Android constraints (arm64 ABI pin + NDK cross-compiler env) and why it
+# signs explicitly (dx has no Android signing config of its own).
 #
 # Signing is gated on the ANDROID_* secrets being present — EXACTLY like
 # platform/android/{app,camera}/build.gradle.kts self-gate their signingConfig.
@@ -156,4 +160,154 @@ jobs:
         with:
           name: ph-bulwark-foss-release-apks
           path: platform/android/dist/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # PH Bulwark MANAGER (apps/parent, Dioxus 0.8) -> manager-release.apk
+  #
+  # The Manager is a SEPARATE artifact from the gradle :app/:camera project: it is
+  # a `dx`-built Dioxus app (detached cargo workspace), so it gets its own job —
+  # NOT a step in release-apks. It joins the SAME FOSS channels (Obtainium /
+  # F-Droid mirror) under the stable asset name `manager-release.apk`, kept in
+  # lock-step with docs/distribution.md, fdroid/metadata/, and the Obtainium
+  # source block. App id `co.predatorhunters.bulwark.manager` (coexists with the
+  # child). See docs/distribution.md.
+  #
+  # TWO non-obvious dx-on-Android constraints baked in below (from CLAUDE.md):
+  #   1. ABI: `dx build --platform android` defaults to an x86_64-only APK, which
+  #      gets INSTALL_FAILED_NO_MATCHING_ABIS on an arm64 phone. The Pixel recipe
+  #      uses `--device <id>` to force arm64; in CI there is no device, so we pin
+  #      the ABI with the rustc triple via `--target aarch64-linux-android`.
+  #   2. The Rust deps (ring, via tonic's tls-ring) need a C cross-compiler, so the
+  #      NDK CC_/AR_/CARGO_TARGET_*_LINKER vars MUST be exported for the target.
+  #
+  # SIGNING: unlike :app/:camera, dx has NO Android signing config (its only
+  # codesign support is Apple/iOS) — it emits an UNSIGNED release APK. So this job
+  # signs explicitly with zipalign + apksigner using the SAME four ANDROID_*
+  # secrets, self-gated exactly like release-apks: secrets present => signed,
+  # absent => the UNSIGNED dx APK ships plus a ::notice:: (the build never fails
+  # for want of a keystore). Keep ONE release keystore across all channels — both
+  # Obtainium and F-Droid verify in-place updates are signed by the same key.
+  manager-apk:
+    name: signed Manager (apps/parent) release APK
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK + NDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install NDK + export its path
+        run: |
+          sdkmanager "ndk;26.3.11579264" "platforms;android-34" "build-tools;34.0.0"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITHUB_ENV"
+
+      - name: Set up Rust + arm64 Android target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # arm64 only — the phone ABI we pin below with --target.
+          targets: aarch64-linux-android
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/parent/target
+          key: ${{ runner.os }}-cargo-manager-${{ hashFiles('apps/parent/Cargo.toml') }}
+
+      - name: Install the dx CLI (Dioxus 0.8 alpha — pinned/locked)
+        # apps/parent is on dioxus 0.8.0-alpha.0; the CLI must be installed with
+        # --locked (the library builds with plain cargo). Mirrors CLAUDE.md.
+        run: cargo install dioxus-cli --version 0.8.0-alpha.0 --locked
+
+      - name: Export NDK cross-compiler env for aarch64 (ring needs cc)
+        # The Rust dep tree (ring, via tonic's tls-ring) compiles C for the
+        # target, so point the linker/CC/AR at the NDK arm64 toolchain — the
+        # exact set CLAUDE.md calls out for a `dx build --platform android`.
+        run: |
+          TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "CC_aarch64_linux_android=$TOOLCHAIN/aarch64-linux-android34-clang" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$TOOLCHAIN/llvm-ar" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TOOLCHAIN/aarch64-linux-android34-clang" >> "$GITHUB_ENV"
+
+      - name: Signing-secret presence notice
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "::notice title=Unsigned Manager APK::No ANDROID_KEYSTORE_BASE64 secret — shipping the UNSIGNED dx APK. Add the four ANDROID_* secrets to ship a signed Manager APK (docs/distribution.md)."
+          else
+            echo "::notice title=Signed Manager APK::Release keystore present — the Manager APK will be zipalign+apksigner signed."
+          fi
+
+      - name: Bundle the Manager APK (arm64, release) with dx
+        working-directory: apps/parent
+        # --target pins arm64 (no --device in CI; see job header). --package-types
+        # apk forces an .apk (the FOSS channels take APKs, not an .aab). dx emits
+        # an UNSIGNED release APK under target/dx/.../android/.../outputs/apk/release.
+        run: dx bundle --platform android --release --package-types apk --target aarch64-linux-android
+
+      - name: Locate, (optionally) sign, and stage manager-release.apk
+        working-directory: apps/parent
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # dx names the dir from the build profile; find the freshest release APK
+          # it produced (unsigned or already-aligned), excluding any debug output.
+          RAW="$(find target/dx -path '*outputs/apk/release/*.apk' | head -n1)"
+          if [ -z "$RAW" ]; then
+            echo "::error title=Manager APK missing::dx produced no release APK under target/dx/**/outputs/apk/release"
+            exit 1
+          fi
+          echo "dx APK: $RAW"
+
+          if [ -z "${ANDROID_KEYSTORE_BASE64:-}" ]; then
+            # No keystore -> ship the UNSIGNED dx APK under the stable name.
+            cp "$RAW" dist/manager-release.apk
+          else
+            BT="$ANDROID_SDK_ROOT/build-tools/34.0.0"
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > release.keystore
+            "$BT/zipalign" -p -f 4 "$RAW" manager-aligned.apk
+            "$BT/apksigner" sign \
+              --ks release.keystore \
+              --ks-pass "pass:$ANDROID_KEYSTORE_PASSWORD" \
+              --ks-key-alias "$ANDROID_KEY_ALIAS" \
+              --key-pass "pass:$ANDROID_KEY_PASSWORD" \
+              --out dist/manager-release.apk \
+              manager-aligned.apk
+            "$BT/apksigner" verify --print-certs dist/manager-release.apk
+            rm -f release.keystore manager-aligned.apk
+          fi
+          (cd dist && sha256sum manager-release.apk > SHA256SUMS-manager-foss)
+          ls -la dist/
+
+      - name: Attach to the GitHub Release (tag push or published release)
+        if: github.event_name == 'release' || github.event_name == 'push'
+        uses: softprops/action-gh-release@v3
+        with:
+          files: apps/parent/dist/*
+
+      - name: Upload as a workflow artifact (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v6
+        with:
+          name: ph-bulwark-manager-foss-release-apk
+          path: apps/parent/dist/*
           if-no-files-found: error

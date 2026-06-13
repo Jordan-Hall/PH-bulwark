@@ -11,7 +11,8 @@ use dioxus::prelude::*;
 
 use crate::api::{
     change_guardian_password, create_guardian_account, create_pair_code_for_child, load_children,
-    login_guardian, request_password_reset, reset_password_with_code, submit_decision,
+    login_guardian, register_push_target, request_password_reset, reset_password_with_code,
+    submit_decision,
 };
 use crate::brand::logo_data_uri;
 use crate::components::{AlertCard, ChildVpnRow, CoverageMatrix};
@@ -28,9 +29,10 @@ use crate::process::{
 };
 use crate::router::{phase_route, Route};
 use crate::servers::{
-    cluster_ca_path_for_endpoint, remove_custom_server, save_guardian_token, save_server_choice,
-    saved_choice, saved_token_for_endpoint, selected_server_id, server_inventory,
-    upsert_custom_server, DEFAULT_REGION_ID,
+    clear_push_endpoint, cluster_ca_path_for_endpoint, remove_custom_server, save_guardian_token,
+    save_push_endpoint, save_server_choice, saved_choice, saved_push_endpoint,
+    saved_token_for_endpoint, selected_server_id, server_inventory, upsert_custom_server,
+    DEFAULT_REGION_ID,
 };
 use crate::state::{pair_expiry_text, segment_code, Alert, AuthState, Console, PairCodeUi};
 
@@ -326,6 +328,13 @@ pub fn Auth() -> Element {
                     unlocked.set(true);
                     auth.refresh();
                     setup_busy.set(false);
+                    // NOTE: no auto-registration of a saved push endpoint on
+                    // login. Remote push delivery is gated OFF until per-guardian
+                    // scoped fan-out ships (issue #140) — until then enrolling an
+                    // endpoint would put this device in the server's GLOBAL fan-out
+                    // (every registered endpoint receives every family's alert), a
+                    // cross-tenant leak. The endpoint is saved on-device only and
+                    // activates automatically once #140 lands.
                     // Offer (skippably) a quick-unlock PIN. If one already
                     // exists, skip straight to the console.
                     if crate::lock::pin_is_set() {
@@ -1309,6 +1318,126 @@ pub fn ServerSettingsPanel(on_saved: EventHandler<()>) -> Element {
     }
 }
 
+/// Remote-notification settings — the guardian registers a self-hosted
+/// **UnifiedPush** endpoint (FOSS; no Google/Apple) so safety alerts can reach
+/// THIS device when they're away from the child's device. The redacted alert is
+/// HTTP-POSTed by the server to the endpoint URL; no alert content is sent at
+/// registration time, and registration is AUTHENTICATED with the guardian's
+/// session token. Until native push delivery lands (see
+/// docs/design/parent-notifications.md) the endpoint URL is entered by hand
+/// (paste your distributor's topic URL, e.g. an `ntfy` topic).
+#[component]
+pub fn NotificationsPanel() -> Element {
+    let mut endpoint = use_signal(saved_push_endpoint);
+    let busy = use_signal(|| false);
+    let mut note = use_signal(|| Option::<String>::None);
+    let mut error = use_signal(|| Option::<String>::None);
+    let mut registered = use_signal(|| !saved_push_endpoint().is_empty());
+
+    let save_and_register = move |_: ()| {
+        if busy() {
+            return;
+        }
+        let value = endpoint().trim().to_string();
+        let mut busy = busy;
+        let mut note = note;
+        let mut error = error;
+        let mut registered = registered;
+        busy.set(true);
+        note.set(None);
+        error.set(None);
+        spawn(async move {
+            // Persist FIRST so a later sign-in re-registers it automatically,
+            // then register with the current server (carries the guardian token).
+            if let Err(e) = save_push_endpoint(&value) {
+                error.set(Some(format!("Couldn't save the endpoint: {e}")));
+                busy.set(false);
+                return;
+            }
+            match register_push_target(&value).await {
+                Ok(()) => {
+                    registered.set(true);
+                    note.set(Some(
+                        "Saved on this device. Remote delivery to the Manager switches on \
+                         automatically once per-guardian alert routing ships — until then your \
+                         endpoint stays on this device only."
+                            .to_string(),
+                    ));
+                }
+                Err(e) => error.set(Some(e.to_string())),
+            }
+            busy.set(false);
+        });
+    };
+
+    rsx! {
+        section { class: "panel",
+            div { class: "panel-head",
+                h2 { "Notifications" }
+                p { class: "sub",
+                    "Get safety alerts on this device through a self-hosted, open-source push service (UnifiedPush) — no Google or Apple services involved. Only redacted, content-free alerts are ever sent."
+                }
+            }
+
+            div { class: "box",
+                h3 { "Self-hosted push endpoint" }
+                p { class: "sub",
+                    "Paste the endpoint URL from your UnifiedPush distributor (for example an "
+                    span { class: "mono", "ntfy" }
+                    " topic URL like "
+                    span { class: "mono", "https://ntfy.sh/your-topic" }
+                    "). This field will be filled automatically once native push delivery ships in the app."
+                }
+                label { class: "field",
+                    span { "Endpoint URL" }
+                    input {
+                        r#type: "url",
+                        placeholder: "https://ntfy.sh/your-topic",
+                        value: "{endpoint}",
+                        oninput: move |e| endpoint.set(e.value()),
+                    }
+                }
+                div { class: "row",
+                    button {
+                        class: "primary",
+                        disabled: busy() || endpoint().trim().is_empty(),
+                        onclick: move |_| save_and_register(()),
+                        if busy() { "Saving…" } else { "Save endpoint" }
+                    }
+                    if registered() {
+                        button {
+                            class: "ghost danger-link",
+                            disabled: busy(),
+                            onclick: move |_| {
+                                let _ = clear_push_endpoint();
+                                endpoint.set(String::new());
+                                registered.set(false);
+                                note.set(Some("Removed the saved endpoint on this device. Existing server registrations expire on their own.".to_string()));
+                                error.set(None);
+                            },
+                            "Forget endpoint"
+                        }
+                    }
+                }
+
+                div { class: "hint",
+                    "Registration is signed in with your guardian account — the server only accepts an endpoint from an authenticated guardian, and rejects anything that isn't a public https URL."
+                }
+
+                if let Some(n) = note() {
+                    div { class: "seg-note", "{n}" }
+                }
+                if let Some(e) = error() {
+                    div { class: "err",
+                        span { dangerous_inner_html: "{svg(\"alert\")}" }
+                        "Couldn't register notifications: {e}"
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Routed screens (one per console tab — `crate::router::Route`). Bodies are
 // the former `match active()` arms, verbatim; only the signal access moved to
@@ -1630,6 +1759,7 @@ pub fn Server() -> Element {
         ServerSettingsPanel {
             on_saved: move |_| auth.refresh()
         }
+        NotificationsPanel {}
     }
 }
 
