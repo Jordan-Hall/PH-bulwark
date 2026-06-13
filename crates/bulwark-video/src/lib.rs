@@ -863,4 +863,237 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // ---------------------------------------------------------------------
+    // Default-build coverage for the timecode/remediation MAPPING logic in
+    // `analyze()` — the part the ffmpeg feature's own `ffmpeg_tests` cannot
+    // reach (those are `#[cfg(feature = "ffmpeg")]` and the real decode needs
+    // the binary). These exercise the pure logic with synthetic inputs:
+    //   frame index i      → blur span (i/fps, (i+1)/fps)
+    //   audio window i      → mute span (i*win_secs, (i+1)*win_secs)
+    //   worst verdict       → highest score across frames + audio
+    //   remediated_media    → populated from Demuxer::remediate when flagged
+    // ---------------------------------------------------------------------
+
+    use std::sync::Mutex;
+
+    /// One recorded `remediate()` call: (blur_ranges, mute_ranges) in seconds.
+    type RemediateCall = (Vec<(f32, f32)>, Vec<(f32, f32)>);
+
+    /// Per-byte synthetic frames: byte `1` = flagged (NSFW), `0` = safe. A frame
+    /// is `vec![marker]`; the [`MarkerScorer`] scores by that marker.
+    struct ScriptedDemuxer {
+        frame_markers: Vec<u8>,
+        /// Number of audio windows to emit (their transcripts come from the
+        /// injected [`ScriptedTranscriber`], keyed by window index).
+        window_count: usize,
+        window_secs: f32,
+        /// Records the ranges the analyzer passed to `remediate()` (if called).
+        remediate_calls: Mutex<Vec<RemediateCall>>,
+        /// Sentinel bytes returned by `remediate()` so the test can assert the
+        /// analyzer copied them into `remediated_media`.
+        cleaned: Vec<u8>,
+    }
+    impl ScriptedDemuxer {
+        fn new(frame_markers: Vec<u8>, window_count: usize, window_secs: f32) -> Self {
+            Self {
+                frame_markers,
+                window_count,
+                window_secs,
+                remediate_calls: Mutex::new(Vec::new()),
+                cleaned: b"CLEANED-SENTINEL".to_vec(),
+            }
+        }
+    }
+    impl Demuxer for ScriptedDemuxer {
+        fn sample(&self, _s: &[u8], _f: f32) -> DecodedSegment {
+            DecodedSegment {
+                frames: self.frame_markers.iter().map(|&m| vec![m]).collect(),
+                // The window byte index distinguishes flagged vs. safe windows so
+                // the injected transcriber knows what transcript to emit.
+                audio_windows: (0..self.window_count as u8).map(|i| vec![i]).collect(),
+                audio_window_secs: self.window_secs,
+                decoded: true,
+            }
+        }
+        fn remediate(
+            &self,
+            _segment: &[u8],
+            blur_ranges: &[(f32, f32)],
+            mute_ranges: &[(f32, f32)],
+        ) -> Option<Vec<u8>> {
+            self.remediate_calls
+                .lock()
+                .unwrap()
+                .push((blur_ranges.to_vec(), mute_ranges.to_vec()));
+            Some(self.cleaned.clone())
+        }
+    }
+
+    /// Scores by the frame's first byte: `1` ⇒ flagged (above threshold), else safe.
+    struct MarkerScorer;
+    impl Scorer for MarkerScorer {
+        fn score(&self, b: &[u8]) -> f32 {
+            if b.first() == Some(&1) {
+                0.9
+            } else {
+                0.0
+            }
+        }
+        fn model_id(&self) -> &str {
+            "test-marker"
+        }
+    }
+
+    /// Transcribes audio window `vec![i]` to the i-th scripted transcript. An
+    /// empty transcript drives the audio analyzer to a SAFE verdict.
+    struct ScriptedTranscriber {
+        texts: Vec<&'static str>,
+    }
+    impl Transcriber for ScriptedTranscriber {
+        fn engine_id(&self) -> &str {
+            "scripted-test"
+        }
+
+        fn transcribe(&self, audio: &[u8]) -> Option<String> {
+            let i = *audio.first()? as usize;
+            Some(self.texts.get(i).copied().unwrap_or("").to_string())
+        }
+    }
+
+    fn video_req(id: &str) -> AnalysisRequest {
+        AnalysisRequest {
+            request_id: id.into(),
+            media_kind: MediaKind::Video as i32,
+            media: Some(Media::InlineMedia(InlineMedia {
+                data: vec![9, 9, 9, 9],
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+
+    fn approx_ranges_eq(got: &[(f32, f32)], want: &[(f32, f32)]) -> bool {
+        got.len() == want.len()
+            && got
+                .iter()
+                .zip(want)
+                .all(|((a0, a1), (b0, b1))| (a0 - b0).abs() < 1e-4 && (a1 - b1).abs() < 1e-4)
+    }
+
+    #[tokio::test]
+    async fn flagged_frames_map_to_blur_timecodes() {
+        // 5 frames at 2 fps (0.5 s/frame); frames 1 and 3 are flagged NSFW.
+        // Expect blur spans at (1/2,2/2)=(0.5,1.0) and (3/2,4/2)=(1.5,2.0).
+        let demux = ScriptedDemuxer::new(vec![0, 1, 0, 1, 0], 0, 0.0);
+        let a = VideoAnalyzer::with_demuxer(VideoConfig { sample_fps: 2.0 }, demux)
+            .with_vision_scorer(Box::new(MarkerScorer));
+        let v = a.analyze(video_req("blur")).await.unwrap();
+
+        assert_eq!(v.category, Category::AdultImage as i32);
+        // remediated_media must carry the demuxer's cleaned bytes (flagged → softened).
+        assert_eq!(v.remediated_media, b"CLEANED-SENTINEL");
+        // The ranges the analyzer derived land exactly on the flagged frame timecodes.
+        let calls = a.demux.remediate_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "remediate called once for a flagged clip");
+        let (blur, mute) = &calls[0];
+        assert!(
+            approx_ranges_eq(blur, &[(0.5, 1.0), (1.5, 2.0)]),
+            "blur spans map to flagged frame indices, got {blur:?}"
+        );
+        assert!(mute.is_empty(), "no audio flagged → no mute spans");
+    }
+
+    #[tokio::test]
+    async fn flagged_audio_windows_map_to_mute_timecodes() {
+        // 3 windows of 15 s; window 1 is grooming speech, the rest safe.
+        // Expect a mute span at (1*15, 2*15) = (15.0, 30.0).
+        let demux = ScriptedDemuxer::new(vec![], 3, 15.0);
+        let a = VideoAnalyzer::with_demuxer(VideoConfig::default(), demux)
+            .with_vision_scorer(Box::new(MarkerScorer))
+            .with_audio_transcriber(Box::new(ScriptedTranscriber {
+                texts: vec!["the weather is nice", "our little secret", ""],
+            }));
+        let v = a.analyze(video_req("mute")).await.unwrap();
+
+        assert_eq!(v.category, Category::Grooming as i32);
+        assert_eq!(v.remediated_media, b"CLEANED-SENTINEL");
+        let calls = a.demux.remediate_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let (blur, mute) = &calls[0];
+        assert!(blur.is_empty(), "no frames flagged → no blur spans");
+        assert!(
+            approx_ranges_eq(mute, &[(15.0, 30.0)]),
+            "mute span maps to the flagged audio window, got {mute:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn worst_verdict_combines_frames_and_audio() {
+        // A flagged frame (vision 0.9) AND flagged grooming audio. Both loops must
+        // contribute their timecodes, and the worst verdict is one of the two
+        // flagged categories (the grooming engine's score is data-driven, so we
+        // assert the merge collected BOTH span kinds rather than pinning a score).
+        let demux = ScriptedDemuxer::new(vec![1], 1, 10.0);
+        let a = VideoAnalyzer::with_demuxer(VideoConfig { sample_fps: 1.0 }, demux)
+            .with_vision_scorer(Box::new(MarkerScorer))
+            .with_audio_transcriber(Box::new(ScriptedTranscriber {
+                texts: vec!["our little secret"],
+            }));
+        let v = a.analyze(video_req("worst")).await.unwrap();
+
+        assert!(
+            v.category == Category::AdultImage as i32 || v.category == Category::Grooming as i32,
+            "worst verdict is one of the flagged categories, got {}",
+            v.category
+        );
+        let calls = a.demux.remediate_calls.lock().unwrap();
+        let (blur, mute) = &calls[0];
+        assert_eq!(blur.len(), 1, "the NSFW frame produced one blur span");
+        assert_eq!(mute.len(), 1, "the grooming window produced one mute span");
+    }
+
+    #[tokio::test]
+    async fn safe_clip_is_not_remediated() {
+        // No flagged frames, no flagged speech → SAFE, and remediate() is never
+        // called (nothing to soften), so remediated_media stays empty.
+        let demux = ScriptedDemuxer::new(vec![0, 0], 2, 5.0);
+        let a = VideoAnalyzer::with_demuxer(VideoConfig::default(), demux)
+            .with_vision_scorer(Box::new(MarkerScorer))
+            .with_audio_transcriber(Box::new(ScriptedTranscriber {
+                texts: vec!["hello", ""],
+            }));
+        let v = a.analyze(video_req("safe")).await.unwrap();
+
+        assert_eq!(v.category, Category::Safe as i32);
+        assert!(v.remediated_media.is_empty(), "nothing flagged → no media");
+        assert!(
+            a.demux.remediate_calls.lock().unwrap().is_empty(),
+            "remediate() must not run for a safe clip"
+        );
+    }
+
+    #[tokio::test]
+    async fn undecoded_clip_is_never_remediated() {
+        // Demuxer reports decoded=false (no ffmpeg / unsupported). The analyzer
+        // must short-circuit to Unspecified WITHOUT calling remediate().
+        struct Undecodable;
+        impl Demuxer for Undecodable {
+            fn sample(&self, _s: &[u8], _f: f32) -> DecodedSegment {
+                DecodedSegment::default() // decoded = false
+            }
+            fn remediate(
+                &self,
+                _s: &[u8],
+                _b: &[(f32, f32)],
+                _m: &[(f32, f32)],
+            ) -> Option<Vec<u8>> {
+                panic!("remediate must not be called when the clip never decoded");
+            }
+        }
+        let a = VideoAnalyzer::with_demuxer(VideoConfig::default(), Undecodable);
+        let v = a.analyze(video_req("nodec")).await.unwrap();
+        assert_eq!(v.category, Category::Unspecified as i32);
+        assert!(v.remediated_media.is_empty());
+    }
 }
