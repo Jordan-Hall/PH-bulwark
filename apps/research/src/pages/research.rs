@@ -68,7 +68,12 @@ const AIMS: [(&str, &str); 4] = [
 #[component]
 pub fn Research() -> Element {
     rsx! {
-        dioxus::document::Title { "Research · Predator Hunters Research" }
+        crate::components::Seo {
+            title: "Research: child-safety models | Predator Hunters",
+            description: "Six on-device child-safety models: grooming detection, content filtering, in-place video rewriting. How we train them, and our frontier-model benchmark.",
+            path: "/research",
+            image: "/og/research.png",
+        }
         header { class: "page-head",
             div { class: "wrap",
                 p { class: "eyebrow rise d1", "Research" }

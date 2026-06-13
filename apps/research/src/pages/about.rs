@@ -17,7 +17,12 @@ const TIMELINE: [(&str, &str); 4] = [
 #[component]
 pub fn About() -> Element {
     rsx! {
-        dioxus::document::Title { "About · Predator Hunters Research" }
+        crate::components::Seo {
+            title: "About: independent child-safety AI lab | Predator Hunters",
+            description: "Predator Hunters Research is the AI arm of an independent child-protection group on the front line since 2017. A small, self-funded team.",
+            path: "/about",
+            image: "/og/about.png",
+        }
         header { class: "page-head",
             div { class: "wrap",
                 p { class: "eyebrow rise d1", "About" }
