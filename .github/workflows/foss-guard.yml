@@ -1,0 +1,31 @@
+name: foss-guard
+
+# Enforce the 100%-FOSS policy (docs/FOSS.md): fail if a proprietary Android
+# dependency (FCM/Firebase, Play Services, ML Kit, any closed Google SDK) is
+# added to ANY app — child :app, :camera, or the Manager's Android project.
+# Cheap + fast; runs on every change to a Gradle file or the guard itself.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "**/build.gradle"
+      - "**/build.gradle.kts"
+      - "scripts/check-foss-android.sh"
+      - ".github/workflows/foss-guard.yml"
+  pull_request:
+    paths:
+      - "**/build.gradle"
+      - "**/build.gradle.kts"
+      - "scripts/check-foss-android.sh"
+      - ".github/workflows/foss-guard.yml"
+  workflow_dispatch: {}
+
+jobs:
+  foss-guard:
+    name: no proprietary Android deps
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Scan Gradle build files for proprietary coordinates
+        run: bash scripts/check-foss-android.sh .
