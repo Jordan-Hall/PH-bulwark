@@ -11,6 +11,15 @@
     <script type="application/ld+json">
     {"@context":"https://schema.org","@type":"Organization","name":"Predator Hunters Research","url":"https://research.predatorhunters.co.uk/","description":"An independent child-safety AI lab building privacy-first models that run on a child's own phone and store nothing.","parentOrganization":{"@type":"Organization","name":"Predator Hunters","url":"https://predatorhunters.co.uk/"},"sameAs":["https://www.facebook.com/Online.Stings","https://x.com/PredHunTers"]}
     </script>
+    <script type="application/ld+json">
+    {"@context":"https://schema.org","@type":"WebSite","name":"Predator Hunters Research","url":"https://research.predatorhunters.co.uk/","inLanguage":"en-GB","publisher":{"@type":"Organization","name":"Predator Hunters Research","url":"https://research.predatorhunters.co.uk/"}}
+    </script>
+    <script type="application/ld+json">
+    {"@context":"https://schema.org","@type":"SoftwareApplication","name":"PH Camera","applicationCategory":"SecurityApplication","operatingSystem":"Android","description":"A camera that checks every frame on the device and will not take or keep an unsafe photo. It asks for no internet permission, so nothing it sees can leave the phone.","offers":{"@type":"Offer","price":"0","priceCurrency":"GBP"},"publisher":{"@type":"Organization","name":"Predator Hunters Research"}}
+    </script>
+    <script type="application/ld+json">
+    {"@context":"https://schema.org","@type":"SoftwareApplication","name":"PH Bulwark","applicationCategory":"SecurityApplication","operatingSystem":"Android","description":"A device-wide shield that filters unsafe content in place across apps and the web, blocks illegal material on sight, and alerts a guardian with a short redacted record. Models run on the child's own phone.","offers":{"@type":"Offer","price":"0","priceCurrency":"GBP"},"publisher":{"@type":"Organization","name":"Predator Hunters Research"}}
+    </script>
     <!-- The FULL stylesheet is inlined here so the browser has every rule before
          first paint. No flash of unstyled content: the page is fully styled the
          moment it renders. (Source lives here; there is no external CSS request.) -->
@@ -176,7 +185,7 @@ html[data-theme="light"] .brand-logo { background: #0b1320; padding: 5px 9px; bo
 .nav-link.on { color: var(--head); background: rgba(245,130,32,.12); box-shadow: inset 0 0 0 1px rgba(245,130,32,.26); }
 .nav-right { display: inline-flex; align-items: center; gap: 8px; }
 .nav-cta { font-family: var(--sans); }
-.theme-toggle { width: 38px; height: 38px; border-radius: 999px; display: grid; place-items: center; cursor: pointer;
+.theme-toggle { width: 44px; height: 44px; border-radius: 999px; display: grid; place-items: center; cursor: pointer;
   background: var(--hair); border: 1px solid var(--hair-strong); color: var(--ink-2); transition: color .18s, background .18s, transform .18s; }
 .theme-toggle:hover { color: var(--head); transform: rotate(-18deg); }
 .theme-toggle svg { width: 17px; height: 17px; display: block; }
@@ -394,7 +403,7 @@ html[data-theme="light"] .brand-logo { background: #0b1320; padding: 5px 9px; bo
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   *, *::before, *::after { animation: none !important; transition: none !important; }
-  .rise { opacity: 1; transform: none; }
+  .rise, .reveal { opacity: 1 !important; transform: none !important; }
 }
 
 /* ===================================================================
@@ -463,8 +472,8 @@ html[data-theme="light"] .brand-logo { background: #0b1320; padding: 5px 9px; bo
     box-shadow: 0 26px 54px -28px rgba(0,0,0,.9);
     animation: menu-in .22s cubic-bezier(.2,.8,.2,1) both;
   }
-  .nav-menu .nav-link { display: flex; align-items: center; width: 100%; padding: 14px 16px; font-size: 1.02rem; border-radius: var(--r-sm); }
-  .nav-menu-cta { width: 100%; justify-content: center; margin-top: 6px; padding: 14px; }
+  .nav-menu .nav-link { display: flex; align-items: center; width: 100%; min-height: 44px; box-sizing: border-box; padding: 14px 16px; font-size: 1.02rem; border-radius: var(--r-sm); }
+  .nav-menu-cta { width: 100%; min-height: 44px; box-sizing: border-box; justify-content: center; margin-top: 6px; padding: 14px; }
 }
 @keyframes menu-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
 
