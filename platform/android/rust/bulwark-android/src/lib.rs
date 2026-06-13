@@ -53,9 +53,10 @@ use jni::JNIEnv;
 use bulwark_policy::{AgeProfile, Policy, PolicyContext, PolicyDecision};
 use bulwark_proto::v1::accounts_client::AccountsClient;
 use bulwark_proto::v1::child_control_client::ChildControlClient;
+use bulwark_proto::v1::family_safety_client::FamilySafetyClient;
 use bulwark_proto::v1::{
     Category, ChildConfig, ChildConfigFilter, FilteringProfile, PairResult, RedeemPairCodeRequest,
-    SourceChannel, TextSpan, Verdict,
+    SosAck, SosRequest, SourceChannel, TextSpan, Verdict,
 };
 use bulwark_proto::DeviceId;
 use bulwark_text::TextAnalyzer;
@@ -85,7 +86,18 @@ fn cluster_endpoint(endpoint: &str, ca_path: &str) -> Result<Endpoint, String> {
         let pinned = if ca_path.is_empty() {
             None
         } else {
-            std::fs::read(ca_path).ok()
+            match std::fs::read(ca_path) {
+                Ok(pem) => Some(pem),
+                // No pin provisioned on this device -> public trust below.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                // A pin EXISTS but is unreadable: never silently downgrade a
+                // pinned (self-hosted / private-CA) server to public roots.
+                Err(e) => {
+                    return Err(format!(
+                        "pinned cluster CA at {ca_path} exists but is unreadable: {e}"
+                    ))
+                }
+            }
         };
         let tls = match pinned {
             // Private-CA path: pin the device-local CA so a self-hosted /
@@ -492,6 +504,73 @@ async fn fetch_child_config_rpc(
     .into_inner();
 
     Ok(config)
+}
+
+// ---------------------------------------------------------------------------
+// Child SOS — the "I need help" action. UNLIKE the fire-and-forget alert
+// relay, the child UI must know whether a guardian path actually took the
+// alert (honesty: "your guardian has been alerted" vs "call a trusted
+// adult"), so this is a bounded blocking RPC with a real ack. CONTENT-FREE:
+// device identity + time — never location, messages, or media.
+// ---------------------------------------------------------------------------
+
+async fn raise_sos_rpc(
+    endpoint: String,
+    device_id: String,
+    ca_path: String,
+    device_token: String,
+) -> Result<SosAck, String> {
+    let device_id = device_id.trim();
+    if device_id.is_empty() {
+        return Err("device id is not ready yet".to_string());
+    }
+    let channel = cluster_endpoint(&endpoint, &ca_path)?
+        .connect()
+        .await
+        .map_err(|e| format!("could not reach server: {e}"))?;
+    let mut client = FamilySafetyClient::new(channel);
+    let now = relay::now_ms();
+    let ack = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.raise_sos(SosRequest {
+            device_id: device_id.to_string(),
+            device_token: device_token.trim().to_string(),
+            ts: now,
+            // Second-granular idempotency key: a retried tap in the same
+            // second dedupes server-side instead of double-paging the family.
+            client_sos_id: format!("{device_id}-sos-{}", now / 1000),
+        }),
+    )
+    .await
+    .map_err(|_| "server timed out while sending the SOS".to_string())?
+    .map_err(|e| match e.code() {
+        tonic::Code::Unauthenticated => {
+            "this device isn't recognised by the server (re-pair it)".to_string()
+        }
+        _ => format!("server rejected the SOS: {}", e.code()),
+    })?
+    .into_inner();
+    Ok(ack)
+}
+
+fn ok_sos_json(ack: &SosAck) -> String {
+    let obj = serde_json::json!({
+        "ok": true,
+        // True when a guardian path took it (live console stream or the
+        // server's email/push sink) — drives the child-facing honesty.
+        "delivered": ack.delivered,
+        "guardians_reached": ack.guardian_streams_reached,
+    });
+    serde_json::to_string(&obj)
+        .unwrap_or_else(|_| r#"{"ok":false,"error":"could not serialize SOS result"}"#.to_string())
+}
+
+fn err_sos_json(error: impl AsRef<str>) -> String {
+    let obj = serde_json::json!({
+        "ok": false,
+        "error": error.as_ref(),
+    });
+    serde_json::to_string(&obj).unwrap_or_else(|_| r#"{"ok":false,"error":"SOS failed"}"#.to_string())
 }
 
 /// The fail-open verdict JSON used whenever input is bad or the engine is
@@ -979,6 +1058,54 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_fetchChil
     string_to_jstring(&mut env, &json)
 }
 
+/// `external fun raiseSos(endpoint: String, deviceId: String, caPath: String, deviceToken: String): String`
+///
+/// Child SOS: send an URGENT CHILD_SOS alert to the enrolled server so the
+/// guardian is paged immediately (`FamilySafety.RaiseSos`, device-token
+/// authenticated). Returns compact JSON the Kotlin SOS card reads:
+///
+/// * `{"ok":true,"delivered":bool,"guardians_reached":N}` — `delivered` is the
+///   server's HONEST answer (a live guardian stream or the email/push sink
+///   took it); the UI tells the child to call 999 / a trusted adult otherwise.
+/// * `{"ok":false,"error":"..."}`
+///
+/// CONTENT-FREE: device identity + time only — no location, messages, media.
+///
+/// # Safety
+/// JNI entry point. Every jstring argument is null-/UTF-8-validated; invalid
+/// input returns an error JSON instead of panicking.
+#[no_mangle]
+pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_raiseSos(
+    mut env: JNIEnv,
+    _class: JClass,
+    endpoint: JString,
+    device_id: JString,
+    ca_path: JString,
+    device_token: JString,
+) -> jstring {
+    let endpoint = match jstring_to_string(&mut env, &endpoint) {
+        Some(s) => s,
+        None => return string_to_jstring(&mut env, &err_sos_json("server address is missing")),
+    };
+    let device_id = jstring_to_string(&mut env, &device_id).unwrap_or_default();
+    let ca_path = jstring_to_string(&mut env, &ca_path).unwrap_or_default();
+    let device_token = jstring_to_string(&mut env, &device_token).unwrap_or_default();
+
+    let json = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(2)
+        .thread_name("bulwark-android-sos")
+        .build()
+    {
+        Ok(rt) => match rt.block_on(raise_sos_rpc(endpoint, device_id, ca_path, device_token)) {
+            Ok(ack) => ok_sos_json(&ack),
+            Err(e) => err_sos_json(e),
+        },
+        Err(_) => err_sos_json("SOS runtime could not start"),
+    };
+    string_to_jstring(&mut env, &json)
+}
+
 /// `external fun nextAlert(): String?`
 ///
 /// Poll the next pending guardian alert as JSON, or return `null` when none is
@@ -1168,6 +1295,23 @@ mod tests {
         let err = err_pairing_json("pair code is invalid");
         assert!(err.contains("\"ok\":false"), "{err}");
         assert!(err.contains("pair code is invalid"), "{err}");
+    }
+
+    #[test]
+    fn sos_json_shapes_are_stable() {
+        let ok = ok_sos_json(&SosAck {
+            delivered: true,
+            alert_id: "a-1".to_string(),
+            guardian_streams_reached: 2,
+            detail: String::new(),
+        });
+        assert!(ok.contains("\"ok\":true"), "{ok}");
+        assert!(ok.contains("\"delivered\":true"), "{ok}");
+        assert!(ok.contains("\"guardians_reached\":2"), "{ok}");
+
+        let err = err_sos_json("server timed out while sending the SOS");
+        assert!(err.contains("\"ok\":false"), "{err}");
+        assert!(err.contains("timed out"), "{err}");
     }
 
     #[test]

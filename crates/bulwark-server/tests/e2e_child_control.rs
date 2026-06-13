@@ -267,6 +267,11 @@ async fn guardian_sets_config_child_fetches_and_streams() {
         "the child's have_version was recorded as its applied version"
     );
     assert!(st.last_report_ts > 0, "check-in time recorded");
+    let desired = st
+        .desired
+        .expect("status echoes the guardian's desired config");
+    assert_eq!(desired.server_region, "us", "echo is the LATEST set (v2)");
+    assert_eq!(desired.config_version, 2);
 
     // A non-guardian cannot read another family's child status.
     let status_denied = tokio::time::timeout(

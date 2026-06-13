@@ -133,8 +133,8 @@ pre-existing accounts on it). Until it's managed:
    coverage limit (managed device required) documented in §2. Remaining for this
    phase: a non-managed-device Settings-guided fallback + an in-app trust-status
    indicator, and the Pixel install check (post-loop, on-device).
-2. **WG server hardening:** `deploy/wireguard/wg-peers.sh` — per-device peers
-   keyed by `device_id` (`# bulwark-device:` comment in `wg0.conf`): `init` /
+2. **WG server hardening (SHIPPED):** `deploy/wireguard/wg-peers.sh` — per-device
+   peers keyed by `device_id` (`# bulwark-device:` comment in `wg0.conf`): `init` /
    `add-peer` (client pubkey preferred; private keys never leave the device;
    stable IP across key rotation) / `remove-peer` / `list-peers` (child
    endpoints redacted by default), applied live via `wg syncconf` (no tunnel
@@ -143,9 +143,37 @@ pre-existing accounts on it). Until it's managed:
    step (`deploy/aws`, `wg_enabled=true`). **A connected peer today gets
    NAT/IP-anonymisation but an UNFILTERED exit — never flip a child to
    FILTER_ON_SERVER until Phase 3 (the filter in the `wg0` forward path)
-   lands.** Still missing (later phases): gRPC peer provisioning tied to
-   enrollment, the boringtun client pump, and the Phase-3 filter hook.
+   lands.**
+   **Provisioning contract (server side, SHIPPED via WgProvision):** the child
+   calls `WgProvision.RegisterWgPeer` (device-token auth, public key only) and
+   receives `{assigned_address, server_public_key, server_endpoint,
+   keepalive_secs, filter_active}`. The gRPC handler never touches wg(8): it
+   persists the desired peer set to `${BULWARK_STATE_DIR}/wg_peers.json`
+   (`/var/lib/bulwark/wg_peers.json` on the region box) and an on-box reconciler
+   (cron/SSM, root) applies it:
+   `jq -r '.peers[] | [.device_id, .public_key] | @tsv' /var/lib/bulwark/wg_peers.json |
+   while IFS=$'\t' read -r dev key; do bulwark-wg-peers add-peer "$dev" "$key"; done`.
+   The file is sorted by address (= allocation order) and peers are never removed
+   in this increment, so wg-peers.sh's lowest-free allocation converges on the
+   granted addresses; an `add-peer --ip` pin must land before any deregistration
+   flow. Env knobs: `BULWARK_WG_SERVER_PUBLIC_KEY` (required for grants),
+   `BULWARK_WG_ENDPOINT`, `BULWARK_WG_KEEPALIVE_SECS`, `BULWARK_WG_FILTER_ACTIVE`
+   (stays unset/false until phase 3 is actually in-path), `BULWARK_WG_RESERVED_ADDRS`
+   (skip a legacy setup-london test peer). Still missing (later phases): the
+   boringtun client pump on-device, and flipping `filter_active` true after
+   staged validation.
 3. **`bulwark-net` proxy in the `wg0` forward path** on the region (reuse the engine).
+   **Code SHIPPED (Phase 3 increment):** `crates/bulwark-net/src/vpn/transparent.rs`
+   (Linux-only `SO_ORIGINAL_DST` front-end adapting REDIRECT'd sockets into the
+   CONNECT bridge the on-device pump already uses — one engine, both modes) +
+   `deploy/wireguard/wg-filter.sh` (iptables REDIRECT on wg0 tcp/80+443, QUIC/443
+   drop, forwarded-v6 drop; `enable` REFUSES unless the proxy is listening, and
+   proxy death = fail-closed RST — the redirect is never torn down to "restore"
+   an unfiltered exit). STILL REQUIRED before any child uses it: server-bin
+   wiring that runs the proxy + transparent listener on the box, the region
+   inspection-CA contract (separate, MORE powerful than the gRPC cluster_ca —
+   per-device recommended; installed/removed on the device like the §2 CA),
+   staged validation per §6, and only then `BULWARK_WG_FILTER_ACTIVE=1`.
 4. **`filter_location` in the proto + ChildConfig + parent toggle** (additive).
 5. **boringtun client in the Android shell** + reconcile (bring tunnel up/down on
    the toggle) + kill-switch wiring to the existing lockdown.

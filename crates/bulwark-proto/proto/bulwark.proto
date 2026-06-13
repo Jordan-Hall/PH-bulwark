@@ -277,6 +277,8 @@ enum AlertKind {
   INTERVENTION           = 1; // a blocker acted (block/blur/mute)
   GROOMING_SUSPECTED     = 2; // grooming engine crossed alert threshold
   PROTECTION_DISABLED    = 3; // tamper: filtering/admin/accessibility off, app-removal attempt, or missed heartbeat
+  CHILD_SOS              = 4; // the child pressed the in-app SOS button — URGENT guardian alert (FamilySafety.RaiseSos)
+  SAFETY_BROADCAST       = 5; // staff-issued region-wide family safety notice — staff-originated ONLY, never crowd-sourced
 }
 
 // A guardian-facing alert. Carries redacted context ONLY — never explicit media.
@@ -730,12 +732,19 @@ message ChildStatusRequest {
 
 // Desired-vs-applied status for the parent console. Child-reported state lives
 // HERE — never on ChildConfig, which stays the guardian's desired document.
-// Content-free: version numbers + a check-in timestamp only.
+// Content-free: version numbers, a check-in timestamp, and the guardian's own
+// desired ChildConfig (policy + routing only, like ChildConfig itself).
 message ChildConfigStatus {
   string child_id        = 1;
   uint64 desired_version = 2; // latest guardian-set config_version
   uint64 applied_version = 3; // last version the child reported applied (0 = none yet)
   int64  last_report_ts  = 4; // unix ms of the child's last check-in (0 = never / since restart)
+  // The guardian's current desired config document, echoed back so the parent
+  // console can seed its controls from what was last set (instead of hardcoded
+  // defaults a later Apply would silently revert unchanged fields to). No new
+  // auth surface: GetChildStatus already requires a guardian session scoped to
+  // this child — the same gate that WRITES this document via SetChildConfig.
+  ChildConfig desired    = 5;
 }
 
 service ChildControl {
@@ -748,6 +757,56 @@ service ChildControl {
   rpc StreamChildConfig(ChildConfigFilter) returns (stream ChildConfig);
   // Guardian reads desired-vs-applied + last check-in (auth: guardian token, scoped).
   rpc GetChildStatus(ChildStatusRequest) returns (ChildConfigStatus);
+}
+
+// ---------------------------------------------------------------------------
+// WgProvision service — WireGuard peer provisioning for FILTER_ON_SERVER.
+// The child device registers its WireGuard PUBLIC key (the private key NEVER
+// leaves the device — same invariant as the per-install inspection CA) and
+// learns its assigned tunnel address + the region's endpoint material.
+//   * DEVICE-authenticated: device_id + the per-device token minted at pairing
+//     (PairResult.device_token) — the same gate as ChildControl Get/Stream.
+//   * Idempotent: re-registering the same device+key returns the SAME address;
+//     a NEW key for the same device is a key rotation (address kept stable).
+//   * DECOUPLED from wg(8): the server only persists the DESIRED peer set to
+//     `<BULWARK_STATE_DIR>/wg_peers.json` (/var/lib/bulwark/wg_peers.json on a
+//     region box); an on-box reconciler applies it with
+//     deploy/wireguard/wg-peers.sh. A grant is a PROMISE of enrollment, live
+//     after the next reconcile pass — not an already-open tunnel.
+// Content-free: keys, addresses, endpoints only — never message/media.
+// ---------------------------------------------------------------------------
+
+message RegisterWgPeerRequest {
+  string device_id     = 1; // the enrolled supervised device (same id as everywhere else)
+  string device_token  = 2; // per-device credential from PairResult.device_token
+  // The device's WireGuard PUBLIC key (44-char base64 of 32 bytes), generated
+  // on-device (boringtun). NEVER the private key — the server validates shape
+  // only (a public and private key are indistinguishable by shape, so keeping
+  // the private key on-device is the CLIENT's enrollment invariant).
+  string wg_public_key = 3;
+}
+
+message WgPeerGrant {
+  // Assigned tunnel address, e.g. "10.8.0.7" — stable per device across
+  // re-registers and key rotations. The client configures it as a /32.
+  string assigned_address  = 1;
+  string server_public_key = 2; // the region's WG public key (base64)
+  string server_endpoint   = 3; // host:port, e.g. "vpn.predatorhunters.co.uk:51820"
+  uint32 keepalive_secs    = 4; // PersistentKeepalive the client should set (25)
+  // HONEST server-side-filtering flag: TRUE only when the bulwark-net engine is
+  // actually inspecting the wg0 forward path on this region (phase 3 of
+  // docs/design/server-vpn-mode-and-ca-trust.md §4). While FALSE the tunnel is
+  // transport/NAT ONLY — a child whose guardian expects filtering must NOT be
+  // routed through an unfiltered exit, so the client keeps filtering ON-DEVICE
+  // (or declines the tunnel) when this is false. Never set aspirationally.
+  bool   filter_active     = 5;
+}
+
+// Device-facing WireGuard provisioning (auth: the pairing-minted device token).
+service WgProvision {
+  // Register/refresh this device's WG peer enrollment and learn its grant.
+  // Safe to call on every tunnel bring-up (idempotent; rotation-aware).
+  rpc RegisterWgPeer(RegisterWgPeerRequest) returns (WgPeerGrant);
 }
 
 // ---------------------------------------------------------------------------
@@ -875,4 +934,107 @@ service ClusterControl {
   rpc Enqueue(EnqueueRequest) returns (EnqueueResponse);
   rpc Dequeue(DequeueRequest) returns (DequeueResponse);
   rpc Drain(DrainRequest) returns (DrainResponse);
+}
+
+// ---------------------------------------------------------------------------
+// FamilySafety service — child SOS + staff safety broadcasts.
+//   * RaiseSos: the SUPERVISED CHILD's one-tap "I need help" action. Device-
+//     authenticated (PairResult.device_token — the same gate as
+//     Tamper.Heartbeat). The server resolves the child's name/family from the
+//     enrolled device and fans an URGENT AlertEvent(kind = CHILD_SOS,
+//     severity = CRITICAL) out to the child's guardians through the same relay
+//     as every other alert (plus the email/push sink when configured).
+//     CONTENT-FREE: who + when + which device — never location, messages, or
+//     media. (A consent-gated coarse-location attachment is a LATER increment;
+//     nothing here collects location.)
+//   * SendSafetyBroadcast: a PH-STAFF-ORIGINATED region-wide family safety
+//     notice ("amber-alert-like") fanned out to guardian consoles. HARD RULE:
+//     never crowd-sourced and never a public accusation — staff issue notices,
+//     guardians read them. AUTH PLACEHOLDER: gated by a server-side shared
+//     staff token (BULWARK_STAFF_BROADCAST_TOKEN; unset = the rpc is off)
+//     until the per-staff accounts/roles system ships (separate design in
+//     progress). TODO(staff-system): the placeholder `staff_token` migrates to
+//     a real per-staff credential via NEW fields/metadata — never renumbering.
+//   * ListSafetyBroadcasts: active notices for late-joining guardian consoles
+//     (the live stream only reaches connected ones) and, later, child devices
+//     (the non-dismissable-until-acknowledged child notice is a follow-up
+//     increment; `notify_child_devices` ships now so the shape is stable).
+// ---------------------------------------------------------------------------
+
+// Child SOS. Carries ONLY the device identity + tap time — no content, no location.
+message SosRequest {
+  string device_id    = 1; // the enrolled child device raising the SOS
+  string device_token = 2; // per-device credential from PairResult.device_token
+  int64  ts           = 3; // child-side tap time, unix epoch millis (the alert is server-stamped)
+  // Client-generated idempotency key so a retried tap can't double-alert
+  // (becomes the CHILD_SOS AlertEvent.alert_id). Empty = server derives one.
+  string client_sos_id = 4;
+}
+
+message SosAck {
+  // True when at least one guardian path took the alert (a live console
+  // stream, or the configured email/push sink) — drives the child-facing
+  // honesty: "your guardian has been alerted" vs "call a trusted adult".
+  bool   delivered = 1;
+  string alert_id  = 2; // the CHILD_SOS AlertEvent's id (dedupe/audit)
+  uint32 guardian_streams_reached = 3;
+  string detail    = 4;
+}
+
+// One staff-issued safety notice. broadcast_id/issued_ts/issued_by are
+// SERVER-stamped. Content is staff-written plain text ONLY — no media and no
+// third-party reports (broadcasts are staff-originated by hard rule).
+message SafetyBroadcast {
+  string   broadcast_id = 1; // server-assigned
+  string   title        = 2; // short headline (<= 120 chars)
+  string   body         = 3; // plain-text notice (<= 2000 chars)
+  Severity severity     = 4; // defaults to HIGH when unspecified
+  string   region       = 5; // "uk" | "us" | ...; empty = every region this node serves
+  int64    issued_ts    = 6; // server-stamped, unix epoch millis
+  int64    expires_ts   = 7; // 0 = active until superseded
+  // Also surface on enrolled child devices as a notice that stays until
+  // acknowledged. The child-device display + acknowledge flow is a follow-up
+  // increment; the flag ships now so the message shape is stable.
+  bool     notify_child_devices = 8;
+  // Staff identity stamp. PLACEHOLDER value ("staff-shared-token") until the
+  // staff accounts system lands, then a real staff account id — same field.
+  string   issued_by    = 9;
+}
+
+message SendSafetyBroadcastRequest {
+  // PLACEHOLDER staff credential: the server-side shared token
+  // (BULWARK_STAFF_BROADCAST_TOKEN). TODO(staff-system): replaced by the
+  // per-staff session credential from the staff-management design — added as
+  // a NEW field / metadata header, never by renumbering this one.
+  string staff_token = 1;
+  SafetyBroadcast broadcast = 2; // broadcast_id/issued_ts/issued_by are server-stamped
+}
+
+message SafetyBroadcastAck {
+  bool   accepted     = 1;
+  string broadcast_id = 2;
+  uint32 guardian_streams_reached = 3; // live consoles reached now; others poll List
+  string detail       = 4;
+}
+
+// Active-notice fetch. Authenticated EITHER as a guardian (session token /
+// Bearer metadata) OR as an enrolled child device (device_id + device_token).
+message ListSafetyBroadcastsRequest {
+  string token        = 1; // guardian session (also via Bearer metadata)
+  string device_id    = 2; // child-device path
+  string device_token = 3;
+  string region       = 4; // optional filter; empty = all
+}
+
+message SafetyBroadcasts {
+  repeated SafetyBroadcast broadcasts = 1; // active (unexpired), newest first
+}
+
+service FamilySafety {
+  // Child SOS -> URGENT guardian alert (device-token authenticated).
+  rpc RaiseSos(SosRequest) returns (SosAck);
+  // Staff-originated regional safety notice (placeholder staff-token gate).
+  rpc SendSafetyBroadcast(SendSafetyBroadcastRequest) returns (SafetyBroadcastAck);
+  // Active notices for (re)connecting guardian consoles / child devices.
+  rpc ListSafetyBroadcasts(ListSafetyBroadcastsRequest) returns (SafetyBroadcasts);
 }

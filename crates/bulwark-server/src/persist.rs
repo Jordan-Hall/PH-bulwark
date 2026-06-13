@@ -66,6 +66,24 @@ impl JsonFile {
         }
     }
 
+    /// STRICT load: `Ok(None)` when the file is genuinely ABSENT, `Ok(Some(v))`
+    /// when it parses, and `Err` when the file EXISTS but is unreadable or
+    /// corrupt. Unlike [`Self::load_or_default`], a present-but-bad file is NOT
+    /// silently treated as empty — use this for state whose file IS a contract
+    /// (e.g. the WireGuard desired-peer set, where "empty" would re-allocate
+    /// addresses already granted to live devices). The caller decides whether a
+    /// bad file should be fatal.
+    pub fn load_strict<T: DeserializeOwned>(&self) -> io::Result<Option<T>> {
+        let bytes = match std::fs::read(&self.path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+
     /// Atomically persist `value` (temp file + fsync + rename). Returns the
     /// `io::Error` on failure; callers log and continue in-memory (never panic).
     pub fn store<T: Serialize>(&self, value: &T) -> io::Result<()> {

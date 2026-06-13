@@ -344,6 +344,10 @@ impl ChildConfigStore {
             desired_version: cfg.config_version,
             applied_version: report.version,
             last_report_ts: report.ts,
+            // Echo the guardian's desired document so the console seeds its
+            // controls from what was last set (same guardian gate as set_config
+            // above — the caller could already write this document).
+            desired: Some(cfg),
         })
     }
 
@@ -865,5 +869,25 @@ mod tests {
         store.record_applied_report("dev-1", 2);
         let st = store.child_status(&accounts, &token, &child_id).unwrap();
         assert_eq!(st.applied_version, 2, "real ack not masked");
+    }
+
+    #[test]
+    fn child_status_echoes_the_desired_config() {
+        let (accounts, token, child_id) = accounts_with_child("dev-1");
+        let store = ChildConfigStore::new();
+        store
+            .set_config(&accounts, &token, proto_config(&child_id, "dev-1"))
+            .unwrap();
+
+        let st = store.child_status(&accounts, &token, &child_id).unwrap();
+        let desired = st.desired.expect("status echoes the desired config");
+        assert_eq!(desired.child_id, child_id);
+        assert_eq!(desired.server_region, "uk");
+        assert_eq!(desired.profile, FilteringProfile::Preteen as i32);
+        assert!(desired.filtering_enabled);
+        assert_eq!(
+            desired.config_version, st.desired_version,
+            "the echoed document matches the reported desired version"
+        );
     }
 }

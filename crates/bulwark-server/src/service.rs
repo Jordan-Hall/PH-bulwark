@@ -9,9 +9,11 @@ use bulwark_proto::v1::accounts_server::AccountsServer;
 use bulwark_proto::v1::alert_relay_server::{AlertRelay, AlertRelayServer};
 use bulwark_proto::v1::analysis_server::{Analysis, AnalysisServer};
 use bulwark_proto::v1::child_control_server::ChildControlServer;
+use bulwark_proto::v1::family_safety_server::FamilySafetyServer;
 use bulwark_proto::v1::offload_server::{Offload, OffloadServer};
 use bulwark_proto::v1::review_server::ReviewServer;
 use bulwark_proto::v1::tamper_server::TamperServer;
+use bulwark_proto::v1::wg_provision_server::WgProvisionServer;
 use bulwark_proto::v1::{
     Action, AlertAck, AlertAckBatch, AlertBatch, AlertEvent, AnalysisBatch, AnalysisRequest,
     Category, DeviceProfile, OffloadPolicy, RefreshOffloadRequest, Severity, Verdict, VerdictBatch,
@@ -21,8 +23,10 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::accounts::{AccountStore, AccountsService};
 use crate::child_control::{ChildConfigStore, ChildControlService};
+use crate::family_safety::{FamilySafetyService, SafetyBroadcastStore};
 use crate::relay::{AlertHub, ReviewService};
 use crate::tamper::{self, TamperService};
+use crate::wg_provision::{WgPeerStore, WgProvisionService};
 use crate::{default_offload_policy, AnalyzerRegistry, ServerConfig, ServerRole};
 
 fn to_status(e: bulwark_core::Error) -> Status {
@@ -313,7 +317,7 @@ pub async fn run(
         // attached when SMTP is configured.
         router = router.add_service(AlertRelayServer::new(AlertRelayService::new(
             hub.clone(),
-            alert_sink,
+            alert_sink.clone(),
         )));
 
         // Parent accounts + per-child guardians (accounts mode): built BEFORE
@@ -361,6 +365,25 @@ pub async fn run(
         }
         router = router.add_service(TamperServer::new(tamper));
 
+        // FamilySafety: child SOS (URGENT guardian alert; device-token
+        // authenticated in accounts mode, same gate as heartbeats) + staff
+        // safety broadcasts (gated by the placeholder shared env token,
+        // BULWARK_STAFF_BROADCAST_TOKEN, until the staff accounts system
+        // ships). SOS fans through the SAME hub as every other alert AND the
+        // email/push sink when configured; broadcasts persist under the state
+        // dir so a console that connects later can still fetch the active list.
+        let broadcast_store = match &cfg.state_dir {
+            Some(dir) => SafetyBroadcastStore::with_state_dir(dir)?,
+            None => SafetyBroadcastStore::new(),
+        };
+        let mut family_safety = FamilySafetyService::new(hub.clone(), broadcast_store)
+            .with_alert_sink(alert_sink.clone())
+            .with_staff_token_from_env();
+        if let Some(accounts) = &accounts {
+            family_safety = family_safety.with_accounts(accounts.clone());
+        }
+        router = router.add_service(FamilySafetyServer::new(family_safety));
+
         // Review (+ optional Accounts) depends on the deployment mode:
         //   * accounts_enabled = false (DEFAULT, single-home/dev): device-scoped
         //     Review only — a client connects with an EMPTY token and gets its
@@ -399,6 +422,21 @@ pub async fn run(
             };
             router = router.add_service(ChildControlServer::new(ChildControlService::new(
                 child_config,
+                accounts.clone(),
+            )));
+            // WireGuard peer provisioning (FILTER_ON_SERVER): device-token-
+            // authenticated against the SAME accounts store. The handler only
+            // persists the DESIRED peer set (wg_peers.json under the state
+            // dir) — an on-box reconciler applies it with
+            // deploy/wireguard/wg-peers.sh; the gRPC path never touches wg(8).
+            // Region material comes from BULWARK_WG_* env (from_env).
+            let wg_peers = match &cfg.state_dir {
+                Some(dir) => WgPeerStore::with_state_dir(dir)?,
+                None => WgPeerStore::new(),
+            }
+            .with_reserved_from_env();
+            router = router.add_service(WgProvisionServer::new(WgProvisionService::from_env(
+                wg_peers,
                 accounts.clone(),
             )));
             // Enable the EMAIL-based password-reset path automatically when SMTP is

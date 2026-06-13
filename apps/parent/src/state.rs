@@ -186,6 +186,8 @@ pub struct Alert {
     pub when: String,
     /// Whether approve / keep-blocked is offered (intervention & grooming items).
     pub actionable: bool,
+    /// URGENT treatment (red card + console banner): the child pressed SOS.
+    pub urgent: bool,
     /// The classifier category; gates the CSAM "never preview" exception.
     pub category: Category,
     /// Safe (blurred/cropped) preview bytes from `Evidence.safe_thumbnail`.
@@ -234,6 +236,8 @@ impl Alert {
                 _ => "Blocked flagged content".to_string(),
             },
             AlertKind::ProtectionDisabled => "Protection changed on the device".to_string(),
+            AlertKind::ChildSos => "URGENT — your child pressed SOS".to_string(),
+            AlertKind::SafetyBroadcast => "Family safety notice".to_string(),
             AlertKind::Unspecified => "Safety alert".to_string(),
         };
 
@@ -247,7 +251,14 @@ impl Alert {
             "A flagged item (redacted summary unavailable).".to_string()
         };
 
-        let device = if ev.device_id.is_empty() {
+        let device = if kind == AlertKind::SafetyBroadcast {
+            // Staff notices are region-scoped, not device-scoped.
+            if ev.app.is_empty() {
+                "All families".to_string()
+            } else {
+                format!("Region: {}", ev.app)
+            }
+        } else if ev.device_id.is_empty() {
             "Supervised device".to_string()
         } else {
             ev.device_id.clone()
@@ -264,8 +275,10 @@ impl Alert {
             detail,
             device,
             when: format_when(ev.ts),
-            // Both product triggers are actionable (guardian can approve/deny).
-            actionable: true,
+            // Content triggers are actionable (approve/deny). An SOS or a
+            // staff safety notice is not a block decision — nothing to approve.
+            actionable: !matches!(kind, AlertKind::ChildSos | AlertKind::SafetyBroadcast),
+            urgent: kind == AlertKind::ChildSos,
             category,
             thumbnail,
             snippet,
@@ -310,6 +323,7 @@ pub fn seed() -> Vec<Alert> {
             device: "Kids tablet".into(),
             when: "2m ago".into(),
             actionable: false,
+            urgent: false,
             category: Category::AdultImage,
             // Offline sample: no real bytes to preview.
             thumbnail: Vec::new(),
@@ -323,6 +337,7 @@ pub fn seed() -> Vec<Alert> {
             device: "Kids phone".into(),
             when: "18m ago".into(),
             actionable: false,
+            urgent: false,
             category: Category::Grooming,
             thumbnail: Vec::new(),
             snippet:

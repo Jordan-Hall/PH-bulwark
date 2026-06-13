@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use crate::persist::JsonFile;
 use bulwark_policy::{Allowlist, ApplyOutcome, ReviewItem};
 use bulwark_proto::v1::{
-    AlertEvent, Category, DeviceFilter, PushAck, PushTarget, ReviewAck, ReviewDecision,
+    AlertEvent, AlertKind, Category, DeviceFilter, PushAck, PushTarget, ReviewAck, ReviewDecision,
     ReviewRequest, ReviewScope, SegmentChunk, SegmentRequest,
 };
 use bulwark_proto::DeviceId;
@@ -610,10 +610,18 @@ impl bulwark_proto::v1::review_server::Review for ReviewService {
             let stream: Self::StreamPendingReviewsStream = Box::pin(base.filter(move |item| {
                 let keep = match item {
                     Ok(ev) => {
-                        let in_scope = scope.child_ids.contains(&ev.child_id)
-                            || scope.device_ids.contains(&ev.device_id);
-                        let dev_ok = want_device.is_empty() || ev.device_id == want_device;
-                        in_scope && dev_ok
+                        // Staff SAFETY_BROADCASTs are region-wide notices
+                        // addressed to EVERY guardian console (staff-originated
+                        // only — never crowd-sourced), so they bypass the
+                        // per-child scoping below.
+                        if ev.kind == AlertKind::SafetyBroadcast as i32 {
+                            true
+                        } else {
+                            let in_scope = scope.child_ids.contains(&ev.child_id)
+                                || scope.device_ids.contains(&ev.device_id);
+                            let dev_ok = want_device.is_empty() || ev.device_id == want_device;
+                            in_scope && dev_ok
+                        }
                     }
                     Err(_) => true, // surface transport errors regardless
                 };

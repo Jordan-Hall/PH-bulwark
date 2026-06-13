@@ -133,4 +133,17 @@ object RustBridge {
      * [TamperReporter][co.predatorhunters.bulwark.tamper.TamperReporter].
      */
     external fun reportTamper(kind: Int)
+
+    /**
+     * Child SOS: send an URGENT alert to the guardian via the enrolled server
+     * (`FamilySafety.RaiseSos`, authenticated with the pairing-minted
+     * [deviceToken]). Content-free — this device's identity and the time, no
+     * location/messages/media. Returns JSON:
+     * `{ ok: true, delivered, guardians_reached }` or `{ ok: false, error }`.
+     * `delivered` is the server's honest answer (a live guardian console or
+     * the email/push sink took it) — the SOS card tells the child to call 999
+     * or a trusted adult when it is false. Blocking (bounded ~10s): call from
+     * a background dispatcher. See [SosCard][co.predatorhunters.bulwark.SosCard].
+     */
+    external fun raiseSos(endpoint: String, deviceId: String, caPath: String, deviceToken: String): String
 }

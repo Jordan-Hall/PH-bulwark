@@ -13,8 +13,9 @@ use crate::state::{should_show_snippet, should_show_thumbnail, Alert};
 
 /// Per-child VPN control row: the guardian picks the filtering region/server,
 /// toggles filtering on/off, and sets the strictness band — applied to the child
-/// device via `ChildControl`. Each control owns its own draft state; "Apply"
-/// pushes it and shows the resulting config version (or the error).
+/// device via `ChildControl`. Drafts seed from the child's SAVED desired config
+/// (echoed by `GetChildStatus`), falling back to safe defaults when none exists
+/// yet; "Apply" pushes them and shows the resulting config version (or the error).
 #[component]
 pub fn ChildVpnRow(child: ProtoChild) -> Element {
     let child_id = child.child_id.clone();
@@ -29,6 +30,33 @@ pub fn ChildVpnRow(child: ProtoChild) -> Element {
     let mut filter_location = use_signal(|| 0i32);
     let note = use_signal(|| Option::<String>::None);
     let busy = use_signal(|| false);
+
+    // Seed the drafts from the guardian's SAVED desired config (echoed by
+    // GetChildStatus), so Apply pushes what the guardian sees instead of
+    // silently reverting untouched fields to the defaults above. No config yet
+    // (NotFound) or a fetch error keeps today's defaults — unchanged behaviour.
+    let seed_child_id = child.child_id.clone();
+    use_effect(move || {
+        let child_id = seed_child_id.clone();
+        spawn(async move {
+            if let Ok((_, _, _, Some(cfg))) = get_child_status(&child_id).await {
+                // Only seed values this row can actually represent: a region
+                // outside CHILD_REGIONS (e.g. "self") or an UNSPECIFIED/CUSTOM
+                // profile keeps the default rather than an un-renderable state.
+                if CHILD_REGIONS
+                    .iter()
+                    .any(|(id, _, _)| *id == cfg.server_region.as_str())
+                {
+                    region.set(cfg.server_region.clone());
+                }
+                if (1..=3).contains(&cfg.profile) {
+                    profile.set(cfg.profile);
+                }
+                enabled.set(cfg.filtering_enabled);
+                filter_location.set(cfg.filter_location);
+            }
+        });
+    });
 
     rsx! {
         div { class: "vpn-row",
@@ -125,7 +153,7 @@ pub fn ChildVpnRow(child: ProtoChild) -> Element {
                                     let mut confirmed = false;
                                     for _ in 0..36 {
                                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                                        if let Ok((_, applied, _)) = get_child_status(&child_id).await {
+                                        if let Ok((_, applied, _, _)) = get_child_status(&child_id).await {
                                             if applied >= v {
                                                 note.set(Some(format!("Applied on the child's device ✓ v{v}")));
                                                 confirmed = true;
@@ -187,19 +215,43 @@ pub fn AlertCard(alert: Alert, on_decide: EventHandler<bool>) -> Element {
     // Cohesive icon + tint per alert family: grooming/protection-status read as a
     // gentle warning; content blocks read as a calm "kept safe"; CSAM is withheld.
     let is_grooming = alert.category == Category::Grooming;
-    let (ic_cls, ic_name) = if is_csam {
-        ("alert-ic csam", "eye-off")
+    let (card_cls, eyebrow, ic_cls, ic_name) = if alert.urgent {
+        // Child SOS: unmissable red treatment — the child asked for help.
+        (
+            "alert-card alert-sos",
+            "URGENT — SOS",
+            "alert-ic sos",
+            "alert",
+        )
+    } else if is_csam {
+        (
+            "alert-card alert-withheld",
+            "Blocked — never stored",
+            "alert-ic csam",
+            "eye-off",
+        )
     } else if is_grooming {
-        ("alert-ic warn", "alert")
+        (
+            "alert-card alert-serious",
+            "Needs your attention",
+            "alert-ic warn",
+            "alert",
+        )
     } else {
-        ("alert-ic block", "shield-check")
+        (
+            "alert-card alert-handled",
+            "Handled for you",
+            "alert-ic block",
+            "shield-check",
+        )
     };
 
     rsx! {
-        div { class: "alert-card",
+        div { class: "{card_cls}",
             div { class: "alert-top",
                 span { class: "{ic_cls}", dangerous_inner_html: "{svg(ic_name)}" }
                 div { class: "alert-head",
+                    div { class: "alert-eyebrow", "{eyebrow}" }
                     div { class: "ttl", "{alert.title}" }
                     div { class: "meta", "{alert.device} \u{00b7} {alert.when}" }
                 }

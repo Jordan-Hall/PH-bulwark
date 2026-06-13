@@ -21,17 +21,21 @@ use bulwark_proto::v1::{
 
 pub mod accounts;
 pub mod child_control;
+pub mod family_safety;
 pub mod persist;
 pub mod relay;
 pub mod reset_mailer;
 pub mod service;
 pub mod tamper;
+pub mod wg_provision;
 
 pub use accounts::{AccountStore, AccountsService};
 pub use child_control::{ChildConfigStore, ChildControlService};
+pub use family_safety::{FamilySafetyService, SafetyBroadcastStore};
 pub use relay::{AlertHub, ReviewService};
 pub use reset_mailer::ResetMailer;
 pub use tamper::TamperService;
+pub use wg_provision::{WgPeerStore, WgProvisionService};
 
 /// Which role this process plays. Chosen by `--role` / `BULWARK_ROLE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

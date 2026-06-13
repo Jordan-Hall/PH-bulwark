@@ -28,6 +28,20 @@
 pub use tokio_util::sync::CancellationToken;
 
 mod netstack;
+/// Server-side transparent redirect front-end (Linux region box; SO_ORIGINAL_DST).
+#[cfg(target_os = "linux")]
+pub mod transparent;
+
+// Userspace WireGuard CLIENT (Phase 5 — the transport leg for
+// `filter_location == FILTER_ON_SERVER`). Default OFF; `--features wg-client`
+// pulls in boringtun (BSD-3-Clause). `wg` is the noise state machine;
+// `wg_pump` is the UDP socket pump that drives it. No data-path integration
+// yet — `run_android_data_path` / `run_netstack` do not feed the pump (see
+// the module docs).
+#[cfg(feature = "wg-client")]
+pub mod wg;
+#[cfg(feature = "wg-client")]
+pub mod wg_pump;
 
 use crate::tun::{open_tun, TunConfig};
 use crate::Result;
@@ -203,6 +217,12 @@ pub fn build_interceptor(
             Arc::new(DevInMemoryKeyStore::new())
         }
     };
+    // Serialize CA load-or-generate across in-process callers: startVpn and the
+    // JNI inspectionCaPem can race on FIRST RUN, and the file keystore's key +
+    // cert writes are not atomic together — an interleaving could persist a
+    // mismatched key/cert pair (every minted leaf would then fail validation).
+    static CA_INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _ca_init = CA_INIT.lock().unwrap_or_else(|e| e.into_inner());
     Ok(Arc::new(NetInterceptor::with_keystore(net_cfg, keystore)?))
 }
 
