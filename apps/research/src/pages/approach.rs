@@ -18,7 +18,7 @@ const PRINCIPLES: [(&str, &str); 6] = [
     ("No raw content, ever", "No raw message, image or video is ever stored. What we keep is a short, redacted record for the guardian, the verdict and a stripped-back snippet or a blurred thumbnail, held in an encrypted, tamper-evident log that deletes itself on a clock. There is nothing raw sitting on a server to leak, because we never put it there."),
     ("A person always decides", "The models raise a concern and a person acts on it. A parent decides for their child, and our editors decide what we report. Nothing is ever an automated accusation."),
     ("Block and report, never store", "Illegal child-abuse material is blocked on sight and reported to the right authority, as the law requires. It is never stored, served, or made."),
-    ("Independent and post-conviction", "Our frontline decoy work identifies offenders and hands the evidence to the police. What we choose to publish, though, covers only cases that have concluded in court and are on the public record. We never name anyone before a trial, and we report independently of any force."),
+    ("Stings, then the courts", "Our frontline team runs decoy operations and, when it is safe, confronts the person and holds them for the police with everything we have gathered. We never name anyone before they are charged. Footage is held back until there is a conviction, censored where it is needed, and published only when it genuinely helps people protect children. We work with the police, not in their place."),
     ("Open methods, closed data", "We explain how the models work. We never publish anything that could harm a child, like their data, a grooming dataset, or live weights."),
 ];
 

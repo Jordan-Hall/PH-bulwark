@@ -40,12 +40,12 @@ pub fn About() -> Element {
             div { class: "wrap",
                 div { class: "prose reveal",
                     p {
-                        "We have been at this for nearly ten years. It started on the front line, with decoy operations. Posing as children online to find the adults who go looking for them, gathering the evidence, and handing it to the police. A smaller team still does that work today. It is careful, draining work, and it taught us something no dataset ever could. We watched, first-hand, how grooming begins, how it escalates, and how an offender will move a child from one app to the next to avoid being caught."
+                        "We have been at this for nearly ten years. It started on the front line, with decoy operations. Posing as children online to find the adults who go looking for them, gathering the evidence, confronting them when it is safe to do so, and holding them for the police. A smaller team still does that work today. It is careful, draining work, and it taught us something no dataset ever could. We watched, first-hand, how grooming begins, how it escalates, and how an offender will move a child from one app to the next to avoid being caught."
                     }
                     p {
                         "That is the ground the lab is built on. We took what we had learned and started building software, so the same patterns could be caught early, on a child's own phone, without the surveillance so much "
                         strong { "safety" }
-                        " software leans on. Two rules have never changed. Nothing we find goes public before a charge, and we only report a case once it has been through the courts."
+                        " software leans on. Two lines have never moved. We never name anyone before they are charged, and we hold any footage back until there is a conviction, censored where it is needed and shown only when it genuinely helps people keep children safe."
                     }
                 }
             }
@@ -104,12 +104,12 @@ pub fn About() -> Element {
                     div { class: "card reveal",
                         div { class: "card-ic", dangerous_inner_html: svg("check") }
                         h3 { "What we are" }
-                        p { "A frontline child-protection team with years of real experience. We run online decoy operations to identify offenders and pass the evidence to the police, we report on cases once they have concluded in court, and we build privacy-first AI to protect children. The lab is the newest part of that work. The frontline team, smaller now, still runs." }
+                        p { "A frontline child-protection team with years of real experience. We run online decoy operations to find adults who go looking for children, and when it is safe to, we confront them and hold them for the police with everything we have gathered. We report on cases once they have been to court, and we build privacy-first AI to protect children. The lab is the newest part of that work. The frontline team, smaller now, still runs." }
                     }
                     div { class: "card reveal",
                         div { class: "card-ic", style: "color:var(--orange);background:rgba(245,130,32,.10);border-color:rgba(245,130,32,.22);", dangerous_inner_html: svg("eye-off") }
                         h3 { "What we are not" }
-                        p { "Not a surveillance company, not a substitute for the police, and not a place for public accusations. We don't stage confrontations or livestreams, we never name anyone before a trial, and we never go digging into a child's private life." }
+                        p { "We are not the police, not a surveillance company, and not in it for a show. We never name anyone before they are charged. We hold footage back until there is a conviction, censor it where it is needed, and only run it when it genuinely teaches people how to keep children safe. We work with the police, not in their place, and we never go digging into a child's private life." }
                     }
                 }
                 div { style: "margin-top:28px;",

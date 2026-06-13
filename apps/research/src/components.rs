@@ -143,7 +143,7 @@ pub fn SiteFooter() -> Element {
                 div { class: "footer-bottom",
                     p { "© 2026 Predator Hunters Research. All rights reserved." }
                     p { class: "legal",
-                        "Independent research and journalism. Our frontline team identifies offenders and passes evidence to the police; what we publish covers only cases that have concluded in court, never before a trial, and we report independently of any force. The models run on the phone, and no raw messages or images are kept."
+                        "Independent research and journalism. Our frontline team runs stings and hands evidence to the police; we never name anyone before they are charged, and we hold footage back until there is a conviction. The models run on the phone, and no raw messages or images are kept."
                     }
                 }
             }

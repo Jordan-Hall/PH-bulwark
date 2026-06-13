@@ -30,7 +30,7 @@ const POLICY: [(&str, &str); 8] = [
     ),
     (
         "Our journalism",
-        "Our reporting uses only what is already on the public court record, after a case has concluded. We never publish a child's data, and we never name anyone before a trial.",
+        "Our reporting uses only what is already on the public court record, after a case has concluded. We never publish a child's data, and we never name anyone before they are charged.",
     ),
     (
         "This website",

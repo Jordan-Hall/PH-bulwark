@@ -43,7 +43,7 @@ const MODELS: [(&str, &str, &str, &str, &str, &str); 6] = [
         "05",
         "Offender-record matching",
         "network",
-        "Early research into linking convictions that are already on the public court record, to support our journalism and help protect communities. A person reviews every match, it happens only after a case has been to court, and it is built around data-protection law. Never before a trial, never an automated accusation.",
+        "Early research into linking convictions that are already on the public court record, to support our journalism and help protect communities. A person reviews every match, it happens only after a case has been to court, and it is built around data-protection law. Never before a charge, never an automated accusation.",
         "research",
         "Research",
     ),
