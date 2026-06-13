@@ -20,7 +20,14 @@ name: android-release
 # Env/NDK/cargo-ndk setup mirrors android-emulator.yml; the release-asset upload
 # mirrors release.yml (tag/Release -> action-gh-release; manual -> artifact).
 
+# Primary trigger is the `v*` tag push: a Release created by release.yml uses the
+# default GITHUB_TOKEN, and GitHub does NOT fire `release: published` for runs
+# triggered that way — so without `push.tags` the signed APKs would never build
+# for an automated release (the assets Obtainium/F-Droid pull would be missing).
+# The `release` trigger is kept for releases published by hand in the UI.
 on:
+  push:
+    tags: ["v*"]
   release:
     types: [published]
   workflow_dispatch: {}
@@ -134,14 +141,17 @@ jobs:
           (cd dist && sha256sum app-release.apk camera-release.apk > SHA256SUMS-android-foss)
           ls -la dist/
 
-      - name: Attach to the GitHub Release (published release)
-        if: github.event_name == 'release'
+      - name: Attach to the GitHub Release (tag push or published release)
+        # A `v*` tag push (the primary path) and a hand-published release both
+        # attach the signed APKs. action-gh-release upserts the release for the
+        # ref's tag, so it works whether release.yml created it first or not.
+        if: github.event_name == 'release' || github.event_name == 'push'
         uses: softprops/action-gh-release@v3
         with:
           files: platform/android/dist/*
 
       - name: Upload as a workflow artifact (manual dispatch)
-        if: github.event_name != 'release'
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v6
         with:
           name: ph-bulwark-foss-release-apks
