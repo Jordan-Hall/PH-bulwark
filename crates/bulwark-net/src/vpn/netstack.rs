@@ -888,6 +888,113 @@ where
         .map_err(|e| NetError::tun(format!("VPN bridge: splice: {e}")))
 }
 
+// ---- platform-agnostic transparent-flow handler (accept → gate → splice) -------
+//
+// This is the per-flow state machine the per-OS pumps will drive once they hand us
+// an already-accepted client byte stream plus its ORIGINAL destination. It is the
+// forward step toward "transparent capture, no explicit proxy": the child's apps
+// are NOT configured to point at a proxy — the pump captures the flow at L3 and we
+// route it through the SAME in-process TLS-inspecting proxy (the filter decision
+// gate) that explicit-proxy mode uses, by SYNTHESISING a `CONNECT <orig-dst>` to it.
+// So transparent mode filters byte-for-byte identically to proxy mode.
+//
+// It is deliberately generic over the client stream (any `AsyncRead + AsyncWrite`)
+// and NOT `cfg`-gated, so it compiles and is unit-tested on every host (incl. the
+// Windows dev box) with loopback / `tokio::io::duplex` fakes — no TUN, no device.
+//
+// FAIL-CLOSED CONTRACT (sacrosanct): there is exactly one way out to the network —
+// the CONNECT to the in-process gate. A blocklisted destination, an unreachable
+// gate, or a gate that refuses the CONNECT all return WITHOUT splicing and WITHOUT
+// ever dialing the real destination. The caller drops the client stream (the flow
+// is refused). There is NO direct-to-destination fallback anywhere in this path —
+// adding one would create exactly the unfiltered path this product forbids.
+
+/// What [`handle_transparent_flow`] did with one captured flow. Returned (instead
+/// of inferred from bytes) so the fail-closed invariant is directly assertable in
+/// tests: every non-`Spliced` outcome means **no bytes reached the destination**.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TransparentFlowOutcome {
+    /// The flow was routed through the filter gate and spliced both ways to
+    /// completion (one half closed). This is the only outcome in which the flow's
+    /// bytes ever traversed the gate to the destination.
+    Spliced,
+    /// The original destination is on the guardian blocklist (literal-IP match);
+    /// the flow was refused **before** any CONNECT/TLS/dial. Fail-closed.
+    RefusedBlocklist,
+    /// The filter gate was unreachable or refused the synthesised CONNECT, so the
+    /// flow was dropped with no bytes forwarded and **no direct dial attempted**.
+    /// Fail-closed (the whole point: a down gate must block, never pass-through).
+    GateUnavailable,
+}
+
+/// Format the original destination of a captured flow as the `CONNECT` authority
+/// the in-process gate expects (`ip:port`, IPv6 bracketed). The transparent pump
+/// only ever sees L3 addresses, so this is always a literal IP — name (SNI/Host)
+/// rules are applied inside the gate, which every flow traverses.
+pub(crate) fn transparent_flow_authority(dst: SocketAddr) -> String {
+    match dst {
+        SocketAddr::V4(a) => format!("{}:{}", a.ip(), a.port()),
+        SocketAddr::V6(a) => format!("[{}]:{}", a.ip(), a.port()),
+    }
+}
+
+/// Drive ONE captured transparent flow through the filter decision gate.
+///
+/// `client` is the already-accepted child-side byte stream (terminated by the
+/// netstack from the captured TCP flow). `dst` is its ORIGINAL destination
+/// (recovered transparently, e.g. from the smoltcp listener endpoint or
+/// `SO_ORIGINAL_DST`). `gate` is the in-process TLS-inspecting proxy
+/// (`127.0.0.1:8080`) — the SAME filter decision gate explicit-proxy mode uses.
+/// `blocklist` is the guardian host blocklist (literal-IP entries match here).
+///
+/// Steps (the accept → decide → dial-through-gate → splice state machine):
+/// 1. **Decide.** A blocklisted destination is refused immediately
+///    ([`TransparentFlowOutcome::RefusedBlocklist`]) — no CONNECT, no dial.
+/// 2. **Dial through the gate.** Synthesise `CONNECT <dst>` to `gate`
+///    ([`connect_via_proxy`]). If the gate is unreachable or refuses, return
+///    [`TransparentFlowOutcome::GateUnavailable`] — **fail CLOSED**: the flow is
+///    dropped, and the real destination is never dialed directly.
+/// 3. **Splice.** On a 2xx, [`splice`] the client and the gate tunnel both ways
+///    until either half closes ([`TransparentFlowOutcome::Spliced`]).
+///
+/// This never dials the destination directly: the gate is the only egress, so the
+/// flow is filtered identically to proxy mode or it is blocked.
+pub(crate) async fn handle_transparent_flow<C>(
+    mut client: C,
+    dst: SocketAddr,
+    gate: SocketAddr,
+    blocklist: &crate::blocklist::HostBlocklist,
+) -> TransparentFlowOutcome
+where
+    C: AsyncRead + AsyncWrite + Unpin,
+{
+    let authority = transparent_flow_authority(dst);
+
+    // 1. Decide. A literal-IP guardian-blocklist entry refuses the flow before any
+    //    CONNECT/TLS — mirrors the pump's pre-CONNECT RST and `decide`'s Drop.
+    if !blocklist.is_empty() && blocklist.is_blocked(&authority) {
+        tracing::debug!(%authority, "transparent flow: destination on guardian blocklist; refused (no dial)");
+        return TransparentFlowOutcome::RefusedBlocklist;
+    }
+
+    // 2. Dial through the gate (NEVER the destination directly). A failure here is
+    //    fail-CLOSED: drop the flow, do not fall back to a direct connection.
+    let mut tunnel = match connect_via_proxy(gate, &authority).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::debug!(%authority, error = %e, "transparent flow: gate unavailable; flow blocked (fail-closed, no direct dial)");
+            return TransparentFlowOutcome::GateUnavailable;
+        }
+    };
+
+    // 3. Splice client <-> gate tunnel both ways. All bytes traverse the gate, so
+    //    the flow is TLS-inspected + content-filtered exactly as in proxy mode.
+    if let Err(e) = splice(&mut client, &mut tunnel).await {
+        tracing::debug!(%authority, error = %e, "transparent flow: splice ended");
+    }
+    TransparentFlowOutcome::Spliced
+}
+
 // ---- smoltcp Device over the TUN (the foundation the netstack polls through) ----
 
 /// A `smoltcp` phy device over a [`TunDevice`]. The poll loop stages one inbound
@@ -1222,6 +1329,142 @@ mod tests {
         drop(client_ext);
         drop(proxy_ext);
         let _ = spliced.await;
+    }
+
+    // ---- handle_transparent_flow: accept → gate → splice state machine --------
+
+    /// Spawn a one-shot fake filter gate that accepts ONE CONNECT, answers with
+    /// `status_line` (e.g. `"HTTP/1.1 200 Connection established"`), and — on a 2xx
+    /// — echoes whatever the client sends back to it. Returns the bound address.
+    /// Models the in-process TLS-inspecting proxy closely enough to drive the flow
+    /// handler end-to-end on loopback with no TUN/device.
+    async fn fake_gate(status_line: &'static str) -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut byte = [0u8; 1];
+            let mut req = Vec::new();
+            while s.read(&mut byte).await.unwrap_or(0) != 0 {
+                req.push(byte[0]);
+                if req.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let _ = s
+                .write_all(format!("{status_line}\r\n\r\n").as_bytes())
+                .await;
+            if req.windows(8).any(|w| w == b"HTTP/1.1") && status_line.contains(" 2") {
+                // 2xx → behave like an established tunnel: echo client bytes back.
+                let mut buf = [0u8; 1024];
+                while let Ok(n) = s.read(&mut buf).await {
+                    if n == 0 || s.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        addr
+    }
+
+    fn dst_v4() -> SocketAddr {
+        SocketAddr::from(([93, 184, 216, 34], 443))
+    }
+
+    #[test]
+    fn transparent_authority_formats_v4_and_v6() {
+        assert_eq!(transparent_flow_authority(dst_v4()), "93.184.216.34:443");
+        let v6: SocketAddr = "[2606:2800:220:1::1]:443".parse().unwrap();
+        // IPv6 must be bracketed so the `host:port` split in CONNECT is unambiguous.
+        assert_eq!(transparent_flow_authority(v6), "[2606:2800:220:1::1]:443");
+    }
+
+    #[tokio::test]
+    async fn transparent_flow_splices_through_the_gate() {
+        // Happy path: the captured client flow is routed through the gate via a
+        // synthesised CONNECT, then spliced both ways — identical to proxy mode.
+        let gate = fake_gate("HTTP/1.1 200 Connection established").await;
+        let (mut child, server_side) = tokio::io::duplex(1024);
+        let blocklist = crate::blocklist::HostBlocklist::default();
+        let handler = tokio::spawn(async move {
+            handle_transparent_flow(server_side, dst_v4(), gate, &blocklist).await
+        });
+        // Bytes the child sends reach the gate and echo back (proving the splice).
+        child.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+        let mut back = [0u8; 18];
+        child.read_exact(&mut back).await.unwrap();
+        assert_eq!(&back, b"GET / HTTP/1.1\r\n\r\n");
+        drop(child); // half-close → splice finishes
+        assert_eq!(handler.await.unwrap(), TransparentFlowOutcome::Spliced);
+    }
+
+    #[tokio::test]
+    async fn transparent_flow_fails_closed_when_gate_unreachable() {
+        // FAIL-CLOSED: with no gate listening, the flow must be dropped — NOT dialed
+        // directly to the destination. We bind+drop a listener to get a port that is
+        // guaranteed closed, then assert the outcome is GateUnavailable and the
+        // child stream received zero bytes (nothing was forwarded anywhere).
+        let throwaway = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_gate = throwaway.local_addr().unwrap();
+        drop(throwaway); // port now closed → CONNECT to the gate fails fast
+        let (mut child, server_side) = tokio::io::duplex(1024);
+        let blocklist = crate::blocklist::HostBlocklist::default();
+        let outcome = handle_transparent_flow(server_side, dst_v4(), dead_gate, &blocklist).await;
+        assert_eq!(
+            outcome,
+            TransparentFlowOutcome::GateUnavailable,
+            "an unreachable gate must FAIL CLOSED (block), never fall back to a direct dial"
+        );
+        // The child half saw EOF (handler dropped its end) and zero data bytes —
+        // confirming no bytes were forwarded to the destination or echoed back.
+        let mut buf = [0u8; 1];
+        assert_eq!(
+            child.read(&mut buf).await.unwrap(),
+            0,
+            "a blocked flow must forward no bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn transparent_flow_fails_closed_when_gate_refuses_connect() {
+        // The gate is reachable but REFUSES the CONNECT (e.g. 407 / 403). That is
+        // still fail-closed: the flow is dropped, never dialed directly.
+        let gate = fake_gate("HTTP/1.1 407 Proxy Authentication Required").await;
+        let (_child, server_side) = tokio::io::duplex(1024);
+        let blocklist = crate::blocklist::HostBlocklist::default();
+        let outcome = handle_transparent_flow(server_side, dst_v4(), gate, &blocklist).await;
+        assert_eq!(
+            outcome,
+            TransparentFlowOutcome::GateUnavailable,
+            "a gate that refuses the CONNECT must block the flow, not bypass the gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn transparent_flow_refuses_blocklisted_destination_before_dialing() {
+        // A literal-IP guardian-blocklist entry refuses the flow BEFORE any CONNECT
+        // or dial. We point at a dead gate to prove the gate is never even contacted:
+        // a blocklist refusal short-circuits, so the dead gate is irrelevant.
+        let throwaway = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_gate = throwaway.local_addr().unwrap();
+        drop(throwaway);
+        let (_child, server_side) = tokio::io::duplex(1024);
+        let blocklist = crate::blocklist::HostBlocklist::parse("93.184.216.34");
+        let outcome = handle_transparent_flow(server_side, dst_v4(), dead_gate, &blocklist).await;
+        assert_eq!(
+            outcome,
+            TransparentFlowOutcome::RefusedBlocklist,
+            "a blocklisted destination must be refused pre-CONNECT (no dial at all)"
+        );
+        // A non-blocklisted destination is NOT refused here (it would try the gate).
+        let (_child2, server_side2) = tokio::io::duplex(1024);
+        let other = crate::blocklist::HostBlocklist::parse("10.9.9.9");
+        let outcome = handle_transparent_flow(server_side2, dst_v4(), dead_gate, &other).await;
+        assert_eq!(
+            outcome,
+            TransparentFlowOutcome::GateUnavailable,
+            "an unlisted destination is routed to the gate (which here is down → fail-closed)"
+        );
     }
 
     struct FakeTun {
