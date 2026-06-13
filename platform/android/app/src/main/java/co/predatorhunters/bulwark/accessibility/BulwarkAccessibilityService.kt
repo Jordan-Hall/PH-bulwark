@@ -215,17 +215,41 @@ class BulwarkAccessibilityService : AccessibilityService() {
      * redacted-alert path; CSAM-specific reporting rides the separate engine
      * hash/report path (a single-probability classifier cannot single it out).
      */
+    /** Consecutive clean scans since the last flagged one — drives the lift
+     *  HYSTERESIS so a single noisy mis-score can't drop a cover. */
+    @Volatile
+    private var cleanScanCount = 0
+
+    /** True between first-cover and lift — so the guardian is alerted ONCE per
+     *  cover episode, not on every refresh tick. */
+    @Volatile
+    private var coverEpisodeActive = false
+
     private fun scanFrameForNsfw(pkg: String, frame: Bitmap) {
         val nsfw = Nsfw.obtain(this) ?: return // fail-open: no model → no image scan
         val region = nsfw.localize(frame) // null when no tile is flagged
         if (region != null && !region.isEmpty) {
-            Log.w(TAG, "sexual/explicit imagery in $pkg — covering region (localized)")
+            // Flagged → cover (refresh) immediately; reset the clean streak.
+            cleanScanCount = 0
             showLocalizedOverlay(region, frame.width, frame.height)
-            // Redacted, content-free guardian signal (never the frame/crop).
-            notifyGuardian(pkg, "{\"reason\":\"Explicit image covered\"}")
-        } else {
-            // Clean frame → lift any region cover left from a previous tick.
-            Handler(Looper.getMainLooper()).post { removeLocalizedOverlay() }
+            if (!coverEpisodeActive) {
+                coverEpisodeActive = true
+                Log.w(TAG, "sexual/explicit imagery in $pkg — covering region (localized)")
+                // Content-free guardian signal — once per episode, not per tick.
+                notifyGuardian(pkg, "{\"reason\":\"Explicit image covered\"}")
+            }
+        } else if (coverEpisodeActive) {
+            // HYSTERESIS: do NOT drop the cover on a single clean frame — the
+            // classifier is noisy per-frame and the offending content (esp. a
+            // playing video) is often still on screen. Lift only after
+            // CLEAN_LIFT_SCANS consecutive clean scans. This stops the cover
+            // flickering/vanishing and the muted video audibly resuming.
+            cleanScanCount++
+            if (cleanScanCount >= CLEAN_LIFT_SCANS) {
+                cleanScanCount = 0
+                coverEpisodeActive = false
+                Handler(Looper.getMainLooper()).post { removeLocalizedOverlay() }
+            }
         }
     }
 
@@ -487,7 +511,11 @@ class BulwarkAccessibilityService : AccessibilityService() {
         regionHandler.removeCallbacks(liftRegionOverlay)
         regionOverlay?.let { v -> runCatching { (getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(v) } }
         regionOverlay = null
-        // Cover lifted (clean frame / TTL) → let media resume.
+        // End the episode (a safety-TTL lift also resets, so the next cover
+        // re-alerts and the clean streak starts fresh).
+        coverEpisodeActive = false
+        cleanScanCount = 0
+        // Cover lifted → let media resume.
         restoreAudio()
     }
 
@@ -546,10 +574,16 @@ class BulwarkAccessibilityService : AccessibilityService() {
         /** Minimum gap between screen-frame scans (battery/CPU + OS rate-limit). */
         private const val OCR_INTERVAL_MS = 4000L
 
-        /** Lift a localized image cover after this long if no later frame refreshes
-         *  it (content scrolled away) — a safety net; the next clean frame lifts it
-         *  explicitly. Longer than the scan interval so a still image stays covered. */
-        private const val REGION_OVERLAY_TTL_MS = 6000L
+        /** Consecutive CLEAN scans required before lifting a localized cover. The
+         *  cover lifts on sustained-clean (content gone), NOT on one noisy frame —
+         *  hysteresis that stops the cover flickering/vanishing while the offending
+         *  content is still on screen. ~CLEAN_LIFT_SCANS × OCR_INTERVAL_MS of clean. */
+        private const val CLEAN_LIFT_SCANS = 2
+
+        /** SAFETY-net auto-lift: clears a stuck cover only if scans stop entirely
+         *  (e.g. no more accessibility events). The normal lift is the clean-scan
+         *  hysteresis above; this is deliberately long so it never causes a flicker. */
+        private const val REGION_OVERLAY_TTL_MS = 30000L
         // Apps the network can't read (E2E / cert-pinned) → on-device capture path.
         private val MONITORED = setOf(
             "com.whatsapp",
