@@ -11,13 +11,28 @@ channels first.
 
 ## 1. Channels by platform
 
-### Android — `co.predatorhunters.bulwark`
+### Android — `co.predatorhunters.bulwark` (+ `…camera`)
+**FOSS, self-hosted first.** The owner's decision is to distribute the Android
+apps through fully self-hosted FOSS channels — **no Google Play, no proprietary
+services.** The full channel map (self-hosted F-Droid repo, Obtainium, Accrescent),
+the Obtainium config snippets, and the honest no-official-F-Droid note live in
+**[distribution.md](distribution.md)**; the table below summarises.
+
 | Channel | Use | Notes |
 |---|---|---|
-| **Direct APK** | testers now | Built by CI; signed with the release key. Easiest for a testing cohort. |
-| **F-Droid** | OSS-aligned distribution | Free, no account fee, values-aligned. **Caveat:** F-Droid inclusion may reject the Device-Owner / Accessibility tooling or require it to be clearly opt-in — submit the metadata and discuss. |
-| **Google Play (closed testing)** | wider managed test | $25 one-time account. **Policy review is strict** for our permissions: VPN (`BIND_VPN_SERVICE`), Accessibility, Device Admin, `FOREGROUND_SERVICE_SPECIAL_USE`. Justify each as **child-safety on a guardian-managed, consented device** in the Play data-safety + permissions declarations. Expect review iterations. |
-| **Samsung Galaxy Store / others** | optional | Same APK; lower priority. |
+| **Self-hosted F-Droid repo** (PRIMARY) | values-aligned, self-hosted | Our own repo at `dist.predatorhunters.co.uk/fdroid/repo` (a signed-APK mirror, not build-from-source). Scaffold + operator runbook in `fdroid/`. Official **F-Droid.org is NOT pursued** (parental-control category + we self-host) — see distribution.md. |
+| **Obtainium** | auto-update from GitHub Releases | Points at the GitHub Releases repo and tracks new tags by APK name (`app-release.apk` / `camera-release.apk`). The auto-update path. |
+| **Accrescent** | FOSS store submission | Requires a fully-FOSS app + its own signing; submit the signed APK via the `accrescent`/`apksigner` flow. |
+| **Direct APK** | sideload testers | The same signed `app-release.apk` / `camera-release.apk` Release assets. |
+| **Google Play** | deliberately NOT pursued | Self-host-first; the Play/AAB path (`store-publish.yml`) is retained but DEMOTED — see §1a. |
+
+#### 1a. Retained (demoted) Play/AAB path
+`store-publish.yml` still exists for a possible future Play closed-testing track
+(signed `.aab`, $25 one-time account, strict review of VPN / Accessibility /
+Device Admin / `FOREGROUND_SERVICE_SPECIAL_USE` — justify each as **child-safety
+on a guardian-managed, consented device**). It is **not** the primary path and is
+inert until the Play account + secrets exist. The FOSS path above ships APKs, not
+AABs.
 
 ### Desktop
 | OS | Channel | Signing |
@@ -57,11 +72,21 @@ git tag v0.1.0-test.1 && git push origin v0.1.0-test.1
   staticlib/xcframework only — there is still no Xcode project/provisioning, so no
   installable iOS/macOS app. The **container image** ships via `docker.yml` / your
   registry.
-- The **Android signed APK** is produced by extending the existing `android.yml`
-  build with `assembleRelease` + an `apksigner` step keyed on repo **secrets**
-  (`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`,
-  `ANDROID_KEY_PASSWORD`); without them keep shipping the debug/unsigned APK for
-  testers. (Wire this once the release keystore exists — see §3.)
+- The **Android signed release APKs** (FOSS path) are produced by
+  `.github/workflows/android-release.yml` on a **published Release** (or manual
+  dispatch). It builds the child JNI lib via cargo-ndk, runs
+  `gradle :app:assembleRelease :camera:assembleRelease` keyed on the repo
+  **secrets** (`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
+  `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`), and attaches signed
+  `app-release.apk` + `camera-release.apk` as Release assets for the self-hosted
+  F-Droid repo / Obtainium / Accrescent (see [distribution.md](distribution.md)).
+  Signing self-gates on the secrets — absent keystore ⇒ **unsigned** APKs + a CI
+  notice, never a failed build. Both `:app` and `:camera` build.gradle carry the
+  env-driven signing block. (Wire the secrets once the release keystore exists —
+  see §3.)
+- The legacy `release.yml` still attaches a **debug** child APK for sideloading
+  testers, and the demoted `store-publish.yml` builds a signed `.aab` for a future
+  Play track; neither is the primary distribution path now.
 - Store listing text lives in `fastlane/metadata/android/en-US/` (used by F-Droid
   and Play upload). Update it from `market.md`.
 

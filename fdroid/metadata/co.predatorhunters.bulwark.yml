@@ -1,0 +1,49 @@
+Categories:
+  - Security
+  - System
+
+License: Apache-2.0 OR MIT
+
+AuthorName: Predator Hunters
+AuthorEmail: support@predatorhunters.co.uk
+WebSite: https://predatorhunters.co.uk
+SourceCode: https://github.com/Jordan-Hall/PH-bulwark
+IssueTracker: https://github.com/Jordan-Hall/PH-bulwark/issues
+
+Summary: Guardian-installed child-safety content filter
+
+Description: |-
+  PH Bulwark is a consensual, openly-visible parental-control app a guardian
+  installs on a device they own, used by a minor they are the legal guardian
+  of. It runs a local content-filtering VPN that inspects traffic on the
+  device — using a certificate the guardian installs — to filter unsafe content
+  and warn the guardian about signs of grooming (secrecy pressure, "let's move
+  to another app", age/personal-info probing). Alerts are content-free and
+  redacted; raw messages and media never leave the device.
+
+  It is openly shown on the device and can be turned off — it is not covert
+  monitoring, not spyware, and not for use on anyone who has not consented. For
+  end-to-end-encrypted apps the wire cannot read, an opt-in on-device
+  accessibility reader recognises the same grooming patterns from text already
+  on screen (never keystrokes or passwords).
+
+  Distribution note: this is a self-hosted F-Droid mirror of the signed APKs
+  published on GitHub Releases. Versions are added manually by the repo
+  operator; for automatic update tracking against GitHub Releases use Obtainium
+  (see the project's docs/distribution.md).
+
+# AntiFeatures: declared honestly. NonFreeAssets covers the Predator Hunters
+# brand logo/launcher icon, which is a trademark and not under the code's
+# permissive licence (the repo ships a permissive vector shield placeholder; if
+# the launcher icon used at build time is the trademarked logo this flag is
+# accurate — drop it if a fully-permissive icon ships). No code is non-free.
+AntiFeatures:
+  - NonFreeAssets
+
+# Binary-drop repo: versions are added by dropping the GitHub-release APK into
+# repo/ and running `fdroid update -c`. There is NO Builds: block (we do not
+# build from source here) and so UpdateCheckMode/AutoUpdateMode are None —
+# fdroidserver must not attempt to discover or fetch new versions itself.
+# Automatic GitHub-release tracking is Obtainium's job, not this repo's.
+AutoUpdateMode: None
+UpdateCheckMode: None

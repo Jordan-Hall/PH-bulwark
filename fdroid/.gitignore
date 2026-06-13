@@ -1,0 +1,27 @@
+# NEVER commit the repo signing key or any binary the operator drops in here.
+# The signing keystore is held OFFLINE and supplied to fdroid at run time.
+
+# Signing keystores / keys (any form)
+*.jks
+*.keystore
+*.p12
+*.bks
+keystore.*
+config.keystore.yml
+*.pem
+*.key
+
+# fdroid-generated working dirs + the signed binaries/index it builds.
+# repo/ and archive/ are produced locally and rsynced to the dist host; they
+# are NOT tracked here (only config.yml + metadata/ are version-controlled).
+/repo/
+/archive/
+/tmp/
+/srclibs/
+/unsigned/
+/binaries/
+/stats/
+
+# Local-only operator config that may carry passwords/paths.
+config.local.yml
+.fdroid.local*

@@ -1,0 +1,41 @@
+Categories:
+  - Security
+  - Multimedia
+
+License: Apache-2.0 OR MIT
+
+AuthorName: Predator Hunters
+AuthorEmail: support@predatorhunters.co.uk
+WebSite: https://predatorhunters.co.uk
+SourceCode: https://github.com/Jordan-Hall/PH-bulwark
+IssueTracker: https://github.com/Jordan-Hall/PH-bulwark/issues
+
+Summary: Local-only safe camera for a child's device
+
+Description: |-
+  PH Bulwark Camera is a companion safe camera for a child's own device. It is
+  local-only by construction: the app declares NO network permission of any
+  kind (no INTERNET, no network state), so the operating system itself
+  guarantees that no photo, no score, and no telemetry can ever leave the
+  device. Its only permission is CAMERA.
+
+  Each capture is checked on-device by a bundled image-safety classifier and is
+  either saved locally or simply dropped from memory — nothing is uploaded and
+  nothing is kept about a blocked capture. The classifier and camera run
+  entirely offline.
+
+  Distribution note: this is a self-hosted F-Droid mirror of the signed APK
+  published on GitHub Releases. Versions are added manually by the repo
+  operator; for automatic update tracking against GitHub Releases use Obtainium
+  (see the project's docs/distribution.md).
+
+# AntiFeatures: NonFreeAssets covers the trademarked Predator Hunters brand
+# icon (not under the permissive code licence). Notably this app has NO network
+# permission, so there is nothing to flag for tracking/ads/telemetry.
+AntiFeatures:
+  - NonFreeAssets
+
+# Binary-drop repo (see the child app metadata): no Builds: block, so both
+# checks are None. Obtainium handles GitHub-release auto-tracking.
+AutoUpdateMode: None
+UpdateCheckMode: None
