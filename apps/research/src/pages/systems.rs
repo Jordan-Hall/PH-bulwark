@@ -78,7 +78,10 @@ pub fn Systems() -> Element {
                             "PH Bulwark sits across every app and the open web. When unsafe content shows up it takes out only that part and leaves the rest of the page working, so a child keeps the sites they actually need."
                         }
                         p { class: "prose", style: "margin-top:14px;",
-                            "When something serious appears it sends a parent a short, redacted alert with no message contents in it. Illegal material is blocked and reported as the law requires. The shield never keeps the content behind it."
+                            "When something serious appears it sends a parent a short, redacted alert with no message contents in it. Illegal material is blocked and reported as the law requires. The shield never keeps the raw content behind it, only a short redacted record of the alert for the guardian."
+                        }
+                        p { class: "prose", style: "margin-top:14px; color:var(--muted); font-size:.9rem;",
+                            "We will be straight about where it is. The core filtering works today. The wider network coverage and some of the on-device models are still being tested, and we will keep saying so here until they are finished."
                         }
                     }
                 }

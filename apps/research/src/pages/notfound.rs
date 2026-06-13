@@ -16,6 +16,7 @@ pub fn NotFound(segments: Vec<String>) -> Element {
             path: "/404",
             image: "/og/home.png",
         }
+        dioxus::document::Meta { name: "robots", content: "noindex, follow" }
         header { class: "page-head",
             div { class: "wrap",
                 p { class: "eyebrow rise d1", "404" }
@@ -24,7 +25,7 @@ pub fn NotFound(segments: Vec<String>) -> Element {
                     span { class: "grad-text", "isn't here." }
                 }
                 p { class: "lede rise d3",
-                    "The link may be old or mistyped. Nothing is broken, the page just doesn't exist."
+                    "The link is probably old or mistyped. Nothing's broken, the page just doesn't exist. If a link on our own site sent you here, tell us and we'll fix it."
                 }
                 div { class: "hero-actions rise d4", style: "margin-top:30px;",
                     Link { class: "btn btn-primary", to: Route::Home {},
@@ -34,6 +35,10 @@ pub fn NotFound(segments: Vec<String>) -> Element {
                     Link { class: "btn btn-ghost", to: Route::Research {},
                         span { class: "ic", dangerous_inner_html: svg("layers") }
                         "See the research"
+                    }
+                    a { class: "btn btn-ghost", href: "mailto:research@predatorhunters.co.uk?subject=Broken%20link",
+                        span { class: "ic", dangerous_inner_html: svg("mail") }
+                        "Report a broken link"
                     }
                 }
             }

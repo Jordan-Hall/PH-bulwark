@@ -8,10 +8,10 @@ use crate::icons::svg;
 
 /// (year, event)
 const TIMELINE: [(&str, &str); 4] = [
-    ("2017", "Predator Hunters begins. An independent group protecting children online and training the parents who keep them safe."),
-    ("2022", "The research lab opens, and serious work on privacy-first, on-device models begins."),
-    ("2025", "The first prototype lands the hardest job of all. It detects unsafe video and rewrites it in place, blurring or muting only the bad moments while the rest plays on."),
-    ("Today", "In final development of our first alpha, heading into staged testing. From here, more and more goes into the models."),
+    ("2017", "Predator Hunters begins as an online decoy operation. We find the adults who go looking for children, hand the evidence to the police, and teach parents what to watch for."),
+    ("2022", "The research lab opens. We start turning years of frontline experience into privacy-first models that run on the child's own phone."),
+    ("2025", "The hardest prototype lands. It catches unsafe video and rewrites it in place, blurring or muting only the bad moments while the rest plays on."),
+    ("Today", "A smaller frontline team still runs the decoy work, and it still teaches us how offenders really behave. Most of our effort now goes into the lab, heading into staged testing of the first alpha."),
 ];
 
 #[component]
@@ -40,12 +40,12 @@ pub fn About() -> Element {
             div { class: "wrap",
                 div { class: "prose reveal",
                     p {
-                        "For most of a decade, Predator Hunters has worked on the front line of child protection. Investigating, reporting from court, teaching parents how to keep their children safe online. One thing kept getting clearer. The danger was moving faster than the tools families had to meet it."
+                        "We have been at this for nearly ten years. It started on the front line, with decoy operations. Posing as children online to find the adults who go looking for them, gathering the evidence, and handing it to the police. A smaller team still does that work today. It is careful, draining work, and it taught us something no dataset ever could. We watched, first-hand, how grooming begins, how it escalates, and how an offender will move a child from one app to the next to avoid being caught."
                     }
                     p {
-                        "So we started building. The lab puts modern machine learning to work on that problem, without the surveillance that so much "
+                        "That is the ground the lab is built on. We took what we had learned and started building software, so the same patterns could be caught early, on a child's own phone, without the surveillance so much "
                         strong { "safety" }
-                        " software leans on. Anything we ship has to protect a child and respect them at the same time."
+                        " software leans on. Two rules have never changed. Nothing we find goes public before a charge, and we only report a case once it has been through the courts."
                     }
                 }
             }
@@ -104,12 +104,12 @@ pub fn About() -> Element {
                     div { class: "card reveal",
                         div { class: "card-ic", dangerous_inner_html: svg("check") }
                         h3 { "What we are" }
-                        p { "Independent researchers and journalists. We build privacy-first AI to protect children, and we report on the people who harm them, from the public court record." }
+                        p { "A frontline child-protection team with years of real experience. We run online decoy operations to identify offenders and pass the evidence to the police, we report on cases once they have concluded in court, and we build privacy-first AI to protect children. The lab is the newest part of that work. The frontline team, smaller now, still runs." }
                     }
                     div { class: "card reveal",
                         div { class: "card-ic", style: "color:var(--orange);background:rgba(245,130,32,.10);border-color:rgba(245,130,32,.22);", dangerous_inner_html: svg("eye-off") }
                         h3 { "What we are not" }
-                        p { "Not a surveillance company, not a police force, and not a place for public accusations. We never name anyone before a trial, and we never collect a child's private life." }
+                        p { "Not a surveillance company, not a substitute for the police, and not a place for public accusations. We don't stage confrontations or livestreams, we never name anyone before a trial, and we never go digging into a child's private life." }
                     }
                 }
                 div { style: "margin-top:28px;",

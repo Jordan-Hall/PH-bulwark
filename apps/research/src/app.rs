@@ -80,6 +80,7 @@ fn NavBar() -> Element {
     let route = use_route::<Route>();
     let mut menu = use_signal(|| false);
     let burger_icon = if menu() { "close" } else { "menu" };
+    let burger_label = if menu() { "Close menu" } else { "Open menu" };
     rsx! {
         nav { class: "nav",
             div { class: "nav-inner",
@@ -110,15 +111,16 @@ fn NavBar() -> Element {
                     }
                     button {
                         class: "theme-toggle nav-burger",
-                        "aria-label": "Open menu",
+                        "aria-label": burger_label,
                         "aria-expanded": "{menu()}",
+                        "aria-controls": "nav-menu",
                         onclick: move |_| { let v = menu(); menu.set(!v); },
                         span { dangerous_inner_html: svg(burger_icon) }
                     }
                 }
             }
             if menu() {
-                div { class: "nav-menu",
+                div { class: "nav-menu", id: "nav-menu",
                     Link { class: nav_class(&route, &Route::Research {}), to: Route::Research {}, onclick: move |_| menu.set(false), "Research" }
                     Link { class: nav_class(&route, &Route::Systems {}), to: Route::Systems {}, onclick: move |_| menu.set(false), "Systems" }
                     Link { class: nav_class(&route, &Route::Approach {}), to: Route::Approach {}, onclick: move |_| menu.set(false), "Approach" }

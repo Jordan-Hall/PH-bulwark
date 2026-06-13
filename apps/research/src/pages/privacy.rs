@@ -13,8 +13,8 @@ const POLICY: [(&str, &str); 8] = [
         "The models run on the child's own phone. Deciding whether something is unsafe happens there, not on someone else's server.",
     ),
     (
-        "We keep nothing",
-        "No raw messages, images or video are ever stored by us. When something needs a parent, they get a short, redacted alert with no content in it.",
+        "We keep no raw content",
+        "No raw message, image or video is ever stored by us. When something needs a guardian, what we keep is a short, redacted record: the verdict, a stripped-back text snippet or a blurred thumbnail, held in an encrypted log that deletes itself on a clock. The raw thing is never written down in the first place.",
     ),
     (
         "If you turn on the network filter",
@@ -38,7 +38,7 @@ const POLICY: [(&str, &str); 8] = [
     ),
     (
         "Your data and your rights",
-        "Because we hold almost nothing, there is very little to ask us for. If you have a question about data, or you are a guardian who wants to understand exactly what the product does, email us and a person will answer.",
+        "Because we hold almost nothing, there is very little to ask us for. We follow UK GDPR and the ICO's Children's Code, and we treat anything to do with a child as the most sensitive data there is. If you have a question about data, or you are a guardian who wants to understand exactly what the product does, email us and a person will answer.",
     ),
 ];
 
@@ -59,7 +59,7 @@ pub fn Privacy() -> Element {
                     span { class: "grad-text", "the whole point." }
                 }
                 p { class: "lede rise d3",
-                    "We build child-safety tools that try to see as little as possible and keep none of it. Here is exactly what that means, in plain words."
+                    "We build child-safety tools that try to see as little as possible, and keep no more than a guardian needs to act on. Here is exactly what that means, in plain words."
                 }
             }
         }
