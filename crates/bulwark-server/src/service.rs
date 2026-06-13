@@ -412,7 +412,8 @@ pub async fn run(
             let wg_peers = match &cfg.state_dir {
                 Some(dir) => WgPeerStore::with_state_dir(dir)?,
                 None => WgPeerStore::new(),
-            };
+            }
+            .with_reserved_from_env();
             router = router.add_service(WgProvisionServer::new(WgProvisionService::from_env(
                 wg_peers,
                 accounts.clone(),

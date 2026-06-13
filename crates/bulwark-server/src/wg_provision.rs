@@ -91,9 +91,48 @@ fn valid_wg_public_key(key: &str) -> bool {
 }
 
 /// Lowest free host octet in `10.8.0.<2..=254>`, or `None` when the subnet is
-/// full. Pure so the exhaustion edge is unit-testable without 253 enrollments.
+/// full. `used` already includes both enrolled peers AND any operator-reserved
+/// octets (e.g. a legacy setup-london test peer the store can't see). Pure so
+/// the exhaustion edge is unit-testable without 253 enrollments.
 fn lowest_free_octet(used: &HashSet<u8>) -> Option<u8> {
     (WG_FIRST_HOST..=WG_LAST_HOST).find(|o| !used.contains(o))
+}
+
+/// Parse `BULWARK_WG_RESERVED_ADDRS` ("10.8.0.2,10.8.0.3" or bare "2,3") into
+/// the set of host octets the allocator must NEVER hand out. Use this on a
+/// region whose `wg0.conf` already carries peers the store doesn't know about —
+/// notably the `deploy/wireguard/setup-london.sh` TEST PEER at 10.8.0.2, which
+/// is exactly the store's first allocation, so a fresh grant would COLLIDE with
+/// it. Malformed entries are ignored (logged); unset = nothing reserved.
+fn reserved_octets_from_env() -> HashSet<u8> {
+    let raw = match std::env::var("BULWARK_WG_RESERVED_ADDRS") {
+        Ok(v) => v,
+        Err(_) => return HashSet::new(),
+    };
+    let reserved = reserved_octets_from_env_str(&raw);
+    if !reserved.is_empty() {
+        tracing::info!(
+            ?reserved,
+            "WgProvision: reserving host octets the allocator will skip"
+        );
+    }
+    reserved
+}
+
+/// Pure parser for [`reserved_octets_from_env`] (env-free, so it's unit-tested
+/// without env races). Accepts full "10.8.0.N" or bare "N"; ignores blanks,
+/// non-numeric tokens, and octets outside the assignable `2..=254` range.
+fn reserved_octets_from_env_str(raw: &str) -> HashSet<u8> {
+    raw.split(',')
+        .filter_map(|tok| {
+            let tok = tok.trim();
+            if tok.is_empty() {
+                return None;
+            }
+            tok.rsplit('.').next().and_then(|o| o.parse::<u8>().ok())
+        })
+        .filter(|o| (WG_FIRST_HOST..=WG_LAST_HOST).contains(o))
+        .collect()
 }
 
 /// One device's desired peer enrollment. Doubles as the persisted snapshot row
@@ -126,6 +165,10 @@ pub struct WgPeerStore {
     /// `Some` → write-through JSON persistence (the reconciler file contract);
     /// `None` (default) → pure in-memory.
     persist: Option<JsonFile>,
+    /// Host octets the allocator must NEVER hand out — peers already in
+    /// `wg0.conf` that this store didn't grant (e.g. setup-london's test peer
+    /// at .2). Populated from `BULWARK_WG_RESERVED_ADDRS`.
+    reserved: Arc<HashSet<u8>>,
 }
 
 impl Default for WgPeerStore {
@@ -139,16 +182,18 @@ impl WgPeerStore {
         Self {
             inner: Arc::new(Mutex::new(Inner::default())),
             persist: None,
+            reserved: Arc::new(HashSet::new()),
         }
     }
 
     /// Durable store rooted at `dir`: loads `wg_peers.json` on startup and
-    /// write-throughs every change. A corrupt file starts empty (logged); only
-    /// an unusable directory is fatal — same contract as
-    /// [`AccountStore::with_state_dir`].
+    /// write-throughs every change. STRICT load: an absent file starts empty
+    /// (a fresh region), but a file that EXISTS yet is unreadable/corrupt is
+    /// FATAL — treating it as empty would re-allocate addresses already granted
+    /// to live devices (codex P1). An unusable directory is fatal too.
     pub fn with_state_dir(dir: &Path) -> std::io::Result<Self> {
         let file = JsonFile::new(dir, "wg_peers.json")?;
-        let snap: WgPeerSnapshot = file.load_or_default();
+        let snap: WgPeerSnapshot = file.load_strict()?.unwrap_or_default();
         let mut inner = Inner::default();
         for row in snap.peers {
             inner.by_device.insert(row.device_id.clone(), row);
@@ -156,7 +201,17 @@ impl WgPeerStore {
         Ok(Self {
             inner: Arc::new(Mutex::new(inner)),
             persist: Some(file),
+            reserved: Arc::new(HashSet::new()),
         })
+    }
+
+    /// Reserve the host octets in `BULWARK_WG_RESERVED_ADDRS` so the allocator
+    /// skips peers already in `wg0.conf` that this store didn't grant (the
+    /// setup-london test peer at .2 in particular). Chainable after `new` /
+    /// `with_state_dir`.
+    pub fn with_reserved_from_env(mut self) -> Self {
+        self.reserved = Arc::new(reserved_octets_from_env());
+        self
     }
 
     fn now_ms() -> i64 {
@@ -251,12 +306,16 @@ impl WgPeerStore {
         }
 
         // New device: lowest free host address in the subnet (same order as
-        // wg-peers.sh's next_free_ip, so the two allocators converge).
-        let used: HashSet<u8> = inner
-            .by_device
-            .values()
-            .filter_map(|p| p.address.rsplit('.').next()?.parse::<u8>().ok())
-            .collect();
+        // wg-peers.sh's next_free_ip, so the two allocators converge). Start
+        // from the operator-reserved octets so we never hand out an address a
+        // peer the store can't see already holds (the setup-london test peer).
+        let mut used: HashSet<u8> = (*self.reserved).clone();
+        used.extend(
+            inner
+                .by_device
+                .values()
+                .filter_map(|p| p.address.rsplit('.').next()?.parse::<u8>().ok()),
+        );
         let octet = lowest_free_octet(&used).ok_or_else(|| {
             Status::resource_exhausted(
                 "tunnel subnet 10.8.0.0/24 is exhausted (253 peers) — grow the subnet first",
@@ -605,6 +664,70 @@ mod tests {
     }
 
     #[test]
+    fn reserved_octets_are_skipped_by_the_allocator() {
+        // A region still carrying setup-london's test peer at 10.8.0.2 reserves
+        // it; the first GRANT must then start at .3, never colliding.
+        let store = WgPeerStore {
+            inner: Arc::new(Mutex::new(Inner::default())),
+            persist: None,
+            reserved: Arc::new([2u8].into_iter().collect()),
+        };
+        assert_eq!(
+            store.register_peer("dev-1", &test_key(1)).unwrap(),
+            "10.8.0.3"
+        );
+        assert_eq!(
+            store.register_peer("dev-2", &test_key(2)).unwrap(),
+            "10.8.0.4"
+        );
+    }
+
+    #[test]
+    fn reserved_addrs_env_parses_full_ips_and_bare_octets() {
+        let r = super::reserved_octets_from_env_str("10.8.0.2, 5 , bad, 999, ");
+        assert!(r.contains(&2) && r.contains(&5));
+        assert_eq!(r.len(), 2, "garbage + out-of-range (999) dropped");
+    }
+
+    #[test]
+    fn corrupt_peer_file_is_fatal_not_silently_empty() {
+        // The reconciler's only input is this file: a present-but-corrupt
+        // wg_peers.json must REFUSE to start (treating it as empty would
+        // re-allocate addresses already granted to live devices). Codex P1.
+        let dir = std::env::temp_dir().join(format!(
+            "bulwark-wgpeers-corrupt-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("wg_peers.json"), b"{ this is not json").unwrap();
+        assert!(
+            WgPeerStore::with_state_dir(&dir).is_err(),
+            "a corrupt desired-peer file must be fatal, never silently empty"
+        );
+        // An ABSENT file is still fine — a fresh region starts empty.
+        let fresh = std::env::temp_dir().join(format!(
+            "bulwark-wgpeers-fresh-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&fresh).unwrap();
+        let store = WgPeerStore::with_state_dir(&fresh).expect("absent file = fresh region");
+        assert_eq!(
+            store.register_peer("dev-1", &test_key(1)).unwrap(),
+            "10.8.0.2"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&fresh);
+    }
+
+    #[test]
     fn peers_persist_and_reload_across_restart() {
         let dir = std::env::temp_dir().join(format!(
             "bulwark-wgpeers-{}-{}",
@@ -646,12 +769,20 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        // Squat a DIRECTORY on the store's file name: the atomic temp+rename in
-        // JsonFile::store cannot replace a directory, so every write fails —
-        // a portable stand-in for "state dir went read-only / disk full".
+        // Build the store BEFORE squatting (so the strict load sees no file =
+        // a fresh region), then squat a DIRECTORY on the file name: the atomic
+        // temp+rename in JsonFile::store cannot replace a directory, so every
+        // WRITE fails — a portable stand-in for "state dir went read-only /
+        // disk full". Constructed via the struct literal so the squat only
+        // breaks writes, not the load (with_state_dir's strict load would
+        // itself reject a directory-as-file, which is a different path).
+        let file = JsonFile::new(&dir, "wg_peers.json").unwrap();
         std::fs::create_dir_all(dir.join("wg_peers.json")).unwrap();
-
-        let store = WgPeerStore::with_state_dir(&dir).unwrap();
+        let store = WgPeerStore {
+            inner: Arc::new(Mutex::new(Inner::default())),
+            persist: Some(file),
+            reserved: Arc::new(HashSet::new()),
+        };
         // The file IS the reconciler contract: an unpersistable enrollment must
         // be REFUSED, not granted-and-lost.
         let err = store.register_peer("dev-1", &test_key(1)).unwrap_err();
