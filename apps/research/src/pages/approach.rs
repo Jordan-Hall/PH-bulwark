@@ -31,6 +31,31 @@ const FAQ: [(&str, &str); 5] = [
     ("Who is it meant for?", "A guardian setting it up on a device they own, for a child in their care. It is not a tool for monitoring adults or anyone who has not consented."),
 ];
 
+/// Minimal JSON-string escape (quotes + backslashes); our content has neither
+/// control chars nor newlines, so this is sufficient.
+fn json_esc(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Build a schema.org FAQPage block from [`FAQ`] so the questions can appear as
+/// rich results, generated from the same source as the visible list.
+fn faq_jsonld() -> String {
+    let items: Vec<String> = FAQ
+        .iter()
+        .map(|(q, a)| {
+            format!(
+                r#"{{"@type":"Question","name":"{}","acceptedAnswer":{{"@type":"Answer","text":"{}"}}}}"#,
+                json_esc(q),
+                json_esc(a)
+            )
+        })
+        .collect();
+    format!(
+        r#"{{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{}]}}"#,
+        items.join(",")
+    )
+}
+
 #[component]
 pub fn Approach() -> Element {
     rsx! {
@@ -40,6 +65,7 @@ pub fn Approach() -> Element {
             path: "/approach",
             image: "/og/approach.png",
         }
+        script { r#type: "application/ld+json", dangerous_inner_html: faq_jsonld() }
         header { class: "page-head",
             div { class: "wrap",
                 p { class: "eyebrow rise d1", "Approach" }

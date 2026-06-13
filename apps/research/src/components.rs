@@ -98,6 +98,7 @@ pub fn SiteFooter() -> Element {
                             li { Link { to: Route::About {}, "About the lab" } }
                             li { Link { to: Route::Contact {}, "Contact" } }
                             li { Link { to: Route::Privacy {}, "Privacy" } }
+                            li { Link { to: Route::Security {}, "Security" } }
                             li { a { href: "https://github.com/Jordan-Hall/PH-bulwark", target: "_blank", rel: "noopener", "Source on GitHub ↗" } }
                             li { a { href: "https://predatorhunters.co.uk", target: "_blank", rel: "noopener", "Main site ↗" } }
                         }
