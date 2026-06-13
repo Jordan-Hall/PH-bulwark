@@ -68,6 +68,7 @@ const AIMS: [(&str, &str); 4] = [
 #[component]
 pub fn Research() -> Element {
     rsx! {
+        dioxus::document::Title { "Research · Predator Hunters Research" }
         header { class: "page-head",
             div { class: "wrap",
                 p { class: "eyebrow rise d1", "Research" }
@@ -105,7 +106,7 @@ pub fn Research() -> Element {
         section { class: "section",
             div { class: "wrap",
                 div { class: "sec-head",
-                    span { class: "sec-index", "How we train" }
+                    span { class: "sec-index", "White paper · How we train" }
                     h2 { "We train for the harm we cannot miss." }
                 }
                 div { class: "prose reveal",
@@ -130,7 +131,7 @@ pub fn Research() -> Element {
         section { class: "section",
             div { class: "wrap",
                 div { class: "sec-head",
-                    span { class: "sec-index", "What we're aiming for" }
+                    span { class: "sec-index", "White paper · What we're aiming for" }
                     h2 { "Where this is going." }
                 }
                 dl { class: "deflist reveal",

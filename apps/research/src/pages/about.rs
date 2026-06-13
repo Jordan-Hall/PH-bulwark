@@ -17,6 +17,7 @@ const TIMELINE: [(&str, &str); 4] = [
 #[component]
 pub fn About() -> Element {
     rsx! {
+        dioxus::document::Title { "About · Predator Hunters Research" }
         header { class: "page-head",
             div { class: "wrap",
                 p { class: "eyebrow rise d1", "About" }

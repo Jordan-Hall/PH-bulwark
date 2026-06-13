@@ -86,6 +86,7 @@ const SYSTEMS: [(&str, &str, &str, &str, &str); 2] = [
 #[component]
 pub fn Home() -> Element {
     rsx! {
+        dioxus::document::Title { "Predator Hunters Research — child-safety AI" }
         // ---------- HERO ----------
         header { class: "hero",
             div { class: "wrap",
@@ -112,16 +113,16 @@ pub fn Home() -> Element {
                                 "How we work"
                             }
                         }
-                        dl { class: "hero-meta rise d5",
-                            div { dt { "On the front line since" } dd { "2017" } }
-                            div { dt { "Where it runs" } dd { "On the phone" } }
-                            div { dt { "Raw content kept" } dd { "0 bytes" } }
-                            div { dt { "Methods" } dd { "Open" } }
-                        }
                     }
                     div { class: "rise d4",
                         Readout {}
                     }
+                }
+                dl { class: "hero-meta rise d5",
+                    div { dt { "On the front line since" } dd { "2017" } }
+                    div { dt { "Where it runs" } dd { "On the phone" } }
+                    div { dt { "Raw content kept" } dd { "0 bytes" } }
+                    div { dt { "Methods" } dd { "Open" } }
                 }
             }
         }
@@ -239,6 +240,12 @@ pub fn Home() -> Element {
                                 span { class: "r-arrow", dangerous_inner_html: svg("arrow-up-right") }
                             }
                         }
+                    }
+                }
+                div { style: "margin-top:28px; display:flex; gap:12px; flex-wrap:wrap;",
+                    Link { class: "btn btn-ghost", to: Route::Research {},
+                        span { class: "ic", dangerous_inner_html: svg("doc") }
+                        "Read the white paper"
                     }
                 }
             }

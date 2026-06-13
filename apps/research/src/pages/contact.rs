@@ -40,6 +40,7 @@ const LANES: [(&str, &str, &str, &str, &str); 4] = [
 #[component]
 pub fn Contact() -> Element {
     rsx! {
+        dioxus::document::Title { "Contact · Predator Hunters Research" }
         header { class: "page-head",
             div { class: "wrap",
                 p { class: "eyebrow rise d1", "Contact" }
