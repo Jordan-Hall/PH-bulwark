@@ -1323,9 +1323,11 @@ pub fn ServerSettingsPanel(on_saved: EventHandler<()>) -> Element {
 /// THIS device when they're away from the child's device. The redacted alert is
 /// HTTP-POSTed by the server to the endpoint URL; no alert content is sent at
 /// registration time, and registration is AUTHENTICATED with the guardian's
-/// session token. Until native push delivery lands (see
-/// docs/design/parent-notifications.md) the endpoint URL is entered by hand
-/// (paste your distributor's topic URL, e.g. an `ntfy` topic).
+/// session token. On Android the endpoint URL is acquired natively from the
+/// device's UnifiedPush distributor (the bundled `PushService` writes it to the
+/// app files dir and this field auto-fills on mount); on desktop, paste your
+/// distributor's topic URL by hand (e.g. an `ntfy` topic). See
+/// docs/design/parent-notifications.md.
 #[component]
 pub fn NotificationsPanel() -> Element {
     let mut endpoint = use_signal(saved_push_endpoint);
@@ -1386,7 +1388,7 @@ pub fn NotificationsPanel() -> Element {
                     span { class: "mono", "ntfy" }
                     " topic URL like "
                     span { class: "mono", "https://ntfy.sh/your-topic" }
-                    "). This field will be filled automatically once native push delivery ships in the app."
+                    "). On Android this fills in automatically from your installed UnifiedPush distributor; on desktop, paste it here."
                 }
                 label { class: "field",
                     span { "Endpoint URL" }

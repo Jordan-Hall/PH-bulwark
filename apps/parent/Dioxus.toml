@@ -5,9 +5,28 @@
 # couldn't even dial the cluster. The distinct `.manager` identifier lets the
 # guardian console coexist with the child app (co.predatorhunters.bulwark) on
 # the same device.
+#
+# NATIVE UNIFIEDPUSH RECEIVE (issue #151): dx 0.8.0-alpha exposes two committed-
+# source seams we use here (verified against dioxus-cli-0.8.0-alpha.0 source):
+#   * `[application].android_manifest`     → dx uses our AndroidManifest.xml
+#                                             VERBATIM (src/build/android.rs:264).
+#   * `[application].android_main_activity` → dx writes our MainActivity.kt
+#                                             VERBATIM into dev.dioxus.main and
+#                                             compiles it (android.rs:279). A Kotlin
+#                                             file may hold several top-level
+#                                             classes, so the UnifiedPush
+#                                             `PushService` rides along in it.
+#   * `[android].gradle_dependencies`       → rendered into the app's
+#                                             `dependencies {}` block
+#                                             (build.gradle.kts.hbs) — the FOSS
+#                                             Apache-2.0 UnifiedPush connector.
 
 [application]
 name = "PH Bulwark Manager"
+# Custom Android shell so the UnifiedPush PushService + its manifest <service>
+# ship as committed source dx regenerates on every build (see header).
+android_manifest = "android/AndroidManifest.xml"
+android_main_activity = "android/MainActivity.kt"
 
 [bundle]
 identifier = "co.predatorhunters.bulwark.manager"
@@ -16,6 +35,13 @@ identifier = "co.predatorhunters.bulwark.manager"
 identifier = "co.predatorhunters.bulwark.manager"
 min_sdk = 26
 target_sdk = 34
+# FOSS (Apache-2.0) UnifiedPush Android connector — no Google/Apple services. The
+# 3.x line delivers via a bound PushService (the old MessagingReceiver is
+# deprecated upstream); the AAR's own manifest contributes the package-visibility
+# <queries> + the embedded receiver, merged by AGP at build. Bare coordinate: the
+# build.gradle.kts template wraps it in `implementation("…")`.
+gradle_dependencies = ["org.unifiedpush.android:connector:3.0.10"]
 
 [android.permissions]
 "android.permission.INTERNET" = { description = "Connect to your PH Bulwark server to review alerts and pair your child's device" }
+"android.permission.POST_NOTIFICATIONS" = { description = "Show redacted, content-free child-safety alerts on this device" }
