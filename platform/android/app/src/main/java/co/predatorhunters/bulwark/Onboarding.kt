@@ -833,6 +833,11 @@ internal fun StatusDashboard(
             textAlign = TextAlign.Center,
         )
 
+        // Child SOS — paired devices only (an unpaired SOS has nowhere to go).
+        if (enrollment != null) {
+            SosCard()
+        }
+
         Card(
             Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp),

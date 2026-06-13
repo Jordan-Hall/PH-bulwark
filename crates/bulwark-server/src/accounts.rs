@@ -1147,6 +1147,17 @@ impl AccountStore {
         Some(entry.account_id.clone())
     }
 
+    /// Resolve an ENROLLED device to its child's `(child_id, family_id,
+    /// child_name)` — the coarse, content-free context a CHILD_SOS alert
+    /// carries (who + which family; never location or content). `None` for an
+    /// unknown device.
+    pub fn child_for_device(&self, device_id: &str) -> Option<(String, String, String)> {
+        let inner = self.inner.lock().expect("account mutex poisoned");
+        let child_id = inner.device_to_child.get(device_id.trim())?;
+        let c = inner.children.get(child_id)?;
+        Some((c.child_id.clone(), c.family_id.clone(), c.name.clone()))
+    }
+
     /// Verify a per-device credential (minted at [`Self::redeem_pair_code`],
     /// presented on Heartbeat / child-config reads): `true` iff `device_id` is
     /// an enrolled child device AND sha256(token) matches the stored digest
