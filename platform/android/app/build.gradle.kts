@@ -6,6 +6,44 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// ---------------------------------------------------------------------------
+// On-device OCR language data (Tesseract `eng.traineddata`).
+//
+// The conventional-OCR FOSS replacement for the removed ML Kit. The traineddata
+// is Apache-2.0 (tesseract-ocr/tessdata_fast). It is BEST-EFFORT fetched into
+// generated assets at build time (never committed — the root .gitignore ignores
+// the module build dir). If the fetch fails (offline build), the asset is simply
+// absent and `Ocr` fails OPEN at runtime — the accessibility view-tree text path
+// is unaffected. OCR is an ADDITIVE source for text the tree can't expose, never
+// a gate.
+// ---------------------------------------------------------------------------
+val fetchTessdata = tasks.register("fetchTessdata") {
+    description = "Best-effort fetch of Tesseract eng.traineddata (Apache-2.0) into generated assets."
+    val outFile = layout.buildDirectory.file("generated/bulwarkAssets/tessdata/eng.traineddata")
+    outputs.file(outFile)
+    doLast {
+        val dest = outFile.get().asFile
+        // Already present and plausibly complete (>1 MB) → skip.
+        if (dest.exists() && dest.length() > 1_000_000L) return@doLast
+        dest.parentFile.mkdirs()
+        // Pinned to the 4.1.0 tag for reproducibility (tessdata_fast, Apache-2.0).
+        val url = "https://github.com/tesseract-ocr/tessdata_fast/raw/4.1.0/eng.traineddata"
+        runCatching {
+            uri(url).toURL().openStream().use { input ->
+                dest.outputStream().use { output -> input.copyTo(output) }
+            }
+            logger.lifecycle("fetchTessdata: fetched eng.traineddata (${dest.length()} bytes)")
+        }.onFailure { e ->
+            // NEVER fail the build for this: OCR fails open without the data.
+            logger.warn("fetchTessdata: could not fetch eng.traineddata (${e.message}); on-device OCR will fail open — the accessibility view-tree text path still works.")
+            if (dest.exists() && dest.length() < 1_000_000L) dest.delete()
+        }
+    }
+}
+// preBuild is an ancestor of every variant's merge*Assets; matching{} is robust
+// to AGP task-registration timing (same pattern as the camera module).
+tasks.matching { it.name == "preBuild" }.configureEach { dependsOn(fetchTessdata) }
+
 android {
     namespace = "co.predatorhunters.bulwark"
     compileSdk = 34
@@ -38,6 +76,13 @@ android {
     // The Rust core (crates/bulwark-client, built as a cdylib by cargo-ndk →
     // libbulwark_client.so) is placed under src/main/jniLibs/<abi>/. See README.md.
     sourceSets["main"].jniLibs.srcDirs("src/main/jniLibs")
+
+    // The build-time-fetched Tesseract eng.traineddata (see fetchTessdata above).
+    sourceSets["main"].assets.srcDirs("build/generated/bulwarkAssets")
+
+    // Store the traineddata uncompressed so it streams straight to the app-private
+    // file Tesseract reads (no inflater pressure on a ~12 MB asset).
+    androidResources { noCompress += "traineddata" }
 
     // Release signing is configured ONLY when the keystore is provided via env
     // (CI store-publish job → ANDROID_* secrets). Without it, release stays unsigned
@@ -78,13 +123,15 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
 
     // On-screen text is read from the ACCESSIBILITY TREE (live, content-free,
-    // fully FOSS) — that is the wired path. ML Kit text-recognition was a
-    // declared-but-never-invoked dependency (a proprietary Google binary, not
-    // FOSS); removed so the child app ships 100% free/open-source. If/when
-    // CONVENTIONAL bitmap/screenshot OCR is actually implemented (for text the
-    // a11y tree can't expose), use Tesseract (org.tesseract:tesseract4android,
-    // Apache-2.0, on-device, bundle eng.traineddata) — never a vision-LLM,
-    // never a proprietary SDK. See the on-device-AI fallback doctrine.
+    // fully FOSS) — the primary wired path. For text the tree CANNOT expose
+    // (canvas/bitmap-rendered chat, image captions), the AccessibilityService
+    // takes a throttled screenshot and runs CONVENTIONAL on-device OCR here —
+    // Tesseract (Apache-2.0, fully FOSS, on-device) — feeding the SAME
+    // bulwark-text grooming detector. This is the FOSS replacement for the
+    // removed ML Kit: a glyph recogniser, never a vision-LLM, never a
+    // proprietary SDK. eng.traineddata is fetched by fetchTessdata (above);
+    // Ocr fails OPEN if it is absent. See docs/design/on-device-agent.md.
+    implementation("cz.adaptech.tesseract4android:tesseract4android:4.9.0")
 
     // QR scan for the pairing setup code (Apache-2.0 ZXing wrapper). Camera
     // permission is requested at scan time by the embedded capture activity;

@@ -9,6 +9,11 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // JitPack hosts Tesseract4Android (cz.adaptech.tesseract4android — the
+        // Apache-2.0 conventional-OCR engine the child app uses for screenshot
+        // text the accessibility tree can't expose). FOSS source, built by
+        // JitPack from the public repo; it is NOT on Maven Central.
+        maven { url = uri("https://jitpack.io") }
     }
 }
 

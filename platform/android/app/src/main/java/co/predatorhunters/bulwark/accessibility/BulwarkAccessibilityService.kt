@@ -1,12 +1,18 @@
 package co.predatorhunters.bulwark.accessibility
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityService.ScreenshotResult
+import android.accessibilityservice.AccessibilityService.TakeScreenshotCallback
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
+import android.view.Display
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -15,7 +21,9 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.FrameLayout
 import android.widget.TextView
+import androidx.annotation.RequiresApi
 import co.predatorhunters.bulwark.core.RustBridge
+import co.predatorhunters.bulwark.ocr.Ocr
 import co.predatorhunters.bulwark.tamper.TamperReporter
 
 /**
@@ -63,9 +71,79 @@ class BulwarkAccessibilityService : AccessibilityService() {
             AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
                 val root = rootInActiveWindow ?: return
                 val text = collectText(root).trim()
-                if (text.isNotEmpty()) submit(pkg, threadIdFor(root, pkg), text)
+                if (text.isNotEmpty()) {
+                    submit(pkg, threadIdFor(root, pkg), text)
+                } else {
+                    // The view-tree exposed NO text — the content is drawn as a
+                    // bitmap/canvas (some games, image captions, stylised chat).
+                    // Fall back to a throttled screenshot + conventional OCR so
+                    // that drawn text still reaches the grooming detector. API 30+
+                    // only; fully fail-open (no OCR engine → nothing happens here,
+                    // the view-tree path is unaffected).
+                    maybeOcr(pkg, threadIdFor(root, pkg))
+                }
             }
         }
+    }
+
+    // --- screenshot OCR fallback (text the accessibility tree can't expose) ---
+
+    @Volatile
+    private var lastOcrAtMs = 0L
+
+    /**
+     * Throttle gate for the screenshot-OCR fallback. Only on API 30+ (where
+     * [takeScreenshot] exists) and at most once per [OCR_INTERVAL_MS] — the OS
+     * also rate-limits `takeScreenshot` (~1/s), and each tick is a full OCR pass,
+     * so we keep it cheap on battery/CPU.
+     */
+    private fun maybeOcr(pkg: String, thread: String) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastOcrAtMs < OCR_INTERVAL_MS) return
+        lastOcrAtMs = now
+        captureAndOcr(pkg, thread)
+    }
+
+    /**
+     * Take one screen frame, OCR it on-device (Tesseract), and feed any extracted
+     * text into the SAME grooming path as the view-tree text. The frame lives only
+     * in memory (no-media invariant) and is recycled immediately. Every failure
+     * path is swallowed — OCR must never break the live protection.
+     */
+    @RequiresApi(Build.VERSION_CODES.R)
+    private fun captureAndOcr(pkg: String, thread: String) {
+        runCatching {
+            takeScreenshot(
+                Display.DEFAULT_DISPLAY,
+                mainExecutor,
+                object : TakeScreenshotCallback {
+                    override fun onSuccess(result: ScreenshotResult) {
+                        val hb = result.hardwareBuffer
+                        try {
+                            val raw = Bitmap.wrapHardwareBuffer(hb, result.colorSpace)
+                            // Tesseract needs a software (readable) bitmap.
+                            val bmp = raw?.copy(Bitmap.Config.ARGB_8888, false)
+                            raw?.recycle()
+                            if (bmp != null) {
+                                val text = Ocr.recognize(this@BulwarkAccessibilityService, bmp)
+                                bmp.recycle()
+                                if (!text.isNullOrEmpty()) submit(pkg, "ocr:$thread", text)
+                            }
+                        } catch (t: Throwable) {
+                            Log.i(TAG, "screenshot OCR failed (fail-open): ${t.message}")
+                        } finally {
+                            hb.close()
+                        }
+                    }
+
+                    override fun onFailure(errorCode: Int) {
+                        // Rate-limited / unavailable right now — ignore (fail-open).
+                        Log.v(TAG, "takeScreenshot failed: $errorCode")
+                    }
+                },
+            )
+        }.onFailure { Log.i(TAG, "takeScreenshot threw (fail-open): ${it.message}") }
     }
 
     private fun submit(pkg: String, thread: String, text: String) {
@@ -240,6 +318,9 @@ class BulwarkAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "BulwarkA11y"
+
+        /** Minimum gap between screenshot-OCR passes (battery/CPU + OS rate-limit). */
+        private const val OCR_INTERVAL_MS = 4000L
         // Apps the network can't read (E2E / cert-pinned) → on-device capture path.
         private val MONITORED = setOf(
             "com.whatsapp",
