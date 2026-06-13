@@ -151,6 +151,8 @@ fn linux_nss_remove_argv(nssdb: &str) -> Vec<String> {
     ]
 }
 
+/// Install the inspection root CA into the Linux system trust store at `scope`
+/// (`update-ca-certificates`; see the module docs for the per-OS mechanism).
 #[cfg(target_os = "linux")]
 pub fn install_root(cert_der: &[u8], scope: StoreScope) -> Result<()> {
     if scope != StoreScope::LocalMachine {
@@ -174,6 +176,8 @@ pub fn install_root(cert_der: &[u8], scope: StoreScope) -> Result<()> {
     Ok(())
 }
 
+/// Remove the inspection root CA from the Linux system trust store at `scope`
+/// — the release-blocking reverse of [`install_root`].
 #[cfg(target_os = "linux")]
 pub fn uninstall_root(_cert_der: &[u8], scope: StoreScope) -> Result<()> {
     if scope != StoreScope::LocalMachine {
@@ -273,6 +277,8 @@ fn macos_remove_argv(scope: StoreScope, pem_path: &str) -> Vec<String> {
     v
 }
 
+/// Install the inspection root CA into the macOS keychain at `scope`
+/// (`security add-trusted-cert`; see the module docs for the mechanism).
 #[cfg(target_os = "macos")]
 pub fn install_root(cert_der: &[u8], scope: StoreScope) -> Result<()> {
     let pem = der_to_pem(cert_der);
@@ -292,6 +298,8 @@ pub fn install_root(cert_der: &[u8], scope: StoreScope) -> Result<()> {
     Ok(())
 }
 
+/// Remove the inspection root CA from the macOS keychain at `scope`
+/// (`security remove-trusted-cert`) — the reverse of [`install_root`].
 #[cfg(target_os = "macos")]
 pub fn uninstall_root(cert_der: &[u8], scope: StoreScope) -> Result<()> {
     // `security remove-trusted-cert` needs the cert file, so re-materialise the PEM.
@@ -315,6 +323,8 @@ pub fn uninstall_root(cert_der: &[u8], scope: StoreScope) -> Result<()> {
 /// Android trusts the inspection CA via Device Owner provisioning, not this
 /// module; other targets have no desktop trust store. We error rather than
 /// silently pretend to install (orphaned-root honesty).
+/// Trust-store install is not implemented for this OS (see the module docs for
+/// the supported per-OS paths); returns an explicit unsupported error.
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn install_root(_cert_der: &[u8], _scope: StoreScope) -> Result<()> {
     Err(NetError::unsupported(
@@ -323,6 +333,8 @@ pub fn install_root(_cert_der: &[u8], _scope: StoreScope) -> Result<()> {
 }
 
 /// See [`install_root`] for the per-OS uninstall commands.
+/// Trust-store uninstall is not implemented for this OS — returns an explicit
+/// unsupported error (the reverse of [`install_root`]).
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn uninstall_root(_cert_der: &[u8], _scope: StoreScope) -> Result<()> {
     Err(NetError::unsupported(
