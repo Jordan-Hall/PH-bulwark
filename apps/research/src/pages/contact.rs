@@ -10,28 +10,28 @@ const LANES: [(&str, &str, &str, &str, &str); 4] = [
     (
         "spark",
         "Backers & funders",
-        "We are self-funded and looking for partners who fund frontier safety research. Help us put more protective models on more children’s devices.",
+        "We are self-funded and looking for people who back safety research. Help us put protective models on more children’s phones.",
         "research@predatorhunters.co.uk",
-        "mailto:research@predatorhunters.co.uk?subject=Funding%20%E2%80%94%20Predator%20Hunters%20Research",
+        "mailto:research@predatorhunters.co.uk?subject=Funding%20Predator%20Hunters%20Research",
     ),
     (
         "cpu",
         "Researchers & engineers",
-        "On-device machine learning, Rust systems, evaluation against real-world evasion. If that is your craft and this is your cause, we want to hear from you.",
+        "On-device machine learning, Rust systems, testing against the way predators really behave. If that is your craft and this is your cause, get in touch.",
         "research@predatorhunters.co.uk",
         "mailto:research@predatorhunters.co.uk?subject=Joining%20the%20lab",
     ),
     (
         "shield-check",
         "Safeguarding partners",
-        "Schools, charities and platforms that want to put privacy-preserving protection to work — without adopting surveillance to do it.",
+        "Schools, charities and platforms that want real protection for children, without turning to surveillance to get it.",
         "research@predatorhunters.co.uk",
         "mailto:research@predatorhunters.co.uk?subject=Partnership",
     ),
     (
         "doc",
         "Press & journalism",
-        "For court reporting, investigations and downloads, head to the main Predator Hunters site — that is where the journalism lives.",
+        "For court reporting, investigations and downloads, head to the main Predator Hunters site. That is where the journalism lives.",
         "predatorhunters.co.uk",
         "https://predatorhunters.co.uk",
     ),
@@ -48,7 +48,7 @@ pub fn Contact() -> Element {
                     span { class: "grad-text", "with us." }
                 }
                 p { class: "lede rise d3",
-                    "We are a small team with a large mission, and we move faster with the right people beside us. Whatever you bring — capital, code, or care — start here."
+                    "We are a small team with a big job, and we move faster with the right people beside us. Whatever you bring, money, code, or care, start here."
                 }
                 div { class: "hero-actions rise d4", style: "margin-top:30px;",
                     a { class: "btn btn-primary", href: "mailto:research@predatorhunters.co.uk",

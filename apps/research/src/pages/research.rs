@@ -1,5 +1,5 @@
-//! Research — the models and the methodology. This is the site's centre of
-//! gravity (the journalism + downloads live on the main site).
+//! Research — the models, how we train them, and what we are aiming for. This
+//! is the lab's centre of gravity and doubles as the white paper. Plain copy.
 
 use dioxus::prelude::*;
 
@@ -11,7 +11,7 @@ const MODELS: [(&str, &str, &str, &str, &str, &str); 6] = [
         "01",
         "Grooming-pattern recognition",
         "scan",
-        "A compact language model that recognises the shape of predatory conversation — secrecy pressure, “let’s move to another app”, gift offers, age and personal-information probing — and raises a content-free flag for a guardian. Tuned so that secrecy and isolation outrank simple age questions.",
+        "A small language model that learns the shape of predatory talk. Secrecy pressure, pushing a child to move to another app, gifts, fishing for their age or address. It raises a flag a parent can act on, with no message contents attached, and it is tuned so that secrecy and isolation count for more than a simple age question.",
         "live",
         "In alpha",
     ),
@@ -19,23 +19,23 @@ const MODELS: [(&str, &str, &str, &str, &str, &str); 6] = [
         "02",
         "On-device content filtering",
         "shield-check",
-        "Real-time classification of unsafe imagery and text as it loads — blocked in place, so only the harmful image or clip is removed or replaced and the rest of an otherwise-legitimate page keeps working. No blunt whole-site bans. Illegal child-abuse material is detected, blocked instantly and reported as the law requires — never stored, never shown.",
+        "It checks images and text as a page loads and blocks the unsafe ones in place. Only the harmful part is removed, so the rest of an ordinary page keeps working and there are no blunt whole-site bans. Illegal child-abuse material is blocked on sight and reported as the law requires. It is never stored, shown, or generated.",
         "live",
         "In alpha",
     ),
     (
         "03",
-        "Screen-reading for encrypted apps",
+        "Reading the screen in encrypted apps",
         "cpu",
-        "Conventional, on-device OCR that catches grooming inside end-to-end-encrypted chats by reading only the text already drawn on screen. Never keystrokes, never passwords; raw text never leaves the device.",
+        "Plain OCR, running on the phone, reads the text already drawn on screen. That lets it catch grooming even inside end-to-end-encrypted chats. It never logs keystrokes or passwords, and the text never leaves the device.",
         "live",
         "In alpha",
     ),
     (
         "04",
-        "Video detection & in-place rewriting",
+        "Video detection and in-place rewriting",
         "layers",
-        "Our flagship alpha capability: detecting unsafe video as it plays and rewriting it on the fly — blurring or muting only the offending moments and re-packaging the same stream, so the rest plays uninterrupted. On-device, nothing stored.",
+        "Our flagship alpha. It spots unsafe video as it plays and rewrites it on the fly, blurring or muting only the moments that are a problem and re-packaging the same stream so the rest plays without a break. It runs on the phone and keeps nothing.",
         "live",
         "In alpha",
     ),
@@ -43,37 +43,26 @@ const MODELS: [(&str, &str, &str, &str, &str, &str); 6] = [
         "05",
         "Offender-record matching",
         "network",
-        "Research into linking convictions already on the public court record to support our journalism and community protection. Post-conviction only, human-reviewed, and built with data-protection law in mind — never pre-trial, never an automated accusation.",
+        "Early research into linking convictions that are already on the public court record, to support our journalism and help protect communities. A person reviews every match, it happens only after a case has been to court, and it is built around data-protection law. Never before a trial, never an automated accusation.",
         "research",
         "Research",
     ),
     (
         "06",
         "Edge distillation",
-        "waveform",
-        "The enabling work: distilling and quantising every model small enough to run offline on a mid-range phone, because protection that needs the cloud is protection that can be switched off.",
+        "bolt",
+        "The work underneath all of it. We shrink every model so it runs offline on a mid-range phone, because protection that needs the cloud is protection an adult can switch off.",
         "research",
         "Research",
     ),
 ];
 
-/// (icon, title, description)
-const METHOD: [(&str, &str, &str); 3] = [
-    (
-        "layers",
-        "Rules first, AI second",
-        "A deterministic rules engine handles the clear-cut cases; models are the minimal layer on top. No large language model sits in any real-time path — it is faster, cheaper, auditable, and private.",
-    ),
-    (
-        "cpu",
-        "Edge-sized, offline",
-        "Every shipped model is distilled and quantised to run on the device with no network round-trip. Protection that depends on a server is protection an adult can quietly remove.",
-    ),
-    (
-        "fingerprint",
-        "Tested against real evasion",
-        "We evaluate the way predators actually behave — pressure to move apps, to keep secrets, to isolate — and tune for the harm we must never miss, not for a leaderboard.",
-    ),
+/// (term, definition) — what we are aiming for.
+const AIMS: [(&str, &str); 4] = [
+    ("A phone a parent can trust", "One a parent can hand a child knowing the worst is caught, without anyone watching over the child's shoulder."),
+    ("Cover the whole phone", "Text, images, video and audio, across apps and the web, all judged on the device."),
+    ("Small enough for any phone", "Models light and fast enough to run on a cheap handset, and given away where giving them away protects more children."),
+    ("A standard others can use", "We publish how the work is done and open the tooling, so good protection does not stay locked inside one company."),
 ];
 
 #[component]
@@ -87,7 +76,7 @@ pub fn Research() -> Element {
                     span { class: "grad-text", "Keep none of the child." }
                 }
                 p { class: "lede rise d3",
-                    "A small family of focused models, each doing one safety job well. Most already run in our alpha build; the rest are in the lab. All of them run on-device and store nothing."
+                    "A small family of focused models, each doing one safety job well. Most already run in our alpha. The rest are still in the lab. All of them run on the phone and store nothing."
                 }
             }
         }
@@ -112,39 +101,64 @@ pub fn Research() -> Element {
             }
         }
 
+        // ---------- HOW WE TRAIN ----------
         section { class: "section",
             div { class: "wrap",
                 div { class: "sec-head",
-                    span { class: "sec-index", "Methodology" }
-                    h2 { "Small, deterministic, and private by construction." }
-                    p { class: "lede", "Our constraints are deliberate. They make the models cheaper to run, easier to audit, and impossible to quietly turn into surveillance." }
+                    span { class: "sec-index", "How we train" }
+                    h2 { "We train for the harm we cannot miss." }
                 }
-                div { class: "grid-3",
-                    for (icon , title , desc) in METHOD {
-                        div { key: "{title}", class: "card reveal",
-                            div { class: "card-ic", dangerous_inner_html: svg(icon) }
-                            h3 { "{title}" }
-                            p { "{desc}" }
+                div { class: "prose reveal",
+                    p {
+                        "We do not scrape children's data. The models learn from lawful public datasets, from examples of grooming that safeguarding practitioners label with us, from synthetic conversations, and from plenty of ordinary chat so the model does not cry wolf at every clumsy message."
+                    }
+                    p {
+                        "Rules come first and the model comes second. A plain set of rules handles the obvious cases. The model is the thin layer on top for the rest. No large language model sits in the live path, which keeps the work fast, cheap to run, and easy to check."
+                    }
+                    p {
+                        "We tune for recall on real danger rather than for a leaderboard, and we test against the way predators actually behave: keeping secrets, moving a child to another app, cutting them off from the people around them. Then we distill everything down small enough to run offline on a mid-range phone."
+                    }
+                    p {
+                        strong { "Nothing a child sends is ever used to train, and no raw content is kept." }
+                        " That is a hard rule, not a setting."
+                    }
+                }
+            }
+        }
+
+        // ---------- WHAT WE'RE AIMING FOR ----------
+        section { class: "section",
+            div { class: "wrap",
+                div { class: "sec-head",
+                    span { class: "sec-index", "What we're aiming for" }
+                    h2 { "Where this is going." }
+                }
+                dl { class: "deflist reveal",
+                    for (term , def) in AIMS {
+                        div { key: "{term}", class: "def",
+                            dt { "{term}" }
+                            dd { "{def}" }
                         }
                     }
                 }
             }
         }
 
+        // ---------- DISCLOSURE ----------
         section { class: "section",
             div { class: "wrap",
                 div { class: "sec-head",
                     span { class: "sec-index", "Disclosure" }
-                    h2 { "What we publish — and what we never will." }
+                    h2 { "What we publish, and what we never will." }
                 }
                 dl { class: "deflist reveal",
                     div { class: "def",
                         dt { "We publish" }
-                        dd { "How the models work — architectures, evaluation methods, safety findings — and the open-source tooling around them." }
+                        dd { "How the models work, how we test them, what we find, and the open-source tooling around them." }
                     }
                     div { class: "def",
                         dt { "We never publish" }
-                        dd { "A child’s data, a raw grooming corpus, or live model weights — nor anything that would help an adult evade protection. Those stay closed, permanently." }
+                        dd { "A child's data, a raw grooming dataset, or live model weights, and nothing that would help an adult get around the protection. That stays closed for good." }
                     }
                 }
             }

@@ -1,5 +1,5 @@
-//! About — who we are, where we came from, and the line between what we are
-//! and what we are not.
+//! About — who we are, where we came from, and the line between what we are and
+//! what we are not. Plain copy.
 
 use dioxus::prelude::*;
 
@@ -8,10 +8,10 @@ use crate::icons::svg;
 
 /// (year, event)
 const TIMELINE: [(&str, &str); 4] = [
-    ("2017", "Predator Hunters begins — an independent organisation protecting children online and training the parents who keep them safe."),
-    ("2022", "The research lab opens. Privacy-first prototyping of on-device safety models begins in earnest."),
-    ("2025", "Our first prototype lands the hardest capability of all — detecting unsafe video and rewriting it in place, blurring or muting only the offending moments while the rest plays on."),
-    ("Today", "In final development of our first alpha, heading into stage testing. From here, more and more goes into the models."),
+    ("2017", "Predator Hunters begins. An independent group protecting children online and training the parents who keep them safe."),
+    ("2022", "The research lab opens, and serious work on privacy-first, on-device models begins."),
+    ("2025", "The first prototype lands the hardest job of all. It detects unsafe video and rewrites it in place, blurring or muting only the bad moments while the rest plays on."),
+    ("Today", "In final development of our first alpha, heading into staged testing. From here, more and more goes into the models."),
 ];
 
 #[component]
@@ -25,7 +25,7 @@ pub fn About() -> Element {
                     span { class: "grad-text", "2017." }
                 }
                 p { class: "lede rise d3",
-                    "Predator Hunters Research is the AI arm of an independent child-protection and journalism organisation. We are small, self-funded, and four years deep in the work of building safety technology that earns a family’s trust."
+                    "Predator Hunters Research is the AI arm of an independent child-protection and journalism group. We are small, self-funded, and four years into building safety tech a family can actually trust."
                 }
             }
         }
@@ -34,12 +34,12 @@ pub fn About() -> Element {
             div { class: "wrap",
                 div { class: "prose reveal",
                     p {
-                        "For most of a decade, Predator Hunters has worked on the front line of child protection — investigating, reporting from court, and teaching parents how to keep their children safe online. Along the way one thing became obvious: the danger had moved faster than the tools families had to meet it."
+                        "For most of a decade, Predator Hunters has worked on the front line of child protection. Investigating, reporting from court, teaching parents how to keep their children safe online. One thing kept getting clearer. The danger was moving faster than the tools families had to meet it."
                     }
                     p {
-                        "So we started building. The research lab exists to put modern machine learning to work on that problem — "
-                        strong { "without" }
-                        " adopting the surveillance playbook that so much ‘safety’ software relies on. Everything we ship has to protect a child and respect them at the same time."
+                        "So we started building. The lab puts modern machine learning to work on that problem, without the surveillance that so much "
+                        strong { "safety" }
+                        " software leans on. Anything we ship has to protect a child and respect them at the same time."
                     }
                 }
             }
@@ -67,14 +67,14 @@ pub fn About() -> Element {
                 div { class: "sec-head",
                     span { class: "sec-index", "Team" }
                     h2 { "Built by a small team." }
-                    p { class: "lede", "Deliberately lean, deeply committed, and honest about what that means: we build carefully and say no often." }
+                    p { class: "lede", "Lean on purpose, and honest about what that means. We build carefully and we say no a lot." }
                 }
                 div { class: "team-grid",
                     div { class: "member reveal",
                         div { class: "member-photo", "JU" }
                         b { "Jordan Upton" }
                         div { class: "role", "Founder · Lead developer" }
-                        p { "Designs and builds the models and the systems that run them — and holds the line on what the lab will never build." }
+                        p { "Designs and builds the models and the systems that run them, and holds the line on what the lab will never build." }
                     }
                     div { class: "member reveal",
                         div { class: "member-photo", style: "background:var(--card-bg);color:var(--green-2);border:1px solid var(--hair-strong);", dangerous_inner_html: svg("scale") }
@@ -98,12 +98,12 @@ pub fn About() -> Element {
                     div { class: "card reveal",
                         div { class: "card-ic", dangerous_inner_html: svg("check") }
                         h3 { "What we are" }
-                        p { "Independent researchers and journalists building privacy-preserving AI to protect children, and reporting — from the public court record — on those who harm them." }
+                        p { "Independent researchers and journalists. We build privacy-first AI to protect children, and we report on the people who harm them, from the public court record." }
                     }
                     div { class: "card reveal",
                         div { class: "card-ic", style: "color:var(--orange);background:rgba(245,130,32,.10);border-color:rgba(245,130,32,.22);", dangerous_inner_html: svg("eye-off") }
                         h3 { "What we are not" }
-                        p { "Not a surveillance company, not a law-enforcement agency, and not a public-accusation platform. We never name anyone pre-trial and never collect a child’s private life." }
+                        p { "Not a surveillance company, not a police force, and not a place for public accusations. We never name anyone before a trial, and we never collect a child's private life." }
                     }
                 }
                 div { style: "margin-top:28px;",

@@ -19,6 +19,14 @@ pub fn ph_logo_data_uri() -> String {
     format!("data:image/png;base64,{}", base64_encode(BYTES))
 }
 
+/// The favicon: the PH wordmark fitted on a navy rounded tile (square, so it
+/// reads at 16–32px in a browser tab). Embedded as a PNG `data:` URI and wired
+/// into the document head by `app::App`.
+pub fn favicon_data_uri() -> String {
+    const BYTES: &[u8] = include_bytes!("../../../branding/favicon.png");
+    format!("data:image/png;base64,{}", base64_encode(BYTES))
+}
+
 /// Minimal standard-alphabet base64 encoder (RFC 4648, `=` padded). Hand-rolled
 /// so the site needs no extra dependency for the data URI.
 pub fn base64_encode(input: &[u8]) -> String {

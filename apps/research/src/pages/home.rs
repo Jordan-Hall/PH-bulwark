@@ -1,7 +1,4 @@
-//! Home — the lab's front door. Hero (with a live "protective telemetry"
-//! readout), mission statement, research highlights, principles, the numbers,
-//! and a founder note. Framing-disciplined: protective, privacy-first, nothing
-//! stored, independent.
+//! Home — the lab's front door. Plain, human copy (no em-dashes / AI cadence).
 
 use dioxus::prelude::*;
 
@@ -14,7 +11,7 @@ const HIGHLIGHTS: [(&str, &str, &str, &str, &str, &str); 4] = [
         "01",
         "Grooming-pattern recognition",
         "scan",
-        "A small language model that recognises predatory conversation patterns — secrecy pressure, “let’s move to another app”, age and personal-info probing — and warns a guardian. Content-free alerts only.",
+        "A small language model that learns how predators talk. Secrecy pressure, pushing a child onto another app, fishing for their age or address. When it sees the pattern it tells a parent, with none of the message contents attached.",
         "live",
         "In alpha",
     ),
@@ -22,7 +19,7 @@ const HIGHLIGHTS: [(&str, &str, &str, &str, &str, &str); 4] = [
         "02",
         "On-device content filtering",
         "shield-check",
-        "Real-time classification of unsafe imagery and text, running entirely on the child’s own device. Illegal material is detected, blocked and reported — never stored.",
+        "It checks images and text as a page loads and blocks the unsafe ones in place. Only the harmful part is removed, so the rest of the page still works. Illegal child-abuse material is blocked on sight and reported as the law requires, and it is never stored or shown.",
         "live",
         "In alpha",
     ),
@@ -30,7 +27,7 @@ const HIGHLIGHTS: [(&str, &str, &str, &str, &str, &str); 4] = [
         "03",
         "Reading the screen in encrypted apps",
         "cpu",
-        "Conventional on-device OCR that catches grooming inside end-to-end-encrypted chats by reading only what is already on screen — never keystrokes, never passwords, never sent off-device.",
+        "Plain OCR, running on the phone, reads the text already on screen. That lets it catch grooming even inside end-to-end-encrypted chats. It never logs keystrokes or passwords, and nothing it reads leaves the device.",
         "live",
         "In alpha",
     ),
@@ -38,33 +35,51 @@ const HIGHLIGHTS: [(&str, &str, &str, &str, &str, &str); 4] = [
         "04",
         "Offender-record matching",
         "network",
-        "Early research into linking convictions already on the public court record, to help our journalism protect communities — human-reviewed, post-conviction only.",
+        "Early research into linking convictions that are already on the public court record, to support our journalism. A person reviews every match, and only after a case has been to court.",
         "research",
         "Research",
     ),
 ];
 
-/// (icon, title, description)
+/// (icon, title, description) — the four lines we hold.
 const PRINCIPLES: [(&str, &str, &str); 4] = [
     (
         "cpu",
-        "On-device by default",
-        "Inference runs on the child’s own phone. The default is that nothing leaves it.",
+        "On device by default",
+        "The models run on the child's own phone. Nothing leaves it unless there is a real reason for it to.",
     ),
     (
         "eye-off",
         "We remember nothing",
-        "No raw messages or media are stored — ever. Only redacted, content-free safety signals.",
+        "No raw messages or images are ever kept. A parent gets a short, redacted alert and nothing more.",
     ),
     (
         "scale",
-        "A human always decides",
-        "Models surface concerns. People — guardians, our editors — make the call. No automated accusations.",
+        "A person always decides",
+        "The models raise a concern. A person decides what happens next, whether that is a parent or one of our editors. Nothing is ever an automated accusation.",
     ),
     (
         "doc",
         "Open methods, closed data",
-        "We publish how the models work. We never publish a child’s data, a grooming corpus, or live weights.",
+        "We are happy to explain how the models work. We will never hand over a child's data, a grooming dataset, or live model weights.",
+    ),
+];
+
+/// (icon, name, tagline, description, status)
+const SYSTEMS: [(&str, &str, &str, &str, &str); 2] = [
+    (
+        "camera",
+        "PH Camera",
+        "Ships first",
+        "A camera that will not take or keep an unsafe photo. Every frame is checked on the phone and thrown away. The app has no internet permission, so nothing it sees can leave the device.",
+        "Alpha",
+    ),
+    (
+        "shield",
+        "PH Bulwark",
+        "Ships next",
+        "The shield for the whole device. It filters unsafe content in place across apps and the web, warns a parent when something is wrong, and keeps the rest of the page working.",
+        "In build",
     ),
 ];
 
@@ -78,29 +93,29 @@ pub fn Home() -> Element {
                     div {
                         div { class: "hero-eyebrow rise d1",
                             span { class: "dot" }
-                            span { "Predator Hunters · AI research lab" }
+                            span { "Predator Hunters · AI research" }
                         }
                         h1 { class: "rise d2",
-                            "The AI that protects children — "
-                            span { class: "grad-text", "and remembers nothing." }
+                            "AI that protects children "
+                            span { class: "grad-text", "without watching them." }
                         }
                         p { class: "hero-lede rise d3",
-                            "We build privacy-preserving models that run on a child’s own device — recognising unsafe content and predatory conversation patterns, warning a guardian, and storing nothing at all."
+                            "Our models run on a child's own phone. They catch unsafe content and the way predators talk, flag it to a parent, and keep nothing."
                         }
                         div { class: "hero-actions rise d4",
                             Link { class: "btn btn-primary", to: Route::Research {},
-                                "Explore the research"
+                                "See the research"
                                 span { dangerous_inner_html: svg("arrow-right") }
                             }
                             Link { class: "btn btn-ghost", to: Route::Approach {},
                                 span { class: "ic", dangerous_inner_html: svg("shield") }
-                                "Our principles"
+                                "How we work"
                             }
                         }
                         dl { class: "hero-meta rise d5",
-                            div { dt { "Front line since" } dd { "2017" } }
-                            div { dt { "Inference" } dd { "On-device" } }
-                            div { dt { "Raw content stored" } dd { "0 bytes" } }
+                            div { dt { "On the front line since" } dd { "2017" } }
+                            div { dt { "Where it runs" } dd { "On the phone" } }
+                            div { dt { "Raw content kept" } dd { "0 bytes" } }
                             div { dt { "Methods" } dd { "Open" } }
                         }
                     }
@@ -117,15 +132,67 @@ pub fn Home() -> Element {
                 div { class: "statement-grid",
                     h2 { class: "statement reveal",
                         "Children deserve protection that "
-                        span { class: "grad-text", "does not surveil them." }
-                        " We prove it can be done."
+                        span { class: "grad-text", "does not spy on them." }
+                        " We think that is possible, and we are building it."
                     }
                     div { class: "statement-aside reveal",
                         p {
-                            "Most “online safety” technology watches everything a child does and ships it to a server. We reject that model. Our research question is narrower and harder: can a model catch real danger while seeing as little as possible — and keeping none of it?"
+                            "Most online-safety tools watch everything a child does and send it off to a server. We don't want to build that. Our question is harder. Can a model catch real danger while seeing as little as possible, and keeping none of it?"
                         }
                         p {
-                            "Four years of prototyping say yes. The result runs on the device, raises a redacted flag a guardian can act on, and forgets the rest."
+                            "Four years of work say yes. What we have runs on the phone, raises a short flag a parent can act on, and forgets the rest."
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---------- SYSTEMS PREVIEW ----------
+        section { class: "section",
+            div { class: "wrap",
+                div { class: "sec-head",
+                    span { class: "sec-index", "01 — What we ship" }
+                    h2 { "Two systems, one job." }
+                    p { class: "lede", "The research turns into apps families can actually install. The camera comes first, the full shield follows." }
+                }
+                div { class: "grid-2",
+                    for (icon , name , tag , desc , status) in SYSTEMS {
+                        Link { key: "{name}", class: "card reveal", to: Route::Systems {},
+                            div { style: "display:flex;align-items:center;justify-content:space-between;",
+                                div { class: "card-ic", dangerous_inner_html: svg(icon) }
+                                span { class: "tag live", "{status}" }
+                            }
+                            h3 { style: "margin-top:18px;", "{name}" }
+                            div { class: "role", style: "font-family:var(--mono);font-size:.7rem;letter-spacing:.14em;text-transform:uppercase;color:var(--orange);margin:6px 0 10px;", "{tag}" }
+                            p { "{desc}" }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---------- BLOCK IN PLACE ----------
+        section { class: "section",
+            div { class: "wrap",
+                div { class: "hero-grid",
+                    div {
+                        span { class: "sec-index", "The difference" }
+                        h2 { style: "margin-top:14px;",
+                            "Block in place, "
+                            span { class: "grad-text", "not the whole web." }
+                        }
+                        p { class: "lede", style: "margin-top:18px;",
+                            "Most filters ban a whole site the moment it might show something unsafe. So a child loses the search, social and learning sites they actually need, and parents give up on the filter. We took the harder route. Our models take out only the unsafe content and leave the rest of the page working."
+                        }
+                    }
+                    div { class: "reveal",
+                        div { class: "phone",
+                            div { class: "phone-screen",
+                                div { class: "phone-notch" }
+                                span { class: "phone-shield", dangerous_inner_html: svg("shield") }
+                                div { class: "phone-title", "Blocked by PH Bulwark" }
+                                div { class: "phone-sub", "This content was flagged as unsafe." }
+                            }
                         }
                     }
                 }
@@ -136,9 +203,9 @@ pub fn Home() -> Element {
         section { class: "section",
             div { class: "wrap",
                 div { class: "sec-head",
-                    span { class: "sec-index", "01 — The work" }
-                    h2 { "Models that catch danger, not childhoods." }
-                    p { class: "lede", "A handful of focused models, each doing one safety job well — most already running in our alpha build." }
+                    span { class: "sec-index", "02 — The models" }
+                    h2 { "Small models, each with one safety job." }
+                    p { class: "lede", "Most of these already run in our alpha. None of them need the cloud." }
                 }
                 div { class: "research-list",
                     for (num , title , icon , desc , tagcls , tagtxt) in HIGHLIGHTS {
@@ -156,36 +223,26 @@ pub fn Home() -> Element {
                         }
                     }
                 }
-                div { style: "margin-top:28px;",
-                    Link { class: "btn btn-ghost", to: Route::Research {},
-                        "See all research"
-                        span { class: "ic", dangerous_inner_html: svg("arrow-right") }
-                    }
-                }
             }
         }
 
-        // ---------- BLOCK IN PLACE (the differentiator) ----------
+        // ---------- BENCHMARK ----------
         section { class: "section",
             div { class: "wrap",
-                div { class: "hero-grid",
-                    div {
-                        span { class: "sec-index", "The difference" }
-                        h2 { style: "margin-top:14px;",
-                            "Block in place — "
-                            span { class: "grad-text", "not the whole web." }
+                div { class: "cta reveal",
+                    div { class: "cta-inner",
+                        p { class: "eyebrow", style: "margin-bottom:18px;", "Our child-safety benchmark" }
+                        h2 {
+                            "We asked the big AI models to help protect children. "
+                            span { class: "grad-text", "Most said no." }
                         }
-                        p { class: "lede", style: "margin-top:18px;",
-                            "Most filters ban an entire site the instant it might show something unsafe — so a child loses legitimate search, social and learning sites by association, and families give up on the filter altogether. We don’t. Our models remove or replace only the unsafe content, in place, and leave the rest of the page working."
+                        p { class: "lede",
+                            "We built a benchmark of 36 real child-safety tasks and ran six frontier models through it. GPT-5 refused all five categories. Gemini refused most. Only xAI's Grok took the work on, and Grok-4.1 scored 79.9% on average and 100% on real grooming cases. That gap is a big part of why we build our own models."
                         }
-                    }
-                    div { class: "reveal",
-                        div { class: "phone",
-                            div { class: "phone-screen",
-                                div { class: "phone-notch" }
-                                span { class: "phone-shield", dangerous_inner_html: svg("shield") }
-                                div { class: "phone-title", "Blocked by PH Bulwark" }
-                                div { class: "phone-sub", "This content was flagged as unsafe." }
+                        div { class: "cta-actions",
+                            a { class: "btn btn-primary", href: "https://benchmark.predatorhunters.co.uk",
+                                "See the benchmark"
+                                span { dangerous_inner_html: svg("arrow-up-right") }
                             }
                         }
                     }
@@ -197,7 +254,7 @@ pub fn Home() -> Element {
         section { class: "section",
             div { class: "wrap",
                 div { class: "sec-head",
-                    span { class: "sec-index", "02 — How we work" }
+                    span { class: "sec-index", "03 — How we work" }
                     h2 { "Four lines we will not cross." }
                 }
                 div { class: "grid-4",
@@ -218,21 +275,21 @@ pub fn Home() -> Element {
                 dl { class: "stats reveal",
                     div { class: "stat", dt { "2017" } dd { "On the front line since" } }
                     div { class: "stat", dt { "76K" } dd { "People in our community" } }
-                    div { class: "stat", dt { span { class: "grad-text", "0" } } dd { "Raw messages or media stored" } }
-                    div { class: "stat", dt { "100%" } dd { "On-device inference" } }
+                    div { class: "stat", dt { span { class: "grad-text", "0" } } dd { "Raw messages or images kept" } }
+                    div { class: "stat", dt { "100%" } dd { "Runs on the phone" } }
                 }
             }
         }
 
-        // ---------- FOUNDER NOTE ----------
+        // ---------- FOUNDER ----------
         section { class: "section",
             div { class: "wrap",
                 div { class: "statement-grid",
                     div {
-                        span { class: "sec-index", style: "margin-bottom:18px;", "03 — Who builds it" }
-                        h2 { class: "reveal", "A small team, four years deep." }
+                        span { class: "sec-index", style: "margin-bottom:18px;", "04 — Who builds it" }
+                        h2 { class: "reveal", "A small team, four years in." }
                         p { class: "lede reveal", style: "margin-top:18px;",
-                            "Predator Hunters Research is the AI arm of an independent child-protection organisation that has been on the front line since 2017. We are small, self-funded, and obsessive about getting the safety — and the privacy — right."
+                            "Predator Hunters Research is the AI side of a child-protection group that has run since 2017. We are small and self-funded, and we care as much about a child's privacy as we do about their safety."
                         }
                         div { style: "margin-top:26px;",
                             Link { class: "btn btn-ghost", to: Route::About {},
@@ -246,7 +303,7 @@ pub fn Home() -> Element {
                             div { class: "member-photo", "JU" }
                             b { "Jordan Upton" }
                             div { class: "role", "Founder · Lead developer" }
-                            p { "Builds the models and the systems they run on — and decides what we will never build." }
+                            p { "Builds the models and the systems they run on, and decides what we won't build." }
                         }
                     }
                 }
@@ -255,8 +312,8 @@ pub fn Home() -> Element {
     }
 }
 
-/// The hero "protective telemetry" panel — a calm, technical readout that says,
-/// at a glance, what the lab's work does and does not do.
+/// The hero "protective telemetry" panel. A calm, technical readout of what the
+/// work does and does not do.
 #[component]
 fn Readout() -> Element {
     rsx! {
@@ -264,23 +321,23 @@ fn Readout() -> Element {
             div { class: "ro-scan" }
             div { class: "readout-bar",
                 span { class: "tl", i {} i {} i {} }
-                b { "on-device · research build" }
+                b { "on device · research build" }
             }
             div { class: "readout-body",
                 div { class: "ro-row",
-                    span { class: "ro-k", "grooming-pattern model" }
+                    span { class: "ro-k", "grooming model" }
                     span { class: "ro-v good", span { class: "live" } "active" }
                 }
                 div { class: "ro-row",
-                    span { class: "ro-k", "content classifier" }
+                    span { class: "ro-k", "content filter" }
                     span { class: "ro-v good", span { class: "live" } "active" }
                 }
                 div { class: "ro-row",
-                    span { class: "ro-k", "raw messages stored" }
+                    span { class: "ro-k", "raw messages kept" }
                     span { class: "ro-v", "0 bytes" }
                 }
                 div { class: "ro-row",
-                    span { class: "ro-k", "guardian alert" }
+                    span { class: "ro-k", "parent alert" }
                     span { class: "ro-v", "redacted" }
                 }
                 div { class: "ro-row",
