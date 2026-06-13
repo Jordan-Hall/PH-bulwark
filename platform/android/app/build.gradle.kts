@@ -77,9 +77,14 @@ dependencies {
     // (the Compose material3 artifact ships no XML resource themes).
     implementation("com.google.android.material:material:1.12.0")
 
-    // CONVENTIONAL on-device OCR (NOT a vision-LLM) for image/screenshot text;
-    // the accessibility tree covers live text. ML Kit runs fully on-device.
-    implementation("com.google.mlkit:text-recognition:16.0.1")
+    // On-screen text is read from the ACCESSIBILITY TREE (live, content-free,
+    // fully FOSS) — that is the wired path. ML Kit text-recognition was a
+    // declared-but-never-invoked dependency (a proprietary Google binary, not
+    // FOSS); removed so the child app ships 100% free/open-source. If/when
+    // CONVENTIONAL bitmap/screenshot OCR is actually implemented (for text the
+    // a11y tree can't expose), use Tesseract (org.tesseract:tesseract4android,
+    // Apache-2.0, on-device, bundle eng.traineddata) — never a vision-LLM,
+    // never a proprietary SDK. See the on-device-AI fallback doctrine.
 
     // QR scan for the pairing setup code (Apache-2.0 ZXing wrapper). Camera
     // permission is requested at scan time by the embedded capture activity;
