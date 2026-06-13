@@ -248,6 +248,22 @@ em.em { font-style: italic; color: var(--head); }
 @keyframes scan { 0% { top: -90px; } 100% { top: 100%; } }
 
 /* ===================================================================
+   PHONE MOCKUP — a clean recreation of the on-device block screen
+   (always navy, like the real product screen, in either theme).
+   =================================================================== */
+.phone { width: clamp(216px, 25vw, 258px); aspect-ratio: 10 / 20.4; margin: 0 auto; position: relative;
+  background: #0F3D5C; border-radius: 42px; padding: 9px;
+  box-shadow: 0 44px 90px -42px rgba(0,0,0,.92), inset 0 0 0 9px #090e15, inset 0 1px 0 rgba(255,255,255,.06); }
+.phone-screen { position: relative; height: 100%; border-radius: 33px; overflow: hidden;
+  background: radial-gradient(120% 75% at 50% 0%, #134f78 0%, #0F3D5C 58%, #0b3047 100%);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 15px; padding: 30px 24px; text-align: center; }
+.phone-notch { position: absolute; top: 11px; left: 50%; transform: translateX(-50%); width: 84px; height: 6px; border-radius: 999px; background: rgba(255,255,255,.2); }
+.phone-shield { width: 56px; height: 56px; color: #d7e6f2; filter: drop-shadow(0 8px 16px rgba(0,0,0,.45)); }
+.phone-shield svg { width: 100%; height: 100%; }
+.phone-title { font-family: var(--sans); font-weight: 700; font-size: 1.12rem; color: #fff; line-height: 1.25; }
+.phone-sub { font-family: var(--sans); font-size: .95rem; color: #bcd5e4; line-height: 1.45; max-width: 22ch; }
+
+/* ===================================================================
    MISSION STATEMENT
    =================================================================== */
 .statement { font-family: var(--display); font-weight: 400; font-size: clamp(1.7rem, 3.4vw, 2.9rem);

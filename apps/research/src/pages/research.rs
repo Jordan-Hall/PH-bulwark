@@ -19,7 +19,7 @@ const MODELS: [(&str, &str, &str, &str, &str, &str); 6] = [
         "02",
         "On-device content filtering",
         "shield-check",
-        "Real-time classification of unsafe imagery and text as it loads, on the device itself. Illegal child-abuse material is detected, blocked instantly, and reported as the law requires — never stored, never shown, never generated.",
+        "Real-time classification of unsafe imagery and text as it loads — blocked in place, so only the harmful image or clip is removed or replaced and the rest of an otherwise-legitimate page keeps working. No blunt whole-site bans. Illegal child-abuse material is detected, blocked instantly and reported as the law requires — never stored, never shown.",
         "live",
         "In alpha",
     ),

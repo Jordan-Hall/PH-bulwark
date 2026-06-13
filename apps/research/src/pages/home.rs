@@ -165,6 +165,34 @@ pub fn Home() -> Element {
             }
         }
 
+        // ---------- BLOCK IN PLACE (the differentiator) ----------
+        section { class: "section",
+            div { class: "wrap",
+                div { class: "hero-grid",
+                    div {
+                        span { class: "sec-index", "The difference" }
+                        h2 { style: "margin-top:14px;",
+                            "Block in place — "
+                            span { class: "grad-text", "not the whole web." }
+                        }
+                        p { class: "lede", style: "margin-top:18px;",
+                            "Most filters ban an entire site the instant it might show something unsafe — so a child loses legitimate search, social and learning sites by association, and families give up on the filter altogether. We don’t. Our models remove or replace only the unsafe content, in place, and leave the rest of the page working."
+                        }
+                    }
+                    div { class: "reveal",
+                        div { class: "phone",
+                            div { class: "phone-screen",
+                                div { class: "phone-notch" }
+                                span { class: "phone-shield", dangerous_inner_html: svg("shield") }
+                                div { class: "phone-title", "Blocked by PH Bulwark" }
+                                div { class: "phone-sub", "This content was flagged as unsafe." }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // ---------- PRINCIPLES ----------
         section { class: "section",
             div { class: "wrap",
