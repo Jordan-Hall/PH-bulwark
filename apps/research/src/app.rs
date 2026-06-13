@@ -8,7 +8,6 @@ use crate::assets::{favicon_data_uri, ph_logo_data_uri};
 use crate::components::{ClosingCta, SiteFooter};
 use crate::icons::svg;
 use crate::pages::{About, Approach, Contact, Home, Research, Systems};
-use crate::theme::STYLE;
 
 /// Colour scheme. Provided as a `Signal<Theme>` context by `App`, toggled from
 /// the nav, read back into the `data-theme` attribute on the theme root — which
@@ -44,7 +43,7 @@ pub fn App() -> Element {
     let mode = if theme() == Theme::Light { "light" } else { "dark" };
     rsx! {
         dioxus::document::Link { rel: "icon", href: "{favicon_data_uri()}" }
-        style { {STYLE} }
+        dioxus::document::Stylesheet { href: asset!("/assets/main.css") }
         div { class: "theme-root", "data-theme": "{mode}",
             div { class: "stage-bg" }
             div { class: "stage-grid" }
@@ -78,11 +77,13 @@ fn nav_class(current: &Route, target: &Route) -> &'static str {
 fn NavBar() -> Element {
     let route = use_route::<Route>();
     let mut theme = use_context::<Signal<Theme>>();
+    let mut menu = use_signal(|| false);
     let toggle_icon = if theme() == Theme::Light { "moon" } else { "sun" };
+    let burger_icon = if menu() { "close" } else { "menu" };
     rsx! {
         nav { class: "nav",
             div { class: "nav-inner",
-                Link { class: "brand", to: Route::Home {},
+                Link { class: "brand", to: Route::Home {}, onclick: move |_| menu.set(false),
                     img { class: "brand-logo", src: "{ph_logo_data_uri()}", alt: "Predator Hunters" }
                     span { class: "brand-tag", "Research" }
                 }
@@ -107,7 +108,24 @@ fn NavBar() -> Element {
                         "Work with us"
                         span { dangerous_inner_html: svg("arrow-right") }
                     }
-                    Link { class: "btn btn-ghost btn-sm nav-burger", to: Route::Contact {},
+                    button {
+                        class: "theme-toggle nav-burger",
+                        "aria-label": "Open menu",
+                        "aria-expanded": "{menu()}",
+                        onclick: move |_| { let v = menu(); menu.set(!v); },
+                        span { dangerous_inner_html: svg(burger_icon) }
+                    }
+                }
+            }
+            if menu() {
+                div { class: "nav-menu",
+                    Link { class: nav_class(&route, &Route::Research {}), to: Route::Research {}, onclick: move |_| menu.set(false), "Research" }
+                    Link { class: nav_class(&route, &Route::Systems {}), to: Route::Systems {}, onclick: move |_| menu.set(false), "Systems" }
+                    Link { class: nav_class(&route, &Route::Approach {}), to: Route::Approach {}, onclick: move |_| menu.set(false), "Approach" }
+                    Link { class: nav_class(&route, &Route::About {}), to: Route::About {}, onclick: move |_| menu.set(false), "About" }
+                    Link { class: nav_class(&route, &Route::Contact {}), to: Route::Contact {}, onclick: move |_| menu.set(false), "Contact" }
+                    Link { class: "btn btn-primary nav-menu-cta", to: Route::Contact {}, onclick: move |_| menu.set(false),
+                        "Work with us"
                         span { dangerous_inner_html: svg("arrow-right") }
                     }
                 }

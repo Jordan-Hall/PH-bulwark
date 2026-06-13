@@ -1,10 +1,10 @@
 # Predator Hunters Research — Dioxus 0.8 web bundle config.
 #
-# The page chrome (fonts, the entire stylesheet, the meta description) is
-# injected from Rust via `document::{Stylesheet, Meta, Title}` and a `style {}`
-# node, so this file only needs the shell: app name + the web document title
-# and the SPA base. Client-side routing uses the History API, so the host must
-# fall back to index.html for unknown paths (see the deploy nginx config).
+# The stylesheet is shipped through dx's asset system (asset!("/assets/main.css")
+# + document::Stylesheet in app.rs), so it lands in the document <head> with a
+# hashed, cacheable URL and the browser has it before first paint. Client-side
+# routing uses the History API, so the host falls back to index.html for unknown
+# paths (see the deploy Caddyfile).
 
 [application]
 name = "Predator Hunters Research"

@@ -174,18 +174,35 @@ pub fn Home() -> Element {
         // ---------- BLOCK IN PLACE ----------
         section { class: "section",
             div { class: "wrap",
-                div { class: "hero-grid",
-                    div {
-                        span { class: "sec-index", "The difference" }
-                        h2 { style: "margin-top:14px;",
-                            "Block in place, "
-                            span { class: "grad-text", "not the whole web." }
-                        }
-                        p { class: "lede", style: "margin-top:18px;",
-                            "Most filters ban a whole site the moment it might show something unsafe. So a child loses the search, social and learning sites they actually need, and parents give up on the filter. We took the harder route. Our models take out only the unsafe content and leave the rest of the page working."
-                        }
+                div { class: "sec-head",
+                    span { class: "sec-index", "The difference" }
+                    h2 {
+                        "Block in place, "
+                        span { class: "grad-text", "not the whole web." }
                     }
-                    div { class: "reveal",
+                    p { class: "lede",
+                        "Most filters ban a whole site the moment it might show something unsafe, so a child loses the search, social and learning sites they actually need. We do two things instead. When we can, we pull out only the unsafe parts and leave the page working. When the content is serious, we block it outright."
+                    }
+                }
+                div { class: "mock-pair reveal",
+                    div {
+                        div { class: "browser",
+                            div { class: "browser-bar",
+                                span { class: "dots", i {} i {} i {} }
+                                span { class: "browser-url", "search results · images" }
+                            }
+                            div { class: "tile-grid",
+                                div { class: "tile" }
+                                div { class: "tile blocked", dangerous_inner_html: svg("shield") }
+                                div { class: "tile" }
+                                div { class: "tile" }
+                                div { class: "tile" }
+                                div { class: "tile blocked", dangerous_inner_html: svg("shield") }
+                            }
+                        }
+                        p { class: "mock-cap", "Filtered in place. The page keeps working." }
+                    }
+                    div {
                         div { class: "phone",
                             div { class: "phone-screen",
                                 div { class: "phone-notch" }
@@ -194,6 +211,7 @@ pub fn Home() -> Element {
                                 div { class: "phone-sub", "This content was flagged as unsafe." }
                             }
                         }
+                        p { class: "mock-cap", "Blocked outright when it must be." }
                     }
                 }
             }
