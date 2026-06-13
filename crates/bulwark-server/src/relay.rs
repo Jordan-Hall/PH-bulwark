@@ -656,23 +656,20 @@ impl bulwark_proto::v1::review_server::Review for ReviewService {
         validate_push_endpoint(target.push_endpoint.trim())?;
 
         // SECURITY: when accounts are wired, registering a push endpoint must be
-        // AUTHENTICATED and SCOPED to one of the guardian's own devices — else any
-        // caller reaching `Review.RegisterPushTarget` could overwrite another
-        // guardian's endpoint or register an arbitrary POST target (SSRF / push
-        // disruption). Mirrors the gate on submit_decision / stream_pending_reviews.
+        // AUTHENTICATED — else any caller reaching `Review.RegisterPushTarget`
+        // could register an arbitrary server-side POST target (SSRF / push
+        // disruption). We authenticate the session token but do NOT scope on
+        // `PushTarget.device_id`: that field is the GUARDIAN's own device id,
+        // a different namespace from the supervised CHILD device ids in
+        // `guardian_scope().device_ids` — scoping on it would reject a valid
+        // guardian registering their own phone. Per-guardian alert routing (so a
+        // guardian only receives their own children's alerts, and endpoints are
+        // keyed by guardian identity to prevent overwrite) is tracked in #140.
         if let Some(store) = &self.accounts {
             let token = meta_token.unwrap_or_default();
-            if token.is_empty() {
+            if token.is_empty() || store.guardian_scope(&token).is_none() {
                 return Err(Status::unauthenticated(
-                    "a session token (authorization: Bearer …) is required to register a push endpoint",
-                ));
-            }
-            let gscope = store
-                .guardian_scope(&token)
-                .ok_or_else(|| Status::unauthenticated("invalid session token"))?;
-            if !gscope.device_ids.contains(target.device_id.trim()) {
-                return Err(Status::permission_denied(
-                    "guardian is not assigned to this device",
+                    "a valid session token (authorization: Bearer …) is required to register a push endpoint",
                 ));
             }
         }

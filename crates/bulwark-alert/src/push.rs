@@ -82,8 +82,14 @@ impl UnifiedPushTransport {
     /// Build the transport. The rustls `reqwest` client is *not* `https_only`:
     /// a self-hosted ntfy-compatible distributor may live behind plain http on a
     /// private network, and the endpoint URL's own scheme decides the wire.
+    ///
+    /// SSRF: redirects are **disabled**. The server only validates the endpoint
+    /// URL at registration time (relay.rs `validate_push_endpoint`); following a
+    /// 3xx would let a public, validated endpoint bounce the POST to an internal
+    /// target (e.g. `169.254.169.254`) on each alert, defeating that check.
     pub fn new() -> Result<Self> {
         let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| AlertError::Push(format!("building HTTP client: {e}")))?;
         Ok(Self { http })
@@ -92,11 +98,11 @@ impl UnifiedPushTransport {
 
 impl Default for UnifiedPushTransport {
     fn default() -> Self {
-        // A builder with no special options cannot realistically fail; fall back
-        // to the default client so `Default` stays infallible.
-        Self {
-            http: reqwest::Client::new(),
-        }
+        // Delegate to `new()` so the redirect-disabled (anti-SSRF) client is the
+        // one and only client we ever build; the builder cannot realistically
+        // fail, but if it did we must NOT silently fall back to a redirect-
+        // following client.
+        Self::new().expect("redirect-none reqwest client builds")
     }
 }
 
