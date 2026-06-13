@@ -40,12 +40,18 @@ it is REPLACED with a FOSS equivalent of equal function:
 
 ## What each capability uses (the FOSS stack)
 
+The **AccessibilityService is the unified on-device agent** — it does it all,
+**no VPN required** (see [on-device-agent.md](design/on-device-agent.md)): it
+reads the view-tree text, and on API 30+ uses `takeScreenshot()` for image
+frames + `TYPE_ACCESSIBILITY_OVERLAY` windows for **localized** cover-ups.
+
 | Capability | FOSS implementation |
 |---|---|
-| On-screen text (E2E/pinned apps) | Android **accessibility tree** (content-free) — the wired path |
-| Conventional OCR (bitmap/screenshot text, if/when built) | **Tesseract** (`tesseract4android`, Apache-2.0) — never a vision-LLM, never ML Kit |
-| NSFW image classification | **ONNX Runtime** (MIT) + the bundled vit model (Apache-2.0) |
-| Audio transcription | **whisper** (open weights, on-device/CPU) |
+| On-screen TEXT (E2E/pinned apps) | Android **accessibility tree** → **`bulwark-text` grooming detector** (the wired path, content-free) |
+| TEXT in bitmaps (a11y tree can't expose) | **Tesseract** OCR (`tesseract4android`, Apache-2.0) on a `takeScreenshot()` frame → the **SAME `bulwark-text` grooming detector**. Conventional OCR only — never a vision-LLM, never ML Kit |
+| NSFW imagery — **on-device, NO VPN** | **ONNX Runtime** (MIT) + bundled ViT classifier (Apache-2.0) on a `takeScreenshot()` frame. A vision **classifier**, not an LLM. Localized: **tile the frame, score each tile, blur only the high-scoring tiles + a margin** (an accessibility overlay) so the rest of the screen stays visible — never a full-screen block. The Camera app runs the same classifier on captures. |
+| NSFW imagery — network path | the same ONNX classifier in the VPN TLS-inspecting proxy (when the VPN is on) |
+| Audio transcription | **whisper** (open weights, on-device/CPU) → `bulwark-text` |
 | QR pairing scan | **ZXing** (`zxing-android-embedded`, Apache-2.0) |
 | Push notifications | **UnifiedPush** (ntfy, self-hosted) — child, Camera, AND Manager |
 | WireGuard transport | **boringtun** (BSD-3) |
