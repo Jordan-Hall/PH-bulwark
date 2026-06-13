@@ -47,6 +47,44 @@ class BulwarkAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         RustBridge.ensureLoaded()
         Log.i(TAG, "Bulwark accessibility capture connected")
+        // Start the PROACTIVE periodic frame scan. Accessibility events fire only
+        // when content CHANGES, so on a STATIC screen (a paused video, a still
+        // image left up) nothing would be (re-)scanned — the image cover could
+        // never re-appear on the same content after lifting, and an event-driven
+        // cover lags the live screen ("comes up randomly"). A steady tick scans
+        // the CURRENT frame regardless of events.
+        scanHandler.postDelayed(periodicScan, PERIODIC_SCAN_MS)
+    }
+
+    override fun onUnbind(intent: android.content.Intent?): Boolean {
+        scanHandler.removeCallbacks(periodicScan)
+        return super.onUnbind(intent)
+    }
+
+    /** The last foreground app seen via an accessibility event — the target the
+     *  periodic tick re-scans (events tell us WHAT is on screen; the tick re-scans
+     *  it even when nothing changes). */
+    @Volatile
+    private var lastForegroundPkg: String = ""
+
+    private val scanHandler = Handler(Looper.getMainLooper())
+
+    /** Proactive scan heartbeat: re-scans the CURRENT screen every
+     *  [PERIODIC_SCAN_MS] regardless of accessibility events (keeps the cover
+     *  synced to the live screen + re-covers static content). Re-posts itself. */
+    private val periodicScan = object : Runnable {
+        override fun run() {
+            runCatching { tickScan() }
+            scanHandler.postDelayed(this, PERIODIC_SCAN_MS)
+        }
+    }
+
+    private fun tickScan() {
+        val pkg = lastForegroundPkg
+        if (pkg.isEmpty() || pkg == packageName) return // nothing foreground / our own UI
+        val thread = runCatching { rootInActiveWindow?.let { threadIdFor(it, pkg) } }
+            .getOrNull() ?: "scan:$pkg"
+        maybeCapture(pkg, thread, ocrText = true)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -60,6 +98,15 @@ class BulwarkAccessibilityService : AccessibilityService() {
         ) {
             guardAgainstUninstall()
             return
+        }
+
+        // Remember the foreground app on the events that signal it, so the
+        // periodic tick knows what's on screen to (re-)scan.
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+            event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ||
+            event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED
+        ) {
+            lastForegroundPkg = pkg
         }
 
         // TEXT/grooming is scoped to the monitored chat apps (the view-tree
@@ -110,6 +157,11 @@ class BulwarkAccessibilityService : AccessibilityService() {
     @Volatile
     private var lastCaptureAtMs = 0L
 
+    /** Separate, longer gate for the (heavier) Tesseract OCR pass — image NSFW
+     *  runs every capture, OCR at most once per [OCR_MIN_GAP_MS]. */
+    @Volatile
+    private var lastOcrAtMs = 0L
+
     /**
      * Low-priority single-thread executor for the screenshot callback, the NSFW
      * inference + tiling, and the Tesseract OCR pass, so none of that work runs
@@ -131,9 +183,13 @@ class BulwarkAccessibilityService : AccessibilityService() {
     private fun maybeCapture(pkg: String, thread: String, ocrText: Boolean) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
         val now = SystemClock.elapsedRealtime()
-        if (now - lastCaptureAtMs < OCR_INTERVAL_MS) return
+        if (now - lastCaptureAtMs < CAPTURE_INTERVAL_MS) return
         lastCaptureAtMs = now
-        captureAndScan(pkg, thread, ocrText)
+        // Image NSFW runs on EVERY capture so the cover tracks the live screen;
+        // the heavier OCR pass runs at most once per OCR_MIN_GAP_MS.
+        val runOcr = ocrText && (now - lastOcrAtMs >= OCR_MIN_GAP_MS)
+        if (runOcr) lastOcrAtMs = now
+        captureAndScan(pkg, thread, runOcr)
     }
 
     /**
@@ -571,14 +627,26 @@ class BulwarkAccessibilityService : AccessibilityService() {
     companion object {
         private const val TAG = "BulwarkA11y"
 
-        /** Minimum gap between screen-frame scans (battery/CPU + OS rate-limit). */
-        private const val OCR_INTERVAL_MS = 4000L
+        /** Min gap between screen captures (OS rate-limits takeScreenshot ~1/s).
+         *  Below the periodic cadence so the proactive tick is never throttled out
+         *  while still de-duping event bursts. */
+        private const val CAPTURE_INTERVAL_MS = 1500L
+
+        /** Proactive scan heartbeat — re-scan the current screen this often even
+         *  with no accessibility events, so static content is (re-)covered and the
+         *  cover tracks the live screen (the "comes up randomly / won't re-appear"
+         *  fix). Within the OS takeScreenshot rate limit. */
+        private const val PERIODIC_SCAN_MS = 2000L
+
+        /** OCR (Tesseract) is heavier than the NSFW pass, so it runs at most this
+         *  often (image NSFW runs every capture). */
+        private const val OCR_MIN_GAP_MS = 6000L
 
         /** Consecutive CLEAN scans required before lifting a localized cover. The
          *  cover lifts on sustained-clean (content gone), NOT on one noisy frame —
          *  hysteresis that stops the cover flickering/vanishing while the offending
-         *  content is still on screen. ~CLEAN_LIFT_SCANS × OCR_INTERVAL_MS of clean. */
-        private const val CLEAN_LIFT_SCANS = 2
+         *  content is still on screen. ~CLEAN_LIFT_SCANS × PERIODIC_SCAN_MS of clean. */
+        private const val CLEAN_LIFT_SCANS = 3
 
         /** SAFETY-net auto-lift: clears a stuck cover only if scans stop entirely
          *  (e.g. no more accessibility events). The normal lift is the clean-scan
