@@ -28,6 +28,9 @@
 pub use tokio_util::sync::CancellationToken;
 
 mod netstack;
+/// Server-side transparent redirect front-end (Linux region box; SO_ORIGINAL_DST).
+#[cfg(target_os = "linux")]
+pub mod transparent;
 
 // Userspace WireGuard CLIENT (Phase 5 — the transport leg for
 // `filter_location == FILTER_ON_SERVER`). Default OFF; `--features wg-client`

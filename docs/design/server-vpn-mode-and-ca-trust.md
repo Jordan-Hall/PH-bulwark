@@ -151,6 +151,17 @@ pre-existing accounts on it). Until it's managed:
    `BULWARK_WG_ENDPOINT`, `BULWARK_WG_KEEPALIVE_SECS`, `BULWARK_WG_FILTER_ACTIVE`
    (stays unset/false until phase 3 is actually in-path).
 3. **`bulwark-net` proxy in the `wg0` forward path** on the region (reuse the engine).
+   **Code SHIPPED (Phase 3 increment):** `crates/bulwark-net/src/vpn/transparent.rs`
+   (Linux-only `SO_ORIGINAL_DST` front-end adapting REDIRECT'd sockets into the
+   CONNECT bridge the on-device pump already uses — one engine, both modes) +
+   `deploy/wireguard/wg-filter.sh` (iptables REDIRECT on wg0 tcp/80+443, QUIC/443
+   drop, forwarded-v6 drop; `enable` REFUSES unless the proxy is listening, and
+   proxy death = fail-closed RST — the redirect is never torn down to "restore"
+   an unfiltered exit). STILL REQUIRED before any child uses it: server-bin
+   wiring that runs the proxy + transparent listener on the box, the region
+   inspection-CA contract (separate, MORE powerful than the gRPC cluster_ca —
+   per-device recommended; installed/removed on the device like the §2 CA),
+   staged validation per §6, and only then `BULWARK_WG_FILTER_ACTIVE=1`.
 4. **`filter_location` in the proto + ChildConfig + parent toggle** (additive).
 5. **boringtun client in the Android shell** + reconcile (bring tunnel up/down on
    the toggle) + kill-switch wiring to the existing lockdown.
