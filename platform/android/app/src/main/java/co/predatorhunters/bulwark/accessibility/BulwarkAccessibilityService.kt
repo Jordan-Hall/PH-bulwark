@@ -94,8 +94,12 @@ class BulwarkAccessibilityService : AccessibilityService() {
                     // throttled frame running BOTH image-NSFW AND OCR→grooming, so
                     // adult imagery and text-in-frames are caught device-wide — not
                     // just in the chat allowlist (which is the view-tree TEXT scope).
-                    // Skips our own UI. Fail-open.
-                    maybeCapture(pkg, "scan:$pkg", ocrText = true)
+                    // Skips our own UI. Fail-open. Use a PER-SURFACE thread id (not a
+                    // constant per-package one) so unrelated screens/videos don't
+                    // share the grooming state machine's per-thread 7-day history.
+                    val root = rootInActiveWindow
+                    val thread = if (root != null) threadIdFor(root, pkg) else "scan:$pkg"
+                    maybeCapture(pkg, thread, ocrText = true)
                 }
             }
         }
@@ -385,8 +389,15 @@ class BulwarkAccessibilityService : AccessibilityService() {
             val req = android.media.AudioFocusRequest.Builder(
                 android.media.AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE,
             ).setAudioAttributes(attrs).build()
-            audioManager.requestAudioFocus(req)
-            audioFocusRequest = req
+            // Only record the request as HELD when focus was actually granted —
+            // otherwise a covered video would stay audible AND every refresh would
+            // early-return (non-null) without retrying. On failure we leave it null
+            // so the next overlay tick tries again.
+            if (audioManager.requestAudioFocus(req) ==
+                android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+            ) {
+                audioFocusRequest = req
+            }
         }
     }
 
