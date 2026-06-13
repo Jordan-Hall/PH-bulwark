@@ -10,10 +10,17 @@
 //!   * **macOS**   → Keychain / Secure Enclave, non-exportable.
 //!   * **Linux**   → TPM 2.0 if present, else kernel keyring + root-only `0600`.
 //!
-//! This trait abstracts "persist / retrieve the CA's PKCS#8 key material in a way
-//! that keeps the raw bytes out of plaintext-on-disk". The Windows DPAPI impl
-//! lives in [`crate::ca::dpapi`]; an in-memory dev/test fallback lives in
-//! [`DevInMemoryKeyStore`] and is **for tests only**.
+//! This trait ([`CaKeyStore`]) **is** the keystore abstraction issue #141 asks
+//! for — the file-based / OS / hardware impls are interchangeable behind it, so
+//! the default file path is unchanged while hardware tiers slot in. The impls:
+//!   * [`crate::ca::dpapi`] — Windows DPAPI (live, host-tested).
+//!   * [`crate::ca::enc_file`] — AES-256-GCM encrypted-file (live, host-tested);
+//!     the Linux no-TPM fallback + defense-in-depth over a bare file.
+//!   * [`crate::ca::file`] — plaintext app-sandbox file (the live Android tier).
+//!   * [`crate::ca::tpm`] / [`crate::ca::keychain`] / [`crate::ca::strongbox`] —
+//!     per-OS hardware scaffolds (Linux TPM 2.0 / macOS Keychain+Secure Enclave /
+//!     Android StrongBox), documented + `device-validated-later`.
+//!   * [`DevInMemoryKeyStore`] — in-memory, **for tests only**.
 //!
 //! ## Honest limitation (documented, not hidden)
 //! The *ideal* posture (threat-model Asset 1) is signing **inside** the keystore
@@ -32,8 +39,11 @@ use crate::Result;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyStoreTier {
     /// Raw key never enters Bulwark memory; signing happens in hardware (TPM /
-    /// Secure Enclave / StrongBox). Strongest. **Not yet implemented** — the
-    /// documented target for a future DPAPI→CNG upgrade.
+    /// Secure Enclave / StrongBox). Strongest. **Scaffolded, device-validated
+    /// later** — the documented target for the TPM ([`crate::ca::tpm`]), Secure
+    /// Enclave ([`crate::ca::keychain`]), and StrongBox ([`crate::ca::strongbox`])
+    /// upgrades. Reaching it requires the trait to grow a `sign()` primitive (a
+    /// non-exportable key cannot satisfy [`CaKeyStore::load_key`]).
     HardwareNonExportable,
     /// Key is encrypted at rest by an OS facility (DPAPI machine+user scope) and
     /// only unwrapped transiently in-process to sign. This is the Windows
@@ -83,8 +93,12 @@ pub trait CaKeyStore: Send + Sync {
     fn store_key(&self, key_der: &[u8]) -> Result<()>;
 
     /// Unwrap and return the CA private key (PKCS#8 DER) for in-process signing.
-    /// On a hardware-signer tier this would instead be unavailable (signing
-    /// happens in the keystore); today the DPAPI tier returns the unwrapped DER.
+    /// On a [`KeyStoreTier::HardwareNonExportable`] tier this is **intentionally
+    /// unavailable** — the key cannot be read out of the TPM / Secure Enclave /
+    /// StrongBox, so those impls return an error here and signing happens via a
+    /// future `sign()` primitive on this trait instead (see the hardware
+    /// scaffolds). Today the exportable tiers (DPAPI / encrypted-file / file)
+    /// return the unwrapped DER.
     ///
     /// Returns `KeyStore` error if no key is present — callers treat that as
     /// **fail-CLOSED** (block + alert + re-provision), per the threat model.

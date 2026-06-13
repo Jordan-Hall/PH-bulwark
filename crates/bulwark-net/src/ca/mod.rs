@@ -16,9 +16,14 @@
 //!     private key to the network. (`store_key` writes only DPAPI ciphertext.)
 
 pub mod dpapi;
+pub mod enc_file;
 pub mod file;
+pub mod keychain;
 pub mod keystore;
+pub mod strongbox;
+pub mod tpm;
 
+pub use enc_file::EncryptedFileKeyStore;
 pub use file::FileKeyStore;
 pub use keystore::{CaKeyStore, DevInMemoryKeyStore, KeyStoreTier};
 
@@ -250,28 +255,54 @@ pub fn reject_shared_ca(source: &str) -> Result<std::convert::Infallible> {
     )))
 }
 
-/// Select the production keystore for this platform. Windows → DPAPI. Other
-/// platforms currently return an `Unsupported` error (their real keystores —
-/// Keychain / Android Keystore / TPM — are future impls). NEVER returns the
-/// insecure in-memory store; that is reachable only via its explicit `new()`.
+/// Select the production keystore for this platform.
+///
+/// | OS | Backend | Tier | Status |
+/// |----|---------|------|--------|
+/// | Windows | DPAPI (`ca::dpapi`) | `OsWrappedAtRest` | live, host-tested |
+/// | Linux | AES-256-GCM encrypted-file (`ca::enc_file`); TPM 2.0 (`ca::tpm`) is the upgrade | `AppSandboxFile` | encrypted-file live + host-tested; TPM scaffolded |
+/// | macOS | Keychain / Secure Enclave (`ca::keychain`) | — | scaffold, returns `Unsupported` until device-validated |
+/// | Android | StrongBox (`ca::strongbox`) is the upgrade; live path is `FileKeyStore` via `vpn::build_interceptor`, NOT here | `AppSandboxFile` | StrongBox scaffolded |
+///
+/// NEVER returns the insecure in-memory store; that is reachable only via its
+/// explicit `new()`. A platform with no device-validated backend returns an
+/// `Unsupported` error (fail-CLOSED) rather than silently picking a weaker one.
 pub fn select_keystore(store_dir: Option<PathBuf>) -> Result<Arc<dyn CaKeyStore>> {
     #[cfg(windows)]
     {
         let dir = store_dir.unwrap_or_else(default_store_dir);
         Ok(Arc::new(dpapi::DpapiKeyStore::new(dir)))
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     {
+        let dir = store_dir.unwrap_or_else(default_store_dir);
+        // AES-256-GCM encrypted-file fallback (host-tested); TPM-sealing is the
+        // device-validated upgrade selected inside `tpm::select_linux_keystore`.
+        Ok(tpm::select_linux_keystore(dir))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let dir = store_dir.unwrap_or_else(default_store_dir);
+        // Scaffolded; returns Unsupported until validated on a Mac runner.
+        keychain::select_macos_keystore(dir)
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        // Android's live CA store is `FileKeyStore`, selected in
+        // `vpn::build_interceptor` (passed `filesDir/ca` by the Kotlin shell),
+        // not here — `select_keystore` has no Android branch by design. The
+        // StrongBox upgrade is scaffolded in `ca::strongbox`. Any other target
+        // is fail-CLOSED.
         let _ = store_dir;
         Err(NetError::unsupported(
-            "production CA keystore not yet implemented for this OS \
-             (Windows DPAPI is the only real backend so far; \
-              macOS Keychain / Android Keystore / Linux TPM are TODO)",
+            "production CA keystore not selected for this OS via select_keystore \
+             (Windows DPAPI + Linux encrypted-file are live; macOS Keychain is \
+              scaffolded; Android uses FileKeyStore via vpn::build_interceptor)",
         ))
     }
 }
 
-/// Default per-user directory for the wrapped key + public cert.
+/// Default per-user directory for the wrapped key + public cert (desktop).
 #[cfg(windows)]
 fn default_store_dir() -> PathBuf {
     // %LOCALAPPDATA%\Bulwark — per-user so DPAPI's user scope lines up.
@@ -281,9 +312,22 @@ fn default_store_dir() -> PathBuf {
         .join("Bulwark")
 }
 
-/// SHA-256 of `bytes` as lowercase hex. Uses `ring` transitively via rustls? No
-/// — implemented locally with a tiny dependency-free routine to avoid pulling a
-/// hashing crate just for a fingerprint. (Standard FIPS-180-4 SHA-256.)
+/// Default per-user directory for the wrapped key + public cert (Linux/macOS).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn default_store_dir() -> PathBuf {
+    // $XDG_DATA_HOME/bulwark (or ~/.local/share/bulwark) — per-user so the
+    // encrypted-file `0600` perms / Keychain user scope line up.
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("bulwark")
+}
+
+/// SHA-256 of `bytes` as lowercase hex. Implemented locally (dependency-free)
+/// for the public-cert fingerprint rather than routing through `ring`'s digest
+/// API — the cert is public, so this avoids coupling the audit fingerprint to a
+/// crypto dependency for no security benefit. (Standard FIPS-180-4 SHA-256.)
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = sha256(bytes);
     let mut s = String::with_capacity(64);
