@@ -442,17 +442,33 @@ pub fn with_bearer<T>(req: T, token: &str) -> tonic::Request<T> {
 /// is the guardian's own UnifiedPush distributor route (e.g. an `ntfy` topic
 /// URL); the server validates it (https + public host, SSRF guard) before
 /// storing it. No alert content is sent here — this is a routing handle only.
+/// GATE: native remote push is OFF until per-guardian scoped fan-out ships
+/// (issue #140). Today the server's `UnifiedPushFanoutSink` POSTs every raised
+/// alert to EVERY registered endpoint (`AlertHub::push_tokens`), so enrolling
+/// this device would let a guardian receive other families' redacted alerts —
+/// a cross-tenant leak. So the client does NOT call the registration RPC yet:
+/// the endpoint is saved on-device only. The #140 PR flips this to `true` (and
+/// adds the scoped routing), at which point registration activates with no other
+/// change. Kept a compile-time const, not an env flag, so master is never one
+/// runtime toggle away from the leak.
+const NATIVE_PUSH_ENABLED: bool = false;
+
 pub async fn register_push_target(endpoint: &str) -> anyhow::Result<()> {
-    let token = guardian_token();
-    if token.is_empty() {
-        anyhow::bail!("sign in required to register notifications for this server");
-    }
     let endpoint = endpoint.trim();
     if endpoint.is_empty() {
         anyhow::bail!("a UnifiedPush endpoint URL is required");
     }
-    let channel = connect_channel().await?;
-    register_push_target_on(channel, &token, &guardian_device_id(), endpoint).await
+    if NATIVE_PUSH_ENABLED {
+        let token = guardian_token();
+        if token.is_empty() {
+            anyhow::bail!("sign in required to register notifications for this server");
+        }
+        let channel = connect_channel().await?;
+        register_push_target_on(channel, &token, &guardian_device_id(), endpoint).await
+    } else {
+        // Inert until #140: saved on-device by the caller; not sent to the cluster.
+        Ok(())
+    }
 }
 
 pub async fn register_push_target_on(

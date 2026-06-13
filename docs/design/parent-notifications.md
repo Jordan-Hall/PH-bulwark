@@ -21,20 +21,27 @@ the item.
 
 The guardian console registers and receives the same way as the child app.
 
-**Landed (registration):**
-- `apps/parent/src/api.rs` — `register_push_target()` calls
+**Implemented but GATED OFF until per-guardian routing (#140):**
+- `apps/parent/src/api.rs` — `register_push_target()` is written to call
   `Review.RegisterPushTarget(PushTarget{ device_id, push_endpoint, platform })`,
-  authenticated with the guardian's existing session token as
-  `authorization: Bearer …` (the generic `with_bearer<T>` helper, shared with the
-  approve/deny RPC). The server REQUIRES this in accounts mode and validates the
-  endpoint (https + public host, SSRF guard); we never weaken that gate.
+  authenticated with the guardian's session token as `authorization: Bearer …`
+  (the generic `with_bearer<T>` helper, shared with the approve/deny RPC); the
+  server REQUIRES it in accounts mode and validates the endpoint (https + public
+  host, SSRF guard) — never weakened. **BUT** it is gated behind a compile-time
+  `NATIVE_PUSH_ENABLED = false` and does NOT call the RPC yet: today the server's
+  `UnifiedPushFanoutSink` POSTs every alert to EVERY registered endpoint
+  (`AlertHub::push_tokens`), so enrolling a guardian device would leak other
+  families' redacted alerts cross-tenant. The #140 PR adds scoped per-guardian
+  fan-out and flips that const — registration then activates with no other change.
 - `apps/parent/src/servers.rs` — a per-install **guardian device id** (minted once
   with `ring`'s CSPRNG, persisted; the server keys its push-target map by it so a
   re-registration overwrites rather than accumulates) and a persisted
   `push_endpoint` (per-user, not per-server).
 - UI: the Region screen's **Notifications** card (`NotificationsPanel`) lets the
-  guardian paste/save their distributor endpoint and register it; a successful
-  login re-registers a saved endpoint with the freshly-issued per-server token.
+  guardian paste/save their distributor endpoint **on this device**; it does NOT
+  auto-register on login and surfaces that remote delivery activates with #140.
+  (The signed-APK **distribution** half — `android-release.yml` + fdroid — is
+  fully landed and independent of this gate.)
 
 **Deferred (native receive) — the precise gap:**
 The Manager is a **`dx`-built Dioxus app**: a thin Android shell that dx

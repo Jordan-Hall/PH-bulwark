@@ -328,17 +328,13 @@ pub fn Auth() -> Element {
                     unlocked.set(true);
                     auth.refresh();
                     setup_busy.set(false);
-                    // Re-register a previously-saved remote-push endpoint with
-                    // THIS server now that a fresh session token exists (the
-                    // token is per-server, established at login). Best-effort and
-                    // non-blocking — a failure never stops sign-in; the guardian
-                    // can re-save from the Region screen's Notifications card.
-                    let saved_endpoint = crate::servers::saved_push_endpoint();
-                    if !saved_endpoint.is_empty() {
-                        spawn(async move {
-                            let _ = crate::api::register_push_target(&saved_endpoint).await;
-                        });
-                    }
+                    // NOTE: no auto-registration of a saved push endpoint on
+                    // login. Remote push delivery is gated OFF until per-guardian
+                    // scoped fan-out ships (issue #140) — until then enrolling an
+                    // endpoint would put this device in the server's GLOBAL fan-out
+                    // (every registered endpoint receives every family's alert), a
+                    // cross-tenant leak. The endpoint is saved on-device only and
+                    // activates automatically once #140 lands.
                     // Offer (skippably) a quick-unlock PIN. If one already
                     // exists, skip straight to the console.
                     if crate::lock::pin_is_set() {
@@ -1362,7 +1358,9 @@ pub fn NotificationsPanel() -> Element {
                 Ok(()) => {
                     registered.set(true);
                     note.set(Some(
-                        "Notifications registered with your server. Alerts will reach this device."
+                        "Saved on this device. Remote delivery to the Manager switches on \
+                         automatically once per-guardian alert routing ships — until then your \
+                         endpoint stays on this device only."
                             .to_string(),
                     ));
                 }
@@ -1404,7 +1402,7 @@ pub fn NotificationsPanel() -> Element {
                         class: "primary",
                         disabled: busy() || endpoint().trim().is_empty(),
                         onclick: move |_| save_and_register(()),
-                        if busy() { "Registering…" } else { "Save & register" }
+                        if busy() { "Saving…" } else { "Save endpoint" }
                     }
                     if registered() {
                         button {
