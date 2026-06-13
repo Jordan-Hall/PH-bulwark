@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- PH Bulwark Camera — a safe camera for the child's own device.
+
+     LOCAL-ONLY BY CONSTRUCTION: this app declares NO network permission of any
+     kind (no INTERNET, no ACCESS_NETWORK_STATE). The OS therefore guarantees
+     that no photo, no score, and no telemetry can ever leave the device — the
+     NSFW check runs entirely on-device and a blocked capture is simply dropped
+     from memory. Do not add a network permission to this manifest. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <uses-feature android:name="android.hardware.camera.any" android:required="true" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Material3.DayNight.NoActionBar">
+
+        <activity
+            android:name=".CameraActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- "Take a photo for me" requests from other apps. HONEST NOTE:
+                 since Android 11 the implicit ACTION_IMAGE_CAPTURE resolves
+                 ONLY to preinstalled system camera apps; this filter matters
+                 for callers that target this package explicitly (e.g. the PH
+                 Bulwark child app) and for ROM/managed-device futures — see
+                 the default-camera design notes. -->
+            <intent-filter>
+                <action android:name="android.media.action.IMAGE_CAPTURE" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+
+            <!-- "Open a camera app in still mode" (NOT restricted by the
+                 Android 11 change): launcher shortcuts / assistants / some
+                 double-press-power gestures can offer and remember this app. -->
+            <intent-filter>
+                <action android:name="android.media.action.STILL_IMAGE_CAMERA" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+
+            <!-- Video entry points are deliberately OWNED but stubbed this
+                 slice: passthrough video would be an unfiltered capture path
+                 (forbidden — a child is never routed through an unfiltered
+                 path). The activity shows a calm "video is coming soon" note
+                 and returns RESULT_CANCELED. -->
+            <intent-filter>
+                <action android:name="android.media.action.VIDEO_CAPTURE" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.media.action.VIDEO_CAMERA" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
