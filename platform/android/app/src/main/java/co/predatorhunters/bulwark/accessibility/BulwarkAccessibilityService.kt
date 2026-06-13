@@ -79,19 +79,23 @@ class BulwarkAccessibilityService : AccessibilityService() {
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
             AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
                 if (monitored) {
-                    // Monitored chat: view-tree TEXT → grooming, plus a throttled
-                    // frame (image NSFW always; OCR only when the tree had no text,
-                    // for bitmap/canvas-drawn chat — games, captions, stylised chat).
+                    // Monitored chat: view-tree TEXT → grooming, PLUS a throttled
+                    // frame that runs BOTH image-NSFW and OCR. OCR runs even when the
+                    // tree exposed text: a screen can show text in the tree AND text
+                    // drawn into images/video the tree can't see (captions, memes,
+                    // stylised chat), so gating OCR on an empty tree missed it.
                     val root = rootInActiveWindow ?: return
                     val text = collectText(root).trim()
                     val thread = threadIdFor(root, pkg)
                     if (text.isNotEmpty()) submit(pkg, thread, text)
-                    maybeCapture(pkg, thread, ocrText = text.isEmpty())
+                    maybeCapture(pkg, thread, ocrText = true)
                 } else if (pkg != packageName) {
-                    // Any OTHER foreground app: throttled frame, image NSFW ONLY
-                    // (no chat-text grooming / OCR here). Skips our own UI. This is
-                    // the device-wide "any adult images, no VPN" path. Fail-open.
-                    maybeCapture(pkg, "img:$pkg", ocrText = false)
+                    // Any OTHER foreground app (browser, YouTube, gallery, …): a
+                    // throttled frame running BOTH image-NSFW AND OCR→grooming, so
+                    // adult imagery and text-in-frames are caught device-wide — not
+                    // just in the chat allowlist (which is the view-tree TEXT scope).
+                    // Skips our own UI. Fail-open.
+                    maybeCapture(pkg, "scan:$pkg", ocrText = true)
                 }
             }
         }
@@ -359,6 +363,39 @@ class BulwarkAccessibilityService : AccessibilityService() {
     private val regionHandler = Handler(Looper.getMainLooper())
     private val liftRegionOverlay = Runnable { removeLocalizedOverlay() }
 
+    private val audioManager by lazy {
+        getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+    }
+    private var audioFocusRequest: android.media.AudioFocusRequest? = null
+
+    /**
+     * Silence the offending media WHILE a localized cover is up. Covering an adult
+     * video must stop its SOUND too — not just hide the picture — so we request
+     * EXCLUSIVE-transient audio focus, which pauses the foreground player (any app
+     * that respects focus, e.g. a video). Idempotent while held; released by
+     * [restoreAudio] when the cover lifts.
+     */
+    private fun muteOffendingAudio() {
+        if (audioFocusRequest != null) return
+        runCatching {
+            val attrs = android.media.AudioAttributes.Builder()
+                .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MOVIE)
+                .build()
+            val req = android.media.AudioFocusRequest.Builder(
+                android.media.AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE,
+            ).setAudioAttributes(attrs).build()
+            audioManager.requestAudioFocus(req)
+            audioFocusRequest = req
+        }
+    }
+
+    /** Release the audio focus when the cover lifts so media may resume. */
+    private fun restoreAudio() {
+        audioFocusRequest?.let { req -> runCatching { audioManager.abandonAudioFocusRequest(req) } }
+        audioFocusRequest = null
+    }
+
     /**
      * Cover ONLY [regionPx] (in frame-pixel coordinates) with an opaque
      * `TYPE_ACCESSIBILITY_OVERLAY`, leaving the rest of the screen visible and
@@ -417,6 +454,9 @@ class BulwarkAccessibilityService : AccessibilityService() {
                     wm.updateViewLayout(view, lp)
                 }
             }
+            // Stop the offending media's SOUND too (covering an adult video must
+            // silence it, not just hide the picture). Idempotent while held.
+            muteOffendingAudio()
             // Self-heal: lift the cover if no later frame refreshes it (content
             // scrolled away and no clean frame arrived to clear it explicitly).
             // Cancel the PRIOR pending removal first so a refresh of a still-
@@ -430,6 +470,8 @@ class BulwarkAccessibilityService : AccessibilityService() {
         regionHandler.removeCallbacks(liftRegionOverlay)
         regionOverlay?.let { v -> runCatching { (getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(v) } }
         regionOverlay = null
+        // Cover lifted (clean frame / TTL) → let media resume.
+        restoreAudio()
     }
 
     /** Real display size in pixels (incl. system bars) — the frame `takeScreenshot`
