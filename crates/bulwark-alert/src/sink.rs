@@ -182,7 +182,7 @@ impl AlertSink for EmailAlertSink {
     }
 }
 
-/// Fan an alert out to several [`AlertSink`]s (e.g. email + FCM push) best-effort.
+/// Fan an alert out to several [`AlertSink`]s (e.g. email + UnifiedPush) best-effort.
 /// One sink's failure is logged and does NOT abort the others; the ack from the
 /// FIRST sink that succeeds is returned (email is the system of record when
 /// present). Used by the server to deliver via every configured channel.

@@ -11,9 +11,11 @@ the item.
    evidence + Approve / "Keep blocked" actions. This is the **same-device** path
    (guardian reviews on the child's device, or a shared/family device).
 3. **Remote push (roadmap)** — when the guardian is on a *separate* device, the
-   server cluster relays the alert via **FCM** to the parent's registered device
-   (`RustBridge.registerParentPushToken`). Needs a `FirebaseMessagingService` +
-   `google-services.json` and a push channel in the cluster.
+   server cluster relays the alert via **self-hosted UnifiedPush** (FOSS; no
+   Google/Apple) to the parent's registered endpoint URL
+   (`RustBridge.registerParentPushToken`). The device's UnifiedPush distributor
+   (e.g. ntfy) supplies the endpoint URL; the server just HTTP-POSTs the redacted
+   payload to it — no service account, no project id, no OAuth.
 
 ## Evidence shown — and the hard rules
 Driven by `Verdict.category` + `Evidence` (which already carries **only** hashes,
@@ -41,13 +43,15 @@ item isn't re-blocked. "Deny" confirms the block (and can tighten policy).
 - **proto** (`bulwark-proto`): add a `Review` service —
   `SubmitDecision(ReviewDecision{alert_id, decision: APPROVE|DENY, scope}) -> Ack`,
   `StreamPendingReviews(DeviceFilter) -> stream AlertEvent`, and
-  `RegisterPushTarget(PushTarget{device_id, fcm_token})`.
+  `RegisterPushTarget(PushTarget{device_id, push_endpoint})`.
 - **bulwark-policy**: consume `ReviewDecision` → per-child allowlist (host/hash) +
   audit (every override is logged, tamper-evident).
-- **bulwark-alert**: add an FCM push channel alongside email; redaction unchanged.
+- **bulwark-alert**: add a self-hosted UnifiedPush channel alongside email
+  (`UnifiedPushFanoutSink`, behind the `push` feature); redaction unchanged.
 - **Android**: JNI exports for `nextAlert` / `submitReviewDecision` /
   `registerParentPushToken` on `bulwark-client` (the `android` feature), a
-  `FirebaseMessagingService`, and a Review screen listing pending items.
+  UnifiedPush receiver (the distributor hands the app an endpoint URL), and a
+  Review screen listing pending items.
 
 ## Privacy invariant (unchanged)
 No raw message text or explicit media is ever persisted or transmitted. The

@@ -331,7 +331,8 @@ service AlertRelay {
 // bulwark-policy / bulwark-alert). See docs/design/parent-notifications.md.
 // APPROVE allowlists the host / content hash for this child; DENY confirms the
 // block. Every decision is audited by bulwark-policy. RegisterPushTarget lets the
-// cluster relay an alert via FCM to a guardian's separate device;
+// cluster relay an alert to a guardian's separate device via a self-hosted
+// UnifiedPush endpoint (FOSS; no Google/Apple);
 // StreamPendingReviews carries the SAME redacted AlertEvent (no media, ever).
 // ---------------------------------------------------------------------------
 
@@ -363,12 +364,12 @@ message ReviewAck {
   bool   applied  = 2;
 }
 
-// A guardian device registered for remote push (FCM). Routing token only — no
-// alert content.
+// A guardian device registered for remote push via self-hosted UnifiedPush.
+// Routing endpoint only — no alert content.
 message PushTarget {
-  string device_id = 1; // the GUARDIAN device id
-  string fcm_token  = 2; // FCM registration token (rotates)
-  string platform   = 3; // "android" | "ios" | "web"
+  string device_id    = 1; // the GUARDIAN device id
+  string push_endpoint = 2; // UnifiedPush endpoint URL (self-hosted; was FCM token)
+  string platform     = 3; // "android" | "ios" | "web"
 }
 
 message PushAck {

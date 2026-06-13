@@ -19,7 +19,7 @@ variable reference.
 ```
 child device                              home cluster                guardian
 ┌────────────────────────┐   AlertRelay   ┌───────────────┐  email +  ┌──────────────┐
-│ bulwark_proxy / bulwark_vpn │──(redacted)──▶ │ bulwark-server  │── FCM ───▶ │ parent app / │
+│ bulwark_proxy / bulwark_vpn │──(redacted)──▶ │ bulwark-server  │UnifiedPush│ parent app / │
 │  TLS inspection filter + OCR +    │   gRPC         │ relay+accounts│   push     │ UI / phone   │
 │  tamper heartbeat       │◀─ offload ────▶│ +Review+Tamper│            └──────────────┘
 └────────────────────────┘  (mTLS)        └───────────────┘
@@ -28,7 +28,8 @@ child device                              home cluster                guardian
   (admin; TUN captures all TCP). Both TLS inspection HTTPS with the per-install root CA and
   run the same pipeline; both emit a tamper heartbeat.
 - **Cluster** (`bulwark-server`, roles `all-in-one`/`lb`/`worker`) receives redacted
-  `AlertEvent`s, scopes per child/guardian, and delivers via email + optional FCM.
+  `AlertEvent`s, scopes per child/guardian, and delivers via email + optional
+  self-hosted UnifiedPush.
 - **Guardian** reviews on the desktop parent app or the `bulwark-ui` dashboard.
 
 ## 2. Server roles & bring-up
@@ -43,8 +44,8 @@ child device                              home cluster                guardian
   `BULWARK_QUORUM_DSN` (shared Postgres for the authoritative lease store). Scale out
   by starting more workers with the LB as their seed (the Ansible playbook in
   `deploy/ansible/` automates this — add a host IP + re-run).
-- Server build features: `classifier` (text backstop), `push` (FCM sink). Default
-  build is byte-identical without `push`.
+- Server build features: `classifier` (text backstop), `push` (self-hosted
+  UnifiedPush sink). Default build is byte-identical without `push`.
 - **Lifecycle:** the server shuts down gracefully on `SIGTERM` (systemd/Docker
   stop) or `Ctrl-C`, draining in-flight gRPC calls before exit — so service
   restarts don't cut off alert delivery mid-flight. A malformed `BULWARK_BIND` fails
@@ -154,12 +155,15 @@ child device                              home cluster                guardian
 - **Without SMTP:** email reset is unavailable (the server logs one warning); the
   saved recovery code from account creation remains the self-service reset fallback.
 
-## 7. FCM push alerts
-- Build the server `--features push`. On-switch: **both** `BULWARK_FCM_PROJECT_ID`
-  and `BULWARK_FCM_SERVICE_ACCOUNT` (path to a GCP service-account JSON; existence
-  validated at startup). Email + push compose into one delivery (CompositeSink).
-  The fan-out pushes each redacted alert to every guardian token registered via
-  `Review.RegisterPushTarget`, read live at raise time.
+## 7. UnifiedPush push alerts (self-hosted; FOSS — no Google/Apple)
+- Build the server `--features push`. **No server-side config** is needed (no
+  project id, no service account, no OAuth): UnifiedPush just HTTP-POSTs the
+  redacted payload to whatever guardian endpoint URLs are registered, so the sink
+  is always active under the `push` feature. Email + push compose into one
+  delivery (CompositeSink). The fan-out pushes each redacted alert to every
+  guardian UnifiedPush endpoint URL registered via `Review.RegisterPushTarget`,
+  read live at raise time. The guardian device's UnifiedPush distributor (e.g.
+  ntfy) supplies that endpoint URL.
 
 ## 8. Durable state
 - `BULWARK_STATE_DIR` (now implemented for accounts, §3) is the base for persisted
@@ -230,8 +234,6 @@ heartbeat detection still fires.
 | `BULWARK_RESET_FROM` | server (accounts) | From: for the reset email (falls back to `BULWARK_ALERT_FROM`) | unset | email reset, distinct sender |
 | `BULWARK_RESET_SUBJECT` | server (accounts) | reset email subject | `PH Bulwark — your password reset code` | never |
 | `BULWARK_RESET_TOKEN_TTL_SECS` | server (accounts) | emailed reset-code lifetime (secs) | 1800 | tune reset-code expiry |
-| `BULWARK_FCM_PROJECT_ID` | bulwark-alert (push) | FCM project (push on-switch) | unset | push (with SA) |
-| `BULWARK_FCM_SERVICE_ACCOUNT` | bulwark-alert (push) | SA JSON path | unset | push (with project) |
 | `BULWARK_CLIENT_CERT`/`_KEY`/`_CA` | client | mTLS material (PEM paths) | unset | cluster offload |
 | `BULWARK_CLUSTER_DOMAIN` | client | mTLS SNI / server name | unset | cluster offload |
 | `BULWARK_CLUSTER_ENDPOINT` | client/parent | cluster gRPC endpoint (one source of truth: console + spawned filter) | `http://127.0.0.1:8443` | remote cluster (https for mTLS) |
@@ -259,5 +261,5 @@ heartbeat detection still fires.
 - Android release keystore + QR/zero-touch unverified in CI (debug APK only).
 - Desktop transparent VPN data path (smoltcp/boringtun) is fail-closed; proxy mode
   is the shipping path.
-- No real NSFW model artifact, FCM creds, SMTP creds, or code-signing keys ship in
-  the repo — all operator-supplied.
+- No real NSFW model artifact, SMTP creds, or code-signing keys ship in
+  the repo — all operator-supplied. (UnifiedPush needs no server-side creds.)

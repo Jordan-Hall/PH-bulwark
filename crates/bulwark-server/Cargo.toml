@@ -66,8 +66,9 @@ whisper = ["dep:bulwark-audio", "bulwark-audio/whisper"]
 # Enable real on-worker VIDEO decode + frame/audio scoring + remediation via the
 # ffmpeg-sidecar demuxer. Needs the ffmpeg binary at runtime (provisioned at deploy).
 ffmpeg = ["bulwark-video/ffmpeg"]
-# Enable the FCM push fan-out sink (forwards to bulwark-alert's push feature). OFF
-# by default so the default server build + host CI stay byte-identical.
+# Enable the self-hosted UnifiedPush fan-out sink (forwards to bulwark-alert's
+# push feature; FOSS, no Google/Apple). OFF by default so the default server
+# build + host CI stay byte-identical.
 push = ["bulwark-alert/push"]
 
 [dev-dependencies]

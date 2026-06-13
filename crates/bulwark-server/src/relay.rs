@@ -11,7 +11,8 @@
 //!   * `Review::SubmitDecision` applies an APPROVE/DENY to the per-device
 //!     [`Allowlist`] from `bulwark-policy` (CSAM is never allowlistable — the
 //!     allowlist module enforces this; we surface its refusal as a `Status`).
-//!   * `Review::RegisterPushTarget` records a guardian's FCM routing token.
+//!   * `Review::RegisterPushTarget` records a guardian's self-hosted UnifiedPush
+//!     endpoint URL.
 //!
 //! PRIVACY INVARIANT: only the redacted [`AlertEvent`] (hashes / safe thumbnail
 //! / redacted context) ever crosses these channels — never raw media. This is
@@ -62,8 +63,8 @@ pub struct AlertHub {
     // unchanged; only construction/load + write-through would move here.
     allowlist: Arc<Mutex<Allowlist>>,
     /// Registered remote-push targets, keyed by guardian device id.
-    // SEAM: durable storage — persist FCM routing tokens (no alert content) so
-    // a guardian stays reachable across restarts.
+    // SEAM: durable storage — persist UnifiedPush endpoint URLs (no alert
+    // content) so a guardian stays reachable across restarts.
     push_targets: Arc<Mutex<HashMap<String, PushTarget>>>,
     /// Pending-review records keyed by `alert_id`: the redacted facts a
     /// `SubmitDecision` needs to resolve a `ReviewItem` (host/hash/category)
@@ -296,21 +297,23 @@ impl AlertHub {
         self.persist_push(&guard);
     }
 
-    /// Snapshot of every registered guardian FCM token (empties dropped). Read at
-    /// raise time by the push fan-out sink; empty when nobody has registered yet.
+    /// Snapshot of every registered guardian UnifiedPush endpoint URL (empties
+    /// dropped). Read at raise time by the push fan-out sink; empty when nobody
+    /// has registered yet.
     pub fn push_tokens(&self) -> Vec<String> {
         self.push_targets
             .lock()
             .expect("push-target mutex poisoned")
             .values()
-            .map(|t| t.fcm_token.clone())
+            .map(|t| t.push_endpoint.clone())
             .filter(|t| !t.trim().is_empty())
             .collect()
     }
 }
 
-/// Adapts an [`AlertHub`] to `bulwark_alert::TokenRegistry` so the FCM fan-out sink
-/// reads the live guardian tokens at raise time. Push-feature only.
+/// Adapts an [`AlertHub`] to `bulwark_alert::TokenRegistry` so the UnifiedPush
+/// fan-out sink reads the live guardian endpoint URLs at raise time. Push-feature
+/// only.
 #[cfg(feature = "push")]
 pub struct HubTokenRegistry {
     hub: AlertHub,
@@ -560,8 +563,8 @@ impl bulwark_proto::v1::review_server::Review for ReviewService {
         if target.device_id.trim().is_empty() {
             return Err(Status::invalid_argument("device_id is required"));
         }
-        if target.fcm_token.trim().is_empty() {
-            return Err(Status::invalid_argument("fcm_token is required"));
+        if target.push_endpoint.trim().is_empty() {
+            return Err(Status::invalid_argument("push_endpoint is required"));
         }
         self.hub.register_push(target);
         Ok(Response::new(PushAck { ok: true }))
@@ -775,7 +778,7 @@ mod tests {
         let hub1 = AlertHub::with_state_dir(&dir).unwrap();
         hub1.register_push(PushTarget {
             device_id: "g-phone".into(),
-            fcm_token: "tok".into(),
+            push_endpoint: "https://ntfy.example/upTok".into(),
             platform: "android".into(),
         });
         hub1.publish(alert("kids-tablet")); // writes a pending review
@@ -783,7 +786,10 @@ mod tests {
 
         let hub2 = AlertHub::with_state_dir(&dir).unwrap();
         // Push targets reloaded.
-        assert_eq!(hub2.push_tokens(), vec!["tok".to_string()]);
+        assert_eq!(
+            hub2.push_tokens(),
+            vec!["https://ntfy.example/upTok".to_string()]
+        );
         // Pending reviews were persisted on publish.
         assert!(dir.join("pending_reviews.json").exists());
         let _ = std::fs::remove_dir_all(&dir);
@@ -881,11 +887,11 @@ mod tests {
             device_id: "guardian-phone".into(),
             ..Default::default()
         };
-        // missing fcm_token
+        // missing push_endpoint
         let err = svc
             .register_push_target(Request::new(t))
             .await
-            .expect_err("must reject empty token");
+            .expect_err("must reject empty endpoint");
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 
