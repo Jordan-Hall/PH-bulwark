@@ -1,6 +1,6 @@
 //! Shared chrome rendered on every route: the closing call-to-action and the
 //! footer. Both are framing-disciplined (independent research + journalism;
-//! convictions / public-record only; nothing stored).
+//! convictions / public-record only; no raw content kept).
 
 use dioxus::prelude::*;
 
@@ -81,7 +81,7 @@ pub fn SiteFooter() -> Element {
                             span { class: "brand-tag", "Research" }
                         }
                         p { class: "footer-blurb",
-                            "An independent child-safety AI lab. We build small models that run on a child's own phone, catch unsafe content and the way predators talk, and store nothing."
+                            "An independent child-safety AI lab. We build small models that run on a child's own phone, catch unsafe content and the way predators talk, and keep no raw messages or images."
                         }
                     }
                     div {
@@ -98,6 +98,7 @@ pub fn SiteFooter() -> Element {
                             li { Link { to: Route::About {}, "About the lab" } }
                             li { Link { to: Route::Contact {}, "Contact" } }
                             li { Link { to: Route::Privacy {}, "Privacy" } }
+                            li { a { href: "https://github.com/Jordan-Hall/PH-bulwark", target: "_blank", rel: "noopener", "Source on GitHub ↗" } }
                             li { a { href: "https://predatorhunters.co.uk", target: "_blank", rel: "noopener", "Main site ↗" } }
                         }
                     }
@@ -142,7 +143,7 @@ pub fn SiteFooter() -> Element {
                 div { class: "footer-bottom",
                     p { "© 2026 Predator Hunters Research. All rights reserved." }
                     p { class: "legal",
-                        "Independent research and journalism. We report only on cases that have been to court and are on the public record, never before a trial, and we work independently of any police force. The models run on the phone, and no raw messages or images are kept."
+                        "Independent research and journalism. Our frontline team runs stings and hands evidence to the police; we never name anyone before they are charged, and we hold footage back until there is a conviction. The models run on the phone, and no raw messages or images are kept."
                     }
                 }
             }

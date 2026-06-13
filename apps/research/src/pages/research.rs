@@ -35,7 +35,7 @@ const MODELS: [(&str, &str, &str, &str, &str, &str); 6] = [
         "04",
         "Video detection and in-place rewriting",
         "layers",
-        "Our flagship alpha. It spots unsafe video as it plays and rewrites it on the fly, blurring or muting only the moments that are a problem and re-packaging the same stream so the rest plays without a break. It runs on the phone and keeps nothing.",
+        "Our flagship alpha. It spots unsafe video as it plays and rewrites it on the fly, blurring or muting only the moments that are a problem and re-packaging the same stream so the rest plays without a break. It runs on the phone and keeps no raw content.",
         "live",
         "In alpha",
     ),
@@ -43,7 +43,7 @@ const MODELS: [(&str, &str, &str, &str, &str, &str); 6] = [
         "05",
         "Offender-record matching",
         "network",
-        "Early research into linking convictions that are already on the public court record, to support our journalism and help protect communities. A person reviews every match, it happens only after a case has been to court, and it is built around data-protection law. Never before a trial, never an automated accusation.",
+        "Early research into linking convictions that are already on the public court record, to support our journalism and help protect communities. A person reviews every match, it happens only after a case has been to court, and it is built around data-protection law. Never before a charge, never an automated accusation.",
         "research",
         "Research",
     ),
@@ -82,7 +82,7 @@ pub fn Research() -> Element {
                     span { class: "grad-text", "Keep none of the child." }
                 }
                 p { class: "lede rise d3",
-                    "A small family of focused models, each doing one safety job well. Most already run in our alpha. The rest are still in the lab. All of them run on the phone and store nothing."
+                    "A small family of focused models, each doing one safety job well. Most already run in our alpha. The rest are still in the lab. They run on the phone, and none of them keep raw content."
                 }
             }
         }
@@ -115,6 +115,9 @@ pub fn Research() -> Element {
                     h2 { "We train for the harm we cannot miss." }
                 }
                 div { class: "prose reveal",
+                    p {
+                        "The patterns the engine looks for did not come from guesswork. They came from grooming we have watched unfold first-hand, across years of frontline decoy operations, then tested and written down. That is the difference between a model trained on theory and one trained on how this actually happens."
+                    }
                     p {
                         "We do not scrape children's data. The models learn from lawful public datasets, from examples of grooming that safeguarding practitioners label with us, from synthetic conversations, and from plenty of ordinary chat so the model does not cry wolf at every clumsy message."
                     }
@@ -165,11 +168,18 @@ pub fn Research() -> Element {
                     div { class: "def", dt { "Gemini-3-Pro / 2.5-Pro · Google" } dd { "Declined most tasks. 0.0%." } }
                     div { class: "def", dt { "GPT-5 · OpenAI" } dd { "Declined all five categories. 0.0%." } }
                 }
-                div { style: "margin-top:26px;",
+                div { style: "margin-top:26px; display:flex; gap:12px; flex-wrap:wrap;",
                     a { class: "btn btn-primary", href: "https://benchmark.predatorhunters.co.uk",
                         "See the full benchmark"
                         span { dangerous_inner_html: svg("arrow-up-right") }
                     }
+                    a { class: "btn btn-ghost", href: "https://benchmark.predatorhunters.co.uk#method",
+                        span { class: "ic", dangerous_inner_html: svg("doc") }
+                        "How we measured this"
+                    }
+                }
+                p { class: "prose", style: "margin-top:18px; font-size:.86rem; color:var(--muted);",
+                    "Scores are from our own benchmark, run in June 2026 against the model versions named above. Each provider's safety filters may behave differently over time. The method, prompts and per-task results are linked above so anyone can check the work."
                 }
             }
         }

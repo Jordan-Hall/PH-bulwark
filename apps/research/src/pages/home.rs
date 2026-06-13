@@ -50,8 +50,8 @@ const PRINCIPLES: [(&str, &str, &str); 4] = [
     ),
     (
         "eye-off",
-        "We remember nothing",
-        "No raw messages or images are ever kept. A parent gets a short, redacted alert and nothing more.",
+        "We keep no raw content",
+        "No raw message, image or video is ever stored. The guardian gets a short, redacted record of what happened, held in an encrypted log that deletes itself on a clock.",
     ),
     (
         "scale",
@@ -88,7 +88,7 @@ pub fn Home() -> Element {
     rsx! {
         crate::components::Seo {
             title: "Predator Hunters Research — child-safety AI",
-            description: "Independent child-safety AI lab. We build privacy-first models that run on a child's own phone, catch grooming and unsafe content, and store nothing.",
+            description: "Independent child-safety AI lab. We build privacy-first models that run on a child's own phone, catch grooming and unsafe content, and keep no raw messages or images.",
             path: "/",
             image: "/og/home.png",
         }
@@ -106,7 +106,7 @@ pub fn Home() -> Element {
                             span { class: "grad-text", "without watching them." }
                         }
                         p { class: "hero-lede rise d3",
-                            "Our models run on a child's own phone. They catch unsafe content and the way predators talk, flag it to a parent, and keep nothing."
+                            "Our models run on a child's own phone. They catch unsafe content and the way predators talk, and flag it to a parent. We keep no raw messages or images, only a short redacted note of what happened."
                         }
                         div { class: "hero-actions rise d4",
                             Link { class: "btn btn-primary", to: Route::Research {},
@@ -143,10 +143,10 @@ pub fn Home() -> Element {
                     }
                     div { class: "statement-aside reveal",
                         p {
-                            "Most online-safety tools watch everything a child does and send it off to a server. We don't want to build that. Our question is harder. Can a model catch real danger while seeing as little as possible, and keeping none of it?"
+                            "Most online-safety tools watch everything a child does and send it off to a server. We don't want to build that. Our question is harder. Can a model catch real danger while seeing as little as possible, and keeping only what a guardian needs to act on?"
                         }
                         p {
-                            "Four years of work say yes. What we have runs on the phone, raises a short flag a parent can act on, and forgets the rest."
+                            "Four years of work say yes. What we have runs on the phone, raises a short flag a parent can act on, and holds on to nothing it doesn't need."
                         }
                     }
                 }
@@ -319,7 +319,7 @@ pub fn Home() -> Element {
                         span { class: "sec-index", style: "margin-bottom:18px;", "04 — Who builds it" }
                         h2 { class: "reveal", "A small team, four years in." }
                         p { class: "lede reveal", style: "margin-top:18px;",
-                            "Predator Hunters Research is the AI side of a child-protection group that has run since 2017. We are small and self-funded, and we care as much about a child's privacy as we do about their safety."
+                            "Predator Hunters Research is the AI side of a child-protection group that has run since 2017, finding offenders online and reporting from court. We are small and self-funded, and we care as much about a child's privacy as we do about their safety."
                         }
                         div { style: "margin-top:26px;",
                             Link { class: "btn btn-ghost", to: Route::About {},
