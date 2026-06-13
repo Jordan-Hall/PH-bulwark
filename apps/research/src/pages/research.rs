@@ -145,6 +145,30 @@ pub fn Research() -> Element {
             }
         }
 
+        // ---------- BENCHMARK ----------
+        section { class: "section",
+            div { class: "wrap",
+                div { class: "sec-head",
+                    span { class: "sec-index", "Benchmark" }
+                    h2 { "We measured the frontier. Most of it looked away." }
+                    p { class: "lede", "We built a benchmark of 36 real child-safety tasks across five areas, then ran six frontier models through it. Only xAI's Grok took the work on. That gap is a big part of why we build our own." }
+                }
+                dl { class: "deflist reveal",
+                    div { class: "def", dt { "Grok-4.1 · xAI" } dd { "79.9% average. 100% on real grooming cases, 95.2% on stranger-meeting scenarios." } }
+                    div { class: "def", dt { "Grok-3 · xAI" } dd { "59.5% average." } }
+                    div { class: "def", dt { "Claude-Opus-4.6 · Anthropic" } dd { "42.2% average. Declined the real-grooming and health-risk tasks." } }
+                    div { class: "def", dt { "Gemini-3-Pro / 2.5-Pro · Google" } dd { "Declined most tasks. 0.0%." } }
+                    div { class: "def", dt { "GPT-5 · OpenAI" } dd { "Declined all five categories. 0.0%." } }
+                }
+                div { style: "margin-top:26px;",
+                    a { class: "btn btn-primary", href: "https://benchmark.predatorhunters.co.uk",
+                        "See the full benchmark"
+                        span { dangerous_inner_html: svg("arrow-up-right") }
+                    }
+                }
+            }
+        }
+
         // ---------- DISCLOSURE ----------
         section { class: "section",
             div { class: "wrap",

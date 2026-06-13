@@ -83,11 +83,38 @@ pub fn SiteFooter() -> Element {
                         h4 { "Connect" }
                         ul {
                             li { a { href: "mailto:research@predatorhunters.co.uk", "research@predatorhunters.co.uk" } }
-                            li { a { href: "https://predatorhunters.co.uk", "Press & journalism ↗" } }
+                            li { a { href: "https://www.facebook.com/Online.Stings", target: "_blank", rel: "noopener", "Facebook ↗" } }
+                            li { a { href: "https://x.com/PredHunTers", target: "_blank", rel: "noopener", "X · @PredHunTers ↗" } }
+                            li { a { href: "https://predatorhunters.co.uk", target: "_blank", rel: "noopener", "Press & journalism ↗" } }
                         }
                         div { style: "margin-top:18px;",
                             img { class: "brand-logo", src: "{ph_logo_data_uri()}", alt: "Predator Hunters", style: "height:46px;" }
                         }
+                    }
+                }
+                div { style: "display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:44px; padding-top:24px; border-top:1px solid var(--hair);",
+                    span { style: "font-family:var(--mono); font-size:.68rem; letter-spacing:.2em; text-transform:uppercase; color:var(--muted); margin-right:4px;", "Share" }
+                    a {
+                        class: "btn btn-ghost btn-sm",
+                        href: "https://twitter.com/intent/tweet?text=Predator%20Hunters%20Research%20%E2%80%94%20child-safety%20AI&url=https%3A%2F%2Fresearch.predatorhunters.co.uk",
+                        target: "_blank", rel: "noopener",
+                        span { dangerous_inner_html: svg("x") }
+                        "Post on X"
+                    }
+                    a {
+                        class: "btn btn-ghost btn-sm",
+                        href: "https://www.facebook.com/sharer/sharer.php?u=https%3A%2F%2Fresearch.predatorhunters.co.uk",
+                        target: "_blank", rel: "noopener",
+                        span { dangerous_inner_html: svg("facebook") }
+                        "Share on Facebook"
+                    }
+                    button {
+                        class: "btn btn-ghost btn-sm",
+                        onclick: move |_| {
+                            let _ = dioxus::document::eval("const u=location.href,t=document.title;if(navigator.share){navigator.share({title:t,url:u}).catch(function(){});}else if(navigator.clipboard){navigator.clipboard.writeText(u);}");
+                        },
+                        span { dangerous_inner_html: svg("share") }
+                        "Share this page"
                     }
                 }
                 div { class: "footer-bottom",
