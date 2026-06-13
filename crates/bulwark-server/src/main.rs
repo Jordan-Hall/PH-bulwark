@@ -160,7 +160,9 @@ async fn main() -> anyhow::Result<()> {
         );
         tracing::info!("UnifiedPush fan-out sink configured (self-hosted; no Google/Apple)");
         let combined: Option<Arc<dyn bulwark_alert::AlertSink>> = match email_sink {
-            Some(e) => Some(Arc::new(bulwark_alert::CompositeSink::new(vec![e, push_sink]))),
+            Some(e) => Some(Arc::new(bulwark_alert::CompositeSink::new(vec![
+                e, push_sink,
+            ]))),
             None => Some(push_sink),
         };
         (combined, Some(hub))
