@@ -14,7 +14,8 @@
 //!   context multipliers (additive bonuses) —
 //!     guardian-isolation secrecy (single category)    +2.5  (alerts on its own)
 //!     secrecy × platform-switch                       +2.0
-//!     personal-info + age-probing (single category)   +1.5
+//!     personal-info + age-probing (single category)   +1.0  (common/often innocent;
+//!                                                            strictly below isolation)
 //!     sexualization × (gifts | emotional-manip)       +2.0
 //!     image-request present                            +5.0
 //!     rapid escalation (≥2 distinct categories <7d)    ×1.5 (multiplicative)
@@ -139,13 +140,20 @@ impl GroomingRuleEngine {
             });
         }
 
-        // personal-info + age probing (+1.5). The lexicon folds both into one
-        // category; firing it contributes the bonus.
-        if in_thread(GroomingRule::PersonalInfoAgeProbing) {
-            raw += 1.5;
+        // personal-info + age probing (+1.0). The lexicon folds both into one
+        // category; firing it contributes the bonus. This is COMMON and often
+        // innocent, so it sits strictly BELOW guardian-isolation secrecy (+2.5):
+        // age/location probing must never outrank "don't tell your parents".
+        // fired_now (NOT in_thread): the standalone boost is for THIS message's
+        // hit — gating on history would re-apply it to every later message once
+        // probing was ever seen (the same trap the isolation bonus avoids), so
+        // a benign thread that once asked an age would stay inflated and could
+        // creep above a lone guardian-isolation hit.
+        if fired_now(GroomingRule::PersonalInfoAgeProbing) {
+            raw += 1.0;
             applied.push(Applied {
-                label: "personal-info + age-probing (+1.5)",
-                bonus: 1.5,
+                label: "personal-info + age-probing (+1.0)",
+                bonus: 1.0,
             });
         }
 
@@ -313,6 +321,31 @@ mod tests {
             "isolation {} should outrank age-probing {}",
             isolation.score,
             age.score
+        );
+    }
+
+    #[test]
+    fn isolation_outranks_age_probing_even_with_a_benign_second_category() {
+        // Regression guard for the RESIDUAL inversion: age/location probing —
+        // common and often innocent — must NEVER outrank a lone guardian-
+        // isolation hit, even when probing is paired with another category and
+        // earns the rapid-escalation x1.5. (Before the +1.0/fired_now fix, the
+        // sticky +1.5 in_thread bonus let age-probe + soft-secrecy leapfrog a
+        // lone "don't tell your parents".)
+        let lex = en();
+        let eng = GroomingRuleEngine::new();
+        let st = ThreadState::new("t");
+        let isolation = eng.evaluate("dont tell your parents", lex.resolve("en"), &st, 0);
+
+        let mut probe_thread = ThreadState::new("t2");
+        let p1 = eng.evaluate("keep this between us", lex.resolve("en"), &probe_thread, 0);
+        probe_thread.record(&p1.fired, 0);
+        let p2 = eng.evaluate("how old are you", lex.resolve("en"), &probe_thread, 1_000);
+        assert!(
+            isolation.score >= p2.score,
+            "lone isolation {} must rank >= age-probe+secrecy {}",
+            isolation.score,
+            p2.score
         );
     }
 
