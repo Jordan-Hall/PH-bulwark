@@ -440,7 +440,8 @@ impl FamilySafety for FamilySafetyService {
                 .map(str::to_string)
                 .unwrap_or_else(|| r.staff_token.trim().to_string());
             // SAFETY_OFFICER or ADMIN may issue a region-wide family-safety notice.
-            let identity = staff.authorize(&token, &[StaffRole::SafetyOfficer, StaffRole::Admin])?;
+            let identity =
+                staff.authorize(&token, &[StaffRole::SafetyOfficer, StaffRole::Admin])?;
             identity.staff_id
         } else if let Some(expected) = &self.staff_token_sha256 {
             if !token_matches(expected, &r.staff_token) {
