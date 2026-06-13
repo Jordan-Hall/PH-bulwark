@@ -193,11 +193,23 @@ class BulwarkPushService : PushService() {
             // No runtime grant yet → the system would drop it; skip quietly.
             return
         }
+        // Tapping the alert opens the Manager so the guardian lands on the review,
+        // instead of having to find the app manually (codex P2).
+        val contentIntent = android.app.PendingIntent.getActivity(
+            this,
+            0,
+            android.content.Intent(this, MainActivity::class.java).addFlags(
+                android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                    android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP,
+            ),
+            android.app.PendingIntent.FLAG_IMMUTABLE,
+        )
         val notification = NotificationCompat.Builder(this, BulwarkPush.CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle("PH Bulwark Manager")
             .setContentText("New safety alert — open the Manager to review.")
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setContentIntent(contentIntent)
             .setAutoCancel(true)
             .build()
         try {
