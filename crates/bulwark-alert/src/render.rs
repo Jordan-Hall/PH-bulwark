@@ -270,6 +270,8 @@ fn headline_for(kind: AlertKind) -> &'static str {
         AlertKind::Intervention => "Predator Hunters Bulwark blocked something",
         AlertKind::GroomingSuspected => "Possible grooming detected",
         AlertKind::ProtectionDisabled => "Predator Hunters Bulwark protection was changed",
+        AlertKind::ChildSos => "URGENT: your child pressed the SOS button",
+        AlertKind::SafetyBroadcast => "Family safety notice from Predator Hunters",
         AlertKind::Unspecified => "Predator Hunters Bulwark alert",
     }
 }
@@ -289,6 +291,14 @@ fn intro_for(kind: AlertKind) -> &'static str {
             "Predator Hunters Bulwark protection on a supervised device was turned off, removed, or \
              stopped checking in. The child's device may no longer be filtered — \
              please check it."
+        }
+        AlertKind::ChildSos => {
+            "Your child pressed the SOS button in the PH Bulwark app on their \
+             device. Please contact them right away."
+        }
+        AlertKind::SafetyBroadcast => {
+            "Predator Hunters staff issued a family safety notice for your \
+             region. Please read it below."
         }
         AlertKind::Unspecified => "Predator Hunters Bulwark raised an alert on a supervised device.",
     }

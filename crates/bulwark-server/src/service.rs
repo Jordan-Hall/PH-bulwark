@@ -9,6 +9,7 @@ use bulwark_proto::v1::accounts_server::AccountsServer;
 use bulwark_proto::v1::alert_relay_server::{AlertRelay, AlertRelayServer};
 use bulwark_proto::v1::analysis_server::{Analysis, AnalysisServer};
 use bulwark_proto::v1::child_control_server::ChildControlServer;
+use bulwark_proto::v1::family_safety_server::FamilySafetyServer;
 use bulwark_proto::v1::offload_server::{Offload, OffloadServer};
 use bulwark_proto::v1::review_server::ReviewServer;
 use bulwark_proto::v1::staff_admin_server::StaffAdminServer;
@@ -23,6 +24,7 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::accounts::{AccountStore, AccountsService};
 use crate::child_control::{ChildConfigStore, ChildControlService};
+use crate::family_safety::{FamilySafetyService, SafetyBroadcastStore};
 use crate::relay::{AlertHub, ReviewService};
 use crate::staff::{StaffAdminService, StaffStore};
 use crate::tamper::{self, TamperService};
@@ -317,7 +319,7 @@ pub async fn run(
         // attached when SMTP is configured.
         router = router.add_service(AlertRelayServer::new(AlertRelayService::new(
             hub.clone(),
-            alert_sink,
+            alert_sink.clone(),
         )));
 
         // Parent accounts + per-child guardians (accounts mode): built BEFORE
@@ -381,6 +383,25 @@ pub async fn run(
                 "staff admin ENABLED — separate staff accounts, TOTP required, every action audited"
             );
         }
+
+        // FamilySafety: child SOS (URGENT guardian alert; device-token
+        // authenticated in accounts mode, same gate as heartbeats) + staff
+        // safety broadcasts (gated by the placeholder shared env token,
+        // BULWARK_STAFF_BROADCAST_TOKEN, until the staff accounts system
+        // ships). SOS fans through the SAME hub as every other alert AND the
+        // email/push sink when configured; broadcasts persist under the state
+        // dir so a console that connects later can still fetch the active list.
+        let broadcast_store = match &cfg.state_dir {
+            Some(dir) => SafetyBroadcastStore::with_state_dir(dir)?,
+            None => SafetyBroadcastStore::new(),
+        };
+        let mut family_safety = FamilySafetyService::new(hub.clone(), broadcast_store)
+            .with_alert_sink(alert_sink.clone())
+            .with_staff_token_from_env();
+        if let Some(accounts) = &accounts {
+            family_safety = family_safety.with_accounts(accounts.clone());
+        }
+        router = router.add_service(FamilySafetyServer::new(family_safety));
 
         // Review (+ optional Accounts) depends on the deployment mode:
         //   * accounts_enabled = false (DEFAULT, single-home/dev): device-scoped

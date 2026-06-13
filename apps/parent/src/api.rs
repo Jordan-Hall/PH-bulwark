@@ -3,13 +3,14 @@
 
 use bulwark_proto::v1::accounts_client::AccountsClient;
 use bulwark_proto::v1::child_control_client::ChildControlClient;
+use bulwark_proto::v1::family_safety_client::FamilySafetyClient;
 use bulwark_proto::v1::review_client::ReviewClient;
 use bulwark_proto::v1::{
-    AccountAck, AlertEvent, ChangePasswordRequest, Child as ProtoChild, ChildConfig,
+    AccountAck, AlertEvent, AlertKind, ChangePasswordRequest, Child as ProtoChild, ChildConfig,
     ChildStatusRequest, CreateAccountRequest, CreatePairCodeRequest, DeviceFilter,
-    ListChildrenRequest, LoginRequest, PairCode, RequestPasswordResetAck,
-    RequestPasswordResetRequest, ResetPasswordAck, ResetPasswordRequest, ReviewDecision,
-    ReviewRequest, ReviewScope, Session, SetChildConfigRequest,
+    ListChildrenRequest, ListSafetyBroadcastsRequest, LoginRequest, PairCode,
+    RequestPasswordResetAck, RequestPasswordResetRequest, ResetPasswordAck, ResetPasswordRequest,
+    ReviewDecision, ReviewRequest, ReviewScope, SafetyBroadcast, Session, SetChildConfigRequest,
 };
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 use tonic::Streaming;
@@ -283,6 +284,47 @@ pub async fn get_child_status(
         status.last_report_ts,
         status.desired,
     ))
+}
+
+/// Fetch the ACTIVE staff safety notices (`FamilySafety.ListSafetyBroadcasts`)
+/// so a console that connects after a broadcast was issued still sees it (the
+/// live stream only reaches connected consoles). Each notice is re-shaped as
+/// the same SAFETY_BROADCAST AlertEvent the stream carries, so the inbox
+/// renders both paths identically (deduped by id).
+pub async fn list_active_safety_broadcasts() -> anyhow::Result<Vec<AlertEvent>> {
+    let token = guardian_token();
+    if token.is_empty() {
+        anyhow::bail!("login required for this server");
+    }
+    let mut client = FamilySafetyClient::new(connect_channel().await?);
+    let resp = client
+        .list_safety_broadcasts(ListSafetyBroadcastsRequest {
+            token,
+            device_id: String::new(),
+            device_token: String::new(),
+            region: String::new(),
+        })
+        .await?
+        .into_inner();
+    Ok(resp.broadcasts.into_iter().map(broadcast_event).collect())
+}
+
+/// Mirror of the server's broadcast→AlertEvent shaping (family_safety.rs):
+/// `app` carries the region scope; title+body land in the redacted context.
+pub fn broadcast_event(b: SafetyBroadcast) -> AlertEvent {
+    AlertEvent {
+        alert_id: b.broadcast_id,
+        kind: AlertKind::SafetyBroadcast as i32,
+        severity: b.severity,
+        app: b.region,
+        ts: b.issued_ts,
+        redacted_context: if b.body.is_empty() {
+            b.title
+        } else {
+            format!("{} — {}", b.title, b.body)
+        },
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]

@@ -277,6 +277,8 @@ enum AlertKind {
   INTERVENTION           = 1; // a blocker acted (block/blur/mute)
   GROOMING_SUSPECTED     = 2; // grooming engine crossed alert threshold
   PROTECTION_DISABLED    = 3; // tamper: filtering/admin/accessibility off, app-removal attempt, or missed heartbeat
+  CHILD_SOS              = 4; // the child pressed the in-app SOS button — URGENT guardian alert (FamilySafety.RaiseSos)
+  SAFETY_BROADCAST       = 5; // staff-issued region-wide family safety notice — staff-originated ONLY, never crowd-sourced
 }
 
 // A guardian-facing alert. Carries redacted context ONLY — never explicit media.
@@ -1068,4 +1070,107 @@ service StaffAdmin {
   // Tamper-evident audit log query (ADMIN only). Audited (yes, querying the
   // audit log is itself an audited action).
   rpc QueryStaffAudit(StaffAuditQuery) returns (StaffAuditPage);
+}
+
+// ---------------------------------------------------------------------------
+// FamilySafety service — child SOS + staff safety broadcasts.
+//   * RaiseSos: the SUPERVISED CHILD's one-tap "I need help" action. Device-
+//     authenticated (PairResult.device_token — the same gate as
+//     Tamper.Heartbeat). The server resolves the child's name/family from the
+//     enrolled device and fans an URGENT AlertEvent(kind = CHILD_SOS,
+//     severity = CRITICAL) out to the child's guardians through the same relay
+//     as every other alert (plus the email/push sink when configured).
+//     CONTENT-FREE: who + when + which device — never location, messages, or
+//     media. (A consent-gated coarse-location attachment is a LATER increment;
+//     nothing here collects location.)
+//   * SendSafetyBroadcast: a PH-STAFF-ORIGINATED region-wide family safety
+//     notice ("amber-alert-like") fanned out to guardian consoles. HARD RULE:
+//     never crowd-sourced and never a public accusation — staff issue notices,
+//     guardians read them. AUTH PLACEHOLDER: gated by a server-side shared
+//     staff token (BULWARK_STAFF_BROADCAST_TOKEN; unset = the rpc is off)
+//     until the per-staff accounts/roles system ships (separate design in
+//     progress). TODO(staff-system): the placeholder `staff_token` migrates to
+//     a real per-staff credential via NEW fields/metadata — never renumbering.
+//   * ListSafetyBroadcasts: active notices for late-joining guardian consoles
+//     (the live stream only reaches connected ones) and, later, child devices
+//     (the non-dismissable-until-acknowledged child notice is a follow-up
+//     increment; `notify_child_devices` ships now so the shape is stable).
+// ---------------------------------------------------------------------------
+
+// Child SOS. Carries ONLY the device identity + tap time — no content, no location.
+message SosRequest {
+  string device_id    = 1; // the enrolled child device raising the SOS
+  string device_token = 2; // per-device credential from PairResult.device_token
+  int64  ts           = 3; // child-side tap time, unix epoch millis (the alert is server-stamped)
+  // Client-generated idempotency key so a retried tap can't double-alert
+  // (becomes the CHILD_SOS AlertEvent.alert_id). Empty = server derives one.
+  string client_sos_id = 4;
+}
+
+message SosAck {
+  // True when at least one guardian path took the alert (a live console
+  // stream, or the configured email/push sink) — drives the child-facing
+  // honesty: "your guardian has been alerted" vs "call a trusted adult".
+  bool   delivered = 1;
+  string alert_id  = 2; // the CHILD_SOS AlertEvent's id (dedupe/audit)
+  uint32 guardian_streams_reached = 3;
+  string detail    = 4;
+}
+
+// One staff-issued safety notice. broadcast_id/issued_ts/issued_by are
+// SERVER-stamped. Content is staff-written plain text ONLY — no media and no
+// third-party reports (broadcasts are staff-originated by hard rule).
+message SafetyBroadcast {
+  string   broadcast_id = 1; // server-assigned
+  string   title        = 2; // short headline (<= 120 chars)
+  string   body         = 3; // plain-text notice (<= 2000 chars)
+  Severity severity     = 4; // defaults to HIGH when unspecified
+  string   region       = 5; // "uk" | "us" | ...; empty = every region this node serves
+  int64    issued_ts    = 6; // server-stamped, unix epoch millis
+  int64    expires_ts   = 7; // 0 = active until superseded
+  // Also surface on enrolled child devices as a notice that stays until
+  // acknowledged. The child-device display + acknowledge flow is a follow-up
+  // increment; the flag ships now so the message shape is stable.
+  bool     notify_child_devices = 8;
+  // Staff identity stamp. PLACEHOLDER value ("staff-shared-token") until the
+  // staff accounts system lands, then a real staff account id — same field.
+  string   issued_by    = 9;
+}
+
+message SendSafetyBroadcastRequest {
+  // PLACEHOLDER staff credential: the server-side shared token
+  // (BULWARK_STAFF_BROADCAST_TOKEN). TODO(staff-system): replaced by the
+  // per-staff session credential from the staff-management design — added as
+  // a NEW field / metadata header, never by renumbering this one.
+  string staff_token = 1;
+  SafetyBroadcast broadcast = 2; // broadcast_id/issued_ts/issued_by are server-stamped
+}
+
+message SafetyBroadcastAck {
+  bool   accepted     = 1;
+  string broadcast_id = 2;
+  uint32 guardian_streams_reached = 3; // live consoles reached now; others poll List
+  string detail       = 4;
+}
+
+// Active-notice fetch. Authenticated EITHER as a guardian (session token /
+// Bearer metadata) OR as an enrolled child device (device_id + device_token).
+message ListSafetyBroadcastsRequest {
+  string token        = 1; // guardian session (also via Bearer metadata)
+  string device_id    = 2; // child-device path
+  string device_token = 3;
+  string region       = 4; // optional filter; empty = all
+}
+
+message SafetyBroadcasts {
+  repeated SafetyBroadcast broadcasts = 1; // active (unexpired), newest first
+}
+
+service FamilySafety {
+  // Child SOS -> URGENT guardian alert (device-token authenticated).
+  rpc RaiseSos(SosRequest) returns (SosAck);
+  // Staff-originated regional safety notice (placeholder staff-token gate).
+  rpc SendSafetyBroadcast(SendSafetyBroadcastRequest) returns (SafetyBroadcastAck);
+  // Active notices for (re)connecting guardian consoles / child devices.
+  rpc ListSafetyBroadcasts(ListSafetyBroadcastsRequest) returns (SafetyBroadcasts);
 }

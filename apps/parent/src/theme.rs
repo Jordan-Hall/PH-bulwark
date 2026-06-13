@@ -208,6 +208,19 @@ input.url:focus, .field input:focus { outline: none; border-color: var(--green);
   background: var(--rose-tint); border: 1px solid var(--rose-line); color: var(--rose-ink);
   border-radius: var(--r-sm); padding: 11px 14px; font-size: 13px; margin-bottom: 14px;
 }
+
+/* URGENT child-SOS treatment: red banner + a red register on the alert card */
+.sos-banner {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--rose-tint); border: 1px solid var(--rose-line); color: var(--rose-ink);
+  border-radius: var(--r-sm); padding: 12px 14px; font-size: 13.5px; font-weight: 700; margin-bottom: 16px;
+}
+.sos-banner svg { width: 17px; height: 17px; flex: none; }
+.alert-sos { border-color: var(--rose-line); box-shadow: 0 0 0 1px var(--rose-line), var(--sh-sm); }
+.alert-sos::before { background: linear-gradient(180deg, var(--rose-line), var(--rose-ink)); }
+.alert-sos .alert-eyebrow { color: var(--rose-ink); }
+.alert-sos .ttl { font-family: var(--display); font-size: 17px; letter-spacing: -.01em; }
+.alert-ic.sos { background: var(--rose-tint); border: 1px solid var(--rose-line); color: var(--rose-ink); }
 .seg-note { margin-top: 12px; color: var(--green-deep); font-size: 13px; font-weight: 600; }
 .ok-note svg, .gate-info svg, .gate-error svg, .csam svg, .vpn-note svg { width: 16px; height: 16px; flex: none; margin-top: 1px; }
 

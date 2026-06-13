@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive-icon FOREGROUND: a white camera with a navy lens, centred in the
+     108dp canvas (within the ~66dp safe zone) — same emblem style as the child
+     app's shield icon. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Camera body with viewfinder bump -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M38,40 L44,40 L47,35 L61,35 L64,40 L70,40 C73,40 75,42 75,45 L75,68 C75,71 73,73 70,73 L38,73 C35,73 33,71 33,68 L33,45 C33,42 35,40 38,40 Z" />
+    <!-- Lens ring, cut in the background navy -->
+    <path
+        android:fillColor="#0F3D5C"
+        android:pathData="M54,46 C60.1,46 65,50.9 65,57 C65,63.1 60.1,68 54,68 C47.9,68 43,63.1 43,57 C43,50.9 47.9,46 54,46 Z" />
+    <!-- Inner lens highlight -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,50 C57.9,50 61,53.1 61,57 C61,60.9 57.9,64 54,64 C50.1,64 47,60.9 47,57 C47,53.1 50.1,50 54,50 Z" />
+</vector>

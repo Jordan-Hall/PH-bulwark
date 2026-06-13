@@ -1,0 +1,51 @@
+<resources>
+    <string name="app_name">PH Bulwark Camera</string>
+
+    <!-- Status pill -->
+    <string name="status_check_ready">Safety check on</string>
+    <string name="status_check_loading">Getting the safety check ready…</string>
+
+    <!-- Gate could not start (fail-closed): calm, actionable, never alarming. -->
+    <string name="gate_unavailable_title">Camera paused</string>
+    <string name="gate_unavailable_body">The safety check could not start, so photos are
+        paused for now. Close the app and open it again — if this keeps happening, ask your
+        guardian for help.</string>
+
+    <!-- Live preview shield -->
+    <string name="preview_shield_title">Camera paused</string>
+    <string name="preview_shield_body">What the camera sees right now doesn\'t look okay to
+        photograph, so the shutter is paused. Point the camera somewhere else to keep
+        snapping.</string>
+
+    <!-- Blocked capture: calm, no shame, states clearly that nothing was kept. -->
+    <string name="blocked_title">That photo wasn\'t saved</string>
+    <string name="blocked_body">This picture looked like something that shouldn\'t be
+        photographed, so it was not saved — nothing was kept on this phone and nothing was
+        sent anywhere. If you think this was a mistake you can try again, or talk to your
+        guardian about it.</string>
+
+    <!-- Transient notices -->
+    <string name="check_failed_body">We couldn\'t check that photo, so it wasn\'t saved. Please try again.</string>
+    <string name="save_failed_body">The photo couldn\'t be saved. Please try again.</string>
+    <string name="saved_body">Saved to Photos.</string>
+
+    <!-- Video stub -->
+    <string name="video_stub_title">Video is coming soon</string>
+    <string name="video_stub_body">PH Bulwark Camera can\'t record video yet. Checked, safe
+        video recording is planned for a future update.</string>
+
+    <!-- Permission -->
+    <string name="permission_title">Camera permission needed</string>
+    <string name="permission_body">PH Bulwark Camera needs the camera permission to take
+        photos. Photos are checked on this phone only — nothing ever leaves the device.</string>
+    <string name="action_grant_permission">Allow camera</string>
+
+    <!-- Actions / accessibility -->
+    <string name="action_ok">OK</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="cd_shutter">Take photo</string>
+    <string name="cd_flip">Flip</string>
+
+    <!-- Transparency footer (matches the child app's honesty line). -->
+    <string name="privacy_footnote">Photos are checked on this phone only. Nothing leaves the device.</string>
+</resources>
