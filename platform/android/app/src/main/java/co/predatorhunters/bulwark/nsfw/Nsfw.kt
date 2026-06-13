@@ -205,7 +205,14 @@ class Nsfw private constructor(
             // then CPU. Each candidate must SURVIVE a warmup inference — an
             // accelerator session that builds but cannot run the model must not
             // win (same lesson as the engine's `time_warmup`).
-            for (useNnapi in booleanArrayOf(true, false)) {
+            //
+            // EXCEPT on a 32-bit process: ORT 1.22.0 has an ARM32 NNAPI SIGBUS
+            // (microsoft/onnxruntime#25138) — a NATIVE crash that the fail-open
+            // runCatching cannot catch and which would kill the service. So a
+            // 32-bit process goes straight to CPU; only 64-bit tries NNAPI.
+            val providers =
+                if (android.os.Process.is64Bit()) booleanArrayOf(true, false) else booleanArrayOf(false)
+            for (useNnapi in providers) {
                 val n = runCatching { build(model, useNnapi) }.getOrNull() ?: continue
                 val warm = runCatching {
                     val bmp = Bitmap.createBitmap(INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ARGB_8888)
