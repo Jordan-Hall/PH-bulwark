@@ -401,17 +401,25 @@ pub async fn run(
         // staff RPC and vice versa); content-free by message shape; every
         // staff action is appended to a tamper-evident audit chain. Mounted
         // only when explicitly enabled (BULWARK_STAFF=1).
-        if cfg.staff_enabled {
+        // Built once and shared: StaffAdmin owns it, and FamilySafety authorizes
+        // broadcasts against the SAME staff sessions (so a SAFETY_OFFICER/ADMIN
+        // session authenticates a broadcast and stamps a real audit id).
+        let staff_store = if cfg.staff_enabled {
             let staff = match &cfg.state_dir {
                 Some(dir) => StaffStore::with_state_dir(dir)?,
                 None => StaffStore::new(),
             }
             .with_bootstrap_from_env();
-            router = router.add_service(StaffAdminServer::new(StaffAdminService::from_env(staff)));
+            router = router.add_service(StaffAdminServer::new(StaffAdminService::from_env(
+                staff.clone(),
+            )));
             tracing::info!(
                 "staff admin ENABLED — separate staff accounts, TOTP required, every action audited"
             );
-        }
+            Some(staff)
+        } else {
+            None
+        };
 
         // FamilySafety: child SOS (URGENT guardian alert; device-token
         // authenticated in accounts mode, same gate as heartbeats) + staff
@@ -427,6 +435,11 @@ pub async fn run(
         let mut family_safety = FamilySafetyService::new(hub.clone(), broadcast_store)
             .with_alert_sink(alert_sink.clone())
             .with_staff_token_from_env();
+        // Prefer the real per-staff accounts system for broadcast auth when it's
+        // enabled; the shared env token above stays as the legacy fallback.
+        if let Some(staff) = &staff_store {
+            family_safety = family_safety.with_staff_store(staff.clone());
+        }
         if let Some(accounts) = &accounts {
             family_safety = family_safety.with_accounts(accounts.clone());
         }
