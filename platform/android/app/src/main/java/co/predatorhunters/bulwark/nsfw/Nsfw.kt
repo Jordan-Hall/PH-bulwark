@@ -61,15 +61,28 @@ class Nsfw private constructor(
      * the lock (mirrors the engine's `Mutex<Session>`).
      */
     @Synchronized
-    fun score(bitmap: Bitmap): Float = runCatching {
+    fun score(bitmap: Bitmap): Float = runCatching { infer(bitmap) }
+        .onFailure { Log.i(TAG, "NSFW score failed (fail-open): ${it.message}") }
+        .getOrDefault(0f)
+
+    /**
+     * Raw inference — **THROWS** on any failure (tensor/runtime/empty output).
+     * The public [score] wraps this fail-open (returns `0f`); the warmup in
+     * [create] calls it DIRECTLY so a built-but-unrunnable provider (e.g. an
+     * NNAPI session that constructs but cannot run the model) is rejected and we
+     * fall back to CPU — instead of caching a dark session whose every score is
+     * `0f`, which would silently disable all image cover-up on that device.
+     */
+    private fun infer(bitmap: Bitmap): Float {
         val input = preprocess(bitmap)
         OnnxTensor.createTensor(ORT, FloatBuffer.wrap(input), SHAPE).use { tensor ->
             session.run(mapOf(inputName to tensor)).use { out ->
-                nsfwProbability(extractLogits(out[0].value))
+                val logits = extractLogits(out[0].value)
+                check(logits.isNotEmpty()) { "model output was not scorable" }
+                return nsfwProbability(logits)
             }
         }
-    }.onFailure { Log.i(TAG, "NSFW score failed (fail-open): ${it.message}") }
-        .getOrDefault(0f)
+    }
 
     /**
      * Localize sexual/explicit imagery by **tiling**. The bundled model is
@@ -197,7 +210,9 @@ class Nsfw private constructor(
                 val warm = runCatching {
                     val bmp = Bitmap.createBitmap(INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ARGB_8888)
                     try {
-                        n.score(bmp)
+                        // THROWING path: a provider that builds but can't run the
+                        // model fails here and is rejected (→ CPU fallback).
+                        n.infer(bmp)
                     } finally {
                         bmp.recycle()
                     }

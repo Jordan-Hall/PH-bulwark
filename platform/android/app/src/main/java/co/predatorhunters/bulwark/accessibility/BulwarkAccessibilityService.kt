@@ -62,29 +62,37 @@ class BulwarkAccessibilityService : AccessibilityService() {
             return
         }
 
-        if (pkg !in MONITORED) return
+        // TEXT/grooming is scoped to the monitored chat apps (the view-tree
+        // text + OCR → grooming path). IMAGE NSFW is NOT: adult images appear in
+        // browsers, WebViews, galleries and any other app, so the no-VPN
+        // image-safety scan must run device-wide (codex: don't gate it on the
+        // chat allowlist). Both share ONE throttled screenshot per tick.
+        val monitored = pkg in MONITORED
 
         when (event.eventType) {
             AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED -> {
-                val text = event.text.joinToString(" ").trim()
-                if (text.isNotEmpty()) submit(pkg, "notif", text)
+                if (monitored) {
+                    val text = event.text.joinToString(" ").trim()
+                    if (text.isNotEmpty()) submit(pkg, "notif", text)
+                }
             }
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
             AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
-                val root = rootInActiveWindow ?: return
-                val text = collectText(root).trim()
-                val thread = threadIdFor(root, pkg)
-                if (text.isNotEmpty()) submit(pkg, thread, text)
-                // ALWAYS consider a throttled screen frame: it scores the frame
-                // for sexual/explicit imagery (the no-VPN image-safety path) and,
-                // only when the view-tree exposed NO text, ALSO runs conventional
-                // OCR so bitmap/canvas-drawn text (games, image captions, stylised
-                // chat) still reaches the grooming detector. Doing this on every
-                // tick — not just when text is empty — is deliberate: real chat /
-                // feed screens DO expose text, yet that is exactly where adult
-                // images appear, so the image scan must not be gated on empty
-                // text. API 30+ only; fully fail-open.
-                maybeCapture(pkg, thread, ocrText = text.isEmpty())
+                if (monitored) {
+                    // Monitored chat: view-tree TEXT → grooming, plus a throttled
+                    // frame (image NSFW always; OCR only when the tree had no text,
+                    // for bitmap/canvas-drawn chat — games, captions, stylised chat).
+                    val root = rootInActiveWindow ?: return
+                    val text = collectText(root).trim()
+                    val thread = threadIdFor(root, pkg)
+                    if (text.isNotEmpty()) submit(pkg, thread, text)
+                    maybeCapture(pkg, thread, ocrText = text.isEmpty())
+                } else if (pkg != packageName) {
+                    // Any OTHER foreground app: throttled frame, image NSFW ONLY
+                    // (no chat-text grooming / OCR here). Skips our own UI. This is
+                    // the device-wide "any adult images, no VPN" path. Fail-open.
+                    maybeCapture(pkg, "img:$pkg", ocrText = false)
+                }
             }
         }
     }
@@ -345,6 +353,12 @@ class BulwarkAccessibilityService : AccessibilityService() {
      *  full-screen block never clobber each other's lifecycle. */
     private var regionOverlay: View? = null
 
+    /** Main-thread handler + a SINGLE reusable lift runnable for the localized
+     *  overlay. Refreshing the cover cancels the prior TTL removal, so a stale
+     *  removal can't lift a still-flagged cover (codex P2). */
+    private val regionHandler = Handler(Looper.getMainLooper())
+    private val liftRegionOverlay = Runnable { removeLocalizedOverlay() }
+
     /**
      * Cover ONLY [regionPx] (in frame-pixel coordinates) with an opaque
      * `TYPE_ACCESSIBILITY_OVERLAY`, leaving the rest of the screen visible and
@@ -361,7 +375,7 @@ class BulwarkAccessibilityService : AccessibilityService() {
      */
     private fun showLocalizedOverlay(regionPx: Rect, frameW: Int, frameH: Int) {
         if (frameW <= 0 || frameH <= 0) return
-        Handler(Looper.getMainLooper()).post {
+        regionHandler.post {
             val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
             val (dispW, dispH) = realDisplaySize(wm)
             val sx = dispW.toFloat() / frameW
@@ -405,11 +419,15 @@ class BulwarkAccessibilityService : AccessibilityService() {
             }
             // Self-heal: lift the cover if no later frame refreshes it (content
             // scrolled away and no clean frame arrived to clear it explicitly).
-            Handler(Looper.getMainLooper()).postDelayed({ removeLocalizedOverlay() }, REGION_OVERLAY_TTL_MS)
+            // Cancel the PRIOR pending removal first so a refresh of a still-
+            // flagged region doesn't get lifted by a stale earlier TTL.
+            regionHandler.removeCallbacks(liftRegionOverlay)
+            regionHandler.postDelayed(liftRegionOverlay, REGION_OVERLAY_TTL_MS)
         }
     }
 
     private fun removeLocalizedOverlay() {
+        regionHandler.removeCallbacks(liftRegionOverlay)
         regionOverlay?.let { v -> runCatching { (getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(v) } }
         regionOverlay = null
     }
