@@ -40,9 +40,35 @@ val fetchTessdata = tasks.register("fetchTessdata") {
         }
     }
 }
+// ---------------------------------------------------------------------------
+// On-device NSFW model asset (the no-VPN image-safety path).
+//
+// The SAME license-pinned classifier the engine bundles and the Camera app uses
+// (crates/bulwark-vision/models/nsfw_detector.onnx — AdamCodd
+// vit-base-nsfw-detector, Apache-2.0, int8 ONNX, 384x384, [-1,1] norm, 2-class
+// softmax with index 1 = nsfw) is copied into this module's generated assets at
+// build time. NEVER duplicated in git (the root .gitignore ignores the module
+// build dir AND *.onnx; the model lives only in the vendored engine copy). It
+// lands under the SAME generated-assets root already on the source set below.
+// Path check: rootProject.projectDir is platform/android, so ../../crates
+// resolves to <repo>/crates. The AccessibilityService scores screen frames with
+// it via the Nsfw classifier (co.predatorhunters.bulwark.nsfw). FAIL-OPEN: if
+// the model is absent the classifier goes dark and the text paths are unaffected.
+// ---------------------------------------------------------------------------
+val copyNsfwModel = tasks.register<Copy>("copyNsfwModel") {
+    description = "Copy the engine's pinned NSFW ONNX model into generated assets."
+    from(rootProject.projectDir.resolve("../../crates/bulwark-vision/models")) {
+        include("nsfw_detector.onnx")
+    }
+    into(layout.buildDirectory.dir("generated/bulwarkAssets/model"))
+}
+
 // preBuild is an ancestor of every variant's merge*Assets; matching{} is robust
 // to AGP task-registration timing (same pattern as the camera module).
-tasks.matching { it.name == "preBuild" }.configureEach { dependsOn(fetchTessdata) }
+tasks.matching { it.name == "preBuild" }.configureEach {
+    dependsOn(fetchTessdata)
+    dependsOn(copyNsfwModel)
+}
 
 android {
     namespace = "co.predatorhunters.bulwark"
@@ -80,9 +106,13 @@ android {
     // The build-time-fetched Tesseract eng.traineddata (see fetchTessdata above).
     sourceSets["main"].assets.srcDirs("build/generated/bulwarkAssets")
 
-    // Store the traineddata uncompressed so it streams straight to the app-private
-    // file Tesseract reads (no inflater pressure on a ~12 MB asset).
-    androidResources { noCompress += "traineddata" }
+    // Store the traineddata + ONNX model uncompressed so each streams straight to
+    // the app-private file the runtime maps (no inflater pressure on the ~12 MB
+    // traineddata or the ~88 MB int8 model whose weights barely compress).
+    androidResources {
+        noCompress += "traineddata"
+        noCompress += "onnx"
+    }
 
     // Release signing is configured ONLY when the keystore is provided via env
     // (CI store-publish job → ANDROID_* secrets). Without it, release stays unsigned
@@ -137,4 +167,12 @@ dependencies {
     // permission is requested at scan time by the embedded capture activity;
     // the decoded text feeds the SAME setup-payload parser as the paste path.
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+
+    // ONNX Runtime Android (MIT) — runs the bundled Apache-2.0 NSFW classifier
+    // fully on-device for the no-VPN image-safety path. The AccessibilityService
+    // scores screen frames (and tiles them for localized cover-up) via the Nsfw
+    // class; NNAPI accelerator when present, CPU otherwise (Nsfw capability-
+    // detects, same as the Camera app's NsfwGate). A vision classifier, never an
+    // LLM, never a proprietary SDK. See docs/design/on-device-agent.md.
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.19.2")
 }
