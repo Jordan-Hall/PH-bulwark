@@ -3,6 +3,12 @@
 Refreshed **2026-06-12** to match shipped reality (domain/TLS cutover + Android
 CA-trust install since the 2026-06-09 pass; perception/VPN layer landed earlier).
 Pairs with [PLAN.md](../PLAN.md).
+
+> **Live gate for opening public beta:** [`public-beta-readiness.md`](public-beta-readiness.md)
+> — the GO/NO-GO checklist per shippable surface (current verdict: **NO-GO for
+> stranger beta**, owner-blocked on signed APKs + on-device validation). The
+> tester-facing install/what-to-test guide is [`TESTING.md`](TESTING.md). This file
+> remains the engine/feature gap map that those two draw from.
 Legend: 🔴 P0 · 🟠 P1 · 🟡 P2 · ✅ done · 🧪 needs real-device / model / credential / deploy
 validation (can't be fully CI-verified here).
 
