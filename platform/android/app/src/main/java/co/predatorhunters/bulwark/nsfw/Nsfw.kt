@@ -149,8 +149,12 @@ class Nsfw private constructor(
     companion object {
         private const val TAG = "BulwarkNsfw"
 
-        /** `VisionConfig::default().nsfw_threshold` (crates/bulwark-vision). */
-        const val BLOCK_THRESHOLD = 0.7f
+        /** Per-tile NSFW block threshold. Higher than the engine default (0.7)
+         *  because this path scores SMALL downscaled tile crops of a screenshot,
+         *  where the int8 classifier is noisier — 0.7 over-flagged benign tiles
+         *  (false covers). 0.85 cuts those while still catching explicit imagery;
+         *  a device-validation tuning knob (with TILE_GRID + the lift hysteresis). */
+        const val BLOCK_THRESHOLD = 0.85f
 
         /** N for the N×N localization grid (perf/accuracy knob — see the spec). */
         const val TILE_GRID = 4

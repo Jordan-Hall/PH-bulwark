@@ -79,19 +79,27 @@ class BulwarkAccessibilityService : AccessibilityService() {
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
             AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
                 if (monitored) {
-                    // Monitored chat: view-tree TEXT → grooming, plus a throttled
-                    // frame (image NSFW always; OCR only when the tree had no text,
-                    // for bitmap/canvas-drawn chat — games, captions, stylised chat).
+                    // Monitored chat: view-tree TEXT → grooming, PLUS a throttled
+                    // frame that runs BOTH image-NSFW and OCR. OCR runs even when the
+                    // tree exposed text: a screen can show text in the tree AND text
+                    // drawn into images/video the tree can't see (captions, memes,
+                    // stylised chat), so gating OCR on an empty tree missed it.
                     val root = rootInActiveWindow ?: return
                     val text = collectText(root).trim()
                     val thread = threadIdFor(root, pkg)
                     if (text.isNotEmpty()) submit(pkg, thread, text)
-                    maybeCapture(pkg, thread, ocrText = text.isEmpty())
+                    maybeCapture(pkg, thread, ocrText = true)
                 } else if (pkg != packageName) {
-                    // Any OTHER foreground app: throttled frame, image NSFW ONLY
-                    // (no chat-text grooming / OCR here). Skips our own UI. This is
-                    // the device-wide "any adult images, no VPN" path. Fail-open.
-                    maybeCapture(pkg, "img:$pkg", ocrText = false)
+                    // Any OTHER foreground app (browser, YouTube, gallery, …): a
+                    // throttled frame running BOTH image-NSFW AND OCR→grooming, so
+                    // adult imagery and text-in-frames are caught device-wide — not
+                    // just in the chat allowlist (which is the view-tree TEXT scope).
+                    // Skips our own UI. Fail-open. Use a PER-SURFACE thread id (not a
+                    // constant per-package one) so unrelated screens/videos don't
+                    // share the grooming state machine's per-thread 7-day history.
+                    val root = rootInActiveWindow
+                    val thread = if (root != null) threadIdFor(root, pkg) else "scan:$pkg"
+                    maybeCapture(pkg, thread, ocrText = true)
                 }
             }
         }
@@ -162,7 +170,13 @@ class BulwarkAccessibilityService : AccessibilityService() {
                                     scanFrameForNsfw(pkg, bmp)
                                     if (ocrText) {
                                         val text = Ocr.recognize(this@BulwarkAccessibilityService, bmp)
-                                        if (!text.isNullOrEmpty()) submit(pkg, "ocr:$thread", text)
+                                        // Submit OCR text under the SAME thread as the
+                                        // view-tree text (not a separate "ocr:" id), so
+                                        // mixed tree+OCR signals in one conversation
+                                        // (e.g. a secrecy message + an image caption
+                                        // steering to another app) combine in the
+                                        // grooming state machine's per-thread history.
+                                        if (!text.isNullOrEmpty()) submit(pkg, thread, text)
                                     }
                                 } finally {
                                     bmp.recycle()
@@ -201,17 +215,41 @@ class BulwarkAccessibilityService : AccessibilityService() {
      * redacted-alert path; CSAM-specific reporting rides the separate engine
      * hash/report path (a single-probability classifier cannot single it out).
      */
+    /** Consecutive clean scans since the last flagged one — drives the lift
+     *  HYSTERESIS so a single noisy mis-score can't drop a cover. */
+    @Volatile
+    private var cleanScanCount = 0
+
+    /** True between first-cover and lift — so the guardian is alerted ONCE per
+     *  cover episode, not on every refresh tick. */
+    @Volatile
+    private var coverEpisodeActive = false
+
     private fun scanFrameForNsfw(pkg: String, frame: Bitmap) {
         val nsfw = Nsfw.obtain(this) ?: return // fail-open: no model → no image scan
         val region = nsfw.localize(frame) // null when no tile is flagged
         if (region != null && !region.isEmpty) {
-            Log.w(TAG, "sexual/explicit imagery in $pkg — covering region (localized)")
+            // Flagged → cover (refresh) immediately; reset the clean streak.
+            cleanScanCount = 0
             showLocalizedOverlay(region, frame.width, frame.height)
-            // Redacted, content-free guardian signal (never the frame/crop).
-            notifyGuardian(pkg, "{\"reason\":\"Explicit image covered\"}")
-        } else {
-            // Clean frame → lift any region cover left from a previous tick.
-            Handler(Looper.getMainLooper()).post { removeLocalizedOverlay() }
+            if (!coverEpisodeActive) {
+                coverEpisodeActive = true
+                Log.w(TAG, "sexual/explicit imagery in $pkg — covering region (localized)")
+                // Content-free guardian signal — once per episode, not per tick.
+                notifyGuardian(pkg, "{\"reason\":\"Explicit image covered\"}")
+            }
+        } else if (coverEpisodeActive) {
+            // HYSTERESIS: do NOT drop the cover on a single clean frame — the
+            // classifier is noisy per-frame and the offending content (esp. a
+            // playing video) is often still on screen. Lift only after
+            // CLEAN_LIFT_SCANS consecutive clean scans. This stops the cover
+            // flickering/vanishing and the muted video audibly resuming.
+            cleanScanCount++
+            if (cleanScanCount >= CLEAN_LIFT_SCANS) {
+                cleanScanCount = 0
+                coverEpisodeActive = false
+                Handler(Looper.getMainLooper()).post { removeLocalizedOverlay() }
+            }
         }
     }
 
@@ -359,6 +397,46 @@ class BulwarkAccessibilityService : AccessibilityService() {
     private val regionHandler = Handler(Looper.getMainLooper())
     private val liftRegionOverlay = Runnable { removeLocalizedOverlay() }
 
+    private val audioManager by lazy {
+        getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+    }
+    private var audioFocusRequest: android.media.AudioFocusRequest? = null
+
+    /**
+     * Silence the offending media WHILE a localized cover is up. Covering an adult
+     * video must stop its SOUND too — not just hide the picture — so we request
+     * EXCLUSIVE-transient audio focus, which pauses the foreground player (any app
+     * that respects focus, e.g. a video). Idempotent while held; released by
+     * [restoreAudio] when the cover lifts.
+     */
+    private fun muteOffendingAudio() {
+        if (audioFocusRequest != null) return
+        runCatching {
+            val attrs = android.media.AudioAttributes.Builder()
+                .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MOVIE)
+                .build()
+            val req = android.media.AudioFocusRequest.Builder(
+                android.media.AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE,
+            ).setAudioAttributes(attrs).build()
+            // Only record the request as HELD when focus was actually granted —
+            // otherwise a covered video would stay audible AND every refresh would
+            // early-return (non-null) without retrying. On failure we leave it null
+            // so the next overlay tick tries again.
+            if (audioManager.requestAudioFocus(req) ==
+                android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+            ) {
+                audioFocusRequest = req
+            }
+        }
+    }
+
+    /** Release the audio focus when the cover lifts so media may resume. */
+    private fun restoreAudio() {
+        audioFocusRequest?.let { req -> runCatching { audioManager.abandonAudioFocusRequest(req) } }
+        audioFocusRequest = null
+    }
+
     /**
      * Cover ONLY [regionPx] (in frame-pixel coordinates) with an opaque
      * `TYPE_ACCESSIBILITY_OVERLAY`, leaving the rest of the screen visible and
@@ -417,6 +495,9 @@ class BulwarkAccessibilityService : AccessibilityService() {
                     wm.updateViewLayout(view, lp)
                 }
             }
+            // Stop the offending media's SOUND too (covering an adult video must
+            // silence it, not just hide the picture). Idempotent while held.
+            muteOffendingAudio()
             // Self-heal: lift the cover if no later frame refreshes it (content
             // scrolled away and no clean frame arrived to clear it explicitly).
             // Cancel the PRIOR pending removal first so a refresh of a still-
@@ -430,6 +511,12 @@ class BulwarkAccessibilityService : AccessibilityService() {
         regionHandler.removeCallbacks(liftRegionOverlay)
         regionOverlay?.let { v -> runCatching { (getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(v) } }
         regionOverlay = null
+        // End the episode (a safety-TTL lift also resets, so the next cover
+        // re-alerts and the clean streak starts fresh).
+        coverEpisodeActive = false
+        cleanScanCount = 0
+        // Cover lifted → let media resume.
+        restoreAudio()
     }
 
     /** Real display size in pixels (incl. system bars) — the frame `takeScreenshot`
@@ -487,10 +574,16 @@ class BulwarkAccessibilityService : AccessibilityService() {
         /** Minimum gap between screen-frame scans (battery/CPU + OS rate-limit). */
         private const val OCR_INTERVAL_MS = 4000L
 
-        /** Lift a localized image cover after this long if no later frame refreshes
-         *  it (content scrolled away) — a safety net; the next clean frame lifts it
-         *  explicitly. Longer than the scan interval so a still image stays covered. */
-        private const val REGION_OVERLAY_TTL_MS = 6000L
+        /** Consecutive CLEAN scans required before lifting a localized cover. The
+         *  cover lifts on sustained-clean (content gone), NOT on one noisy frame —
+         *  hysteresis that stops the cover flickering/vanishing while the offending
+         *  content is still on screen. ~CLEAN_LIFT_SCANS × OCR_INTERVAL_MS of clean. */
+        private const val CLEAN_LIFT_SCANS = 2
+
+        /** SAFETY-net auto-lift: clears a stuck cover only if scans stop entirely
+         *  (e.g. no more accessibility events). The normal lift is the clean-scan
+         *  hysteresis above; this is deliberately long so it never causes a flicker. */
+        private const val REGION_OVERLAY_TTL_MS = 30000L
         // Apps the network can't read (E2E / cert-pinned) → on-device capture path.
         private val MONITORED = setOf(
             "com.whatsapp",
