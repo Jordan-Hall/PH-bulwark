@@ -72,13 +72,26 @@ network path uses** — never a new model, never an LLM, all FOSS:
 
 1. **Text-OCR → grooming:** add `tesseract4android` + an `Ocr` engine; on a
    throttled `takeScreenshot()`, OCR → existing `analyzeText` grooming path.
-   (View-tree text path already lives.)
+   (View-tree text path already lives.) **DONE.**
 2. **Image NSFW (full-frame):** score the screenshot with the ONNX classifier;
    on a hit, cover with a single full-frame-region overlay (coarse) + alert.
+   **DONE (2026-06-13)** — folded into increment 3's localized path: the
+   `Nsfw` classifier (`co.predatorhunters.bulwark.nsfw`, ONNX Runtime MIT +
+   the bundled Apache-2.0 model, NNAPI-or-CPU, fail-OPEN) scores the frame.
 3. **Localized tiled cover-up:** N×N tiling, flagged-tile bounding box + margin,
-   tracking accessibility overlay (the spec above).
+   tracking accessibility overlay (the spec above). **DONE (2026-06-13)** —
+   `Nsfw.localize` tiles the frame (`TILE_GRID`=4, `TILE_MARGIN`=1) and the
+   `AccessibilityService.showLocalizedOverlay` covers ONLY the flagged region
+   (frame-px → display-px scaled, explicit TOP|LEFT origin), lifting on the next
+   clean frame / a TTL. The frame scan now fires on EVERY throttled tick (not
+   only when the view-tree text is empty) so adult images on text-bearing chat /
+   feed screens are scored; OCR still runs only when the tree exposed no text.
+   In-memory only — frame + every tile crop recycled, nothing persisted.
 4. **Tuning + device validation** on the Pixel: thresholds, tile count, tick
-   cadence, battery, overlay UX; CSAM path end-to-end.
+   cadence, battery, overlay UX; CSAM path end-to-end. **NEXT** (runtime
+   behaviour — tile accuracy, perf, overlay placement — is device-validated
+   here; the classifier emits ONE probability so CSAM-specific reporting rides
+   the separate engine hash/report path, not this single-score classifier).
 
 All four reuse the shipped FOSS engines (`bulwark-text`, `bulwark-vision`,
 Tesseract) — no new models, no proprietary SDK, no VPN dependency.
