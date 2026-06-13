@@ -200,13 +200,27 @@ impl AlertRelay for AlertRelayService {
         let reached = self.hub.publish(event.clone());
 
         match &self.sink {
-            // SMTP configured: dedupe/digest + e-mail, return its ack.
-            Some(sink) => sink
-                .raise(event)
-                .await
-                .map(Response::new)
-                .map_err(|e| Status::internal(e.to_string())),
-            // No SMTP sink: the broadcast fan-out is the delivery path. Ack as
+            // A sink (email and/or UnifiedPush) is configured: it is ONE delivery
+            // path, the live Review stream is ANOTHER. Combine them — a guardian
+            // streaming right now received the alert even if the sink delivered to
+            // nobody (e.g. the UnifiedPush registry is empty, or SMTP deduped it).
+            // Returning only the sink's ack would mislabel a stream-delivered alert
+            // as undelivered.
+            Some(sink) => {
+                let mut ack = sink
+                    .raise(event)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?;
+                if reached > 0 && !ack.delivered {
+                    ack.delivered = true;
+                    ack.detail = format!(
+                        "{} + fanned out to {reached} guardian stream(s)",
+                        ack.detail
+                    );
+                }
+                Ok(Response::new(ack))
+            }
+            // No sink: the broadcast fan-out is the delivery path. Ack as
             // delivered iff at least one guardian stream received it.
             None => Ok(Response::new(AlertAck {
                 alert_id: event.alert_id,
@@ -223,17 +237,32 @@ impl AlertRelay for AlertRelayService {
     ) -> Result<Response<AlertAckBatch>, Status> {
         let batch = req.into_inner();
 
-        // Fan every event out to subscribed guardian Review streams.
+        // Fan every event out to subscribed guardian Review streams, remembering
+        // how many streams each alert reached so a sink ack can be upgraded the
+        // same way single raise_alert does (stream delivery is a real path).
+        let mut reached: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         for ev in &batch.events {
-            self.hub.publish(ev.clone());
+            let n = self.hub.publish(ev.clone());
+            *reached.entry(ev.alert_id.clone()).or_default() += n;
         }
 
         match &self.sink {
-            Some(sink) => sink
-                .raise_batch(batch)
-                .await
-                .map(Response::new)
-                .map_err(|e| Status::internal(e.to_string())),
+            Some(sink) => {
+                let mut resp = sink
+                    .raise_batch(batch)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?;
+                for ack in &mut resp.acks {
+                    if !ack.delivered && reached.get(&ack.alert_id).copied().unwrap_or(0) > 0 {
+                        let n = reached[&ack.alert_id];
+                        ack.delivered = true;
+                        ack.detail =
+                            format!("{} + fanned out to {n} guardian stream(s)", ack.detail);
+                    }
+                }
+                Ok(Response::new(resp))
+            }
             None => {
                 let acks = batch
                     .events

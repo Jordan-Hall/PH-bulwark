@@ -138,8 +138,14 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(not(feature = "push"))]
     let (alert_sink, hub) = (email_sink, None::<bulwark_server::AlertHub>);
 
-    // PUSH build: build the hub HERE so the FCM fan-out sink can read its live
-    // push_targets at raise time; compose email + push best-effort.
+    // PUSH build: build the hub HERE so the UnifiedPush fan-out sink can read its
+    // live push_targets at raise time; compose email + push best-effort.
+    //
+    // UnifiedPush needs NO server-side config (no project id, no service account,
+    // no OAuth) — it just HTTP-POSTs the redacted payload to whatever guardian
+    // endpoint URLs are registered. So the sink is always available under the
+    // `push` feature and fans to whatever the registry currently holds (an empty
+    // registry is a successful no-op).
     #[cfg(feature = "push")]
     let (alert_sink, hub) = {
         let hub = match &cfg.state_dir {
@@ -148,25 +154,16 @@ async fn main() -> anyhow::Result<()> {
             }
             None => bulwark_server::AlertHub::new(),
         };
-        let push_sink: Option<Arc<dyn bulwark_alert::AlertSink>> =
-            match bulwark_alert::FcmConfig::from_env().map_err(|e| anyhow::anyhow!(e))? {
-                Some(fcm) => {
-                    let reg = Arc::new(bulwark_server::relay::HubTokenRegistry::new(hub.clone()));
-                    let sink = bulwark_alert::FcmFanoutSink::new(&fcm, reg)
-                        .map_err(|e| anyhow::anyhow!(e))?;
-                    tracing::info!("FCM push fan-out sink configured");
-                    Some(Arc::new(sink))
-                }
-                None => {
-                    tracing::info!("no FCM push sink (BULWARK_FCM_PROJECT_ID unset)");
-                    None
-                }
-            };
-        let combined: Option<Arc<dyn bulwark_alert::AlertSink>> = match (email_sink, push_sink) {
-            (Some(e), Some(p)) => Some(Arc::new(bulwark_alert::CompositeSink::new(vec![e, p]))),
-            (Some(e), None) => Some(e),
-            (None, Some(p)) => Some(p),
-            (None, None) => None,
+        let reg = Arc::new(bulwark_server::relay::HubTokenRegistry::new(hub.clone()));
+        let push_sink: Arc<dyn bulwark_alert::AlertSink> = Arc::new(
+            bulwark_alert::UnifiedPushFanoutSink::new(reg).map_err(|e| anyhow::anyhow!(e))?,
+        );
+        tracing::info!("UnifiedPush fan-out sink configured (self-hosted; no Google/Apple)");
+        let combined: Option<Arc<dyn bulwark_alert::AlertSink>> = match email_sink {
+            Some(e) => Some(Arc::new(bulwark_alert::CompositeSink::new(vec![
+                e, push_sink,
+            ]))),
+            None => Some(push_sink),
         };
         (combined, Some(hub))
     };

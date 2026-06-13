@@ -100,7 +100,8 @@ class BulwarkVpnService : VpnService() {
      * Surface flagged alerts to the guardian. Polls the Rust core for the next
      * alert and posts each as a notification (safe evidence + approve/deny) via
      * [AlertNotifier]. This is the same-device path; remote delivery to a separate
-     * parent device is via FCM (see docs/design/parent-notifications.md).
+     * parent device is via self-hosted UnifiedPush (FOSS; no Google/Apple — see
+     * docs/design/parent-notifications.md).
      */
     private fun startAlertPoller() {
         if (polling) return

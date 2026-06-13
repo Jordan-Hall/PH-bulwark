@@ -33,7 +33,8 @@ docker compose -f deploy/docker/docker-compose.yml exec \
 - **TLS / mTLS:** the default image serves plaintext (dev). For production, supply the
   server's cert material (mount certs + configure via `bulwark-core` config) or run
   behind a TLS-terminating proxy. See `docs/deployment.md` §4.
-- **FCM push:** rebuild with `--build-arg FEATURES=push`, set `BULWARK_FCM_*`, and mount
-  the service-account key (see the compose file).
+- **Self-hosted UnifiedPush:** rebuild with `--build-arg FEATURES=push` (FOSS; no
+  Google/Apple, no creds/config — the server POSTs redacted alerts to whatever
+  guardian endpoint URLs are registered; see the compose file).
 
 See `docs/deployment.md` for the full env-var reference and production checklist.

@@ -122,8 +122,10 @@ object RustBridge {
      */
     external fun submitReviewDecision(alertId: String, approve: Boolean)
 
-    /** Register this parent device's push token so the cluster can deliver alerts
-     *  remotely via FCM. No-op when the parent reviews on the same device. */
+    /** Register this parent device's self-hosted UnifiedPush endpoint URL so the
+     *  cluster can deliver alerts remotely (FOSS; no Google/Apple). The URL is
+     *  supplied by the device's UnifiedPush distributor (e.g. ntfy). No-op when
+     *  the parent reviews on the same device. */
     external fun registerParentPushToken(token: String)
 
     /**

@@ -66,8 +66,9 @@ jobs:
         continue-on-error: true
       - run: cargo build -p bulwark-ui --features llm-explain
       - run: cargo build -p bulwark-cluster --features gossip,quorum
-      # FCM push fan-out (guardian alerts to a phone) — keep this path compiling
-      # + tested so it can't rot; it's off by default in the server build.
+      # Self-hosted UnifiedPush fan-out (guardian alerts to a phone; FOSS, no
+      # Google/Apple) — keep this path compiling + tested so it can't rot; it's
+      # off by default in the server build.
       - run: cargo build -p bulwark-alert --features push
       - run: cargo test  -p bulwark-alert --features push
       - run: cargo build -p bulwark-server --features push

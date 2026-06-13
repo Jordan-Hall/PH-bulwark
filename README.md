@@ -11,8 +11,9 @@ Free / open-source, Rust **client/server** child-safety system. It blocks
 non-child-safe content **in real time** (not whole-site blocking), detects signs of
 grooming in text, retains blocked clips for guardian review, raises tamper alerts if
 protection is disabled, and notifies a guardian (email; push is feature-gated and
-needs FCM credentials) whenever it intervenes or suspects grooming. Thin device
-clients; a horizontally-scalable analysis backend.
+uses self-hosted UnifiedPush — FOSS, no Google/Apple, no credentials) whenever it
+intervenes or suspects grooming. Thin device clients; a horizontally-scalable
+analysis backend.
 
 > **Status (2026-06):** all crates **implemented + compile-verified in CI**
 > (`.github/workflows/ci.yml`: clippy + build + test + feature builds + windows-gated

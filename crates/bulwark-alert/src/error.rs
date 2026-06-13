@@ -38,9 +38,10 @@ pub enum AlertError {
     #[error("mail transport error: {0}")]
     Transport(String),
 
-    /// A push-notification backend (FCM, behind the `push` feature) failed to
-    /// mint an OAuth2 token or deliver the message. Alerting is best-effort, so
-    /// callers may choose to log-and-continue on this rather than abort.
+    /// A push-notification backend (self-hosted UnifiedPush, behind the `push`
+    /// feature) failed to POST the redacted payload to the guardian endpoint.
+    /// Alerting is best-effort, so callers may choose to log-and-continue on
+    /// this rather than abort.
     #[cfg(feature = "push")]
     #[error("push delivery error: {0}")]
     Push(String),

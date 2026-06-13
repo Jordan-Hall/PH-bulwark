@@ -6,9 +6,9 @@ license.workspace = true
 
 [features]
 # OFF by default so the normal build (email-only) is completely unchanged.
-# Enables the Firebase Cloud Messaging (FCM HTTP v1) push AlertSink.
+# Enables the self-hosted UnifiedPush push AlertSink (FOSS; no Google/Apple).
 default = []
-push = ["dep:reqwest", "dep:jsonwebtoken", "dep:serde_json"]
+push = ["dep:reqwest", "dep:serde_json"]
 
 [dependencies]
 bulwark-proto = { path = "../bulwark-proto" }
@@ -21,7 +21,6 @@ tracing.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 
-# --- push feature (FCM HTTP v1) — optional, gated by `push` -----------------
+# --- push feature (self-hosted UnifiedPush) — optional, gated by `push` -----
 reqwest = { workspace = true, optional = true }
-jsonwebtoken = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }

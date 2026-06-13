@@ -193,7 +193,8 @@ For production self-hosting:
 - Prefer TLS. With a publicly-trusted cert (e.g. Let's Encrypt) no pin is needed.
   Set `BULWARK_CLUSTER_CA` in the guardian app only when using a private CA.
 - Keep `BULWARK_STATE_DIR` durable, backed up, and private.
-- Provision SMTP/FCM only if alerts need email/push fan-out.
+- Provision SMTP only if alerts need email fan-out. Self-hosted UnifiedPush push
+  (FOSS; no Google/Apple) needs no server-side creds — just build `--features push`.
 - Client heavy-media offload still needs client mTLS material; alert/review can
   use the normal guardian token path.
 

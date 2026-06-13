@@ -20,9 +20,11 @@
 //!   `docs/security/data-handling.md` §1–2 (class C0 must never leave the box).
 //! - **No backhaul.** In the default build the only outbound connection is to
 //!   the configured SMTP server. No telemetry, no analytics, no third-party
-//!   endpoint. The opt-in `push` feature ([`push::FcmPushSink`], off by
-//!   default) adds exactly one more endpoint — Firebase Cloud Messaging — and
-//!   even then transmits only the same redacted scalar fields (never media).
+//!   endpoint. The opt-in `push` feature ([`push::UnifiedPushSink`], off by
+//!   default) adds exactly one more endpoint — a self-hosted
+//!   [UnifiedPush](https://unifiedpush.org) distributor URL (FOSS; no
+//!   Google/Apple) — and even then transmits only the same redacted scalar
+//!   fields (never media).
 //! - **No AI / ML.** Pure deterministic rendering + rate-limiting.
 //! - **No hardcoded secrets.** SMTP credentials come from
 //!   [`config::SmtpAuth::from_env`] / the OS keystore at runtime and are never
@@ -64,8 +66,7 @@ pub use config::{AlertConfig, RateLimitConfig, SmtpAuth, SmtpConfig, TlsMode};
 pub use error::{AlertError, Result};
 #[cfg(feature = "push")]
 pub use push::{
-    FcmConfig, FcmFanoutSink, FcmHttpTransport, FcmPushSink, PushTransport, ServiceAccount,
-    TokenRegistry,
+    PushTransport, TokenRegistry, UnifiedPushFanoutSink, UnifiedPushSink, UnifiedPushTransport,
 };
 pub use sink::{CompositeSink, EmailAlertSink};
 pub use transport::{MailTransport, OutgoingMail, SmtpTransport};

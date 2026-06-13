@@ -63,7 +63,8 @@ substring-matches on (`"GROOMING"`, `"CSAM"`). The `redacted_context` body is th
 **content-free policy reason** — the bridge never forwards raw captured text.
 `startVpn` boxes a session and returns its pointer as the opaque `jlong` handle;
 `stopVpn` frees it. The intercept loop, alert queue, allowlist persistence and
-FCM delivery are owned by other crates (bulwark-net / bulwark-alert / bulwark-store /
+self-hosted UnifiedPush delivery (FOSS; no Google/Apple) are owned by other crates
+(bulwark-net / bulwark-alert / bulwark-store /
 bulwark-server); those four exports validate input and no-op safely until that
 wiring lands. Every call fails **open** (SAFE / ALLOW or no-op) on bad input.
 

@@ -1156,9 +1156,11 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_submitRev
 
 /// `external fun registerParentPushToken(token: String)`
 ///
-/// Register this parent device's FCM push token so the cluster can deliver alerts
-/// remotely. Push delivery is owned by the server/alert crates; this bridge only
-/// validates the token and no-ops (same-device review needs no token).
+/// Register this parent device's self-hosted UnifiedPush endpoint URL (FOSS; no
+/// Google/Apple) so the cluster can deliver alerts remotely. The URL comes from
+/// the device's UnifiedPush distributor. Push delivery is owned by the
+/// server/alert crates; this bridge only validates the value and no-ops
+/// (same-device review needs no endpoint).
 ///
 /// # Safety
 /// JNI entry point. `token` is null-/UTF-8-validated; a bad value is ignored.
@@ -1168,8 +1170,8 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_registerP
     _class: JClass,
     token: JString,
 ) {
-    let _token = jstring_to_string(&mut env, &token).unwrap_or_default();
-    // No-op until remote FCM delivery is wired through this bridge.
+    let _endpoint = jstring_to_string(&mut env, &token).unwrap_or_default();
+    // No-op until remote UnifiedPush delivery is wired through this bridge.
 }
 
 /// `external fun reportTamper(kind: Int)`
