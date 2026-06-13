@@ -1,25 +1,3 @@
-//! The single source-of-truth stylesheet, injected once by `app::App`.
-//!
-//! DESIGN LANGUAGE — "vigilant frontier lab". Two brand inputs are synthesised:
-//! the gritty Predator Hunters identity (red-on-black, serious, since 2017) and
-//! the Bulwark Shield mark (lime-green + orange figures on navy). Result:
-//!   * a deep navy-black stage,
-//!   * an ember RED→ORANGE signature gradient (Predator Hunters intensity — used
-//!     for headlines, primary actions, brand moments),
-//!   * lime-GREEN reserved as the "protected / active" signal (the protective
-//!     tech — status dots, capability icons, telemetry).
-//! "We fight (ember) to protect (green)."
-//!
-//! Display = Fraunces (optical serif, investigative gravity); UI/body = Hanken
-//! Grotesk; technical labels / telemetry = Spline Sans Mono.
-//!
-//! LIGHT + DARK: every theme-dependent colour is a CSS variable on `:root`
-//! (dark default) and overridden under `.theme-root[data-theme="light"]`, so
-//! the whole site recolours from one attribute toggled by the nav switch.
-//! Atmosphere is layered (aurora + engineering grid + grain + vignette);
-//! scroll-driven reveals via `animation-timeline: view()`; reduced-motion honoured.
-
-pub const STYLE: &str = r#"
 @import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,400;1,9..144,500&family=Hanken+Grotesk:wght@400;500;600;700&family=Spline+Sans+Mono:wght@400;500;600&display=swap');
 
 :root {
@@ -425,4 +403,63 @@ em.em { font-style: italic; color: var(--head); }
   .grid-4, .stats { grid-template-columns: 1fr; }
   .footer-top { grid-template-columns: 1fr; }
 }
-"#;
+
+/* ===================================================================
+   IN-PLACE FILTER MOCK — a browser whose unsafe tiles are replaced in
+   place (page still works), shown next to the full-block phone.
+   =================================================================== */
+.mock-pair { display: grid; grid-template-columns: 1.35fr .85fr; gap: clamp(20px,4vw,40px); align-items: center; }
+.mock-cap { font-family: var(--mono); font-size: .66rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin: 14px 0 0; text-align: center; }
+.browser { border: 1px solid var(--hair-strong); border-radius: var(--r-md); overflow: hidden; background: var(--card-bg); box-shadow: 0 34px 80px -48px rgba(0,0,0,.7); }
+.browser-bar { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--hair); background: var(--bg-2); }
+.browser-bar .dots { display: flex; gap: 6px; flex: none; }
+.browser-bar .dots i { width: 10px; height: 10px; border-radius: 50%; background: var(--hair-strong); }
+.browser-url { flex: 1; font-family: var(--mono); font-size: .7rem; color: var(--muted); background: var(--bg); border: 1px solid var(--hair); border-radius: 999px; padding: 5px 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; padding: 14px; }
+.tile { aspect-ratio: 4 / 3; border-radius: 8px; background: linear-gradient(135deg, rgba(143,210,74,.12), rgba(111,168,208,.12)); border: 1px solid var(--hair); }
+.tile.blocked { position: relative; display: grid; place-items: center; background: var(--bg-2); border: 1px dashed rgba(143,210,74,.45); color: var(--green-2); }
+.tile.blocked svg { width: 20px; height: 20px; opacity: .9; }
+.tile.blocked::after { content: "Filtered"; position: absolute; bottom: 7px; font-family: var(--mono); font-size: .5rem; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+@media (max-width: 940px) { .mock-pair { grid-template-columns: 1fr; gap: 28px; } .mock-pair .phone { max-width: 240px; } }
+
+/* ===================================================================
+   MOBILE NAV + SPACING (mobile-first cleanup)
+   =================================================================== */
+.nav-burger { display: none; }
+.nav-menu { display: none; }
+
+@media (max-width: 860px) {
+  /* collapse the inline links + CTA into a hamburger menu */
+  .nav-links { display: none; }
+  .nav-cta { display: none; }
+  .nav-burger { display: inline-flex; }
+  .nav-inner { padding: 9px 10px 9px 16px; }
+
+  .nav-menu {
+    display: flex; flex-direction: column; gap: 4px;
+    width: calc(100% - 2*var(--gut)); max-width: var(--maxw); margin: 8px auto 0;
+    padding: 10px; box-sizing: border-box;
+    background: var(--nav-bg); border: 1px solid var(--hair); border-radius: var(--r-lg);
+    backdrop-filter: blur(16px) saturate(140%); -webkit-backdrop-filter: blur(16px) saturate(140%);
+    box-shadow: 0 26px 54px -28px rgba(0,0,0,.9);
+    animation: menu-in .22s cubic-bezier(.2,.8,.2,1) both;
+  }
+  .nav-menu .nav-link { display: flex; align-items: center; width: 100%; padding: 14px 16px; font-size: 1.02rem; border-radius: var(--r-sm); }
+  .nav-menu-cta { width: 100%; justify-content: center; margin-top: 6px; padding: 14px; }
+}
+@keyframes menu-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+
+@media (max-width: 720px) {
+  /* kill the oversized top gaps and tighten the rhythm on phones */
+  .hero { padding: 22px 0 40px; }
+  .hero-grid { gap: 26px; }
+  .hero h1 { font-size: clamp(2.2rem, 8.6vw, 3.1rem); line-height: 1.06; }
+  .hero-lede { font-size: 1.06rem; }
+  .hero-meta { margin-top: 30px; padding-top: 20px; gap: 18px 26px; }
+  .section { padding: 52px 0; }
+  .page-head { padding: 92px 0 18px; }
+  .sec-head { margin-bottom: 26px; }
+  .statement { font-size: clamp(1.5rem, 6.6vw, 2rem); }
+  .cta { padding: 32px 20px; }
+  .stat { padding: 24px 20px; }
+}

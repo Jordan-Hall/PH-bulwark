@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Predator Hunters Research is an independent child-safety AI lab. We build privacy-first models that run on a child's own phone and store nothing." />
+    <!-- Critical CSS, inline in the head so the first paint is already dark and
+         sane (no flash of unstyled content). The full stylesheet (assets/main.css)
+         is loaded by the app and takes over the moment it arrives. -->
+    <style>
+      html, body { margin: 0; background: #08111B; color: #EAF2F7;
+        font-family: 'Hanken Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif;
+        -webkit-font-smoothing: antialiased; }
+      svg { width: 24px; height: 24px; }
+      img { max-width: 100%; display: block; }
+      #main { min-height: 100dvh; }
+      /* hold content for a beat so it appears already-styled, then reveal */
+      #main:empty { }
+    </style>
+  </head>
+  <body>
+    <div id="main"></div>
+  </body>
+</html>

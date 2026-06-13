@@ -19,7 +19,6 @@ mod assets;
 mod components;
 mod icons;
 mod pages;
-mod theme;
 
 fn main() {
     dioxus::launch(app::App);
