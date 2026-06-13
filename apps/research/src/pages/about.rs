@@ -9,7 +9,7 @@ use crate::icons::svg;
 /// (year, event)
 const TIMELINE: [(&str, &str); 4] = [
     ("2017", "Predator Hunters begins as an online decoy operation. We find the adults who go looking for children, hand the evidence to the police, and teach parents what to watch for."),
-    ("2022", "The research lab opens. We start turning years of frontline experience into privacy-first models that run on the child's own phone."),
+    ("2022", "The research lab opens. We start turning years of frontline experience into privacy-first models that run on the child's own devices."),
     ("2025", "The hardest prototype lands. It catches unsafe video and rewrites it in place, blurring or muting only the bad moments while the rest plays on."),
     ("Today", "A smaller frontline team still runs the decoy work, and it still teaches us how offenders really behave. Most of our effort now goes into the lab, heading into staged testing of the first alpha."),
 ];
@@ -43,7 +43,7 @@ pub fn About() -> Element {
                         "We have been at this for nearly ten years. It started on the front line, with decoy operations. Posing as children online to find the adults who go looking for them, gathering the evidence, confronting them when it is safe to do so, and holding them for the police. A smaller team still does that work today. It is careful, draining work, and it taught us something no dataset ever could. We watched, first-hand, how grooming begins, how it escalates, and how an offender will move a child from one app to the next to avoid being caught."
                     }
                     p {
-                        "That is the ground the lab is built on. We took what we had learned and started building software, so the same patterns could be caught early, on a child's own phone, without the surveillance so much "
+                        "That is the ground the lab is built on. We took what we had learned and started building software, so the same patterns could be caught early, on a child's own devices, without the surveillance so much "
                         strong { "safety" }
                         " software leans on. Two lines have never moved. We never name anyone before they are charged, and we hold any footage back until there is a conviction, censored where it is needed and shown only when it genuinely helps people keep children safe."
                     }

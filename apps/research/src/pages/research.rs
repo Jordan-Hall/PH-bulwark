@@ -27,7 +27,7 @@ const MODELS: [(&str, &str, &str, &str, &str, &str); 6] = [
         "03",
         "Reading the screen in encrypted apps",
         "cpu",
-        "Plain OCR, running on the phone, reads the text already drawn on screen. That lets it catch grooming even inside end-to-end-encrypted chats. It never logs keystrokes or passwords, and the text never leaves the device.",
+        "Plain OCR, running on the device, reads the text already drawn on screen. That lets it catch grooming even inside end-to-end-encrypted chats. It never logs keystrokes or passwords, and the text never leaves the device.",
         "live",
         "In alpha",
     ),
@@ -35,7 +35,7 @@ const MODELS: [(&str, &str, &str, &str, &str, &str); 6] = [
         "04",
         "Video detection and in-place rewriting",
         "layers",
-        "Our flagship alpha. It spots unsafe video as it plays and rewrites it on the fly, blurring or muting only the moments that are a problem and re-packaging the same stream so the rest plays without a break. It runs on the phone and keeps no raw content.",
+        "Our flagship alpha. It spots unsafe video as it plays and rewrites it on the fly, blurring or muting only the moments that are a problem and re-packaging the same stream so the rest plays without a break. It runs on the device and keeps no raw content.",
         "live",
         "In alpha",
     ),
@@ -51,7 +51,7 @@ const MODELS: [(&str, &str, &str, &str, &str, &str); 6] = [
         "06",
         "Edge distillation",
         "bolt",
-        "The work underneath all of it. We shrink every model so it runs offline on a mid-range phone, because protection that needs the cloud is protection an adult can switch off.",
+        "The work underneath all of it. We shrink every model so it runs offline on everyday hardware, from a mid-range phone to an ageing laptop, because protection that needs the cloud is protection an adult can switch off.",
         "research",
         "Research",
     ),
@@ -59,9 +59,9 @@ const MODELS: [(&str, &str, &str, &str, &str, &str); 6] = [
 
 /// (term, definition) — what we are aiming for.
 const AIMS: [(&str, &str); 4] = [
-    ("A phone a parent can trust", "One a parent can hand a child knowing the worst is caught, without anyone watching over the child's shoulder."),
-    ("Cover the whole phone", "Text, images, video and audio, across apps and the web, all judged on the device."),
-    ("Small enough for any phone", "Models light and fast enough to run on a cheap handset, and given away where giving them away protects more children."),
+    ("A device a parent can trust", "Something a parent can hand a child, or set up on the family computer, knowing the worst is caught, without anyone watching over the child's shoulder."),
+    ("Cover every device, every platform", "Text, images, video and audio, across apps and the web, judged on the device itself, built to run on Windows, Mac, Android, iOS, iPad and tablets, not just the phone."),
+    ("Small enough for any device", "Models light and fast enough to run on a cheap phone or an ageing laptop, and given away where giving them away protects more children."),
     ("A standard others can use", "We publish how the work is done and open the tooling, so good protection does not stay locked inside one company."),
 ];
 
@@ -82,7 +82,7 @@ pub fn Research() -> Element {
                     span { class: "grad-text", "Keep none of the child." }
                 }
                 p { class: "lede rise d3",
-                    "A small family of focused models, each doing one safety job well. Most already run in our alpha. The rest are still in the lab. They run on the phone, and none of them keep raw content."
+                    "A small family of focused models, each doing one safety job well. Most already run in our alpha. The rest are still in the lab. They run on the device itself, and none of them keep raw content."
                 }
             }
         }
@@ -125,7 +125,7 @@ pub fn Research() -> Element {
                         "Rules come first and the model comes second. A plain set of rules handles the obvious cases. The model is the thin layer on top for the rest. No large language model sits in the live path, which keeps the work fast, cheap to run, and easy to check."
                     }
                     p {
-                        "We tune for recall on real danger rather than for a leaderboard, and we test against the way predators actually behave: keeping secrets, moving a child to another app, cutting them off from the people around them. Then we distill everything down small enough to run offline on a mid-range phone."
+                        "We tune for recall on real danger rather than for a leaderboard, and we test against the way predators actually behave: keeping secrets, moving a child to another app, cutting them off from the people around them. Then we distill everything down small enough to run offline on everyday hardware, phones and laptops alike."
                     }
                     p {
                         strong { "Nothing a child sends is ever used to train, and no raw content is kept." }

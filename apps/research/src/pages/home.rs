@@ -27,7 +27,7 @@ const HIGHLIGHTS: [(&str, &str, &str, &str, &str, &str); 4] = [
         "03",
         "Reading the screen in encrypted apps",
         "cpu",
-        "Plain OCR, running on the phone, reads the text already on screen. That lets it catch grooming even inside end-to-end-encrypted chats. It never logs keystrokes or passwords, and nothing it reads leaves the device.",
+        "Plain OCR, running on the device, reads the text already on screen. That lets it catch grooming even inside end-to-end-encrypted chats. It never logs keystrokes or passwords, and nothing it reads leaves the device.",
         "live",
         "In alpha",
     ),
@@ -46,7 +46,7 @@ const PRINCIPLES: [(&str, &str, &str); 4] = [
     (
         "cpu",
         "On device by default",
-        "The models run on the child's own phone. An optional filter can route traffic through our servers or one you host yourself, never a third party.",
+        "The models run on the child's own device, not someone else's server, and are built for the platforms a family actually uses, from Android and Windows to iPhone, iPad and Mac. An optional filter can route traffic through our servers or one you host yourself, never a third party.",
     ),
     (
         "eye-off",
@@ -71,7 +71,7 @@ const SYSTEMS: [(&str, &str, &str, &str, &str); 2] = [
         "camera",
         "PH Camera",
         "Ships first",
-        "A camera that will not take or keep an unsafe photo. Every frame is checked on the phone and thrown away. The app has no internet permission, so nothing it sees can leave the device.",
+        "A camera that will not take or keep an unsafe photo. Every frame is checked on the device and thrown away. The app has no internet permission, so nothing it sees can leave it.",
         "Alpha",
     ),
     (
@@ -88,7 +88,7 @@ pub fn Home() -> Element {
     rsx! {
         crate::components::Seo {
             title: "Predator Hunters Research — child-safety AI",
-            description: "Independent child-safety AI lab. We build privacy-first models that run on a child's own phone, catch grooming and unsafe content, and keep no raw messages or images.",
+            description: "Independent child-safety AI lab. We build privacy-first models that run on a child's own devices across Windows, Mac, Android, iOS and iPad, catch grooming and unsafe content, and keep no raw messages or images.",
             path: "/",
             image: "/og/home.png",
         }
@@ -106,7 +106,7 @@ pub fn Home() -> Element {
                             span { class: "grad-text", "without watching them." }
                         }
                         p { class: "hero-lede rise d3",
-                            "Our models run on a child's own phone. They catch unsafe content and the way predators talk, and flag it to a parent. We keep no raw messages or images, only a short redacted note of what happened."
+                            "Our models run on a child's own devices, the phone, tablet and computer a family already uses. They catch unsafe content and the way predators talk, and flag it to a parent. We keep no raw messages or images, only a short redacted note of what happened."
                         }
                         div { class: "hero-actions rise d4",
                             Link { class: "btn btn-primary", to: Route::Research {},
@@ -125,7 +125,7 @@ pub fn Home() -> Element {
                 }
                 dl { class: "hero-meta rise d5",
                     div { dt { "On the front line since" } dd { "2017" } }
-                    div { dt { "Where it runs" } dd { "On the phone" } }
+                    div { dt { "Where it runs" } dd { "Every device" } }
                     div { dt { "Raw content kept" } dd { "0 bytes" } }
                     div { dt { "Methods" } dd { "Open" } }
                 }
@@ -146,7 +146,7 @@ pub fn Home() -> Element {
                             "Most online-safety tools watch everything a child does and send it off to a server. We don't want to build that. Our question is harder. Can a model catch real danger while seeing as little as possible, and keeping only what a guardian needs to act on?"
                         }
                         p {
-                            "Four years of work say yes. What we have runs on the phone, raises a short flag a parent can act on, and holds on to nothing it doesn't need."
+                            "Four years of work say yes. What we have runs on the device, raises a short flag a parent can act on, and holds on to nothing it doesn't need."
                         }
                     }
                 }
@@ -306,7 +306,7 @@ pub fn Home() -> Element {
                     div { class: "stat", dt { "2017" } dd { "On the front line since" } }
                     div { class: "stat", dt { "76K" } dd { "People in our community" } }
                     div { class: "stat", dt { span { class: "grad-text", "0" } } dd { "Raw messages or images kept" } }
-                    div { class: "stat", dt { "100%" } dd { "Runs on the phone" } }
+                    div { class: "stat", dt { "100%" } dd { "Runs on the device" } }
                 }
             }
         }

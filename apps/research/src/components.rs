@@ -81,7 +81,7 @@ pub fn SiteFooter() -> Element {
                             span { class: "brand-tag", "Research" }
                         }
                         p { class: "footer-blurb",
-                            "An independent child-safety AI lab. We build small models that run on a child's own phone, catch unsafe content and the way predators talk, and keep no raw messages or images."
+                            "An independent child-safety AI lab. We build small models that run on a child's own devices, across Windows, Mac, Android, iOS and iPad, catch unsafe content and the way predators talk, and keep no raw messages or images."
                         }
                     }
                     div {
@@ -144,7 +144,7 @@ pub fn SiteFooter() -> Element {
                 div { class: "footer-bottom",
                     p { "© 2026 Predator Hunters Research. All rights reserved." }
                     p { class: "legal",
-                        "Independent research and journalism. Our frontline team runs stings and hands evidence to the police; we never name anyone before they are charged, and we hold footage back until there is a conviction. The models run on the phone, and no raw messages or images are kept."
+                        "Independent research and journalism. Our frontline team runs stings and hands evidence to the police; we never name anyone before they are charged, and we hold footage back until there is a conviction. The models run on the device, and no raw messages or images are kept."
                     }
                 }
             }
