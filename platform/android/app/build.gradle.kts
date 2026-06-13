@@ -114,6 +114,14 @@ android {
         noCompress += "onnx"
     }
 
+    // 16 KB page-size packaging: AGP 8.5.0 does NOT 16 KB-zipalign uncompressed
+    // native libs inside the APK, so a `.so` mmap'd from a 4 KB-aligned offset can
+    // fail to load on a 16 KB device even though its ELF LOAD segments are 0x4000.
+    // EXTRACT the libs at install instead (legacy packaging) so they're dlopen'd
+    // from page-aligned files. Combined with the 16 KB ELF alignment, this keeps
+    // the APK loadable on 16 KB devices without an AGP bump.
+    packaging { jniLibs { useLegacyPackaging = true } }
+
     // Release signing is configured ONLY when the keystore is provided via env
     // (CI store-publish job → ANDROID_* secrets). Without it, release stays unsigned
     // and the debug build (used by android.yml) is unaffected — no keystore in repo.

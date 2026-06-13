@@ -70,6 +70,10 @@ android {
     // (no inflater pressure on an 88 MB asset).
     androidResources { noCompress += "onnx" }
 
+    // 16 KB page-size packaging (AGP 8.5.0 won't 16 KB-zipalign in-APK libs):
+    // extract native libs at install so they're dlopen'd from page-aligned files.
+    packaging { jniLibs { useLegacyPackaging = true } }
+
     // Release signing is configured ONLY when the keystore is provided via env
     // (the FOSS release CI — android-release.yml — sets the ANDROID_* secrets).
     // Without it the release stays UNSIGNED and the debug build is unaffected;
