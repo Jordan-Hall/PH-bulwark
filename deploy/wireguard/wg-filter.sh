@@ -46,15 +46,28 @@ exec 200>"$LOCK"
 command -v flock >/dev/null 2>&1 && { flock -w 30 200 || die "another bulwark-wg-filter is running"; }
 
 proxy_listening() {
-  # True iff something is LISTENing on :$TP. ss is in iproute2 (present on the box).
-  ss -lntH "sport = :$TP" 2>/dev/null | grep -q ":$TP\b"
+  # A REACHABLE listener on :$TP — i.e. NOT bound only to loopback. iptables
+  # REDIRECT rewrites the destination to the wg0 interface address, so a
+  # 127.0.0.1-/::1-only listener never receives the redirected flow and would
+  # black-hole every child's 80/443. We require at least one listener on a
+  # non-loopback local address (0.0.0.0 / :: / the wg0 addr). ss is in iproute2.
+  ss -lntH "sport = :$TP" 2>/dev/null | awk '
+    { laddr = $4
+      sub(/:[0-9]+$/, "", laddr)          # strip ":port" (handles [::]:p and a.b.c.d:p)
+      gsub(/^\[|\]$/, "", laddr)           # strip the IPv6 [...] brackets
+      if (laddr !~ /^127\./ && laddr != "::1") found = 1
+    }
+    END { exit found ? 0 : 1 }
+  '
 }
 
 cmd_enable() {
   [ "$TP" -ge 1 ] && [ "$TP" -le 65535 ] || die "bad BULWARK_TPROXY_PORT: $TP"
-  # FAIL-CLOSED preflight: never redirect into a black hole.
-  proxy_listening || die "no listener on :$TP — start the bulwark-net filter proxy \
-(transparent.rs) BEFORE enabling the redirect, or children lose all 80/443"
+  # FAIL-CLOSED preflight: never redirect into a black hole. A loopback-only
+  # listener counts as ABSENT here — REDIRECT can't reach 127.0.0.1/::1.
+  proxy_listening || die "no reachable listener on :$TP — start the bulwark-net filter \
+proxy (transparent.rs) bound to 0.0.0.0:$TP (NOT 127.0.0.1) BEFORE enabling the redirect, \
+or children lose all 80/443"
 
   # net.ipv4.ip_forward is already 1 (wg-peers init sets it); assert, don't fight it.
   [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo 0)" = "1" ] \
@@ -105,7 +118,7 @@ cmd_disable() {
 cmd_status() {
   echo "[wg-filter] interface         : $WG_IF"
   echo "[wg-filter] redirect port     : $TP"
-  echo -n "[wg-filter] proxy listening   : "; proxy_listening && echo "YES" || echo "NO (redirect would black-hole)"
+  echo -n "[wg-filter] proxy listening   : "; proxy_listening && echo "YES (non-loopback)" || echo "NO / loopback-only (redirect would black-hole)"
   echo -n "[wg-filter] nat PREROUTING   : "; iptables -t nat -C PREROUTING -i "$WG_IF" -p tcp -j "$CHAIN" 2>/dev/null && echo "active" || echo "absent"
   echo -n "[wg-filter] QUIC/443 drop    : "; iptables -C FORWARD -i "$WG_IF" -p udp --dport 443 -j DROP 2>/dev/null && echo "active" || echo "absent"
   echo "[wg-filter] nat $CHAIN rules:"
