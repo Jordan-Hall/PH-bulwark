@@ -40,7 +40,12 @@ const LANES: [(&str, &str, &str, &str, &str); 4] = [
 #[component]
 pub fn Contact() -> Element {
     rsx! {
-        dioxus::document::Title { "Contact · Predator Hunters Research" }
+        crate::components::Seo {
+            title: "Contact: work with us | Predator Hunters Research",
+            description: "Work with us. Backers, on-device ML engineers and safeguarding partners helping put privacy-first protective AI on more children's phones.",
+            path: "/contact",
+            image: "/og/contact.png",
+        }
         header { class: "page-head",
             div { class: "wrap",
                 p { class: "eyebrow rise d1", "Contact" }

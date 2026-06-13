@@ -10,7 +10,12 @@ use crate::icons::svg;
 pub fn NotFound(segments: Vec<String>) -> Element {
     let _ = segments;
     rsx! {
-        dioxus::document::Title { "Not found · Predator Hunters Research" }
+        crate::components::Seo {
+            title: "Not found | Predator Hunters Research",
+            description: "That page is not here. Head back to Predator Hunters Research.",
+            path: "/404",
+            image: "/og/home.png",
+        }
         header { class: "page-head",
             div { class: "wrap",
                 p { class: "eyebrow rise d1", "404" }

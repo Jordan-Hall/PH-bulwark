@@ -10,7 +10,12 @@ use crate::icons::svg;
 #[component]
 pub fn Systems() -> Element {
     rsx! {
-        dioxus::document::Title { "Systems · Predator Hunters Research" }
+        crate::components::Seo {
+            title: "Systems: PH Camera and the Shield | Predator Hunters",
+            description: "The apps that carry the models. PH Camera will not take an unsafe photo; the Shield filters unsafe content in place across the whole device.",
+            path: "/systems",
+            image: "/og/systems.png",
+        }
         header { class: "page-head",
             div { class: "wrap",
                 p { class: "eyebrow rise d1", "Systems" }

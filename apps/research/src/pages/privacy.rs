@@ -45,7 +45,12 @@ const POLICY: [(&str, &str); 8] = [
 #[component]
 pub fn Privacy() -> Element {
     rsx! {
-        dioxus::document::Title { "Privacy · Predator Hunters Research" }
+        crate::components::Seo {
+            title: "Privacy | Predator Hunters Research",
+            description: "On-device by default; the optional filtering VPN routes to our own or a self-hosted server, never a third party; no raw messages or media are stored.",
+            path: "/privacy",
+            image: "/og/privacy.png",
+        }
         header { class: "page-head",
             div { class: "wrap",
                 p { class: "eyebrow rise d1", "Privacy" }

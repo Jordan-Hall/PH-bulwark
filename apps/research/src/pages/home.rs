@@ -86,7 +86,12 @@ const SYSTEMS: [(&str, &str, &str, &str, &str); 2] = [
 #[component]
 pub fn Home() -> Element {
     rsx! {
-        dioxus::document::Title { "Predator Hunters Research — child-safety AI" }
+        crate::components::Seo {
+            title: "Predator Hunters Research — child-safety AI",
+            description: "Independent child-safety AI lab. We build privacy-first models that run on a child's own phone, catch grooming and unsafe content, and store nothing.",
+            path: "/",
+            image: "/og/home.png",
+        }
         // ---------- HERO ----------
         header { class: "hero",
             div { class: "wrap",

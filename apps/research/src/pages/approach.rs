@@ -34,7 +34,12 @@ const FAQ: [(&str, &str); 5] = [
 #[component]
 pub fn Approach() -> Element {
     rsx! {
-        dioxus::document::Title { "Approach · Predator Hunters Research" }
+        crate::components::Seo {
+            title: "Approach: protection without surveillance | Predator Hunters",
+            description: "How we work and the lines we will not cross: on-device by default, nothing stored, a person always decides, and protection without surveillance.",
+            path: "/approach",
+            image: "/og/approach.png",
+        }
         header { class: "page-head",
             div { class: "wrap",
                 p { class: "eyebrow rise d1", "Approach" }

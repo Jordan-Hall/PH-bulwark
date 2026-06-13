@@ -8,6 +8,28 @@ use crate::app::Route;
 use crate::assets::PH_LOGO;
 use crate::icons::svg;
 
+/// Per-page SEO head: title, description, canonical, and Open Graph / Twitter
+/// tags, all route-specific. Rendered at the top of each page so the SSG
+/// pre-render bakes them into THAT route's static head — real per-page SEO and
+/// per-page social cards, not one global set.
+#[component]
+pub fn Seo(title: String, description: String, path: String, image: String) -> Element {
+    let url = format!("https://research.predatorhunters.co.uk{path}");
+    let img = format!("https://research.predatorhunters.co.uk{image}");
+    rsx! {
+        dioxus::document::Title { "{title}" }
+        dioxus::document::Meta { name: "description", content: "{description}" }
+        dioxus::document::Link { rel: "canonical", href: "{url}" }
+        dioxus::document::Meta { property: "og:title", content: "{title}" }
+        dioxus::document::Meta { property: "og:description", content: "{description}" }
+        dioxus::document::Meta { property: "og:url", content: "{url}" }
+        dioxus::document::Meta { property: "og:image", content: "{img}" }
+        dioxus::document::Meta { name: "twitter:title", content: "{title}" }
+        dioxus::document::Meta { name: "twitter:description", content: "{description}" }
+        dioxus::document::Meta { name: "twitter:image", content: "{img}" }
+    }
+}
+
 /// The shared closing CTA — investment / collaboration attraction, kept honest.
 /// Suppressed on the Contact route, where it would only repeat that page.
 #[component]

@@ -9,15 +9,6 @@ use crate::components::{ClosingCta, SiteFooter};
 use crate::icons::svg;
 use crate::pages::{About, Approach, Contact, Home, NotFound, Privacy, Research, Systems};
 
-/// Colour scheme. Provided as a `Signal<Theme>` context by `App`, toggled from
-/// the nav, read back into the `data-theme` attribute on the theme root — which
-/// is what every light/dark CSS variable keys off.
-#[derive(Clone, Copy, PartialEq)]
-pub enum Theme {
-    Dark,
-    Light,
-}
-
 #[derive(Routable, Clone, PartialEq)]
 pub enum Route {
     #[layout(Shell)]
@@ -48,15 +39,14 @@ async fn static_routes() -> Result<Vec<String>, ServerFnError> {
     Ok(Route::static_routes().iter().map(ToString::to_string).collect())
 }
 
-/// Root: inject the one stylesheet, provide the theme, paint the themed stage,
-/// mount the router.
+/// Root: set the favicon, paint the stage, mount the router. The light/dark
+/// theme lives on `<html data-theme>` (set flash-free by an inline script in
+/// index.html and toggled in the nav), so there is no theme signal here.
 #[component]
 pub fn App() -> Element {
-    let theme = use_context_provider(|| Signal::new(Theme::Dark));
-    let mode = if theme() == Theme::Light { "light" } else { "dark" };
     rsx! {
         dioxus::document::Link { rel: "icon", href: FAVICON }
-        div { class: "theme-root", "data-theme": "{mode}",
+        div { class: "theme-root",
             div { class: "stage-bg" }
             div { class: "stage-grid" }
             div { class: "stage-grain" }
@@ -88,9 +78,7 @@ fn nav_class(current: &Route, target: &Route) -> &'static str {
 #[component]
 fn NavBar() -> Element {
     let route = use_route::<Route>();
-    let mut theme = use_context::<Signal<Theme>>();
     let mut menu = use_signal(|| false);
-    let toggle_icon = if theme() == Theme::Light { "moon" } else { "sun" };
     let burger_icon = if menu() { "close" } else { "menu" };
     rsx! {
         nav { class: "nav",
@@ -111,10 +99,10 @@ fn NavBar() -> Element {
                         class: "theme-toggle",
                         "aria-label": "Switch between light and dark theme",
                         onclick: move |_| {
-                            let next = if theme() == Theme::Light { Theme::Dark } else { Theme::Light };
-                            theme.set(next);
+                            let _ = dioxus::document::eval("var h=document.documentElement;var t=h.getAttribute('data-theme')==='light'?'dark':'light';h.setAttribute('data-theme',t);try{localStorage.setItem('ph-theme',t);}catch(e){}");
                         },
-                        span { dangerous_inner_html: svg(toggle_icon) }
+                        span { class: "ic-sun", dangerous_inner_html: svg("sun") }
+                        span { class: "ic-moon", dangerous_inner_html: svg("moon") }
                     }
                     Link { class: "btn btn-primary btn-sm nav-cta", to: Route::Contact {},
                         "Work with us"
