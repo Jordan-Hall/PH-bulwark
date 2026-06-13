@@ -111,6 +111,19 @@ pub fn App() -> Element {
             offline.set(false);
             alerts.write().clear();
 
+            // Active staff safety notices are fetched on every (re)connect so
+            // a console that signs in AFTER a broadcast was issued still sees
+            // it; live ones also arrive on the stream below (deduped by id).
+            if let Ok(events) = crate::api::list_active_safety_broadcasts().await {
+                let mut list = alerts.write();
+                for event in events {
+                    let alert = Alert::from_event(event);
+                    if !list.iter().any(|a| a.id == alert.id) {
+                        list.push(alert);
+                    }
+                }
+            }
+
             while let Ok(Some(event)) = stream.message().await {
                 let alert = Alert::from_event(event);
                 let mut list = alerts.write();
@@ -260,6 +273,13 @@ fn ConsoleLayout() -> Element {
                 Link { class: tab_class(&route, &Route::Coverage {}), to: Route::Coverage {},
                     span { class: "nav-ic", dangerous_inner_html: "{svg(\"grid\")}" }
                     "Coverage"
+                }
+            }
+
+            if alerts.read().iter().any(|a| a.urgent) {
+                div { class: "sos-banner", role: "alert",
+                    span { dangerous_inner_html: "{svg(\"alert\")}" }
+                    "URGENT — a child pressed SOS. Contact them right away; if you can't reach them, call 999."
                 }
             }
 
