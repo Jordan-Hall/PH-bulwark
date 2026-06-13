@@ -70,6 +70,10 @@ android {
     // (no inflater pressure on an 88 MB asset).
     androidResources { noCompress += "onnx" }
 
+    // 16 KB page-size packaging (AGP 8.5.0 won't 16 KB-zipalign in-APK libs):
+    // extract native libs at install so they're dlopen'd from page-aligned files.
+    packaging { jniLibs { useLegacyPackaging = true } }
+
     // Release signing is configured ONLY when the keystore is provided via env
     // (the FOSS release CI — android-release.yml — sets the ANDROID_* secrets).
     // Without it the release stays UNSIGNED and the debug build is unaffected;
@@ -118,5 +122,6 @@ dependencies {
 
     // ONNX Runtime Android (MIT) — runs the bundled NSFW model fully on-device.
     // NNAPI accelerator when present, CPU otherwise (NsfwGate capability-detects).
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.19.2")
+    // 1.22.0 ships 16 KB-page-aligned native libs (incl. the 4j_jni bridge) (Android 15 requirement).
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.22.0")
 }

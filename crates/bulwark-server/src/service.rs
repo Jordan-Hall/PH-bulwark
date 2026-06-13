@@ -365,6 +365,15 @@ pub async fn run(
             None
         };
 
+        // Scope guardian push fan-out per family (#140): hand the hub the accounts
+        // store so its `endpoints_for` routes a redacted alert ONLY to the
+        // guardians assigned to that child/device — never another family. Without
+        // this (single-tenant dev) the fan-out stays flat. Harmless when the push
+        // feature is off (nothing reads it).
+        if let Some(a) = &accounts {
+            hub.attach_accounts(a.clone());
+        }
+
         // Tamper: child-device protection liveness + uninstall/disable alerts,
         // fanned out through the SAME hub (so they reach guardian Review streams,
         // scoped per child/device). A background task sweeps for devices that have

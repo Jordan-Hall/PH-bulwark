@@ -8,6 +8,7 @@ mod notfound;
 mod privacy;
 mod research;
 mod systems;
+mod waitlist;
 
 pub use about::About;
 pub use approach::Approach;
@@ -17,3 +18,4 @@ pub use notfound::NotFound;
 pub use privacy::Privacy;
 pub use research::Research;
 pub use systems::Systems;
+pub use waitlist::Waitlist;

@@ -1,0 +1,21 @@
+# 16 KB page-size ELF alignment for the Android native libraries we build.
+#
+# Android 15+ devices that run with a 16 KB memory page size REJECT shared
+# objects whose LOAD segments are aligned to the legacy 4 KB boundary (the
+# "Android app compatibility / not 16 KB-aligned" warning, and a hard load
+# failure on a real 16 KB device). NDK r27+ makes 16 KB the default, but our
+# toolchain is r26, so we pass the linker max-page-size explicitly. This applies
+# to every `.so` cargo-ndk produces in this workspace (libbulwark_client.so and
+# the tun_rs cdylib). The third-party AAR libs (ONNX Runtime, Tesseract) are
+# aligned by bumping those dependencies — see platform/android/app/build.gradle.kts.
+[target.aarch64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+[target.armv7-linux-androideabi]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+[target.x86_64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+[target.i686-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]

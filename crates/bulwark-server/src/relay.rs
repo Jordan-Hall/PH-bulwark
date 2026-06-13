@@ -62,7 +62,10 @@ pub struct AlertHub {
     // `bulwark-policy::Allowlist` API (`apply`, `is_host_allowed`, `audit`) is
     // unchanged; only construction/load + write-through would move here.
     allowlist: Arc<Mutex<Allowlist>>,
-    /// Registered remote-push targets, keyed by guardian device id.
+    /// Registered remote-push targets, keyed by OWNER: the guardian **account
+    /// id** in accounts mode (so a re-registration overwrites and one guardian
+    /// can't clobber another), or the device id in single-tenant dev. Fan-out is
+    /// SCOPED — see [`AlertHub::endpoints_for`].
     // SEAM: durable storage — persist UnifiedPush endpoint URLs (no alert
     // content) so a guardian stays reachable across restarts.
     push_targets: Arc<Mutex<HashMap<String, PushTarget>>>,
@@ -79,6 +82,12 @@ pub struct AlertHub {
     /// AND the approve-allowlist (persisted as a decision journal + replayed on
     /// load — see `replay_audit`). `None` (default) → pure in-memory.
     persist: Option<HubPersist>,
+    /// Parent-accounts store, ATTACHED in `run()` once it's built
+    /// ([`AlertHub::attach_accounts`]). Lets [`AlertHub::endpoints_for`] map an
+    /// alert's child/device → the assigned guardians → their push endpoints, so a
+    /// redacted alert reaches ONLY that family (multi-tenant isolation). Never
+    /// attached (single-tenant dev) → fan out to every registered endpoint.
+    accounts: Arc<std::sync::OnceLock<crate::accounts::AccountStore>>,
 }
 
 /// Where the hub's push targets + pending reviews are persisted (push-target/
@@ -137,6 +146,7 @@ impl AlertHub {
             push_targets: Arc::new(Mutex::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
             persist: None,
+            accounts: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -163,6 +173,7 @@ impl AlertHub {
                 pending,
                 audit,
             }),
+            accounts: Arc::new(std::sync::OnceLock::new()),
         })
     }
 
@@ -287,19 +298,28 @@ impl AlertHub {
         outcome
     }
 
-    /// Record a guardian's remote-push routing token (no alert content).
-    fn register_push(&self, target: PushTarget) {
+    /// Attach the parent-accounts store so push fan-out is SCOPED per guardian
+    /// (see [`Self::endpoints_for`]). Called once in `run()` after the store is
+    /// built; idempotent (a second call is ignored).
+    pub fn attach_accounts(&self, store: crate::accounts::AccountStore) {
+        let _ = self.accounts.set(store);
+    }
+
+    /// Record a guardian's remote-push routing endpoint (no alert content), keyed
+    /// by `owner` — the guardian account id in accounts mode (so re-registration
+    /// overwrites and one guardian can't clobber another), or the device id in dev.
+    fn register_push(&self, owner: String, target: PushTarget) {
         let mut guard = self
             .push_targets
             .lock()
             .expect("push-target mutex poisoned");
-        guard.insert(target.device_id.clone(), target);
+        guard.insert(owner, target);
         self.persist_push(&guard);
     }
 
-    /// Snapshot of every registered guardian UnifiedPush endpoint URL (empties
-    /// dropped). Read at raise time by the push fan-out sink; empty when nobody
-    /// has registered yet.
+    /// Snapshot of EVERY registered guardian UnifiedPush endpoint URL (empties
+    /// dropped). The single-tenant / dev fan-out target; accounts mode uses the
+    /// SCOPED [`Self::endpoints_for`] instead.
     pub fn push_tokens(&self) -> Vec<String> {
         self.push_targets
             .lock()
@@ -307,6 +327,33 @@ impl AlertHub {
             .values()
             .map(|t| t.push_endpoint.clone())
             .filter(|t| !t.trim().is_empty())
+            .collect()
+    }
+
+    /// The guardian endpoints that should receive `event` — SCOPED so a redacted
+    /// alert reaches ONLY the guardians assigned to its child/device, never
+    /// another family (multi-tenant isolation, #140). With an accounts store
+    /// attached: resolve the alert's child (by `child_id`, else the child
+    /// `device_id`) → its guardian account ids → their registered endpoints.
+    /// Without one (single-tenant dev) every registered endpoint is returned.
+    pub fn endpoints_for(&self, event: &AlertEvent) -> Vec<String> {
+        let Some(accounts) = self.accounts.get() else {
+            return self.push_tokens(); // single-tenant dev: no scoping needed
+        };
+        let owners: Vec<String> = if !event.child_id.trim().is_empty() {
+            accounts.guardians_for_child(&event.child_id)
+        } else {
+            accounts.guardians_for_device(&event.device_id)
+        };
+        let guard = self
+            .push_targets
+            .lock()
+            .expect("push-target mutex poisoned");
+        owners
+            .iter()
+            .filter_map(|owner| guard.get(owner))
+            .map(|t| t.push_endpoint.clone())
+            .filter(|e| !e.trim().is_empty())
             .collect()
     }
 }
@@ -328,8 +375,8 @@ impl HubTokenRegistry {
 
 #[cfg(feature = "push")]
 impl bulwark_alert::TokenRegistry for HubTokenRegistry {
-    fn tokens(&self) -> Vec<String> {
-        self.hub.push_tokens()
+    fn endpoints_for(&self, event: &AlertEvent) -> Vec<String> {
+        self.hub.endpoints_for(event)
     }
 }
 
@@ -655,26 +702,31 @@ impl bulwark_proto::v1::review_server::Review for ReviewService {
         // private / link-local / metadata addresses) before it is stored.
         validate_push_endpoint(target.push_endpoint.trim())?;
 
-        // SECURITY: when accounts are wired, registering a push endpoint must be
-        // AUTHENTICATED — else any caller reaching `Review.RegisterPushTarget`
-        // could register an arbitrary server-side POST target (SSRF / push
-        // disruption). We authenticate the session token but do NOT scope on
-        // `PushTarget.device_id`: that field is the GUARDIAN's own device id,
-        // a different namespace from the supervised CHILD device ids in
-        // `guardian_scope().device_ids` — scoping on it would reject a valid
-        // guardian registering their own phone. Per-guardian alert routing (so a
-        // guardian only receives their own children's alerts, and endpoints are
-        // keyed by guardian identity to prevent overwrite) is tracked in #140.
-        if let Some(store) = &self.accounts {
+        // SECURITY + SCOPING: when accounts are wired, registering a push endpoint
+        // must be AUTHENTICATED (else any caller reaching `Review.RegisterPushTarget`
+        // could register an arbitrary server-side POST target — SSRF / push
+        // disruption). We resolve the authenticated guardian's ACCOUNT ID and key
+        // the registration by it: that makes a re-registration overwrite the
+        // guardian's own entry (not accumulate or clobber another's) AND lets the
+        // fan-out scope alerts to a guardian's children (#140). We deliberately do
+        // NOT scope on `PushTarget.device_id` (the GUARDIAN's own device id, a
+        // different namespace from the supervised CHILD device ids). In
+        // single-tenant dev (no accounts) the device id is the owner key.
+        let owner = if let Some(store) = &self.accounts {
             let token = meta_token.unwrap_or_default();
-            if token.is_empty() || store.guardian_scope(&token).is_none() {
-                return Err(Status::unauthenticated(
-                    "a valid session token (authorization: Bearer …) is required to register a push endpoint",
-                ));
+            match store.account_for_session(&token) {
+                Some(account_id) => account_id,
+                None => {
+                    return Err(Status::unauthenticated(
+                        "a valid session token (authorization: Bearer …) is required to register a push endpoint",
+                    ));
+                }
             }
-        }
+        } else {
+            target.device_id.trim().to_string()
+        };
 
-        self.hub.register_push(target);
+        self.hub.register_push(owner, target);
         Ok(Response::new(PushAck { ok: true }))
     }
 
@@ -884,11 +936,14 @@ mod tests {
     fn push_targets_and_pending_persist_across_restart() {
         let dir = tmp_dir("persist");
         let hub1 = AlertHub::with_state_dir(&dir).unwrap();
-        hub1.register_push(PushTarget {
-            device_id: "g-phone".into(),
-            push_endpoint: "https://ntfy.example/upTok".into(),
-            platform: "android".into(),
-        });
+        hub1.register_push(
+            "g-phone".into(),
+            PushTarget {
+                device_id: "g-phone".into(),
+                push_endpoint: "https://ntfy.example/upTok".into(),
+                platform: "android".into(),
+            },
+        );
         hub1.publish(alert("kids-tablet")); // writes a pending review
         drop(hub1); // simulate a restart
 
@@ -1061,6 +1116,83 @@ mod tests {
             .await
             .expect_err("must require a session token");
         assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn push_fanout_is_scoped_to_the_alerts_guardians() {
+        // #140: a redacted alert must reach ONLY the guardians assigned to its
+        // child/device — never another family. Build two families, register each
+        // guardian's endpoint, and assert the fan-out target is family-scoped.
+        use crate::accounts::AccountStore;
+        let accounts = AccountStore::new();
+        let acct_a = accounts
+            .create_account("a@ex.com", "passworda", "A")
+            .unwrap()
+            .0;
+        let acct_b = accounts
+            .create_account("b@ex.com", "passwordb", "B")
+            .unwrap()
+            .0;
+        let (tok_a, _, _) = accounts.login("a@ex.com", "passworda").unwrap();
+        let (tok_b, _, _) = accounts.login("b@ex.com", "passwordb").unwrap();
+        accounts.add_child(&tok_a, "Kid A", "device-a").unwrap();
+        accounts.add_child(&tok_b, "Kid B", "device-b").unwrap();
+
+        let hub = AlertHub::new();
+        hub.attach_accounts(accounts.clone());
+        // Endpoints keyed by guardian ACCOUNT id, exactly as register_push_target does.
+        hub.register_push(
+            acct_a.clone(),
+            PushTarget {
+                device_id: "guardian-a-phone".into(),
+                push_endpoint: "https://ntfy.sh/a".into(),
+                ..Default::default()
+            },
+        );
+        hub.register_push(
+            acct_b.clone(),
+            PushTarget {
+                device_id: "guardian-b-phone".into(),
+                push_endpoint: "https://ntfy.sh/b".into(),
+                ..Default::default()
+            },
+        );
+
+        // Alert for child A's device → ONLY guardian A's endpoint (NOT B's).
+        assert_eq!(
+            hub.endpoints_for(&alert("device-a")),
+            vec!["https://ntfy.sh/a".to_string()],
+            "child A's alert must reach only guardian A",
+        );
+        assert_eq!(
+            hub.endpoints_for(&alert("device-b")),
+            vec!["https://ntfy.sh/b".to_string()],
+            "child B's alert must reach only guardian B",
+        );
+        // An alert for an unknown device routes to NOBODY — scoped, never broadcast.
+        assert!(
+            hub.endpoints_for(&alert("device-unknown")).is_empty(),
+            "an unknown device must not fan out to any family",
+        );
+    }
+
+    #[tokio::test]
+    async fn push_fanout_without_accounts_is_flat_single_tenant() {
+        // Single-tenant dev (no accounts store attached): no families to scope to,
+        // so every registered endpoint receives the alert (the legacy behaviour).
+        let hub = AlertHub::new();
+        hub.register_push(
+            "device-a".into(),
+            PushTarget {
+                device_id: "device-a".into(),
+                push_endpoint: "https://ntfy.sh/only".into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            hub.endpoints_for(&alert("anything")),
+            vec!["https://ntfy.sh/only".to_string()],
+        );
     }
 
     #[tokio::test]

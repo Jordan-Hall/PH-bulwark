@@ -43,6 +43,18 @@ research.predatorhunters.co.uk {
 	header {
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "strict-origin-when-cross-origin"
+		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+		X-Frame-Options "DENY"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+		Cross-Origin-Opener-Policy "same-origin"
+		# CSP. script-src needs 'unsafe-inline' because the page ships three
+		# first-party inline scripts (the flash-free theme-init + two Dioxus
+		# wasm-bootstrap blocks that are regenerated each build, so a hash list
+		# is not maintainable) plus 'wasm-unsafe-eval' for the wasm runtime.
+		# style-src/font-src allow Google Fonts via the inline @import — those
+		# come out once #8 self-hosts the fonts, tightening this to 'self'.
+		# object-src/frame-ancestors/base-uri/form-action are locked down.
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 		-Server
 	}
 }

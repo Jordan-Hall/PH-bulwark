@@ -219,9 +219,11 @@ impl UnifiedPushSink {
 /// alerts). The relay's `AlertHub` implements this over its in-memory
 /// `push_targets`.
 pub trait TokenRegistry: Send + Sync {
-    /// A snapshot of every registered guardian endpoint URL right now (may be
-    /// empty).
-    fn tokens(&self) -> Vec<String>;
+    /// The guardian endpoint URLs that should receive THIS specific alert —
+    /// scoped to the guardians assigned to the alert's child/device, so a
+    /// redacted alert never reaches another family's guardian (multi-tenant
+    /// isolation). Read at raise time; may be empty (nobody to notify).
+    fn endpoints_for(&self, event: &AlertEvent) -> Vec<String>;
 }
 
 /// An [`AlertSink`] that pushes the redacted event to EVERY currently-registered
@@ -259,7 +261,7 @@ impl UnifiedPushFanoutSink {
     /// Fan one event out to every current endpoint. Returns (delivered, attempted).
     async fn fan_one(&self, event: &AlertEvent) -> Result<(usize, usize)> {
         assert_no_media(event)?; // hard privacy invariant, before any send
-        let endpoints = self.registry.tokens();
+        let endpoints = self.registry.endpoints_for(event);
         let attempted = endpoints.len();
         if attempted == 0 {
             return Ok((0, 0));
@@ -470,7 +472,10 @@ mod tests {
 
     struct StaticRegistry(Vec<String>);
     impl TokenRegistry for StaticRegistry {
-        fn tokens(&self) -> Vec<String> {
+        // The static set regardless of the event — these tests exercise fan-out
+        // delivery/redaction; per-alert SCOPING is tested in bulwark-server's
+        // HubTokenRegistry (where the AccountStore guardian↔child map lives).
+        fn endpoints_for(&self, _event: &AlertEvent) -> Vec<String> {
             self.0.clone()
         }
     }

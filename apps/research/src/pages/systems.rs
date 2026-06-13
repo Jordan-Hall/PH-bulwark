@@ -96,7 +96,11 @@ pub fn Systems() -> Element {
                     h2 { "One device, covered end to end." }
                     p { class: "lede", "The camera guards what a child creates. The shield guards what reaches them. Together they cover the whole phone, and both run the same models the research builds." }
                 }
-                div { style: "margin-top:8px;",
+                div { style: "margin-top:8px; display:flex; gap:12px; flex-wrap:wrap;",
+                    Link { class: "btn btn-primary", to: Route::Waitlist {},
+                        "Join the alpha"
+                        span { dangerous_inner_html: svg("arrow-right") }
+                    }
                     Link { class: "btn btn-ghost", to: Route::Research {},
                         "See the models behind them"
                         span { class: "ic", dangerous_inner_html: svg("arrow-right") }

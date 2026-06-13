@@ -43,36 +43,57 @@ The guardian console registers and receives the same way as the child app.
   (The signed-APK **distribution** half — `android-release.yml` + fdroid — is
   fully landed and independent of this gate.)
 
-**Deferred (native receive) — the precise gap:**
-The Manager is a **`dx`-built Dioxus app**: a thin Android shell that dx
-*generates at build time* (from `Dioxus.toml`) around the Rust/wry webview. The
-UnifiedPush Android **connector library is Kotlin** and works through a
-`BroadcastReceiver` that (a) receives the distributor-supplied endpoint URL via
-an Intent (`NEW_ENDPOINT`) and (b) receives each incoming push (`MESSAGE`), then
-posts a system notification. Wiring that requires committing custom Kotlin +
-manifest `<receiver>`/`<service>` entries into the Android project — but dx
-0.8-alpha **regenerates the whole Android scaffold under `target/dx/…` (which is
-gitignored) and exposes no source-overlay / custom-manifest-merge hook**. There
-is no clean seam to inject the receiver without forking dx's mobile bundler or
-post-processing its output, so it is **deliberately deferred** rather than hacked.
+**Native receive (Android) — LANDED (#151, 2026-06-13):**
+The earlier pass deferred this on the belief that dx 0.8-alpha "exposes no
+source-overlay / custom-manifest hook." That was **wrong for the pinned
+`dioxus-cli-0.8.0-alpha.0`**, which DOES expose committed-source seams (verified
+against the CLI source — `src/build/android.rs` + `src/config/app.rs`):
 
-Until that lands, the endpoint URL is entered **by hand** in the Notifications
-card (the guardian pastes their ntfy topic URL); registration and server-side
-relay are fully functional with a manually-supplied endpoint.
+- `[application].android_manifest` → dx uses our `AndroidManifest.xml` **verbatim**
+  (android.rs:264-271; the doc-comment's "merge" is aspirational — it's used as-is).
+- `[application].android_main_activity` → dx writes our `MainActivity.kt` **verbatim**
+  into `dev.dioxus.main/` and compiles it every build (android.rs:279-291). A Kotlin
+  file may hold several top-level classes, so the receive side rides along in it.
+- `[android].gradle_dependencies` → rendered into the app `dependencies {}` block.
 
-**Recommended approach (when picked up):**
-1. Preferred — add a dx mobile **Android source-overlay** capability (upstream or
-   a local patch) so an `apps/parent/android/` Kotlin dir + a manifest fragment
-   merge into the generated project; add the UnifiedPush connector dependency and
-   a `BroadcastReceiver` that calls a Rust JNI export to hand the endpoint URL to
-   `register_push_target()` and to surface `MESSAGE` pushes as notifications.
-2. Alternative — ship the guardian console on Android as a **native shell**
-   (mirroring `platform/android`) hosting the Rust core over JNI, where the
-   Kotlin receiver lives in committed source — the same pattern the child app
-   already uses for its `AlertNotifier`.
+So no dx fork and no post-build manifest hack are needed. The implementation
+(`apps/parent/android/` + `Dioxus.toml`):
 
-Either way the Rust registration/redaction code above is unchanged; only the
-endpoint-acquisition + notification-display layer is added.
+1. **`gradle_dependencies = ["org.unifiedpush.android:connector:3.0.10"]`** — the
+   FOSS **Apache-2.0** UnifiedPush Android connector (no Google/Apple). NOTE: the
+   modern 3.x connector delivers via a bound **`PushService`** — the old
+   `MessagingReceiver` BroadcastReceiver is **deprecated upstream** (the library
+   embeds its own exported receiver that forwards distributor intents to your
+   service via `org.unifiedpush.android.connector.PUSH_EVENT`). The AAR's library
+   manifest also contributes the package-visibility `<queries>` + that internal
+   receiver, which AGP merges at build, so our verbatim manifest only declares OUR
+   `<service>` + `POST_NOTIFICATIONS`.
+2. **`MainActivity.kt`** (custom) — extends `WryActivity`, and in `onCreate`
+   creates the alert `NotificationChannel`, requests the `POST_NOTIFICATIONS`
+   runtime grant (API 33+), and calls `UnifiedPush.tryUseDefaultDistributor` →
+   `register` so a `NEW_ENDPOINT` is actually delivered (graceful no-op when no
+   distributor is installed). A second top-level class `BulwarkPushService :
+   PushService()` handles the events:
+   - **onNewEndpoint** → writes the endpoint URL to `filesDir/bulwark/push_endpoint.txt`
+     — the SAME app-private path the Rust side's `app_config_dir()` resolves over
+     JNI. No JNI callback into the (often-dead) Rust process is needed; the
+     Notifications panel's `saved_push_endpoint()` reads it on mount.
+   - **onMessage** → posts a **content-free** system notification (a fixed generic
+     line, never a field from the payload), honouring the privacy invariant.
+3. **`AndroidManifest.xml`** (custom) — the dx-rendered template (captured from a
+   real `dx build` under `target/dx/…`) plus exactly `POST_NOTIFICATIONS` and the
+   `<service android:name="dev.dioxus.main.BulwarkPushService" android:exported="false">`
+   with the `PUSH_EVENT` intent-filter (fully-qualified name — the namespace
+   `co.predatorhunters.bulwark.manager` differs from the `dev.dioxus.main` package).
+
+**Guardian-auth is unchanged.** Acquiring an endpoint only writes the handoff file;
+the token-gated `Review.RegisterPushTarget` RPC stays behind `NATIVE_PUSH_ENABLED`
+(#140). The Rust registration/redaction code above is untouched — only the
+endpoint-acquisition + notification-display layer was added, in committed Kotlin.
+
+Desktop has no UnifiedPush distributor concept, so there the endpoint URL is still
+pasted by hand in the Notifications card; registration + server relay work the same
+with a manually-supplied endpoint.
 
 ## Evidence shown — and the hard rules
 Driven by `Verdict.category` + `Evidence` (which already carries **only** hashes,
