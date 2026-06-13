@@ -17,6 +17,15 @@
 //!     `output` chain dropping `udp dport 443`), else fall back to `iptables`
 //!     (`-A OUTPUT -p udp --dport 443 -j DROP`). Teardown deletes the table /
 //!     removes the rule so we never leave UDP/443 blocked after the VPN is gone.
+//!   * **macOS** → `pfctl` with a dedicated anchor (`bulwark_quic`): we load a
+//!     `block drop quick out proto udp from any to any port 443` rule into the
+//!     anchor and enable pf. Teardown flushes the anchor (`pfctl -a bulwark_quic
+//!     -F all`) so UDP/443
+//!     is never left blocked after the VPN stops. **Honest limitation:** an anchor
+//!     only takes effect if the main ruleset references it (`anchor "bulwark_quic"`
+//!     in `pf.conf`); the bundled VPN profile adds that directive at install. We do
+//!     not rewrite `pf.conf` at teardown — flushing the anchor empties our rules
+//!     without touching the system ruleset.
 //!   * **Android** → `VpnService` simply does not route UDP/443 (drops it); there
 //!     is no host firewall command, so this controller is a no-op there.
 //!
@@ -30,6 +39,12 @@ use crate::{NetError, Result};
 /// Stable name for the firewall rule/table so add + delete refer to the same
 /// object (idempotent apply, exact teardown). Greppable in `netsh`/`nft` output.
 const RULE_NAME: &str = "Bulwark-QUIC-Downgrade";
+
+/// Stable `pfctl` anchor name (macOS). pf anchor names cannot contain spaces, so
+/// this uses the underscore form rather than [`RULE_NAME`]; install + teardown
+/// both reference exactly this anchor.
+#[cfg(any(target_os = "macos", test))]
+const PF_ANCHOR: &str = "bulwark_quic";
 
 /// QUIC downgrade controller: decides which flows to block and applies the
 /// platform firewall rule blocking outbound UDP/443.
@@ -93,6 +108,24 @@ impl QuicDowngrade {
             Ok(())
         }
 
+        #[cfg(target_os = "macos")]
+        {
+            let _ = macos_remove_rule(); // clean slate (flush any stale anchor rules)
+            macos_add_rule()?;
+            // NOTE (device-validation gate): loading + enabling the anchor only
+            // ENFORCES the drop if the main pf ruleset references it
+            // (`anchor "bulwark_quic"` in pf.conf). The bundled VPN profile adds
+            // that directive at install; until on-device validation confirms the
+            // reference is live we log a warning so a "success" here is not read as
+            // proof UDP/443 is actually blocked.
+            tracing::warn!(
+                anchor = PF_ANCHOR,
+                "QUIC downgrade: anchor loaded + pf enabled; enforcement requires the \
+                 bundled profile's `anchor \"bulwark_quic\"` reference (device-validated)"
+            );
+            Ok(())
+        }
+
         #[cfg(target_os = "android")]
         {
             // VpnService handles UDP/443 by simply not routing it; nothing to do.
@@ -102,7 +135,12 @@ impl QuicDowngrade {
             Ok(())
         }
 
-        #[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
+        #[cfg(not(any(
+            windows,
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "android"
+        )))]
         {
             tracing::warn!("QUIC downgrade not implemented on this platform; UDP/443 NOT blocked");
             Ok(())
@@ -136,7 +174,19 @@ impl QuicDowngrade {
             Ok(())
         }
 
-        #[cfg(not(any(windows, target_os = "linux")))]
+        #[cfg(target_os = "macos")]
+        {
+            match macos_remove_rule() {
+                Ok(()) => tracing::info!(
+                    anchor = PF_ANCHOR,
+                    "QUIC downgrade rule removed (pfctl anchor flushed)"
+                ),
+                Err(e) => tracing::debug!("QUIC downgrade rule removal: {e} (treating as absent)"),
+            }
+            Ok(())
+        }
+
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
         {
             tracing::debug!("QUIC downgrade rule removal: nothing to do on this platform");
             Ok(())
@@ -271,6 +321,113 @@ fn linux_remove_rule() -> Result<()> {
     }
 }
 
+// --- macOS: pfctl anchor ----------------------------------------------------
+//
+// The argv/anchor-body builders below are cfg'd `any(target_os = "macos", test)`
+// so they compile + are unit-tested on this (Windows) host; only the execution
+// (`macos_add_rule`/`macos_remove_rule`) is `target_os = "macos"`.
+
+/// The pf rule body loaded into our anchor: drop all *outbound* UDP to port 443
+/// (QUIC) on every interface. `quick` makes the decision final so nothing later
+/// in our anchor re-allows it.
+#[cfg(any(target_os = "macos", test))]
+fn macos_pf_rule() -> String {
+    "block drop quick out proto udp from any to any port 443\n".to_string()
+}
+
+/// argv to load the anchor rule from stdin: `pfctl -a bulwark_quic -f -`.
+/// (`-f -` reads the ruleset from stdin, which we feed [`macos_pf_rule`].)
+#[cfg(any(target_os = "macos", test))]
+fn macos_pf_load_argv() -> Vec<String> {
+    vec![
+        "pfctl".to_string(),
+        "-a".to_string(),
+        PF_ANCHOR.to_string(),
+        "-f".to_string(),
+        "-".to_string(),
+    ]
+}
+
+/// argv to ensure pf is enabled: `pfctl -E`. (Idempotent; `-E` is a no-op +
+/// success if pf is already on, beyond a reference-count log.)
+#[cfg(any(target_os = "macos", test))]
+fn macos_pf_enable_argv() -> Vec<String> {
+    vec!["pfctl".to_string(), "-E".to_string()]
+}
+
+/// argv to flush every rule from our anchor: `pfctl -a bulwark_quic -F all`.
+/// This is the exact teardown — it empties OUR anchor only and never touches the
+/// system ruleset, so UDP/443 is unblocked without disabling pf globally.
+#[cfg(any(target_os = "macos", test))]
+fn macos_pf_flush_argv() -> Vec<String> {
+    vec![
+        "pfctl".to_string(),
+        "-a".to_string(),
+        PF_ANCHOR.to_string(),
+        "-F".to_string(),
+        "all".to_string(),
+    ]
+}
+
+/// Run `pfctl`, feeding `stdin_body` to its stdin when non-empty (used by the
+/// `-f -` anchor load). Mirrors [`run`]'s error shape.
+#[cfg(target_os = "macos")]
+fn run_pfctl(argv: &[String], stdin_body: Option<&str>) -> Result<()> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let (program, args) = argv
+        .split_first()
+        .ok_or_else(|| NetError::Quic("empty pfctl command".to_string()))?;
+    let mut cmd = Command::new(program);
+    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    if stdin_body.is_some() {
+        cmd.stdin(Stdio::piped());
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| NetError::Quic(format!("spawning `{program}`: {e}")))?;
+    if let Some(body) = stdin_body {
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| NetError::Quic("pfctl stdin unavailable".to_string()))?
+            .write_all(body.as_bytes())
+            .map_err(|e| NetError::Quic(format!("writing pfctl ruleset: {e}")))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|e| NetError::Quic(format!("waiting on `{program}`: {e}")))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Err(NetError::Quic(format!(
+            "`{}` failed ({}): {}",
+            argv.join(" "),
+            output.status,
+            if stderr.trim().is_empty() {
+                stdout.trim()
+            } else {
+                stderr.trim()
+            }
+        )))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_add_rule() -> Result<()> {
+    // Load our drop rule into the dedicated anchor, then make sure pf is on.
+    run_pfctl(&macos_pf_load_argv(), Some(&macos_pf_rule()))?;
+    run_pfctl(&macos_pf_enable_argv(), None)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_remove_rule() -> Result<()> {
+    // Flush only our anchor — leaves the system ruleset + pf state intact.
+    run_pfctl(&macos_pf_flush_argv(), None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,5 +455,47 @@ mod tests {
         // No-op when disabled: returns Ok WITHOUT shelling out to netsh/nft, so
         // the unit test stays hermetic (no firewall mutation, no admin needed).
         q.apply_rule().unwrap();
+    }
+
+    // --- macOS pfctl command-construction tests (host-agnostic: the argv/rule
+    // builders are cfg'd `any(target_os = "macos", test)` so they compile + run
+    // on this host; runtime execution is device-validated later). ---
+
+    #[test]
+    fn macos_pf_rule_drops_outbound_udp_443() {
+        let rule = macos_pf_rule();
+        assert!(rule.contains("block drop"));
+        assert!(rule.contains("out")); // outbound only
+        assert!(rule.contains("proto udp"));
+        assert!(rule.contains("port 443"));
+    }
+
+    #[test]
+    fn macos_pf_load_argv_targets_our_anchor_from_stdin() {
+        assert_eq!(
+            macos_pf_load_argv(),
+            vec!["pfctl", "-a", PF_ANCHOR, "-f", "-"]
+        );
+    }
+
+    #[test]
+    fn macos_pf_enable_argv_is_dash_e() {
+        assert_eq!(macos_pf_enable_argv(), vec!["pfctl", "-E"]);
+    }
+
+    #[test]
+    fn macos_pf_flush_argv_flushes_only_our_anchor() {
+        // Teardown MUST scope to our anchor (-a PF_ANCHOR) so it never disables pf
+        // globally or touches the system ruleset — UDP/443 is unblocked cleanly.
+        assert_eq!(
+            macos_pf_flush_argv(),
+            vec!["pfctl", "-a", PF_ANCHOR, "-F", "all"]
+        );
+    }
+
+    #[test]
+    fn macos_anchor_name_has_no_spaces() {
+        // pf anchor names cannot contain spaces (unlike the netsh RULE_NAME).
+        assert!(!PF_ANCHOR.contains(' '));
     }
 }
