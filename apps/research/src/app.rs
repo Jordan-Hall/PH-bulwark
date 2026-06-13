@@ -4,7 +4,7 @@
 
 use dioxus::prelude::*;
 
-use crate::assets::{favicon_data_uri, ph_logo_data_uri};
+use crate::assets::{FAVICON, PH_LOGO};
 use crate::components::{ClosingCta, SiteFooter};
 use crate::icons::svg;
 use crate::pages::{About, Approach, Contact, Home, NotFound, Privacy, Research, Systems};
@@ -39,6 +39,15 @@ pub enum Route {
     NotFound { segments: Vec<String> },
 }
 
+/// SSG hook: `dx build --ssg` POSTs to `/api/static_routes` and pre-renders each
+/// path it returns. We hand back every non-dynamic route from the `Routable`
+/// enum (the catch-all `NotFound` is dynamic and is skipped automatically), so
+/// crawlers / link bots / no-JS clients get fully-rendered HTML.
+#[server(endpoint = "static_routes")]
+async fn static_routes() -> Result<Vec<String>, ServerFnError> {
+    Ok(Route::static_routes().iter().map(ToString::to_string).collect())
+}
+
 /// Root: inject the one stylesheet, provide the theme, paint the themed stage,
 /// mount the router.
 #[component]
@@ -46,7 +55,7 @@ pub fn App() -> Element {
     let theme = use_context_provider(|| Signal::new(Theme::Dark));
     let mode = if theme() == Theme::Light { "light" } else { "dark" };
     rsx! {
-        dioxus::document::Link { rel: "icon", href: "{favicon_data_uri()}" }
+        dioxus::document::Link { rel: "icon", href: FAVICON }
         div { class: "theme-root", "data-theme": "{mode}",
             div { class: "stage-bg" }
             div { class: "stage-grid" }
@@ -87,7 +96,7 @@ fn NavBar() -> Element {
         nav { class: "nav",
             div { class: "nav-inner",
                 Link { class: "brand", to: Route::Home {}, onclick: move |_| menu.set(false),
-                    img { class: "brand-logo", src: "{ph_logo_data_uri()}", alt: "Predator Hunters" }
+                    img { class: "brand-logo", src: PH_LOGO, alt: "Predator Hunters" }
                     span { class: "brand-tag", "Research" }
                 }
                 div { class: "nav-links",

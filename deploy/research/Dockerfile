@@ -15,14 +15,19 @@ RUN cargo install dioxus-cli --version 0.8.0-alpha.0 --locked
 WORKDIR /app
 COPY . .
 WORKDIR /app/apps/research
-RUN dx build --platform web --release
-# dx emits the servable bundle to target/dx/<name>/release/web/public — locate
-# the produced index.html robustly and stage its directory.
+# Fullstack SSG: build a server binary that pre-renders every static route to
+# real HTML (great for crawlers / link bots / no-JS), then the wasm hydrates.
+RUN dx build --fullstack --ssg --release
+# SSG emits client assets to .../release/web/public and the pre-rendered
+# per-route HTML to .../release/web/static. Merge into /site: assets first, then
+# the rendered HTML (which provides index.html and the per-route directories).
 RUN set -eux; \
-    PUB="$(dirname "$(find /app -type f -name index.html -path '*release/web/public*' | head -n1)")"; \
-    test -n "$PUB"; \
-    mkdir -p /site; cp -r "$PUB"/. /site/; \
-    ls -la /site
+    WEB="$(dirname "$(find /app -type d -path '*release/web/public' | head -n1)")"; \
+    test -n "$WEB"; test -d "$WEB/static"; \
+    mkdir -p /site; \
+    cp -r "$WEB/public/." /site/; \
+    cp -r "$WEB/static/." /site/; \
+    echo "=== /site routes ==="; find /site -name index.html | sort
 
 # ---- 2. build Caddy with the Cloudflare DNS plugin ------------------------
 FROM caddy:2-builder AS caddybuild

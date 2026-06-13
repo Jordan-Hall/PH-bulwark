@@ -12,15 +12,19 @@ description = "Predator Hunters Research — public site for the child-safety AI
 #   * `web`     — the SHIPPED target (`dx build --platform web` → wasm).
 #   * `desktop` — host-checkable preview window (`cargo run`), handy on Windows.
 [features]
+# Fullstack SSG: dx builds a server binary that pre-renders every static route
+# to real HTML at build time (`dx build --platform web --ssg`), and the wasm
+# hydrates on the client. Crawlers / link bots / no-JS / assistive tech get the
+# full body; users still get the SPA.
 default = ["web"]
 web = ["dioxus/web"]
-desktop = ["dioxus/desktop"]
+server = ["dioxus/server"]
 
 [dependencies]
-# Dioxus 0.8 + the router, pinned to the SAME alpha apps/parent is proven
-# against (its committed Cargo.lock resolves this exact build). The router
-# drives the multi-page lab site (Home / Research / Approach / About / Contact).
-dioxus = { version = "0.8.0-alpha.0", features = ["router"] }
+# Dioxus 0.8 (SAME pinned alpha — no version bump), now with `fullstack` so the
+# router's static routes can be pre-rendered. The router drives the multi-page
+# lab site; `fullstack` adds the server-side render used only at build time.
+dioxus = { version = "0.8.0-alpha.0", features = ["router", "fullstack"] }
 
 # Detached from the engine cargo workspace (like apps/parent and apps/child) so
 # the verified `cargo build --workspace` never drags in the heavy UI tree. This
