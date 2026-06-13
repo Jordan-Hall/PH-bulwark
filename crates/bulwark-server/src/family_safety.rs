@@ -19,12 +19,14 @@
 //!      `ListSafetyBroadcasts`) — PH-staff-originated, region-wide family
 //!      safety notices fanned out to guardian consoles. HARD RULE: broadcasts
 //!      are STAFF-originated only — never crowd-sourced, never a public
-//!      accusation. AUTH PLACEHOLDER: until the per-staff accounts/roles
-//!      system ships (separate design in progress), the rpc is gated by a
-//!      server-side shared token (`BULWARK_STAFF_BROADCAST_TOKEN`); unset =
-//!      the rpc is OFF (`Unimplemented`). TODO(staff-system): replace the
-//!      shared token with per-staff credentials + a real audit identity — the
-//!      proto already carries `issued_by`, so this swaps in without breakage.
+//!      accusation. AUTH: when the staff accounts system (StaffAdmin) is wired,
+//!      a broadcast is authenticated by a per-staff SESSION token (role
+//!      SAFETY_OFFICER or ADMIN) via [`StaffStore::authorize`] and stamped with
+//!      that account's id in `issued_by` (real audit identity). A LEGACY shared
+//!      token (`BULWARK_STAFF_BROADCAST_TOKEN`) is honoured ONLY when no staff
+//!      store is wired (stamps the `staff-shared-token` marker). With neither
+//!      configured the rpc is OFF (`Unimplemented`) — a default deployment
+//!      exposes NO broadcast surface at all.
 //!
 //! State: broadcasts persist as JSON under `BULWARK_STATE_DIR` (the `persist`
 //! module — the same shape as [`crate::child_control::ChildConfigStore`]; we
@@ -41,10 +43,12 @@ use serde::{Deserialize, Serialize};
 use crate::accounts::AccountStore;
 use crate::persist::JsonFile;
 use crate::relay::AlertHub;
+use crate::staff::StaffStore;
 use bulwark_proto::v1::family_safety_server::FamilySafety;
 use bulwark_proto::v1::{
     AlertEvent, AlertKind, Category, ListSafetyBroadcastsRequest, SafetyBroadcast,
     SafetyBroadcastAck, SafetyBroadcasts, SendSafetyBroadcastRequest, Severity, SosAck, SosRequest,
+    StaffRole,
 };
 use ring::rand::{SecureRandom, SystemRandom};
 use tonic::{Request, Response, Status};
@@ -254,8 +258,12 @@ pub struct FamilySafetyService {
     /// URGENT delivery beyond live streams: the same email/push sink
     /// `AlertRelay` uses, when the operator configured one.
     sink: Option<Arc<dyn bulwark_alert::AlertSink>>,
-    /// sha256-hex of the shared staff token. `None` = broadcasts disabled.
-    /// PLACEHOLDER until the staff-management system ships (see module docs).
+    /// `Some` → the real per-staff accounts system (StaffAdmin). When wired, a
+    /// broadcast is authenticated by a STAFF SESSION token (SAFETY_OFFICER or
+    /// ADMIN) and stamped with that staff account's id — the primary path.
+    staff: Option<StaffStore>,
+    /// sha256-hex of the shared staff token. `None` = no shared token. LEGACY
+    /// fallback, used ONLY when no `staff` store is wired (see module docs).
     staff_token_sha256: Option<String>,
     rng: Arc<SystemRandom>,
 }
@@ -267,9 +275,18 @@ impl FamilySafetyService {
             broadcasts,
             accounts: None,
             sink: None,
+            staff: None,
             staff_token_sha256: None,
             rng: Arc::new(SystemRandom::new()),
         }
+    }
+
+    /// Wire the real staff accounts system: broadcasts are then authenticated by
+    /// a per-staff session token (SAFETY_OFFICER/ADMIN) and stamped with the
+    /// staff account id, retiring the shared-token placeholder.
+    pub fn with_staff_store(mut self, staff: StaffStore) -> Self {
+        self.staff = Some(staff);
+        self
     }
 
     /// Require SOS device authentication (and gate List) against `accounts` —
@@ -399,19 +416,44 @@ impl FamilySafety for FamilySafetyService {
         &self,
         req: Request<SendSafetyBroadcastRequest>,
     ) -> Result<Response<SafetyBroadcastAck>, Status> {
+        // Staff session token (if any) from `authorization: Bearer …`, captured
+        // before the message is consumed.
+        let meta_token = crate::accounts::bearer_token(&req);
         let r = req.into_inner();
 
-        // PLACEHOLDER staff gate (see module docs). Unset = the rpc is off, so
-        // a default deployment exposes NO broadcast surface at all.
-        let Some(expected) = &self.staff_token_sha256 else {
+        // Staff authentication, in priority order:
+        //   1. The real per-staff accounts system (StaffAdmin) when wired — a
+        //      SAFETY_OFFICER or ADMIN session token authorizes the broadcast and
+        //      its account id is stamped into `issued_by` (real audit identity).
+        //   2. LEGACY: the shared `BULWARK_STAFF_BROADCAST_TOKEN`, used only when
+        //      the staff accounts system is not wired (`issued_by` = a marker).
+        //   3. Neither configured → the rpc is OFF (a default deployment exposes
+        //      NO broadcast surface at all).
+        // HARD RULE either way: broadcasts are STAFF-originated, never crowd-sourced.
+        let issued_by: String = if let Some(staff) = &self.staff {
+            // Prefer the bearer session token; fall back to the message field so
+            // a client that puts the session token there still works.
+            let token = meta_token
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| r.staff_token.trim().to_string());
+            // SAFETY_OFFICER or ADMIN may issue a region-wide family-safety notice.
+            let identity = staff.authorize(&token, &[StaffRole::SafetyOfficer, StaffRole::Admin])?;
+            identity.staff_id
+        } else if let Some(expected) = &self.staff_token_sha256 {
+            if !token_matches(expected, &r.staff_token) {
+                return Err(Status::permission_denied("invalid staff token"));
+            }
+            "staff-shared-token".to_string()
+        } else {
             return Err(Status::unimplemented(
                 "staff safety broadcasts are not enabled on this node \
-                 (BULWARK_STAFF_BROADCAST_TOKEN unset; per-staff accounts are in design)",
+                 (enable the staff accounts system with BULWARK_STAFF=1, or set the \
+                 legacy BULWARK_STAFF_BROADCAST_TOKEN)",
             ));
         };
-        if !token_matches(expected, &r.staff_token) {
-            return Err(Status::permission_denied("invalid staff token"));
-        }
 
         let mut b = r
             .broadcast
@@ -433,8 +475,9 @@ impl FamilySafety for FamilySafetyService {
         b.region = b.region.trim().to_ascii_lowercase();
         b.broadcast_id = format!("bcast-{}", random_hex(&self.rng, 8));
         b.issued_ts = now_ms();
-        // TODO(staff-system): a real staff account id once staff auth exists.
-        b.issued_by = "staff-shared-token".to_string();
+        // Real per-staff audit identity (the authenticated staff account id), or
+        // the "staff-shared-token" marker on the legacy shared-token path.
+        b.issued_by = issued_by;
         if b.severity == Severity::Unspecified as i32 {
             b.severity = Severity::High as i32;
         }
@@ -711,6 +754,22 @@ mod tests {
         assert_eq!(b.broadcast_id, ack.broadcast_id);
         assert_eq!(b.issued_by, "staff-shared-token", "server-stamped");
         assert!(b.issued_ts > 0, "server-stamped");
+    }
+
+    #[tokio::test]
+    async fn broadcasts_with_staff_store_require_a_valid_staff_session() {
+        use crate::staff::StaffStore;
+        // With the real staff accounts system wired, a broadcast must present a
+        // valid SAFETY_OFFICER/ADMIN staff SESSION token — NOT the legacy shared
+        // token. An empty store has no sessions, so the request is rejected as
+        // Unauthenticated, proving the staff-session path is the one in force.
+        let svc = FamilySafetyService::new(AlertHub::new(), SafetyBroadcastStore::new())
+            .with_staff_store(StaffStore::new());
+        let err = svc
+            .send_safety_broadcast(Request::new(staff_broadcast("Notice")))
+            .await
+            .expect_err("an invalid/absent staff session is rejected");
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }
 
     #[tokio::test]
