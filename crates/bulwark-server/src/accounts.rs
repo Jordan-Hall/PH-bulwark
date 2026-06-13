@@ -1158,6 +1158,31 @@ impl AccountStore {
         Some((c.child_id.clone(), c.family_id.clone(), c.name.clone()))
     }
 
+    /// Account ids of the guardians assigned to `child_id` (empty for an unknown
+    /// child). Used to SCOPE guardian push fan-out so a redacted alert reaches
+    /// ONLY the guardians of the child it concerns — never another family.
+    pub fn guardians_for_child(&self, child_id: &str) -> Vec<String> {
+        let inner = self.inner.lock().expect("account mutex poisoned");
+        inner
+            .children
+            .get(child_id.trim())
+            .map(|c| c.guardians.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Account ids of the guardians assigned to the child owning the enrolled
+    /// `device_id` (empty for an unknown device). The device-keyed counterpart to
+    /// [`Self::guardians_for_child`] for alerts that carry only the child device.
+    pub fn guardians_for_device(&self, device_id: &str) -> Vec<String> {
+        let inner = self.inner.lock().expect("account mutex poisoned");
+        inner
+            .device_to_child
+            .get(device_id.trim())
+            .and_then(|cid| inner.children.get(cid))
+            .map(|c| c.guardians.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
     /// Verify a per-device credential (minted at [`Self::redeem_pair_code`],
     /// presented on Heartbeat / child-config reads): `true` iff `device_id` is
     /// an enrolled child device AND sha256(token) matches the stored digest
