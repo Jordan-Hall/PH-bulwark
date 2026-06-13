@@ -170,7 +170,13 @@ class BulwarkAccessibilityService : AccessibilityService() {
                                     scanFrameForNsfw(pkg, bmp)
                                     if (ocrText) {
                                         val text = Ocr.recognize(this@BulwarkAccessibilityService, bmp)
-                                        if (!text.isNullOrEmpty()) submit(pkg, "ocr:$thread", text)
+                                        // Submit OCR text under the SAME thread as the
+                                        // view-tree text (not a separate "ocr:" id), so
+                                        // mixed tree+OCR signals in one conversation
+                                        // (e.g. a secrecy message + an image caption
+                                        // steering to another app) combine in the
+                                        // grooming state machine's per-thread history.
+                                        if (!text.isNullOrEmpty()) submit(pkg, thread, text)
                                     }
                                 } finally {
                                     bmp.recycle()
