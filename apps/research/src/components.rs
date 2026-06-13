@@ -74,9 +74,9 @@ pub fn SiteFooter() -> Element {
                         h4 { "Organisation" }
                         ul {
                             li { Link { to: Route::About {}, "About the lab" } }
-                            li { Link { to: Route::About {}, "Team" } }
                             li { Link { to: Route::Contact {}, "Contact" } }
-                            li { a { href: "https://predatorhunters.co.uk", "Main site ↗" } }
+                            li { Link { to: Route::Privacy {}, "Privacy" } }
+                            li { a { href: "https://predatorhunters.co.uk", target: "_blank", rel: "noopener", "Main site ↗" } }
                         }
                     }
                     div {

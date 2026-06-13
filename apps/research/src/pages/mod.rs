@@ -4,6 +4,8 @@ mod about;
 mod approach;
 mod contact;
 mod home;
+mod notfound;
+mod privacy;
 mod research;
 mod systems;
 
@@ -11,5 +13,7 @@ pub use about::About;
 pub use approach::Approach;
 pub use contact::Contact;
 pub use home::Home;
+pub use notfound::NotFound;
+pub use privacy::Privacy;
 pub use research::Research;
 pub use systems::Systems;

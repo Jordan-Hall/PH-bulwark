@@ -33,4 +33,8 @@ FROM caddy:2-alpine
 COPY --from=caddybuild /usr/bin/caddy /usr/bin/caddy
 COPY deploy/research/Caddyfile /etc/caddy/Caddyfile
 COPY --from=build /site /srv
+# Static SEO + share files, served at the root: /og.png, /robots.txt,
+# /sitemap.xml, /apple-touch-icon.png (copied after the bundle so they sit at
+# /srv root, not under /assets).
+COPY deploy/research/static/ /srv/
 EXPOSE 80 443
