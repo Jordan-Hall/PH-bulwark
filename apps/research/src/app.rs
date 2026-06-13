@@ -7,7 +7,7 @@ use dioxus::prelude::*;
 use crate::assets::{FAVICON, PH_LOGO};
 use crate::components::{ClosingCta, SiteFooter};
 use crate::icons::svg;
-use crate::pages::{About, Approach, Contact, Home, NotFound, Privacy, Research, Systems};
+use crate::pages::{About, Approach, Contact, Home, NotFound, Privacy, Research, Systems, Waitlist};
 
 #[derive(Routable, Clone, PartialEq)]
 pub enum Route {
@@ -26,6 +26,8 @@ pub enum Route {
     Contact {},
     #[route("/privacy")]
     Privacy {},
+    #[route("/waitlist")]
+    Waitlist {},
     #[route("/:..segments")]
     NotFound { segments: Vec<String> },
 }
