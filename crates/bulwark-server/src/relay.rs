@@ -1125,8 +1125,14 @@ mod tests {
         // guardian's endpoint, and assert the fan-out target is family-scoped.
         use crate::accounts::AccountStore;
         let accounts = AccountStore::new();
-        let acct_a = accounts.create_account("a@ex.com", "passworda", "A").unwrap().0;
-        let acct_b = accounts.create_account("b@ex.com", "passwordb", "B").unwrap().0;
+        let acct_a = accounts
+            .create_account("a@ex.com", "passworda", "A")
+            .unwrap()
+            .0;
+        let acct_b = accounts
+            .create_account("b@ex.com", "passwordb", "B")
+            .unwrap()
+            .0;
         let (tok_a, _, _) = accounts.login("a@ex.com", "passworda").unwrap();
         let (tok_b, _, _) = accounts.login("b@ex.com", "passwordb").unwrap();
         accounts.add_child(&tok_a, "Kid A", "device-a").unwrap();
