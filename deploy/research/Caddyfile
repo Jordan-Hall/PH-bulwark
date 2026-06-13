@@ -23,17 +23,21 @@ research.predatorhunters.co.uk {
 		respond "ok" 200
 	}
 
-	# Everything else: the static SPA, with client-routing fallback.
+	# Everything else: pre-rendered per-route HTML (SSG), falling back to the
+	# SPA shell. `{path}/index.html` serves the pre-rendered page for a route
+	# (e.g. /research → /research/index.html); unknown paths hit /index.html and
+	# the wasm router renders the 404 page.
 	handle {
 		root * /srv
-		try_files {path} /index.html
+		try_files {path} {path}/index.html /index.html
 		file_server
 
 		# Long-cache the immutable, content-hashed bundle assets…
 		@assets path *.wasm *.js *.css *.woff *.woff2 *.png *.jpg *.jpeg *.svg
 		header @assets Cache-Control "public, max-age=604800"
-		# …but never cache the HTML shell, so a deploy is picked up at once.
-		header /index.html Cache-Control "no-cache"
+		# …but never cache the HTML (so a redeploy is picked up immediately).
+		@html not path *.wasm *.js *.css *.woff *.woff2 *.png *.jpg *.jpeg *.svg *.xml *.txt *.ico
+		header @html Cache-Control "no-cache"
 	}
 
 	header {

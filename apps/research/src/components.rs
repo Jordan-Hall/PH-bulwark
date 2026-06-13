@@ -5,7 +5,7 @@
 use dioxus::prelude::*;
 
 use crate::app::Route;
-use crate::assets::ph_logo_data_uri;
+use crate::assets::PH_LOGO;
 use crate::icons::svg;
 
 /// The shared closing CTA — investment / collaboration attraction, kept honest.
@@ -55,7 +55,7 @@ pub fn SiteFooter() -> Element {
                 div { class: "footer-top",
                     div {
                         Link { class: "brand", to: Route::Home {},
-                            img { class: "brand-logo", src: "{ph_logo_data_uri()}", alt: "Predator Hunters" }
+                            img { class: "brand-logo", src: PH_LOGO, alt: "Predator Hunters" }
                             span { class: "brand-tag", "Research" }
                         }
                         p { class: "footer-blurb",
@@ -88,7 +88,7 @@ pub fn SiteFooter() -> Element {
                             li { a { href: "https://predatorhunters.co.uk", target: "_blank", rel: "noopener", "Press & journalism ↗" } }
                         }
                         div { style: "margin-top:18px;",
-                            img { class: "brand-logo", src: "{ph_logo_data_uri()}", alt: "Predator Hunters", style: "height:46px;" }
+                            img { class: "brand-logo", src: PH_LOGO, alt: "Predator Hunters", style: "height:46px;" }
                         }
                     }
                 }
