@@ -2,25 +2,24 @@ name: research-site
 
 # Build the Predator Hunters Research static site image in CI, push to GHCR,
 # then have the EC2 box docker-PULL + run it via AWS SSM (same no-SSH pattern as
-# deploy.yml). The box only RUNS the prebuilt nginx image (a few MB).
+# deploy.yml). The box only RUNS the prebuilt image.
 #
-# Serves research.predatorhunters.co.uk. TLS is terminated at the Cloudflare
-# edge (subdomain proxied — record already created), so the container speaks
-# plain HTTP; the deploy maps it to host port 80 (Cloudflare → origin on :80
-# under SSL mode "Flexible"; switch to "Full" only with origin TLS).
+# Serves research.predatorhunters.co.uk via Caddy. Caddy auto-provisions a real
+# Let's Encrypt cert over the Cloudflare DNS-01 challenge (CF_API_TOKEN), so the
+# origin is valid under Cloudflare "Full (strict)". Cert state persists in a
+# /data host volume.
 #
-# Gated on the GitHub Environment `production`. Reuses the SAME deploy secrets
-# as deploy.yml:
+# Gated on the GitHub Environment `production`. Reuses deploy.yml's secrets/vars:
 #   secret AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY  (ph-bulwark-deployer; ssm:SendCommand)
+#   secret BULWARK_CF_DNS_TOKEN  Cloudflare DNS-edit token (also used by the server's acme.sh)
 #   var    AWS_REGION         e.g. eu-west-2
 #   var    AWS_INSTANCE_ID    the EC2 instance id (SSM-managed)
-#   var    RESEARCH_PORT      optional host port, default 80
 #
 # ONE-TIME prerequisites (outside CI — see deploy/research/README.md):
 #   * Cloudflare: proxied A record `research` → box IP  ✅ DONE.
-#   * Cloudflare: SSL/TLS mode "Flexible" (origin :80) — or "Full" with origin TLS.
-#   * Security group: allow the chosen RESEARCH_PORT (80) inbound, ideally
-#     restricted to Cloudflare IP ranges. (Needs EC2 perms the deploy IAM lacks.)
+#   * Security group: allow inbound :443 (and :80 for the redirect) from the
+#     Cloudflare IP ranges. ⚠️ The deploy IAM is ssm:SendCommand-only and cannot
+#     edit the SG — do this via the console or deploy/aws terraform.
 
 on:
   push:
@@ -54,20 +53,16 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build the wasm bundle into an nginx image
+      - name: Build the wasm bundle into a Caddy image
         run: |
           set -euo pipefail
           docker build -f deploy/research/Dockerfile \
             -t "$IMAGE:${GITHUB_SHA}" -t "$IMAGE:latest" .
-      - name: Smoke test — nginx serves the bundle
+      - name: Smoke test — image runs + bundle is present
         run: |
           set -euo pipefail
-          docker run -d --name smoke -p 8099:80 "$IMAGE:${GITHUB_SHA}"
-          sleep 4
-          curl -fsS http://127.0.0.1:8099/healthz
-          curl -fsS http://127.0.0.1:8099/ | grep -qi "<!DOCTYPE html" \
-            || { echo "::error::index.html not served"; docker logs smoke; exit 1; }
-          docker rm -f smoke
+          docker run --rm "$IMAGE:${GITHUB_SHA}" caddy version
+          docker run --rm --entrypoint sh "$IMAGE:${GITHUB_SHA}" -c 'test -f /srv/index.html && echo bundle-ok'
       - name: Push to GHCR
         run: |
           set -euo pipefail
@@ -92,23 +87,33 @@ jobs:
       - name: Redeploy via SSM Run Command
         env:
           IID: ${{ vars.AWS_INSTANCE_ID }}
-          RESEARCH_PORT: ${{ vars.RESEARCH_PORT }}
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Cloudflare DNS-edit token for Caddy's DNS-01 issuance. Required — an
+          # empty token means Caddy can't get a cert and the site won't serve TLS.
+          CF_TOKEN: ${{ secrets.BULWARK_CF_DNS_TOKEN }}
         run: |
           set -euo pipefail
-          PORT="${RESEARCH_PORT:-80}"
           REF="${IMAGE}:${GITHUB_SHA}"
-          # `set -eu` (NOT -eux) on the box so the GHCR token isn't echoed.
+          if [ -z "${CF_TOKEN}" ]; then
+            echo "::error::secret BULWARK_CF_DNS_TOKEN is empty — Caddy needs it for DNS-01"; exit 1
+          fi
+          # Ship the token as a base64 env-file blob (single JSON/shell-safe token,
+          # never echoed) → written 0600 on the box, passed via --env-file (not
+          # `-e`, so it isn't visible in `docker inspect`/ps args).
+          CF_B64="$(printf 'CF_API_TOKEN=%s\n' "${CF_TOKEN}" | base64 -w0)"
+          # `set -eu` (NOT -eux) on the box so neither token is echoed.
           cat > params.json <<JSON
           {"commands":[
             "set -eu",
             "echo '${GHCR_TOKEN}' | docker login ghcr.io -u '${GHCR_USER}' --password-stdin",
             "docker pull '${REF}'",
+            "mkdir -p /var/lib/research-caddy && chmod 700 /var/lib/research-caddy",
+            "printf '%s' '${CF_B64}' | base64 -d > /etc/research-cf.env && chmod 600 /etc/research-cf.env",
             "docker rm -f research-site || true",
-            "docker run -d --name research-site --restart unless-stopped -p ${PORT}:80 '${REF}'",
-            "sleep 4",
-            "docker ps --filter name=research-site --format '{{.Status}}' | grep -q Up || { docker logs --tail 50 research-site; exit 1; }",
+            "docker run -d --name research-site --restart unless-stopped -p 80:80 -p 443:443 --env-file /etc/research-cf.env -v /var/lib/research-caddy:/data '${REF}'",
+            "sleep 8",
+            "docker ps --filter name=research-site --format '{{.Status}}' | grep -q Up || { docker logs --tail 80 research-site; exit 1; }",
             "docker logout ghcr.io || true",
             "docker image prune -f || true"
           ]}
@@ -117,7 +122,7 @@ jobs:
             --document-name AWS-RunShellScript --comment "research-site redeploy (pull)" \
             --parameters file://params.json --query Command.CommandId --output text)
           echo "SSM command: $CID"
-          for i in $(seq 1 30); do
+          for i in $(seq 1 36); do
             ST=$(aws ssm get-command-invocation --command-id "$CID" --instance-id "$IID" --query Status --output text 2>/dev/null || echo Pending)
             echo "status: $ST"
             case "$ST" in

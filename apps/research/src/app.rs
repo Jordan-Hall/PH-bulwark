@@ -4,7 +4,7 @@
 
 use dioxus::prelude::*;
 
-use crate::assets::logo_mark_data_uri;
+use crate::assets::ph_logo_data_uri;
 use crate::components::{ClosingCta, SiteFooter};
 use crate::icons::svg;
 use crate::pages::{About, Approach, Contact, Home, Research};
@@ -80,11 +80,8 @@ fn NavBar() -> Element {
         nav { class: "nav",
             div { class: "nav-inner",
                 Link { class: "brand", to: Route::Home {},
-                    img { class: "brand-mark", src: "{logo_mark_data_uri()}", alt: "Predator Hunters" }
-                    span { class: "brand-name",
-                        b { "Predator Hunters" }
-                        span { "Research" }
-                    }
+                    img { class: "brand-logo", src: "{ph_logo_data_uri()}", alt: "Predator Hunters" }
+                    span { class: "brand-tag", "Research" }
                 }
                 div { class: "nav-links",
                     Link { class: nav_class(&route, &Route::Research {}), to: Route::Research {}, "Research" }

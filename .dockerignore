@@ -1,10 +1,15 @@
 # Keep the build context small. Do NOT exclude any `crates/**` source — they are
 # root-workspace members and cargo needs them all to build `-p bulwark-server`.
-**/target
 .git
 .github
 *.log
 /models
-# Detached sub-workspaces not needed to build the server tier.
+# Detached sub-workspaces not needed to build the SERVER tier…
 apps
 platform
+# …but the research-site image (deploy/research/Dockerfile) DOES need
+# apps/research, so re-include just that one. (`**/target` is re-applied last so
+# the bulky build artifacts still never enter any context.)
+!apps/research
+!apps/research/**
+**/target

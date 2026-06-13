@@ -167,12 +167,12 @@ em.em { font-style: italic; color: var(--head); }
   background: var(--nav-bg); border: 1px solid var(--hair); border-radius: 999px;
   backdrop-filter: blur(16px) saturate(140%); -webkit-backdrop-filter: blur(16px) saturate(140%);
   box-shadow: 0 18px 40px -28px rgba(0,0,0,.9); }
-.brand { display: inline-flex; align-items: center; gap: 11px; min-width: 0; }
-.brand-mark { height: 30px; width: auto; display: block; flex: none;
-  filter: drop-shadow(0 2px 7px rgba(0,0,0,.45)); }
-.brand-name { display: flex; flex-direction: column; line-height: 1; }
-.brand-name b { font-family: var(--sans); font-weight: 700; font-size: .98rem; letter-spacing: .01em; color: var(--head); }
-.brand-name span { font-family: var(--mono); font-size: .6rem; letter-spacing: .34em; text-transform: uppercase; color: var(--muted); margin-top: 4px; }
+.brand { display: inline-flex; align-items: center; gap: 12px; min-width: 0; }
+.brand-logo { height: 32px; width: auto; display: block; flex: none; filter: drop-shadow(0 2px 8px rgba(0,0,0,.5)); }
+.brand-tag { font-family: var(--mono); font-size: .62rem; letter-spacing: .3em; text-transform: uppercase; color: var(--muted); align-self: center; padding-left: 12px; border-left: 1px solid var(--hair-strong); }
+/* The wordmark's letters are white-filled (built for a dark field). On the dark
+   theme it floats free; in light mode it needs a small dark plate to read. */
+.theme-root[data-theme="light"] .brand-logo { background: #0b1320; padding: 5px 9px; border-radius: 9px; filter: none; }
 .nav-links { display: flex; align-items: center; gap: 4px; }
 .nav-link { font-size: .92rem; color: var(--ink-2); padding: 9px 14px; border-radius: 999px; transition: color .18s, background .18s; }
 .nav-link:hover { color: var(--head); background: var(--hair); }
@@ -192,6 +192,8 @@ em.em { font-style: italic; color: var(--head); }
   font-size: .96rem; padding: 13px 22px; border-radius: 999px; cursor: pointer; border: 1px solid transparent;
   transition: transform .14s cubic-bezier(.2,.8,.2,1), box-shadow .2s, background .2s, border-color .2s, color .2s; }
 .btn svg { width: 17px; height: 17px; }
+/* icon wrappers are inline-flex so the glyph centres on the text baseline */
+.btn span { display: inline-flex; align-items: center; }
 .btn-primary { color: var(--on-grad); background: var(--grad); font-weight: 700;
   box-shadow: 0 14px 34px -12px rgba(237,42,51,.5), inset 0 1px 0 rgba(255,255,255,.3); }
 .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 22px 46px -12px rgba(245,130,32,.6), inset 0 1px 0 rgba(255,255,255,.34); }

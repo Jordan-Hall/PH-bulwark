@@ -13,7 +13,7 @@ const MODELS: [(&str, &str, &str, &str, &str, &str); 6] = [
         "scan",
         "A compact language model that recognises the shape of predatory conversation — secrecy pressure, “let’s move to another app”, gift offers, age and personal-information probing — and raises a content-free flag for a guardian. Tuned so that secrecy and isolation outrank simple age questions.",
         "live",
-        "In product",
+        "In alpha",
     ),
     (
         "02",
@@ -21,7 +21,7 @@ const MODELS: [(&str, &str, &str, &str, &str, &str); 6] = [
         "shield-check",
         "Real-time classification of unsafe imagery and text as it loads, on the device itself. Illegal child-abuse material is detected, blocked instantly, and reported as the law requires — never stored, never shown, never generated.",
         "live",
-        "In product",
+        "In alpha",
     ),
     (
         "03",
@@ -29,15 +29,15 @@ const MODELS: [(&str, &str, &str, &str, &str, &str); 6] = [
         "cpu",
         "Conventional, on-device OCR that catches grooming inside end-to-end-encrypted chats by reading only the text already drawn on screen. Never keystrokes, never passwords; raw text never leaves the device.",
         "live",
-        "In product",
+        "In alpha",
     ),
     (
         "04",
-        "Multimodal safety classification",
+        "Video detection & in-place rewriting",
         "layers",
-        "Extending detection across image, short-video and audio so the same protective judgement covers every way unsafe content reaches a child — still on-device, still storing nothing.",
-        "research",
-        "In development",
+        "Our flagship alpha capability: detecting unsafe video as it plays and rewriting it on the fly — blurring or muting only the offending moments and re-packaging the same stream, so the rest plays uninterrupted. On-device, nothing stored.",
+        "live",
+        "In alpha",
     ),
     (
         "05",
@@ -87,7 +87,7 @@ pub fn Research() -> Element {
                     span { class: "grad-text", "Keep none of the child." }
                 }
                 p { class: "lede rise d3",
-                    "A small family of focused models, each doing one safety job well. Most already run inside the product; the rest are in the lab. All of them run on-device and store nothing."
+                    "A small family of focused models, each doing one safety job well. Most already run in our alpha build; the rest are in the lab. All of them run on-device and store nothing."
                 }
             }
         }
@@ -133,22 +133,18 @@ pub fn Research() -> Element {
 
         section { class: "section",
             div { class: "wrap",
-                div { class: "statement-grid",
-                    div {
-                        span { class: "sec-index", style: "margin-bottom:18px;", "Disclosure" }
-                        h2 { class: "reveal", "What we publish — and what we never will." }
+                div { class: "sec-head",
+                    span { class: "sec-index", "Disclosure" }
+                    h2 { "What we publish — and what we never will." }
+                }
+                dl { class: "deflist reveal",
+                    div { class: "def",
+                        dt { "We publish" }
+                        dd { "How the models work — architectures, evaluation methods, safety findings — and the open-source tooling around them." }
                     }
-                    div { class: "reveal",
-                        dl { class: "deflist", style: "border-top:0;",
-                            div { class: "def",
-                                dt { "We publish" }
-                                dd { "How the models work — architectures, evaluation methods, safety findings — and the open-source tooling around them." }
-                            }
-                            div { class: "def",
-                                dt { "We never publish" }
-                                dd { "A child’s data, a raw grooming corpus, or live model weights — nor anything that would help an adult evade protection. Those stay closed, permanently." }
-                            }
-                        }
+                    div { class: "def",
+                        dt { "We never publish" }
+                        dd { "A child’s data, a raw grooming corpus, or live model weights — nor anything that would help an adult evade protection. Those stay closed, permanently." }
                     }
                 }
             }

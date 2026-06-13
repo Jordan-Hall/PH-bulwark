@@ -10,8 +10,8 @@ use crate::icons::svg;
 const TIMELINE: [(&str, &str); 4] = [
     ("2017", "Predator Hunters begins — an independent organisation protecting children online and training the parents who keep them safe."),
     ("2022", "The research lab opens. Privacy-first prototyping of on-device safety models begins in earnest."),
-    ("2025", "The first models reach real devices inside the product — recognising grooming patterns and filtering unsafe content, on-device."),
-    ("Today", "A family of six models in development and in production. A small team, the same mission."),
+    ("2025", "Our first prototype lands the hardest capability of all — detecting unsafe video and rewriting it in place, blurring or muting only the offending moments while the rest plays on."),
+    ("Today", "In final development of our first alpha, heading into stage testing. From here, more and more goes into the models."),
 ];
 
 #[component]

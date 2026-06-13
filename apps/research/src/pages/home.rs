@@ -16,7 +16,7 @@ const HIGHLIGHTS: [(&str, &str, &str, &str, &str, &str); 4] = [
         "scan",
         "A small language model that recognises predatory conversation patterns — secrecy pressure, “let’s move to another app”, age and personal-info probing — and warns a guardian. Content-free alerts only.",
         "live",
-        "In product",
+        "In alpha",
     ),
     (
         "02",
@@ -24,7 +24,7 @@ const HIGHLIGHTS: [(&str, &str, &str, &str, &str, &str); 4] = [
         "shield-check",
         "Real-time classification of unsafe imagery and text, running entirely on the child’s own device. Illegal material is detected, blocked and reported — never stored.",
         "live",
-        "In product",
+        "In alpha",
     ),
     (
         "03",
@@ -32,7 +32,7 @@ const HIGHLIGHTS: [(&str, &str, &str, &str, &str, &str); 4] = [
         "cpu",
         "Conventional on-device OCR that catches grooming inside end-to-end-encrypted chats by reading only what is already on screen — never keystrokes, never passwords, never sent off-device.",
         "live",
-        "In product",
+        "In alpha",
     ),
     (
         "04",
@@ -138,7 +138,7 @@ pub fn Home() -> Element {
                 div { class: "sec-head",
                     span { class: "sec-index", "01 — The work" }
                     h2 { "Models that catch danger, not childhoods." }
-                    p { class: "lede", "A handful of focused models, each doing one safety job well — and most already shipping inside the product." }
+                    p { class: "lede", "A handful of focused models, each doing one safety job well — most already running in our alpha build." }
                 }
                 div { class: "research-list",
                     for (num , title , icon , desc , tagcls , tagtxt) in HIGHLIGHTS {

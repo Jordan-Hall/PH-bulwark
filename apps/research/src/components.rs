@@ -5,7 +5,7 @@
 use dioxus::prelude::*;
 
 use crate::app::Route;
-use crate::assets::logo_mark_data_uri;
+use crate::assets::ph_logo_data_uri;
 use crate::icons::svg;
 
 /// The shared closing CTA — investment / collaboration attraction, kept honest.
@@ -55,11 +55,8 @@ pub fn SiteFooter() -> Element {
                 div { class: "footer-top",
                     div {
                         Link { class: "brand", to: Route::Home {},
-                            img { class: "brand-mark", src: "{logo_mark_data_uri()}", alt: "Predator Hunters" }
-                            span { class: "brand-name",
-                                b { "Predator Hunters" }
-                                span { "Research" }
-                            }
+                            img { class: "brand-logo", src: "{ph_logo_data_uri()}", alt: "Predator Hunters" }
+                            span { class: "brand-tag", "Research" }
                         }
                         p { class: "footer-blurb",
                             "An independent child-safety AI lab. We build privacy-preserving models that run on a child's own device — detecting unsafe content and predatory conversation patterns, storing nothing."
@@ -89,7 +86,7 @@ pub fn SiteFooter() -> Element {
                             li { a { href: "https://predatorhunters.co.uk", "Press & journalism ↗" } }
                         }
                         div { style: "margin-top:18px;",
-                            img { class: "brand-mark", src: "{logo_mark_data_uri()}", alt: "Predator Hunters", style: "height:40px;" }
+                            img { class: "brand-logo", src: "{ph_logo_data_uri()}", alt: "Predator Hunters", style: "height:46px;" }
                         }
                     }
                 }

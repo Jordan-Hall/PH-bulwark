@@ -1,23 +1,21 @@
-# Predator Hunters Research static site — build the Dioxus 0.8 web/wasm bundle in
-# CI, then serve it from a tiny nginx image. Multi-stage so the runtime image
-# carries only the static bundle (no Rust toolchain).
+# Predator Hunters Research static site — build the Dioxus 0.8 web/wasm bundle,
+# then serve it from Caddy with the Cloudflare DNS plugin. Caddy auto-provisions
+# a real Let's Encrypt certificate via DNS-01 (using CF_API_TOKEN), so the origin
+# presents a publicly-trusted cert that satisfies Cloudflare "Full (strict)" —
+# with no acme-on-box and no cert files to mount. Multi-stage so the runtime
+# image carries only the static bundle + the Caddy binary.
 #
-# Build context is the REPO ROOT (the app embeds branding/logo.jpg via a
-# ../../../branding relative include, and is a detached cargo workspace under
-# apps/research with its own Cargo.lock).
+# Build context is the REPO ROOT (the app embeds branding/* via ../../../ relative
+# includes, and is a detached cargo workspace under apps/research).
 
-# ---- build stage -----------------------------------------------------------
+# ---- 1. build the wasm bundle ---------------------------------------------
 FROM rust:1-bookworm AS build
 RUN rustup target add wasm32-unknown-unknown
-# dx (the Dioxus CLI), pinned to the same 0.8 alpha the app is proven against.
 RUN cargo install dioxus-cli --version 0.8.0-alpha.0 --locked
-
 WORKDIR /app
 COPY . .
-
 WORKDIR /app/apps/research
 RUN dx build --platform web --release
-
 # dx emits the servable bundle to target/dx/<name>/release/web/public — locate
 # the produced index.html robustly and stage its directory.
 RUN set -eux; \
@@ -26,9 +24,13 @@ RUN set -eux; \
     mkdir -p /site; cp -r "$PUB"/. /site/; \
     ls -la /site
 
-# ---- runtime stage ---------------------------------------------------------
-FROM nginx:1.27-alpine
-COPY deploy/research/nginx.conf /etc/nginx/conf.d/default.conf
-COPY --from=build /site /usr/share/nginx/html
-EXPOSE 80
-HEALTHCHECK --interval=30s --timeout=4s --retries=3 CMD wget -qO- http://127.0.0.1/healthz || exit 1
+# ---- 2. build Caddy with the Cloudflare DNS plugin ------------------------
+FROM caddy:2-builder AS caddybuild
+RUN xcaddy build --with github.com/caddy-dns/cloudflare
+
+# ---- 3. runtime -----------------------------------------------------------
+FROM caddy:2-alpine
+COPY --from=caddybuild /usr/bin/caddy /usr/bin/caddy
+COPY deploy/research/Caddyfile /etc/caddy/Caddyfile
+COPY --from=build /site /srv
+EXPOSE 80 443

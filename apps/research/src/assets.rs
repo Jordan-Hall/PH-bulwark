@@ -7,14 +7,15 @@
 //! nav/hero use the bespoke inline-SVG `shield` glyph from `icons.rs` instead,
 //! which we can tint to the dark palette precisely.
 
-/// The shield MARK as a transparent-background `data:` URI (PNG) — the white
-/// field was flood-filled out of `branding/logo.jpg` so the mark sits directly
-/// on the dark stage with no chip. Used for the nav + footer brand lockup.
+/// The official Predator Hunters wordmark (red/white distressed lockup with the
+/// rifle crossbar) as a transparent-background `data:` URI (PNG). It is the org
+/// brand mark, shown in the nav + footer; on the dark stage the white letter
+/// fill reads cleanly, in light mode it sits on a small dark plate (see CSS).
 /// Decoded on call; cache in a `use_memo` if rendered repeatedly.
-pub fn logo_mark_data_uri() -> String {
+pub fn ph_logo_data_uri() -> String {
     // Relative to THIS file (apps/research/src/assets.rs): ../../../ climbs
     // src → apps/research → apps → repo root.
-    const BYTES: &[u8] = include_bytes!("../../../branding/logo-mark.png");
+    const BYTES: &[u8] = include_bytes!("../../../branding/ph-logo.png");
     format!("data:image/png;base64,{}", base64_encode(BYTES))
 }
 

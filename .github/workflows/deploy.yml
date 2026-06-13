@@ -21,6 +21,17 @@ name: deploy
 on:
   push:
     branches: [master]
+    # Only redeploy the server when something the SERVER image depends on
+    # changes. Docs/marketing/other-app changes (e.g. apps/research, the
+    # research-site deploy, branding) no longer bounce the live service.
+    # (Deliberately excludes this file's own path so editing the filter doesn't
+    # self-trigger a redeploy; use `release` or Run workflow for that.)
+    paths:
+      - crates/**
+      - deploy/docker/**
+      - deploy/wireguard/**
+      - Cargo.toml
+      - Cargo.lock
   release:
     types: [published]
   workflow_dispatch: {}
