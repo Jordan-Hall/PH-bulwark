@@ -46,7 +46,7 @@ const PRINCIPLES: [(&str, &str, &str); 4] = [
     (
         "cpu",
         "On device by default",
-        "The models run on the child's own phone. Nothing leaves it unless there is a real reason for it to.",
+        "The models run on the child's own phone. An optional filter can route traffic through our servers or one you host yourself, never a third party.",
     ),
     (
         "eye-off",
@@ -366,7 +366,7 @@ fn Readout() -> Element {
                     span { class: "ro-v", "redacted" }
                 }
                 div { class: "ro-row",
-                    span { class: "ro-k", "sent to the cloud" }
+                    span { class: "ro-k", "shared with third parties" }
                     span { class: "ro-v", "never" }
                 }
             }

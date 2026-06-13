@@ -14,7 +14,7 @@ const NEVER: [(&str, &str, &str); 4] = [
 
 /// (term, definition) — the principles.
 const PRINCIPLES: [(&str, &str); 6] = [
-    ("On device by default", "The models run on the child's own phone. Leaving it is the rare exception, and even then it never carries raw content."),
+    ("On device by default", "The models run on the child's own phone. You can route traffic through a filtering VPN, but only to our servers or an instance you host yourself, never a third party, and it never carries raw content."),
     ("We remember nothing", "The system is built so there is nothing to leak. No raw messages or images are ever kept, and alerts carry no content."),
     ("A person always decides", "The models raise a concern and a person acts on it. A parent decides for their child, and our editors decide what we report. Nothing is ever an automated accusation."),
     ("Block and report, never store", "Illegal child-abuse material is blocked on sight and reported to the right authority, as the law requires. It is never stored, served, or made."),

@@ -7,7 +7,7 @@ use dioxus::prelude::*;
 use crate::assets::{favicon_data_uri, ph_logo_data_uri};
 use crate::components::{ClosingCta, SiteFooter};
 use crate::icons::svg;
-use crate::pages::{About, Approach, Contact, Home, Research, Systems};
+use crate::pages::{About, Approach, Contact, Home, NotFound, Privacy, Research, Systems};
 
 /// Colour scheme. Provided as a `Signal<Theme>` context by `App`, toggled from
 /// the nav, read back into the `data-theme` attribute on the theme root — which
@@ -33,6 +33,10 @@ pub enum Route {
     About {},
     #[route("/contact")]
     Contact {},
+    #[route("/privacy")]
+    Privacy {},
+    #[route("/:..segments")]
+    NotFound { segments: Vec<String> },
 }
 
 /// Root: inject the one stylesheet, provide the theme, paint the themed stage,
