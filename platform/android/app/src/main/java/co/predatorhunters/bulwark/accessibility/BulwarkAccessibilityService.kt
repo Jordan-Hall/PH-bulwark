@@ -44,14 +44,48 @@ import co.predatorhunters.bulwark.tamper.TamperReporter
  */
 class BulwarkAccessibilityService : AccessibilityService() {
 
+    /** Current foreground app package (updated on every event) so a cover can be
+     *  bound to the surface it was placed over. Never our own UI. */
+    @Volatile
+    private var lastForegroundPkg: String? = null
+
+    /** The package a localized cover is currently placed over. A cover belongs to
+     *  ONE surface: the instant the foreground window changes to a DIFFERENT app
+     *  (app switch, notification shade, launcher), the cover is dropped, so it can
+     *  never linger over the wrong screen or block the shade (the stale-cover bug
+     *  that made the phone unusable). */
+    @Volatile
+    private var coverPkg: String? = null
+
     override fun onServiceConnected() {
         RustBridge.ensureLoaded()
+        // Warm the NSFW classifier off the main thread so the first real frame
+        // isn't delayed by the model load.
+        ocrExecutor.execute { runCatching { Nsfw.obtain(this) } }
         Log.i(TAG, "Bulwark accessibility capture connected")
+    }
+
+    override fun onUnbind(intent: android.content.Intent?): Boolean {
+        // Drop any cover when the service unbinds (settings toggle / shutdown) so
+        // it can never be left stuck on screen.
+        removeLocalizedOverlay()
+        return super.onUnbind(intent)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
         val pkg = event.packageName?.toString() ?: return
+        // Track the live foreground app (skip our own UI) for surface-bound covers.
+        if (pkg != packageName) lastForegroundPkg = pkg
+
+        // SURFACE-BOUND COVER: when the foreground window changes to a DIFFERENT
+        // app/surface than the one a cover was placed over, drop the cover at once
+        // — it must never linger over another app, the launcher, or the
+        // notification shade (which would block pull-down). Event-driven, no TTL.
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            val cp = coverPkg
+            if (cp != null && pkg != cp) removeLocalizedOverlay()
+        }
 
         // Uninstall-guard: when the package installer / Settings opens, check
         // whether it's an attempt to remove US and, if so, alert + bounce away.
@@ -77,7 +111,11 @@ class BulwarkAccessibilityService : AccessibilityService() {
                 }
             }
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
-            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
+            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED,
+            AccessibilityEvent.TYPE_VIEW_SCROLLED -> {
+                // Re-scan on ANY on-screen change incl. scroll, so a cover tracks
+                // the content as it moves and lifts the moment it scrolls away
+                // (event-driven — no periodic polling, no timed auto-lift).
                 if (monitored) {
                     // Monitored chat: view-tree TEXT → grooming, PLUS a throttled
                     // frame that runs BOTH image-NSFW and OCR. OCR runs even when the
@@ -110,6 +148,11 @@ class BulwarkAccessibilityService : AccessibilityService() {
     @Volatile
     private var lastCaptureAtMs = 0L
 
+    /** Independent OCR sub-throttle: Tesseract is far heavier than the NSFW pass,
+     *  so the image scan runs every capture but OCR only every [OCR_MIN_GAP_MS]. */
+    @Volatile
+    private var lastOcrAtMs = 0L
+
     /**
      * Low-priority single-thread executor for the screenshot callback, the NSFW
      * inference + tiling, and the Tesseract OCR pass, so none of that work runs
@@ -124,16 +167,19 @@ class BulwarkAccessibilityService : AccessibilityService() {
 
     /**
      * Throttle gate for the screen-frame scan. Only on API 30+ (where
-     * [takeScreenshot] exists) and at most once per [OCR_INTERVAL_MS] — the OS
-     * also rate-limits `takeScreenshot` (~1/s), and each tick is a full OCR +
-     * N² NSFW-classifier pass, so we keep it cheap on battery/CPU.
+     * [takeScreenshot] exists). The NSFW image pass runs every capture (at most
+     * once per [CAPTURE_MIN_GAP_MS] — the OS also rate-limits `takeScreenshot`
+     * ~1/s); the heavier Tesseract OCR pass is sub-throttled to [OCR_MIN_GAP_MS]
+     * so frequent NSFW re-scans don't drag in an OCR pass every tick.
      */
     private fun maybeCapture(pkg: String, thread: String, ocrText: Boolean) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
         val now = SystemClock.elapsedRealtime()
-        if (now - lastCaptureAtMs < OCR_INTERVAL_MS) return
+        if (now - lastCaptureAtMs < CAPTURE_MIN_GAP_MS) return
         lastCaptureAtMs = now
-        captureAndScan(pkg, thread, ocrText)
+        val doOcr = ocrText && (now - lastOcrAtMs >= OCR_MIN_GAP_MS)
+        if (doOcr) lastOcrAtMs = now
+        captureAndScan(pkg, thread, doOcr)
     }
 
     /**
@@ -231,6 +277,7 @@ class BulwarkAccessibilityService : AccessibilityService() {
         if (region != null && !region.isEmpty) {
             // Flagged → cover (refresh) immediately; reset the clean streak.
             cleanScanCount = 0
+            coverPkg = pkg // bind the cover to this surface (drop on app change)
             showLocalizedOverlay(region, frame.width, frame.height)
             if (!coverEpisodeActive) {
                 coverEpisodeActive = true
@@ -515,6 +562,7 @@ class BulwarkAccessibilityService : AccessibilityService() {
         // re-alerts and the clean streak starts fresh).
         coverEpisodeActive = false
         cleanScanCount = 0
+        coverPkg = null
         // Cover lifted → let media resume.
         restoreAudio()
     }
@@ -571,19 +619,27 @@ class BulwarkAccessibilityService : AccessibilityService() {
     companion object {
         private const val TAG = "BulwarkA11y"
 
-        /** Minimum gap between screen-frame scans (battery/CPU + OS rate-limit). */
-        private const val OCR_INTERVAL_MS = 4000L
+        /** Minimum gap between screenshots (OS rate-limits `takeScreenshot` ~1/s).
+         *  Scans are EVENT-DRIVEN (content-change / text / scroll) — there is no
+         *  periodic polling timer (deliberate: covering is reactive to on-screen
+         *  changes only, never a background poll). */
+        private const val CAPTURE_MIN_GAP_MS = 1000L
 
-        /** Consecutive CLEAN scans required before lifting a localized cover. The
-         *  cover lifts on sustained-clean (content gone), NOT on one noisy frame —
-         *  hysteresis that stops the cover flickering/vanishing while the offending
-         *  content is still on screen. ~CLEAN_LIFT_SCANS × OCR_INTERVAL_MS of clean. */
-        private const val CLEAN_LIFT_SCANS = 2
+        /** OCR sub-throttle: Tesseract is heavy, so OCR runs at most this often even
+         *  though the NSFW image pass runs on every capture. */
+        private const val OCR_MIN_GAP_MS = 6000L
 
-        /** SAFETY-net auto-lift: clears a stuck cover only if scans stop entirely
-         *  (e.g. no more accessibility events). The normal lift is the clean-scan
-         *  hysteresis above; this is deliberately long so it never causes a flicker. */
-        private const val REGION_OVERLAY_TTL_MS = 30000L
+        /** Consecutive CLEAN scans before lifting a cover. 1 = lift as soon as one
+         *  scan after a content change comes back clean (content scrolled away /
+         *  changed) — the wide model gap (benign ≤0.64, explicit ≥0.89) makes a
+         *  false-clean very unlikely, so no multi-scan hysteresis is needed. The
+         *  cover is also dropped instantly on any app/window change (surface-bound). */
+        private const val CLEAN_LIFT_SCANS = 1
+
+        /** SAFETY-net ONLY: clears a cover if accessibility events stop entirely
+         *  (no content-change/scroll to drive a clean-scan lift). Short, because the
+         *  normal lifts are event-driven (clean scan + surface change), not timed. */
+        private const val REGION_OVERLAY_TTL_MS = 5000L
         // Apps the network can't read (E2E / cert-pinned) → on-device capture path.
         private val MONITORED = setOf(
             "com.whatsapp",
