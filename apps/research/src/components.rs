@@ -89,7 +89,8 @@ pub fn SiteFooter() -> Element {
                         ul {
                             li { Link { to: Route::Research {}, "The models" } }
                             li { Link { to: Route::Approach {}, "Our approach" } }
-                            li { Link { to: Route::Approach {}, "Principles" } }
+                            li { Link { to: Route::Coverage {}, "What we catch" } }
+                            li { Link { to: Route::Systems {}, "Systems" } }
                         }
                     }
                     div {

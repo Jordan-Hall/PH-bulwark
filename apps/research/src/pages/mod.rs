@@ -3,6 +3,7 @@
 mod about;
 mod approach;
 mod contact;
+mod coverage;
 mod home;
 mod notfound;
 mod ph_bulwark;
@@ -16,6 +17,7 @@ mod waitlist;
 pub use about::About;
 pub use approach::Approach;
 pub use contact::Contact;
+pub use coverage::Coverage;
 pub use home::Home;
 pub use notfound::NotFound;
 pub use ph_bulwark::PhBulwark;
