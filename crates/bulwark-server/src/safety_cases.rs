@@ -128,7 +128,7 @@ impl CaseRec {
 /// Decode lowercase hex → bytes; a non-hex / odd-length string yields empty
 /// (never a panic — a corrupt at-rest hash must not crash a read).
 fn hex_to_bytes(s: &str) -> Vec<u8> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Vec::new();
     }
     let mut out = Vec::with_capacity(s.len() / 2);
