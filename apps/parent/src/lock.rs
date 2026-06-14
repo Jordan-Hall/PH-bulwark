@@ -67,7 +67,7 @@ pub fn validate_pin_shape(pin: &str) -> Result<(), String> {
     if !pin.chars().all(|c| c.is_ascii_digit()) {
         return Err("PIN must be digits only.".to_string());
     }
-    if len < PIN_MIN || len > PIN_MAX {
+    if !(PIN_MIN..=PIN_MAX).contains(&len) {
         return Err(format!("PIN must be {PIN_MIN} to {PIN_MAX} digits."));
     }
     Ok(())
@@ -218,7 +218,7 @@ fn to_hex(bytes: &[u8]) -> String {
 }
 
 fn from_hex(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len())

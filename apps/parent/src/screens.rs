@@ -506,14 +506,14 @@ pub fn ForgotPassword() -> Element {
     let mut email = use_signal(String::new);
     let mut code = use_signal(String::new);
     let mut new_pw = use_signal(String::new);
-    let mut busy = use_signal(|| false);
-    let mut error = use_signal(|| Option::<String>::None);
+    let busy = use_signal(|| false);
+    let error = use_signal(|| Option::<String>::None);
     // The fresh recovery code returned after a successful reset (save this one).
-    let mut new_code = use_signal(|| Option::<String>::None);
+    let new_code = use_signal(|| Option::<String>::None);
     // Generic confirmation after requesting an emailed code (anti-enumeration:
     // the same message whether or not the email has an account).
-    let mut emailed = use_signal(|| Option::<String>::None);
-    let mut emailing = use_signal(|| false);
+    let emailed = use_signal(|| Option::<String>::None);
+    let emailing = use_signal(|| false);
 
     let email_v = email();
     let pw_len = new_pw().chars().count();
@@ -1669,6 +1669,37 @@ pub fn Children() -> Element {
     let children = console.children;
     let children_error = console.children_error;
     let children_busy = console.children_busy;
+
+    // One roster-load path, shared by the mount auto-load and the manual
+    // "Refresh roster" button so the two can't drift. The synchronous body
+    // reads NO signal it also writes — the in-flight guard and every `set`
+    // live inside the spawned task. That keeps the `use_effect` below from
+    // subscribing to `children_busy` (which it flips), which would otherwise
+    // re-trigger the effect each time the load finishes and loop the RPC.
+    // Same shape as `ChildVpnRow`'s seed effect.
+    let load_roster = move || {
+        let mut children = children;
+        let mut children_busy = children_busy;
+        let mut children_error = children_error;
+        spawn(async move {
+            if children_busy() {
+                return;
+            }
+            children_busy.set(true);
+            children_error.set(None);
+            match load_children().await {
+                Ok(rows) => children.set(rows),
+                Err(e) => children_error.set(Some(e.to_string())),
+            }
+            children_busy.set(false);
+        });
+    };
+
+    // Auto-load the roster once when the tab mounts, so a guardian opening
+    // Children sees their paired devices without a manual refresh (mirrors the
+    // alert stream auto-connecting and ChildVpnRow auto-seeding its draft).
+    use_effect(load_roster);
+
     rsx! {
     section { class: "panel",
         div { class: "panel-head split",
@@ -1679,20 +1710,7 @@ pub fn Children() -> Element {
             button {
                 class: "ghost",
                 disabled: children_busy(),
-                onclick: move |_| {
-                    let mut children = children;
-                    let mut children_busy = children_busy;
-                    let mut children_error = children_error;
-                    children_busy.set(true);
-                    children_error.set(None);
-                    spawn(async move {
-                        match load_children().await {
-                            Ok(rows) => children.set(rows),
-                            Err(e) => children_error.set(Some(e.to_string())),
-                        }
-                        children_busy.set(false);
-                    });
-                },
+                onclick: move |_| load_roster(),
                 if children_busy() { "Refreshing…" } else { "Refresh roster" }
             }
         }
@@ -1788,9 +1806,9 @@ pub fn ChangePassword() -> Element {
     let mut old_pw = use_signal(String::new);
     let mut new_pw = use_signal(String::new);
     let mut confirm = use_signal(String::new);
-    let mut busy = use_signal(|| false);
-    let mut error = use_signal(|| Option::<String>::None);
-    let mut done = use_signal(|| false);
+    let busy = use_signal(|| false);
+    let error = use_signal(|| Option::<String>::None);
+    let done = use_signal(|| false);
 
     let new_len = new_pw().chars().count();
     let matches = !confirm().is_empty() && new_pw() == confirm();
