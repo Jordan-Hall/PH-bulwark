@@ -95,8 +95,10 @@ class BrowserContentFilter(
     @JavascriptInterface
     fun onExtract(json: String) {
         worker.execute {
+            // Content-free log only: a JSON parse error message embeds a snippet
+            // of the extracted PAGE TEXT, so never log the throwable message here.
             runCatching { dispatch(json) }
-                .onFailure { Log.i(TAG, "extract dispatch failed (fail-open): ${it.message}") }
+                .onFailure { Log.i(TAG, "extract dispatch failed (fail-open)") }
         }
     }
 
@@ -153,25 +155,51 @@ class BrowserContentFilter(
     }
 
     /**
-     * Fetch + decode an image URL to a [Bitmap] for the classifier (which needs
-     * pixels, not a URL). Best-effort cookie header so same-session images load.
-     * Bounded timeouts; any failure returns null (fail-open).
+     * Fetch + decode an image URL to a BOUNDED [Bitmap] for the classifier (which
+     * needs pixels, not a URL). Two-pass decode: read the bounds first, then decode
+     * with an `inSampleSize` that caps the longest edge at [MAX_DECODE_EDGE] — a
+     * large or hostile image (e.g. 20000x20000) must never allocate at native
+     * resolution and OOM the process (the classifier downscales to 384 anyway).
+     * Best-effort cookie header so same-session images load. Bounded timeouts; any
+     * failure returns null (fail-open). Content-free logging (no URL).
      */
     private fun fetchBitmap(src: String): Bitmap? = runCatching {
+        val cookie = CookieManager.getInstance().getCookie(src)
+        // Pass 1: bounds only (no pixel allocation).
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        openStream(src, cookie).use { BitmapFactory.decodeStream(it, null, bounds) }
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        // Pass 2: decode downsampled to the edge cap (HttpURLConnection isn't
+        // reliably re-readable, so re-open the stream).
+        val opts = BitmapFactory.Options().apply {
+            inSampleSize = sampleSizeFor(bounds.outWidth, bounds.outHeight)
+        }
+        openStream(src, cookie).use { BitmapFactory.decodeStream(it, null, opts) }
+    }.onFailure { Log.v(TAG, "image fetch/decode skipped (fail-open)") }
+        .getOrNull()
+
+    /** Open a bounded-timeout stream for [src], carrying the best-effort cookie. */
+    private fun openStream(src: String, cookie: String?): java.io.InputStream {
         val conn = URL(src).openConnection().apply {
             connectTimeout = FETCH_TIMEOUT_MS
             readTimeout = FETCH_TIMEOUT_MS
             // TODO(hardening): auth/referer headers for gated CDNs.
-            CookieManager.getInstance().getCookie(src)?.let {
-                setRequestProperty("Cookie", it)
-            }
+            cookie?.let { setRequestProperty("Cookie", it) }
             setRequestProperty("Accept", "image/*")
         }
-        conn.getInputStream().use { input ->
-            BitmapFactory.decodeStream(input)
+        return conn.getInputStream()
+    }
+
+    /** Power-of-two `inSampleSize` so the longest decoded edge is <= [MAX_DECODE_EDGE]. */
+    private fun sampleSizeFor(w: Int, h: Int): Int {
+        var sample = 1
+        var longest = maxOf(w, h)
+        while (longest > MAX_DECODE_EDGE) {
+            sample *= 2
+            longest /= 2
         }
-    }.onFailure { Log.v(TAG, "image fetch/decode skipped (fail-open): ${it.message}") }
-        .getOrNull()
+        return sample
+    }
 
     private fun obtainNsfw(): Nsfw? {
         nsfw?.let { return it }
@@ -216,6 +244,11 @@ class BrowserContentFilter(
         private const val BROWSER_THREAD = "browser"
 
         private const val FETCH_TIMEOUT_MS = 8000
+
+        /** Cap the longest decoded image edge so a huge/hostile image can't OOM
+         *  the process. Well above the classifier's 384 input; the score path
+         *  downscales again. */
+        private const val MAX_DECODE_EDGE = 2048
 
         /** Don't judge a page "predominantly flagged" until there's enough text to
          *  be meaningful (avoids blocking a near-empty page on one short hit). */

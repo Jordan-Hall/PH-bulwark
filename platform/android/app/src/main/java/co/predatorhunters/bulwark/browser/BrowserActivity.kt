@@ -26,6 +26,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -171,6 +172,15 @@ private fun BrowserScreen(onClose: () -> Unit) {
                 progress = { progress / 100f },
                 modifier = Modifier.fillMaxWidth(),
             )
+        }
+
+        // Tear down the WebView's native renderer and the filter's worker thread
+        // when the screen leaves — otherwise each browser open leaks both.
+        DisposableEffect(Unit) {
+            onDispose {
+                filter.shutdown()
+                webView?.apply { stopLoading(); destroy() }
+            }
         }
 
         // --- WebView + (conditional) full-page block notice ----------------
