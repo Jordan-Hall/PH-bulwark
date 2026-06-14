@@ -85,38 +85,44 @@ internal enum class CameraFilter(@StringRes val label: Int, val matrix: ColorMat
     companion object {
         /** The strip order shown to the child. */
         val strip: List<CameraFilter> = entries.toList()
-
-        /** Per-channel contrast around mid-grey (128). */
-        private fun contrast(c: Float): ColorMatrix {
-            val t = (1f - c) * 128f
-            return ColorMatrix(
-                floatArrayOf(
-                    c, 0f, 0f, 0f, t,
-                    0f, c, 0f, 0f, t,
-                    0f, 0f, c, 0f, t,
-                    0f, 0f, 0f, 1f, 0f,
-                ),
-            )
-        }
-
-        /** Uniform brightness add. */
-        private fun brightness(b: Float): ColorMatrix = ColorMatrix(
-            floatArrayOf(
-                1f, 0f, 0f, 0f, b,
-                0f, 1f, 0f, 0f, b,
-                0f, 0f, 1f, 0f, b,
-                0f, 0f, 0f, 1f, 0f,
-            ),
-        )
-
-        /** Independent per-channel scale (color cast). */
-        private fun channelScale(r: Float, g: Float, b: Float): ColorMatrix = ColorMatrix(
-            floatArrayOf(
-                r, 0f, 0f, 0f, 0f,
-                0f, g, 0f, 0f, 0f,
-                0f, 0f, b, 0f, 0f,
-                0f, 0f, 0f, 1f, 0f,
-            ),
-        )
     }
 }
+
+// ---- ColorMatrix builders -----------------------------------------------------
+// TOP-LEVEL (file-private), NOT companion members: the enum entries above call
+// these in their constructors, which run BEFORE the companion object is
+// initialised — a companion function would be "uninitialized here" (Kotlin enum
+// init order). Top-level functions are available during enum entry construction.
+
+/** Per-channel contrast around mid-grey (128). */
+private fun contrast(c: Float): ColorMatrix {
+    val t = (1f - c) * 128f
+    return ColorMatrix(
+        floatArrayOf(
+            c, 0f, 0f, 0f, t,
+            0f, c, 0f, 0f, t,
+            0f, 0f, c, 0f, t,
+            0f, 0f, 0f, 1f, 0f,
+        ),
+    )
+}
+
+/** Uniform brightness add. */
+private fun brightness(b: Float): ColorMatrix = ColorMatrix(
+    floatArrayOf(
+        1f, 0f, 0f, 0f, b,
+        0f, 1f, 0f, 0f, b,
+        0f, 0f, 1f, 0f, b,
+        0f, 0f, 0f, 1f, 0f,
+    ),
+)
+
+/** Independent per-channel scale (color cast). */
+private fun channelScale(r: Float, g: Float, b: Float): ColorMatrix = ColorMatrix(
+    floatArrayOf(
+        r, 0f, 0f, 0f, 0f,
+        0f, g, 0f, 0f, 0f,
+        0f, 0f, b, 0f, 0f,
+        0f, 0f, 0f, 1f, 0f,
+    ),
+)
