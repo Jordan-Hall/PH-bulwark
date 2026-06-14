@@ -4,6 +4,7 @@
     <!-- Status pill -->
     <string name="status_check_ready">Safety check on</string>
     <string name="status_check_loading">Getting the safety check ready…</string>
+    <string name="checking_safety">Checking…</string>
 
     <!-- Gate could not start (fail-closed): calm, actionable, never alarming. -->
     <string name="gate_unavailable_title">Camera paused</string>

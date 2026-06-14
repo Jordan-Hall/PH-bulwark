@@ -409,6 +409,13 @@ internal fun CameraScreen(
             }
         }
 
+        // Visible safety check: while a photo is scored or a clip re-scanned, show
+        // "Checking…" so the gate's work is visible. The shot/clip is saved ONLY
+        // after this clears — never before (this IS the deliberate safety delay).
+        if (hasPermission && capturing) {
+            CheckingOverlay()
+        }
+
         // Readable control zone: a soft bottom-up gradient so the controls stay
         // legible over any scene (Samsung/Pixel-style), without hiding the shot.
         if (hasPermission) {
@@ -544,6 +551,36 @@ internal fun CameraScreen(
                     onButton = { notice = null },
                 )
             }
+        }
+    }
+}
+
+/** "Checking…" — the visible safety pause while a capture is scored / re-scanned. */
+@Composable
+private fun CheckingOverlay() {
+    Box(
+        Modifier.fillMaxSize().background(Ink.copy(alpha = 0.25f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Row(
+            Modifier
+                .clip(RoundedCornerShape(50))
+                .background(Ink.copy(alpha = 0.88f))
+                .padding(horizontal = 22.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CircularProgressIndicator(
+                color = Sky,
+                strokeWidth = 2.dp,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(Modifier.width(12.dp))
+            Text(
+                stringResource(R.string.checking_safety),
+                color = Color.White,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+            )
         }
     }
 }
