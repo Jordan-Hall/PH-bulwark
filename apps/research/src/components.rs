@@ -91,6 +91,7 @@ pub fn SiteFooter() -> Element {
                             li { Link { to: Route::Approach {}, "Our approach" } }
                             li { Link { to: Route::Coverage {}, "What we catch" } }
                             li { Link { to: Route::Systems {}, "Systems" } }
+                            li { Link { to: Route::Download {}, "Download the apps" } }
                         }
                     }
                     div {

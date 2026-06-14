@@ -26,6 +26,11 @@ server = ["dioxus/server"]
 # lab site; `fullstack` adds the server-side render used only at build time.
 dioxus = { version = "0.8.0-alpha.0", features = ["router", "fullstack"] }
 
+# QR generation for the /download page, rendered to inline SVG at render time
+# (no network, no third party). `default-features = false` drops the heavy
+# `image` backend; we only need `svg`. MIT OR Apache-2.0.
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+
 # Detached from the engine cargo workspace (like apps/parent and apps/child) so
 # the verified `cargo build --workspace` never drags in the heavy UI tree. This
 # crate builds on its own: `cd apps/research && cargo check --target wasm32-unknown-unknown`.
