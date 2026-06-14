@@ -60,13 +60,24 @@ bulwark-net = { path = "../../../../crates/bulwark-net" }
 serde_json = "1"
 
 # Structured logging — already in the tree via bulwark-net; used to record a
-# data-path exit alongside the guardian-facing protection-status alert.
-tracing = "0.1"
+# data-path exit alongside the guardian-facing protection-status alert. The
+# `log` feature makes tracing events ALSO emit `log` records when no tracing
+# subscriber is installed; android_logger (below) is the logcat backend, so the
+# on-device VPN data path (bulwark-net's `tracing::info!/debug!/error!`) becomes
+# visible in `adb logcat` instead of vanishing silently.
+tracing = { version = "0.1", features = ["log"] }
 
 # Child enrollment talks to the same Accounts gRPC service as the parent app.
 # Keep this in Rust so Android does not need a second generated gRPC client.
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 tonic = { version = "0.14", features = ["transport", "tls-ring", "tls-webpki-roots"] }
+
+# Android: route Rust `tracing`/`log` diagnostics to logcat (tag `BulwarkRust`)
+# so the on-device VPN data path is observable. Android-only — the host detached-
+# workspace build (unit tests) doesn't link android liblog.
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.13"
+log = "0.4"
 
 [dev-dependencies]
 # Host tests implement the bulwark-net `Interceptor` trait with a scripted stub
