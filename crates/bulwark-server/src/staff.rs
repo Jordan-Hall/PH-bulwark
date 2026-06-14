@@ -2101,4 +2101,218 @@ mod tests {
             |e| e.action == "safety_case.open" && e.detail == "state=SAFETY_CASE_STATE_OPENED"
         ));
     }
+
+    #[tokio::test]
+    async fn support_only_guardian_rpcs_deny_operator_and_safety_officer() {
+        // The guardian-support RPCs are SUPPORT/ADMIN only. authorize(SUPPORT_ROLES)
+        // runs BEFORE the accounts.as_ref() precondition, so a service with NO
+        // AccountStore still returns PermissionDenied for the wrong role (rather
+        // than FailedPrecondition) — proving the role gate, not the wiring.
+        let (store, admin_token, _) = bootstrap_store();
+        let operator = login_role(&store, &admin_token, "op@ph.example", StaffRole::Operator);
+        let officer = login_role(
+            &store,
+            &admin_token,
+            "officer@ph.example",
+            StaffRole::SafetyOfficer,
+        );
+        let svc = StaffAdminService::new(store.clone(), vec![]);
+
+        for refused in [&operator, &officer] {
+            let err = svc
+                .trigger_guardian_reset(Request::new(TriggerGuardianResetRequest {
+                    token: refused.clone(),
+                    guardian_email: "p@x.com".into(),
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+            let err = svc
+                .unlock_guardian_account(Request::new(UnlockGuardianRequest {
+                    token: refused.clone(),
+                    guardian_email: "p@x.com".into(),
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+            let err = svc
+                .get_guardian_meta(Request::new(GuardianMetaRequest {
+                    token: refused.clone(),
+                    guardian_email: "p@x.com".into(),
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        }
+
+        // SUPPORT itself passes the SUPPORT_ROLES gate (then hits the honest
+        // FailedPrecondition because no AccountStore is wired) — confirming the
+        // deny above is the ROLE gate, not a blanket refusal.
+        let support = login_role(
+            &store,
+            &admin_token,
+            "support@ph.example",
+            StaffRole::Support,
+        );
+        let err = svc
+            .get_guardian_meta(Request::new(GuardianMetaRequest {
+                token: support,
+                guardian_email: "p@x.com".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn safety_only_rpcs_deny_support_and_operator() {
+        // The SafetyCase RPCs are SAFETY_OFFICER/ADMIN only. Cover list / get /
+        // transition (open is already covered) — SUPPORT and OPERATOR are refused.
+        let (store, admin_token, _) = bootstrap_store();
+        let support = login_role(
+            &store,
+            &admin_token,
+            "support@ph.example",
+            StaffRole::Support,
+        );
+        let operator = login_role(&store, &admin_token, "op@ph.example", StaffRole::Operator);
+        let svc = StaffAdminService::new(store.clone(), vec![]);
+
+        for refused in [&support, &operator] {
+            let err = svc
+                .list_safety_cases(Request::new(ListSafetyCasesRequest {
+                    token: refused.clone(),
+                    state_filter: SafetyCaseState::Unspecified as i32,
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+            let err = svc
+                .get_safety_case(Request::new(GetSafetyCaseRequest {
+                    token: refused.clone(),
+                    case_id: "any".into(),
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+            let err = svc
+                .transition_safety_case(Request::new(TransitionSafetyCaseRequest {
+                    token: refused.clone(),
+                    case_id: "any".into(),
+                    new_state: SafetyCaseState::UnderReview as i32,
+                    ncmec_reference: String::new(),
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        }
+    }
+
+    #[tokio::test]
+    async fn audit_chain_is_content_free() {
+        use bulwark_proto::v1::Category;
+        // Distinctive sentinels: if any PII/content reached the audit chain it
+        // would appear verbatim. The audit must carry only ids/outcomes/state.
+        const SENTINEL_EMAIL: &str = "leak-probe@example.com";
+        const SENTINEL_NAME: &str = "LeakProbeName";
+
+        let (store, admin_token, _) = bootstrap_store();
+        // A guardian to act on. The guardian display-name is never stored by
+        // AccountStore, so the guardian-email + content-hash are the real PII
+        // vectors here; the staff display-name below is the real NAME vector.
+        let accounts = AccountStore::new();
+        accounts
+            .create_account(SENTINEL_EMAIL, "password123", "Guardian")
+            .unwrap();
+        // A staff account whose DISPLAY NAME is the sentinel — create_staff DOES
+        // persist it (StaffRec.display_name), yet must never write it to the
+        // audit chain (staff.create records the staff_id + role only).
+        store
+            .create_staff(
+                &admin_token,
+                "",
+                "named@ph.example",
+                "rolepassword123",
+                StaffRole::Support as i32,
+                SENTINEL_NAME,
+            )
+            .unwrap();
+        let support = login_role(
+            &store,
+            &admin_token,
+            "support@ph.example",
+            StaffRole::Support,
+        );
+        let officer = login_role(
+            &store,
+            &admin_token,
+            "officer@ph.example",
+            StaffRole::SafetyOfficer,
+        );
+        let svc = StaffAdminService::new(store.clone(), vec![]).with_accounts(accounts);
+
+        // Run all three guardian-support RPCs against the sentinel email.
+        svc.trigger_guardian_reset(Request::new(TriggerGuardianResetRequest {
+            token: support.clone(),
+            guardian_email: SENTINEL_EMAIL.into(),
+        }))
+        .await
+        .unwrap();
+        svc.unlock_guardian_account(Request::new(UnlockGuardianRequest {
+            token: support.clone(),
+            guardian_email: SENTINEL_EMAIL.into(),
+        }))
+        .await
+        .unwrap();
+        svc.get_guardian_meta(Request::new(GuardianMetaRequest {
+            token: support,
+            guardian_email: SENTINEL_EMAIL.into(),
+        }))
+        .await
+        .unwrap();
+
+        // Open a safety case with a recognizable hash — its hex must never land
+        // in an audit detail either (the audit records the case id + state only).
+        let sha = vec![0xde, 0xad, 0xbe, 0xef];
+        let sha_hex = to_hex(&sha);
+        svc.open_safety_case(Request::new(OpenSafetyCaseRequest {
+            token: officer,
+            sha256: sha,
+            perceptual_hash: vec![],
+            category: Category::CsamSuspected as i32,
+            jurisdiction: "uk".into(),
+        }))
+        .await
+        .unwrap();
+
+        let (entries, _, chain_ok) = store.query_audit(0, 0);
+        assert!(chain_ok);
+        // Every audit field that could carry a free string is checked: no email,
+        // no staff display name, no content hash anywhere on the chain.
+        for e in &entries {
+            for field in [&e.target, &e.detail, &e.staff_id, &e.action] {
+                assert!(
+                    !field.contains(SENTINEL_EMAIL),
+                    "audit leaked guardian email in {field:?}"
+                );
+                assert!(
+                    !field.contains(SENTINEL_NAME),
+                    "audit leaked staff display name in {field:?}"
+                );
+                assert!(
+                    !field.contains(&sha_hex),
+                    "audit leaked content hash in {field:?}"
+                );
+            }
+        }
+        // And the audited actions DID run — their content-free outcomes are present.
+        assert!(entries.iter().any(|e| e.action == "guardian.reset"));
+        assert!(entries.iter().any(|e| e.action == "guardian.unlock"));
+        assert!(entries.iter().any(|e| e.action == "guardian.meta"));
+        assert!(entries.iter().any(|e| e.action == "safety_case.open"));
+    }
 }
