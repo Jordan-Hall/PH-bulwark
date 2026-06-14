@@ -86,7 +86,7 @@ private enum class Notice { BlockedNsfw, CheckFailed, SaveFailed, Saved }
 private const val PREVIEW_SCORE_INTERVAL_MS = 300L
 
 /** Max long edge of the decode used to score a capture (model input is 384). */
-private const val SCORING_MAX_DIM = 1024
+private const val SCORING_MAX_DIM = 512
 
 /**
  * The camera: PreviewView + shutter, with two protective layers.
