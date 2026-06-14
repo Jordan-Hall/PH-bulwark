@@ -28,6 +28,41 @@ work on Linux, macOS, and Android (Windows already works via `tun/windows.rs`).
 > is implemented + host-tested but NOT device-validated yet, so it does not count as
 > working until the Pixel pass.
 
+## Mode B — no-Device-Owner host filter (DNS + TLS-SNI, NO decryption)
+
+Status: **compiled on CI + host-tested — on-device validation pending; NOT yet the
+default Android data path (2026-06-14).** Sibling of the decrypting pump for the
+common case of an **existing consumer phone with no Device Owner and no factory
+reset**, where we cannot install a trust anchor and therefore MUST NOT decrypt TLS.
+The only host filtering available without decryption is matching the *cleartext*
+host that two protocols already reveal:
+
+- **DNS (UDP/53):** parse the cleartext QNAME; a blocklisted name is answered with a
+  `NXDOMAIN` sinkhole injected straight back to the client (no upstream query); every
+  other query is forwarded to the resolver exactly as the decrypting pump does.
+- **TLS:** peek the first record(s) of each new TCP flow and parse the **cleartext
+  SNI** from the `ClientHello` (TLS 1.2 *and* 1.3 — SNI is not encrypted). A
+  blocklisted SNI host resets the flow; everything else is dialed **directly** to its
+  real destination and spliced byte-for-byte unchanged (the peeked bytes are replayed
+  so the handshake isn't truncated).
+
+**Fail-SAFE** (opposite of the decrypting pump's fail-CLOSED): any unparsed /
+truncated / non-matching input PASSES — acceptable only because the on-screen
+**accessibility content filter is the always-on backstop** in the layered model.
+Honest limits: **DoH/DoT** (encrypted DNS) and **ECH** (encrypted ClientHello) hide
+the host from this layer (TODOs noted in `vpn/sni_dns.rs`); IPv4-first like the
+decrypting pump.
+
+- Pure parsers + verdicts live in `vpn/sni_dns.rs` (host-compiled + unit-tested
+  everywhere, incl. the Windows dev box); the generic, host-testable flow handler is
+  `vpn/netstack.rs::handle_host_filtered_flow` (loopback `duplex` tests cover
+  buffer-replay, refuse=zero-bytes, non-TLS pass-through, and incomplete-hello
+  fail-SAFE). The `cfg(unix)` driver is `run_netstack_host_filter` + the per-flow
+  `direct_flow` task; entry points are `vpn::run_vpn_host_filter` (desktop TUN) and
+  `vpn::run_android_host_filter` (VpnService fd).
+- Selection between this and the decrypting path is a product decision; `startVpn`
+  still uses `run_android_data_path` (the decrypting pump) by default.
+
 ## Part 0 — shared layer first (everything depends on it)
 
 **`tun/mod.rs` trait additions** (Windows inherits the no-op defaults — unchanged):

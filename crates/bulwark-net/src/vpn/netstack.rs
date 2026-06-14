@@ -635,6 +635,412 @@ async fn proxy_flow(
     waker.wake();
 }
 
+// ===========================================================================
+// No-Device-Owner host-filter pump (DNS sinkhole + TLS-SNI reset, NO decrypt)
+// ===========================================================================
+//
+// A SIBLING of `run_netstack` for the no-Device-Owner mode. It reuses the SAME
+// smoltcp termination machinery (`TunPhy`, `build_interface`, `open_proxy_listener`,
+// the DNS helpers) but with a different egress and the OPPOSITE failure mode:
+//   * DNS/53: parse the cleartext QNAME; a blocklisted name gets a SINKHOLE
+//     `NXDOMAIN` injected back to the client; everything else is forwarded to the
+//     upstream resolver exactly as the main pump does.
+//   * TCP: terminate the flow, peek the cleartext TLS-SNI (`super::sni_dns`,
+//     NO decryption); a blocklisted SNI host resets the flow, otherwise the flow
+//     is dialed DIRECTLY to its real destination and spliced byte-for-byte.
+//   * Everything that doesn't parse → fail-SAFE PASS (the accessibility filter is
+//     the always-on backstop in the layered model).
+//
+// STATUS: compiled on CI + host-tested via `handle_host_filtered_flow` /
+// `super::sni_dns`; the loop itself awaits on-device validation and is NOT yet
+// wired into `run_android_data_path` (see `run_vpn_host_filter`). This mirrors
+// how `vpn::wg`/`wg_pump` ship "built, no data-path integration yet".
+
+/// Run the no-Device-Owner host-filter pump until `shutdown` is cancelled. Same
+/// runtime contract as [`run_netstack`] (multi-threaded tokio; parks a worker via
+/// `block_in_place`). Takes the guardian blocklist by `Arc` (names match here, via
+/// DNS QNAME + TLS SNI — not just literal IPs like the decrypting pump).
+#[cfg(unix)]
+pub(super) async fn run_netstack_host_filter(
+    tun: &dyn TunDevice,
+    blocklist: std::sync::Arc<crate::blocklist::HostBlocklist>,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::block_in_place(move || host_filter_loop(tun, &blocklist, &handle, &shutdown))
+}
+
+#[cfg(unix)]
+fn host_filter_loop(
+    tun: &dyn TunDevice,
+    blocklist: &std::sync::Arc<crate::blocklist::HostBlocklist>,
+    handle: &tokio::runtime::Handle,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    let tunfd = tun
+        .as_raw_fd()
+        .ok_or_else(|| NetError::tun("host-filter pump: TUN exposes no pollable fd"))?;
+    let mtu = 1500usize;
+    let mut phy = TunPhy::new(tun, mtu);
+    let mut iface = build_interface(&mut phy);
+    let mut sockets = SocketSet::new(Vec::new());
+    let mut flows: Vec<Flow> = Vec::new();
+
+    let (wake_rd, wake_wr) = make_pipe()?;
+    let waker = std::sync::Arc::new(Waker { fd: wake_wr });
+    let (dns_tx, dns_rx) = std::sync::mpsc::channel::<DnsReply>();
+
+    tracing::info!(
+        entries = blocklist.len(),
+        "host-filter pump: no-Device-Owner DNS+SNI netstack up (no decryption)"
+    );
+
+    let result = (|| -> Result<()> {
+        loop {
+            if shutdown.is_cancelled() {
+                break;
+            }
+            let now = SmolInstant::now();
+            let delay_ms = iface
+                .poll_delay(now, &sockets)
+                .map(|d| d.total_millis() as i32)
+                .unwrap_or(200)
+                .clamp(1, 200);
+            let mut pfds = [
+                libc::pollfd {
+                    fd: tunfd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: wake_rd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            let rc = unsafe { libc::poll(pfds.as_mut_ptr(), 2, delay_ms) };
+            if rc < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(NetError::tun(format!("host-filter pump: poll: {e}")));
+            }
+            if pfds[1].revents & libc::POLLIN != 0 {
+                drain_pipe(wake_rd);
+            }
+            if pfds[0].revents & libc::POLLIN != 0 {
+                let mut buf = vec![0u8; mtu + 64];
+                if let Ok(n) = tun.recv(&mut buf) {
+                    if n > 0 {
+                        handle_inbound_host_filter(
+                            &buf[..n],
+                            &mut iface,
+                            &mut phy,
+                            &mut sockets,
+                            &mut flows,
+                            handle,
+                            &waker,
+                            &dns_tx,
+                            blocklist,
+                        );
+                    }
+                }
+            }
+            pump_host_filtered_flows(&mut sockets, &mut flows, handle, blocklist, &waker);
+            while let Ok((s, sp, d, dp, resp)) = dns_rx.try_recv() {
+                let pkt = build_dns_response_v4(s, sp, d, dp, &resp);
+                let _ = tun.send(&pkt);
+            }
+            iface.poll(SmolInstant::now(), &mut phy, &mut sockets);
+            reap_flows(&mut sockets, &mut flows);
+        }
+        Ok(())
+    })();
+
+    flows.clear();
+    unsafe {
+        let _ = libc::close(wake_rd);
+    }
+    tracing::info!("host-filter pump: no-Device-Owner netstack stopped");
+    result
+}
+
+/// Classify one captured packet for the host-filter pump. TCP flows are
+/// terminated for SNI gating; DNS is QNAME-checked and sinkholed if listed;
+/// QUIC/443 is dropped so the browser falls back to inspectable TCP/443.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn handle_inbound_host_filter(
+    pkt: &[u8],
+    iface: &mut Interface,
+    phy: &mut TunPhy,
+    sockets: &mut SocketSet,
+    flows: &mut Vec<Flow>,
+    handle: &tokio::runtime::Handle,
+    waker: &std::sync::Arc<Waker>,
+    dns_tx: &std::sync::mpsc::Sender<DnsReply>,
+    blocklist: &std::sync::Arc<crate::blocklist::HostBlocklist>,
+) {
+    let Some(summary) = parse_packet(pkt) else {
+        return;
+    };
+    // IPv4-first: v6 is dropped so apps fall back to v4 (documented limitation).
+    let (IpAddress::Ipv4(src), IpAddress::Ipv4(dst)) = (summary.src, summary.dst) else {
+        return;
+    };
+    match summary.transport {
+        Transport::Tcp {
+            src_port,
+            dst_port,
+            syn,
+        } => {
+            // Always terminate the flow: the SNI host is only visible once the
+            // handshake's first record arrives, so the gating happens in
+            // `direct_flow` (no pre-CONNECT IP refusal — names, not IPs, match).
+            let key = (src, src_port, dst, dst_port);
+            if syn && !flows.iter().any(|f| f.key == key) {
+                let endpoint = IpEndpoint::new(IpAddress::Ipv4(dst), dst_port);
+                if let Ok(h) = open_proxy_listener(sockets, endpoint) {
+                    flows.push(Flow {
+                        handle: h,
+                        key,
+                        authority: format!("{dst}:{dst_port}"),
+                        up_tx: None,
+                        down_rx: None,
+                        to_client: std::collections::VecDeque::new(),
+                        proxy_done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        spawned: false,
+                        closing: false,
+                    });
+                }
+            }
+            phy.stage(pkt.to_vec());
+            iface.poll(SmolInstant::now(), phy, sockets);
+        }
+        Transport::Udp { src_port, dst_port } => {
+            if dst_port == QUIC_UDP_PORT {
+                return; // drop QUIC -> forces inspectable TCP/443
+            }
+            if dst_port == 53 && pkt.len() >= 20 {
+                let src_o = [pkt[12], pkt[13], pkt[14], pkt[15]];
+                let dst_o = [pkt[16], pkt[17], pkt[18], pkt[19]];
+                if let Some(payload) = v4_udp_payload(pkt) {
+                    // A blocklisted QNAME is sinkholed: inject NXDOMAIN straight
+                    // back to the client (no upstream query). Otherwise forward
+                    // to the resolver exactly as the main pump does. Fail-SAFE:
+                    // an unparsable query forwards.
+                    if !blocklist.is_empty()
+                        && super::sni_dns::dns_verdict(&payload, blocklist)
+                            == super::sni_dns::HostVerdict::Refuse
+                    {
+                        if let Some(nx) = super::sni_dns::build_nxdomain_response(&payload) {
+                            tracing::debug!(
+                                "host filter: DNS name on guardian blocklist; NXDOMAIN sinkhole"
+                            );
+                            // Sourced from the queried server back to the client.
+                            let _ = dns_tx.send((dst_o, dst_port, src_o, src_port, nx));
+                            waker.wake();
+                            return;
+                        }
+                    }
+                    let resolver = resolver_for(dst_o);
+                    let tx = dns_tx.clone();
+                    let w = waker.clone();
+                    handle.spawn(dns_query(
+                        payload, resolver, src_o, src_port, dst_o, dst_port, tx, w,
+                    ));
+                }
+            }
+            // other UDP dropped (documented limitation)
+        }
+        Transport::Other(_) => {}
+    }
+}
+
+/// Move bytes between each flow's smoltcp socket and its `direct_flow` task,
+/// spawning the direct bridge on establish. Mirrors [`pump_tcp_flows`] but the
+/// per-flow task dials the real destination directly (no proxy/CONNECT) after a
+/// fail-SAFE TLS-SNI gate.
+#[cfg(unix)]
+fn pump_host_filtered_flows(
+    sockets: &mut SocketSet,
+    flows: &mut [Flow],
+    handle: &tokio::runtime::Handle,
+    blocklist: &std::sync::Arc<crate::blocklist::HostBlocklist>,
+    waker: &std::sync::Arc<Waker>,
+) {
+    use std::sync::atomic::Ordering;
+    for flow in flows.iter_mut() {
+        let sock = sockets.get_mut::<tcp::Socket>(flow.handle);
+
+        if !flow.spawned && sock.state() == tcp::State::Established {
+            let (up_tx, up_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(PROXY_UP_CHANNEL);
+            let (down_tx, down_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
+            handle.spawn(direct_flow(
+                flow.authority.clone(),
+                blocklist.clone(),
+                up_rx,
+                down_tx,
+                flow.proxy_done.clone(),
+                waker.clone(),
+            ));
+            flow.up_tx = Some(up_tx);
+            flow.down_rx = Some(down_rx);
+            flow.spawned = true;
+        }
+
+        if let Some(up_tx) = &flow.up_tx {
+            while sock.can_recv() {
+                match up_tx.try_reserve() {
+                    Ok(permit) => {
+                        let mut b = [0u8; 8192];
+                        match sock.recv_slice(&mut b) {
+                            Ok(n) if n > 0 => permit.send(b[..n].to_vec()),
+                            _ => break,
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+
+        if let Some(down_rx) = &mut flow.down_rx {
+            while flow.to_client.len() < TO_CLIENT_CAP {
+                match down_rx.try_recv() {
+                    Ok(v) => flow.to_client.extend(v),
+                    Err(_) => break,
+                }
+            }
+        }
+
+        while sock.can_send() && !flow.to_client.is_empty() {
+            let (head, _) = flow.to_client.as_slices();
+            match sock.send_slice(head) {
+                Ok(n) if n > 0 => {
+                    flow.to_client.drain(..n);
+                }
+                _ => break,
+            }
+        }
+
+        if !sock.may_recv() && !sock.can_recv() {
+            flow.up_tx = None;
+        }
+
+        if flow.proxy_done.load(Ordering::Relaxed)
+            && flow.to_client.is_empty()
+            && !flow.closing
+            && sock.is_open()
+        {
+            sock.close();
+            flow.closing = true;
+        }
+    }
+}
+
+/// The direct bridge for one established flow in the no-Device-Owner mode.
+///
+/// Accumulates the opening client bytes (the TLS `ClientHello`, up to
+/// [`SNI_PEEK_CAP`]) from `up_rx`, parses the cleartext SNI (NO decryption), and:
+///   * a blocklisted SNI host → reset the flow (mark done, dial NOTHING);
+///   * otherwise dial the REAL destination directly, REPLAY the peeked bytes, and
+///     shuttle bytes both ways via the flow's channels (transparent pass-through).
+///
+/// Fail-SAFE: no SNI / unparsed / incomplete-then-EOF all PASS (dial direct).
+/// `authority` is the captured `ip:port`; the SNI gate matches the cleartext
+/// hostname inside the handshake, which an `ip:port` blocklist entry cannot,
+/// so name rules apply here for real.
+#[cfg(unix)]
+async fn direct_flow(
+    authority: String,
+    blocklist: std::sync::Arc<crate::blocklist::HostBlocklist>,
+    mut up_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    down_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    waker: std::sync::Arc<Waker>,
+) {
+    use super::sni_dns::client_hello_sni;
+    use std::sync::atomic::Ordering;
+
+    // 1. Peek the opening bytes until the SNI parses, the cap is hit, or the
+    //    client stops sending — buffering them for replay.
+    let mut peek: Vec<u8> = Vec::with_capacity(1024);
+    let mut sni: Option<String> = None;
+    while peek.len() < SNI_PEEK_CAP {
+        if let Some(host) = client_hello_sni(&peek) {
+            sni = Some(host);
+            break;
+        }
+        // Not a TLS handshake → no SNI to wait for; stop peeking and pass NOW
+        // (else a non-TLS request/response flow would deadlock — see
+        // `handle_host_filtered_flow`).
+        if !super::sni_dns::looks_like_tls_handshake(&peek) {
+            break;
+        }
+        match up_rx.recv().await {
+            Some(chunk) => peek.extend_from_slice(&chunk),
+            None => break, // client closed its send half before a full hello
+        }
+    }
+    if sni.is_none() {
+        sni = client_hello_sni(&peek);
+    }
+
+    // 2. SNI verdict (fail-SAFE everywhere but an explicit blocklist match).
+    let refuse = matches!(&sni, Some(host) if !blocklist.is_empty() && blocklist.is_blocked(host));
+    if refuse {
+        tracing::debug!(
+            sni = sni.as_deref().unwrap_or("?"),
+            %authority,
+            "host filter: TLS-SNI on guardian blocklist; flow reset (no dial, not decrypted)"
+        );
+        done.store(true, Ordering::Relaxed);
+        waker.wake();
+        return;
+    }
+
+    // 3. Pass: dial the real destination directly (no proxy, no decryption).
+    let stream = match TcpStream::connect(authority.as_str()).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!(%authority, error = %e, "host filter: direct dial failed");
+            done.store(true, Ordering::Relaxed);
+            waker.wake();
+            return;
+        }
+    };
+    let (mut rd, mut wr) = stream.into_split();
+    // client -> upstream: replay the peeked hello first, then stream the rest.
+    let up = tokio::spawn(async move {
+        if !peek.is_empty() && wr.write_all(&peek).await.is_err() {
+            return;
+        }
+        while let Some(chunk) = up_rx.recv().await {
+            if wr.write_all(&chunk).await.is_err() {
+                break;
+            }
+        }
+        let _ = wr.shutdown().await;
+    });
+    // upstream -> client
+    let mut buf = vec![0u8; 16 * 1024];
+    loop {
+        match rd.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                if down_tx.send(buf[..n].to_vec()).await.is_err() {
+                    break;
+                }
+                waker.wake();
+            }
+        }
+    }
+    up.abort();
+    done.store(true, Ordering::Relaxed);
+    waker.wake();
+}
+
 /// Forward one captured DNS query to `resolver` and return the reply 4-tuple +
 /// payload to the loop (which crafts the reply packet and writes it to the TUN).
 #[cfg(unix)]
@@ -993,6 +1399,149 @@ where
         tracing::debug!(%authority, error = %e, "transparent flow: splice ended");
     }
     TransparentFlowOutcome::Spliced
+}
+
+// ---- no-Device-Owner host-filtered flow (DNS+SNI, NO decryption) -----------
+//
+// The sibling of `handle_transparent_flow` for the **no-Device-Owner** mode: a
+// content filter for an ordinary consumer phone where we CANNOT install a trust
+// anchor, so we MUST NOT decrypt. There is no in-process gate/CONNECT here — the
+// flow's ONLY content check is the cleartext TLS-SNI host (parsed without
+// decrypting; see `super::sni_dns`). A listed host is reset; anything else is
+// dialed DIRECTLY to its real destination and spliced byte-for-byte unchanged.
+//
+// FAIL-SAFE (deliberate, opposite of the decrypting pump's fail-CLOSED): a flow
+// whose first bytes don't parse as a blocklisted ClientHello is PASSED. That is
+// acceptable ONLY because the on-screen ACCESSIBILITY content filter is the
+// always-on backstop in the layered model — this network layer is an early,
+// cheap host block, never the sole gate. (Unlike `handle_transparent_flow`,
+// which is the egress of record and therefore fail-CLOSED.)
+//
+// Generic over the client stream and NOT `cfg`-gated, so it is unit-tested on
+// every host (incl. the Windows dev box) with `tokio::io::duplex` fakes — the
+// `cfg(unix)` loop that drives it on-device cannot be compiled there.
+
+/// What [`handle_host_filtered_flow`] did with one captured flow.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum HostFilteredOutcome {
+    /// The flow's TLS-SNI host is on the guardian blocklist; it was reset before
+    /// any direct dial (no bytes reached the destination).
+    RefusedSni,
+    /// The flow was passed: dialed directly to its real destination and spliced
+    /// both ways (SNI absent / unlisted / unparsed → fail-SAFE pass).
+    Passed,
+    /// The direct dial to the real destination failed (host unreachable, refused,
+    /// etc.). No content decision was bypassed — the destination simply could not
+    /// be reached, so nothing was filtered or forwarded.
+    DialFailed,
+}
+
+/// First-bytes buffer cap before we stop waiting for a complete ClientHello and
+/// fail-SAFE pass the flow. Matches the parser's own cap so the two agree.
+#[cfg(any(test, unix))]
+const SNI_PEEK_CAP: usize = super::sni_dns::MAX_CLIENT_HELLO;
+
+/// Drive ONE captured flow through the no-Device-Owner host filter (DNS is
+/// handled separately, in the loop; this is the TCP/TLS path).
+///
+/// `client` is the already-accepted child-side byte stream (terminated by the
+/// netstack from the captured TCP flow). `dst` is its ORIGINAL destination. We:
+/// 1. **Peek** the opening client bytes (up to [`SNI_PEEK_CAP`]) WITHOUT
+///    consuming them, looking for a complete TLS `ClientHello`.
+/// 2. **SNI verdict.** A blocklisted SNI host → reset the flow
+///    ([`HostFilteredOutcome::RefusedSni`]); NO dial, no bytes forwarded.
+/// 3. **Pass.** Otherwise dial `dst` DIRECTLY (no decryption, no proxy), REPLAY
+///    the peeked bytes to it, and splice both ways
+///    ([`HostFilteredOutcome::Passed`]). A failed dial is
+///    [`HostFilteredOutcome::DialFailed`].
+///
+/// Buffer-then-replay is load-bearing: the bytes consumed to read the SNI MUST
+/// be forwarded to the upstream on pass, or the handshake would be truncated.
+#[cfg(any(test, unix))]
+pub(crate) async fn handle_host_filtered_flow<C>(
+    mut client: C,
+    dst: SocketAddr,
+    blocklist: &crate::blocklist::HostBlocklist,
+) -> HostFilteredOutcome
+where
+    C: AsyncRead + AsyncWrite + Unpin,
+{
+    use super::sni_dns::{client_hello_sni, HostVerdict};
+
+    // 1. Peek the opening client bytes until we can parse a SNI host, the buffer
+    //    cap is hit, or the client stops sending — WITHOUT consuming them (they
+    //    are replayed to the upstream on pass).
+    let mut peek = Vec::with_capacity(1024);
+    let mut sni: Option<String> = None;
+    let mut buf = [0u8; 4096];
+    while peek.len() < SNI_PEEK_CAP {
+        // A complete ClientHello already yields the host → stop reading.
+        if let Some(host) = client_hello_sni(&peek) {
+            sni = Some(host);
+            break;
+        }
+        // The opening bytes can't be a TLS handshake → there's no cleartext SNI to
+        // wait for. Stop peeking and fail-SAFE pass NOW: a non-TLS request/response
+        // protocol won't send more until the server replies, and we haven't dialed
+        // the server yet — buffering further would deadlock the flow.
+        if !super::sni_dns::looks_like_tls_handshake(&peek) {
+            break;
+        }
+        match client.read(&mut buf).await {
+            Ok(0) => break, // client half-closed before completing the hello
+            Ok(n) => peek.extend_from_slice(&buf[..n]),
+            Err(_) => break, // read error → fail-SAFE pass with what we have
+        }
+    }
+    // One last parse in case the cap/EOF was hit exactly as the hello completed.
+    if sni.is_none() {
+        sni = client_hello_sni(&peek);
+    }
+
+    // 2. SNI verdict. A listed host is refused before any dial (fail-SAFE
+    //    everywhere else: no SNI, unparsed, or unlisted → pass).
+    let verdict = match &sni {
+        Some(host) if !blocklist.is_empty() => {
+            if blocklist.is_blocked(host) {
+                HostVerdict::Refuse
+            } else {
+                HostVerdict::Pass
+            }
+        }
+        _ => HostVerdict::Pass,
+    };
+    if verdict == HostVerdict::Refuse {
+        tracing::debug!(
+            sni = sni.as_deref().unwrap_or("?"),
+            %dst,
+            "host filter: TLS-SNI on guardian blocklist; flow reset (no dial, not decrypted)"
+        );
+        // Dropping `client` resets/closes the captured flow; nothing was dialed.
+        return HostFilteredOutcome::RefusedSni;
+    }
+
+    // 3. Pass: dial the REAL destination directly (no proxy, no decryption),
+    //    replay the peeked bytes, and splice the rest unchanged. NOTE: this is
+    //    transparent pass-through of the *payload* — the bytes are untouched; we
+    //    only terminated the L3 flow because an unprivileged VpnService cannot
+    //    raw-forward IP packets (the established model in this module).
+    let mut upstream = match TcpStream::connect(dst).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!(%dst, error = %e, "host filter: direct dial failed");
+            return HostFilteredOutcome::DialFailed;
+        }
+    };
+    if !peek.is_empty() {
+        if let Err(e) = upstream.write_all(&peek).await {
+            tracing::debug!(%dst, error = %e, "host filter: replaying peeked bytes failed");
+            return HostFilteredOutcome::DialFailed;
+        }
+    }
+    if let Err(e) = splice(&mut client, &mut upstream).await {
+        tracing::debug!(%dst, error = %e, "host filter: splice ended");
+    }
+    HostFilteredOutcome::Passed
 }
 
 // ---- smoltcp Device over the TUN (the foundation the netstack polls through) ----
@@ -1465,6 +2014,172 @@ mod tests {
             TransparentFlowOutcome::GateUnavailable,
             "an unlisted destination is routed to the gate (which here is down → fail-closed)"
         );
+    }
+
+    // ---- handle_host_filtered_flow: no-Device-Owner DNS+SNI mode (no decrypt) --
+
+    /// Build a TLS ClientHello record carrying `sni` (mirrors the sni_dns test
+    /// builder; kept local so these tests are self-contained).
+    fn client_hello_record(sni: &str) -> Vec<u8> {
+        let host = sni.as_bytes();
+        let mut server_name = vec![0x00];
+        server_name.extend_from_slice(&(host.len() as u16).to_be_bytes());
+        server_name.extend_from_slice(host);
+        let mut sni_ext = (server_name.len() as u16).to_be_bytes().to_vec();
+        sni_ext.extend_from_slice(&server_name);
+        let mut extensions = 0x0000u16.to_be_bytes().to_vec();
+        extensions.extend_from_slice(&(sni_ext.len() as u16).to_be_bytes());
+        extensions.extend_from_slice(&sni_ext);
+        let mut body = vec![0x03, 0x03];
+        body.extend_from_slice(&[0xAB; 32]);
+        body.push(0x00);
+        body.extend_from_slice(&2u16.to_be_bytes());
+        body.extend_from_slice(&[0x13, 0x01]);
+        body.push(0x01);
+        body.push(0x00);
+        body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        body.extend_from_slice(&extensions);
+        let mut hs = vec![0x01];
+        let bl = body.len();
+        hs.extend_from_slice(&[(bl >> 16) as u8, (bl >> 8) as u8, bl as u8]);
+        hs.extend_from_slice(&body);
+        let mut rec = vec![0x16, 0x03, 0x01];
+        rec.extend_from_slice(&(hs.len() as u16).to_be_bytes());
+        rec.extend_from_slice(&hs);
+        rec
+    }
+
+    /// A one-shot fake upstream that records everything it receives and echoes it
+    /// back, so a splice is observable. Returns (addr, JoinHandle<received bytes>).
+    async fn fake_upstream() -> (SocketAddr, tokio::task::JoinHandle<Vec<u8>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut got = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                match s.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        got.extend_from_slice(&buf[..n]);
+                        if s.write_all(&buf[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            got
+        });
+        (addr, handle)
+    }
+
+    #[tokio::test]
+    async fn host_filter_passes_and_replays_the_clienthello_to_upstream() {
+        // BUFFER-REPLAY (load-bearing): an unlisted SNI is dialed DIRECTLY and the
+        // peeked ClientHello bytes are forwarded intact (not dropped after the SNI
+        // read) — else the handshake would be truncated at the real server.
+        let (upstream, recv) = fake_upstream().await;
+        let blocklist = crate::blocklist::HostBlocklist::parse("adult.example");
+        let hello = client_hello_record("safe.example");
+        let (mut child, server_side) = tokio::io::duplex(8192);
+        let hello_for_child = hello.clone();
+        let handler = tokio::spawn(async move {
+            handle_host_filtered_flow(server_side, upstream, &blocklist).await
+        });
+        child.write_all(&hello_for_child).await.unwrap();
+        // The upstream echoes the replayed hello back to the child (proves splice).
+        let mut back = vec![0u8; hello.len()];
+        child.read_exact(&mut back).await.unwrap();
+        assert_eq!(
+            back, hello,
+            "upstream must receive the ClientHello bytes intact"
+        );
+        drop(child); // half-close → splice ends
+        assert_eq!(handler.await.unwrap(), HostFilteredOutcome::Passed);
+        let got = recv.await.unwrap();
+        assert!(
+            got.starts_with(&hello),
+            "the direct upstream must have received the replayed ClientHello first"
+        );
+    }
+
+    #[tokio::test]
+    async fn host_filter_refuses_blocklisted_sni_without_dialing() {
+        // REFUSE = ZERO BYTES: a listed SNI host is reset before any dial. Point at
+        // a closed port to prove the upstream is never contacted (a dial would
+        // error, but the refusal short-circuits before we ever dial).
+        let throwaway = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead = throwaway.local_addr().unwrap();
+        drop(throwaway);
+        let blocklist = crate::blocklist::HostBlocklist::parse(".adult.example");
+        let hello = client_hello_record("cdn.adult.example");
+        let (mut child, server_side) = tokio::io::duplex(8192);
+        let handler =
+            tokio::spawn(
+                async move { handle_host_filtered_flow(server_side, dead, &blocklist).await },
+            );
+        child.write_all(&hello).await.unwrap();
+        assert_eq!(handler.await.unwrap(), HostFilteredOutcome::RefusedSni);
+        // The handler dropped its end without echoing anything → child sees EOF.
+        let mut buf = [0u8; 1];
+        assert_eq!(
+            child.read(&mut buf).await.unwrap(),
+            0,
+            "a refused flow must forward/echo no bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn host_filter_passes_non_tls_traffic_through() {
+        // Plain (non-TLS) bytes carry no SNI → fail-SAFE pass: dialed directly and
+        // spliced unchanged. (The accessibility filter is the backstop for content
+        // this network layer can't see.)
+        let (upstream, recv) = fake_upstream().await;
+        let blocklist = crate::blocklist::HostBlocklist::parse("adult.example");
+        let (mut child, server_side) = tokio::io::duplex(8192);
+        let handler = tokio::spawn(async move {
+            handle_host_filtered_flow(server_side, upstream, &blocklist).await
+        });
+        child
+            .write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let mut back = [0u8; 9];
+        child.read_exact(&mut back).await.unwrap();
+        assert_eq!(&back, b"GET / HTT");
+        drop(child);
+        assert_eq!(handler.await.unwrap(), HostFilteredOutcome::Passed);
+        assert!(recv.await.unwrap().starts_with(b"GET /"));
+    }
+
+    #[tokio::test]
+    async fn host_filter_incomplete_hello_fails_safe_passes_without_hanging() {
+        // INCOMPLETE-FOREVER: a partial ClientHello that never completes must NOT
+        // hang on the peek loop — once the client half-closes, the flow fails-SAFE
+        // and is dialed/spliced with whatever arrived.
+        let (upstream, recv) = fake_upstream().await;
+        let blocklist = crate::blocklist::HostBlocklist::parse("adult.example");
+        let full = client_hello_record("adult.example"); // would be REFUSED if completed
+        let partial = full[..full.len() / 2].to_vec(); // truncated mid-handshake
+        let (mut child, server_side) = tokio::io::duplex(8192);
+        let p = partial.clone();
+        let handler = tokio::spawn(async move {
+            handle_host_filtered_flow(server_side, upstream, &blocklist).await
+        });
+        child.write_all(&p).await.unwrap();
+        child.shutdown().await.unwrap(); // half-close: no more bytes ever
+                                         // Must terminate (not hang) and pass the partial bytes to the upstream.
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), handler).await;
+        assert_eq!(
+            outcome
+                .expect("handler must not hang on an incomplete hello")
+                .unwrap(),
+            HostFilteredOutcome::Passed,
+            "an incomplete ClientHello fails-SAFE (passes), it does not block or refuse"
+        );
+        let got = recv.await.unwrap();
+        assert_eq!(got, partial, "the partial bytes were forwarded directly");
     }
 
     struct FakeTun {
