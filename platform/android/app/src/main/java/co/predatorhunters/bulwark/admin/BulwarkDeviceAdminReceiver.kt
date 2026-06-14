@@ -8,6 +8,8 @@ import android.util.Log
 import co.predatorhunters.bulwark.MainActivity
 import co.predatorhunters.bulwark.tamper.TamperReporter
 
+// CaTrust lives in the same package (co.predatorhunters.bulwark.admin).
+
 /**
  * Device-admin receiver (the WEAK tamper-resistance tier — works without a factory
  * reset).
@@ -59,7 +61,8 @@ class BulwarkDeviceAdminReceiver : DeviceAdminReceiver() {
         }
     }
 
-    /** Idempotent finalize: enforce lockdown, record enrollment, surface the UI. */
+    /** Idempotent finalize: enforce lockdown, trust the inspection CA, record
+     *  enrollment, surface the UI. */
     private fun finalizeProvisioning(context: Context, extras: android.os.PersistableBundle?) {
         Log.i(TAG, "finalizing Device Owner provisioning")
         runCatching { Lockdown.enforce(context) }
@@ -67,6 +70,15 @@ class BulwarkDeviceAdminReceiver : DeviceAdminReceiver() {
             val dpm = Lockdown.dpm(context)
             val admin = Lockdown.adminComponent(context)
             dpm.setProfileName(admin, "PH Bulwark managed")
+        }
+        // Now that we are Device Owner, install the per-install TLS-inspection CA
+        // into the SYSTEM trust store so inspected HTTPS validates the moment the
+        // filtering VPN starts (the establish() fail-closed path also calls this;
+        // doing it here means the CA is trusted as soon as the device is managed,
+        // not only on the first VPN start). Idempotent / safe no-op if present.
+        runCatching {
+            val result = CaTrust.ensureInstalled(context)
+            Log.i(TAG, "inspection CA trust at provisioning: $result")
         }
         runCatching { Enrollment.markProvisioned(context, extras) }
         runCatching {

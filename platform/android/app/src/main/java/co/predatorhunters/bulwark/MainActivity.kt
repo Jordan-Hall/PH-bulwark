@@ -26,6 +26,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.core.content.ContextCompat
 import co.predatorhunters.bulwark.accessibility.BulwarkAccessibilityService
+import co.predatorhunters.bulwark.admin.CaTrust
 import co.predatorhunters.bulwark.admin.Enrollment
 import co.predatorhunters.bulwark.admin.EnrollmentRecord
 import co.predatorhunters.bulwark.admin.Lockdown
@@ -61,6 +62,8 @@ class MainActivity : ComponentActivity() {
     private var vpnConsented by mutableStateOf(false)
     private var vpnRunning by mutableStateOf(false)
     private var antiRemovalOn by mutableStateOf(false)
+    private var isDeviceOwner by mutableStateOf(false)
+    private var caInstalled by mutableStateOf(false)
     private var paired by mutableStateOf(false)
     private var enrollment by mutableStateOf<EnrollmentRecord?>(null)
 
@@ -94,6 +97,21 @@ class MainActivity : ComponentActivity() {
         }, "bulwark-config-sync").apply { isDaemon = true }.start()
     }
 
+    /**
+     * Provisioning finishes in [admin.BulwarkDeviceAdminReceiver], which launches
+     * us with [EXTRA_FROM_PROVISIONING]. Re-read the live state (now Device Owner +
+     * CA installed) and drop any forced re-journey so the dashboard reflects the
+     * freshly-managed device immediately.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.getBooleanExtra(EXTRA_FROM_PROVISIONING, false)) {
+            forceJourney = false
+        }
+        refreshLocalState()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         refreshLocalState()
@@ -115,6 +133,8 @@ class MainActivity : ComponentActivity() {
             antiRemovalOn = antiRemovalOn,
             paired = paired,
             cloudFilteringRequested = cloudFilteringRequested,
+            isDeviceOwner = isDeviceOwner,
+            caInstalled = caInstalled,
         )
         val onboardingDone = prefs().getBoolean(KEY_ONBOARDING_DONE, false)
         val showDashboard = !forceJourney && onboardingDone && isFullySetUp(state)
@@ -132,6 +152,8 @@ class MainActivity : ComponentActivity() {
                     onOpenAccessibility = ::openAccessibilitySettings,
                     onStartVpn = ::requestVpnConsent,
                     onReconfigure = { forceJourney = true },
+                    canProvisionManaged = canProvisionManaged(),
+                    onProvisionManaged = ::launchManagedProvisioning,
                 )
             } else {
                 OnboardingJourney(
@@ -237,6 +259,41 @@ class MainActivity : ComponentActivity() {
         runCatching { startActivity(intent) }
     }
 
+    /**
+     * Whether the platform will let THIS app launch managed (Device Owner)
+     * provisioning right now — true only on a fresh / no-accounts device. We never
+     * show a "make this managed" button when the platform would reject it; the
+     * existing-device path is an operator command surfaced as text instead.
+     * `ACTION_PROVISION_MANAGED_DEVICE` is deprecated (API 30+) but remains the
+     * only in-app entry to Device-Owner provisioning.
+     */
+    @Suppress("DEPRECATION")
+    private fun canProvisionManaged(): Boolean {
+        if (Lockdown.isDeviceOwner(this)) return false
+        return runCatching {
+            val dpm = Lockdown.dpm(this)
+            dpm.isProvisioningAllowed(
+                android.app.admin.DevicePolicyManager.ACTION_PROVISION_MANAGED_DEVICE,
+            )
+        }.getOrDefault(false)
+    }
+
+    /**
+     * Launch the platform's managed-device provisioning flow (Device Owner). Only
+     * reachable when [canProvisionManaged] is true. The platform shows its own
+     * consent screen; on completion [admin.BulwarkDeviceAdminReceiver] finalizes
+     * lockdown + CA trust. Best-effort: a no-op (logged) if the platform declines.
+     */
+    @Suppress("DEPRECATION")
+    private fun launchManagedProvisioning() {
+        val intent = Intent(android.app.admin.DevicePolicyManager.ACTION_PROVISION_MANAGED_DEVICE)
+            .putExtra(
+                android.app.admin.DevicePolicyManager.EXTRA_PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME,
+                Lockdown.adminComponent(this),
+            )
+        runCatching { startActivity(intent) }
+    }
+
     // -----------------------------------------------------------------------
     // Live state
     // -----------------------------------------------------------------------
@@ -250,7 +307,10 @@ class MainActivity : ComponentActivity() {
         // Honest live state: BulwarkVpnService flips `running` in
         // onStartCommand/onDestroy — consent alone must never show "running".
         vpnRunning = BulwarkVpnService.running
-        antiRemovalOn = Lockdown.isDeviceOwner(this) || Lockdown.isActiveAdmin(this)
+        isDeviceOwner = Lockdown.isDeviceOwner(this)
+        antiRemovalOn = isDeviceOwner || Lockdown.isActiveAdmin(this)
+        // Read-only: short-circuits to false off-Device-Owner, so this is cheap.
+        caInstalled = CaTrust.isInstalled(this)
         paired = Enrollment.isEnrolled(this)
         enrollment = Enrollment.record(this)
         cloudFilteringRequested = ChildConfigSync.cloudFilteringRequested(this)
