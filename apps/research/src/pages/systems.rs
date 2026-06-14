@@ -1,6 +1,5 @@
-//! Systems (the lab's applied work) — the two apps that put the models on a
-//! real phone: PH Camera (ships first) and PH Bulwark, the shield (ships next).
-//! Plain, human copy.
+//! Systems — the overview of the lab's applied work: two apps that put the
+//! models on a real device. Each links to its own product page. Plain copy.
 
 use dioxus::prelude::*;
 
@@ -11,8 +10,8 @@ use crate::icons::svg;
 pub fn Systems() -> Element {
     rsx! {
         crate::components::Seo {
-            title: "Systems: PH Camera and the Shield | Predator Hunters",
-            description: "The apps that carry the models. PH Camera will not take an unsafe photo; the Shield filters unsafe content in place across the whole device.",
+            title: "Systems: PH Camera and PH Bulwark | Predator Hunters",
+            description: "The apps that carry the models. PH Camera won't take an unsafe photo; PH Bulwark filters unsafe content in place across the whole device. Android first, every platform next.",
             path: "/systems",
             image: "/og/systems.png",
         }
@@ -24,64 +23,39 @@ pub fn Systems() -> Element {
                     span { class: "grad-text", "install." }
                 }
                 p { class: "lede rise d3",
-                    "The models only matter once they reach a real device. These are the two apps that carry them. The camera comes first, the full shield comes next."
+                    "The models only matter once they reach a real device. These are the two apps that carry them. The camera comes first, the full shield comes next, and both are built to run across every device a family uses."
                 }
             }
         }
 
-        // ---------- PH CAMERA ----------
+        // ---------- THE TWO PRODUCTS ----------
         section { class: "section", style: "padding-top:clamp(20px,4vh,48px);",
             div { class: "wrap",
-                div { class: "hero-grid",
-                    div {
-                        span { class: "sec-index", "PH Camera · ships first" }
-                        h2 { style: "margin-top:14px;", "A camera that won't take an unsafe photo." }
-                        p { class: "lede", style: "margin-top:18px;",
-                            "Children get pushed into taking photos they should never take. PH Camera checks every frame on the device before anything is saved. If a shot is unsafe it never becomes a file."
+                div { class: "grid-2",
+                    Link { class: "card reveal", to: Route::PhCamera {},
+                        div { style: "display:flex;align-items:center;justify-content:space-between;",
+                            div { class: "card-ic", style: "color:#bfe6c4;", dangerous_inner_html: svg("camera") }
+                            span { class: "tag live", "Alpha" }
                         }
-                        p { class: "prose", style: "margin-top:14px;",
-                            "The app asks for no internet permission at all, so the device itself guarantees that nothing it sees can leave it. Nothing is stored, nothing is logged, nothing is sent. If the safety check cannot run, the camera will not save the shot. Safe is the only default."
-                        }
-                    }
-                    div { class: "reveal",
-                        div { class: "phone",
-                            div { class: "phone-screen",
-                                div { class: "phone-notch" }
-                                span { class: "phone-shield", style: "color:#bfe6c4;", dangerous_inner_html: svg("camera") }
-                                div { class: "phone-title", "PH Camera" }
-                                div { class: "phone-sub", "Unsafe photos never get taken or saved." }
-                            }
+                        h3 { style: "margin-top:18px;", "PH Camera" }
+                        div { class: "role", style: "font-family:var(--mono);font-size:.7rem;letter-spacing:.14em;text-transform:uppercase;color:var(--orange);margin:6px 0 10px;", "Ships first" }
+                        p { "A camera that checks every frame on the device and will not take or keep an unsafe photo. No internet permission, so nothing it sees can leave the device." }
+                        span { class: "btn btn-ghost btn-sm", style: "margin-top:16px;",
+                            "About PH Camera"
+                            span { class: "ic", dangerous_inner_html: svg("arrow-right") }
                         }
                     }
-                }
-            }
-        }
-
-        // ---------- PH BULWARK (THE SHIELD) ----------
-        section { class: "section",
-            div { class: "wrap",
-                div { class: "hero-grid",
-                    div { class: "reveal",
-                        div { class: "phone",
-                            div { class: "phone-screen",
-                                div { class: "phone-notch" }
-                                span { class: "phone-shield", dangerous_inner_html: svg("shield") }
-                                div { class: "phone-title", "Blocked by PH Bulwark" }
-                                div { class: "phone-sub", "This content was flagged as unsafe." }
-                            }
+                    Link { class: "card reveal", to: Route::PhBulwark {},
+                        div { style: "display:flex;align-items:center;justify-content:space-between;",
+                            div { class: "card-ic", dangerous_inner_html: svg("shield") }
+                            span { class: "tag live", "In build" }
                         }
-                    }
-                    div {
-                        span { class: "sec-index", "PH Bulwark · ships next" }
-                        h2 { style: "margin-top:14px;", "A shield for the whole device." }
-                        p { class: "lede", style: "margin-top:18px;",
-                            "PH Bulwark sits across every app and the open web. When unsafe content shows up it takes out only that part and leaves the rest of the page working, so a child keeps the sites they actually need."
-                        }
-                        p { class: "prose", style: "margin-top:14px;",
-                            "When something serious appears it sends a parent a short, redacted alert with no message contents in it. Illegal material is blocked and reported as the law requires. The shield never keeps the raw content behind it, only a short redacted record of the alert for the guardian."
-                        }
-                        p { class: "prose", style: "margin-top:14px; color:var(--muted); font-size:.9rem;",
-                            "We will be straight about where it is. The core filtering works today. The wider network coverage and some of the on-device models are still being tested, and we will keep saying so here until they are finished."
+                        h3 { style: "margin-top:18px;", "PH Bulwark" }
+                        div { class: "role", style: "font-family:var(--mono);font-size:.7rem;letter-spacing:.14em;text-transform:uppercase;color:var(--orange);margin:6px 0 10px;", "Ships next" }
+                        p { "A shield for the whole device. It filters unsafe content in place across apps and the web, warns a guardian when something is wrong, and keeps the rest of the page working." }
+                        span { class: "btn btn-ghost btn-sm", style: "margin-top:16px;",
+                            "About PH Bulwark"
+                            span { class: "ic", dangerous_inner_html: svg("arrow-right") }
                         }
                     }
                 }
