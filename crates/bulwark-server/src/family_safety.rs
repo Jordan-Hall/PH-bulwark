@@ -312,9 +312,10 @@ impl FamilySafetyService {
         self
     }
 
-    /// PLACEHOLDER staff gate from the environment
-    /// (`BULWARK_STAFF_BROADCAST_TOKEN`). TODO(staff-system): retire this in
-    /// favour of per-staff credentials once the staff-management design ships.
+    /// LEGACY shared-token staff gate from the environment
+    /// (`BULWARK_STAFF_BROADCAST_TOKEN`). Superseded by per-staff session auth
+    /// ([`Self::with_staff_store`], #147) — kept only as a fallback for nodes that
+    /// run without the staff accounts system wired; used iff no `staff` store is set.
     pub fn with_staff_token_from_env(self) -> Self {
         let raw = std::env::var("BULWARK_STAFF_BROADCAST_TOKEN").ok();
         match raw.as_deref().map(str::trim) {
