@@ -83,7 +83,7 @@ import kotlinx.coroutines.delay
 private enum class Notice { BlockedNsfw, CheckFailed, SaveFailed, Saved }
 
 /** Min interval between live preview scores (CPU ViT ~100-300 ms on a Pixel 7). */
-private const val PREVIEW_SCORE_INTERVAL_MS = 700L
+private const val PREVIEW_SCORE_INTERVAL_MS = 300L
 
 /** Max long edge of the decode used to score a capture (model input is 384). */
 private const val SCORING_MAX_DIM = 1024
@@ -112,30 +112,26 @@ internal fun CameraScreen(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    var hasPermission by remember {
-        mutableStateOf(
-            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
-                PackageManager.PERMISSION_GRANTED,
-        )
-    }
+    fun isGranted(perm: String) =
+        ContextCompat.checkSelfPermission(context, perm) == PackageManager.PERMISSION_GRANTED
+    var hasPermission by remember { mutableStateOf(isGranted(Manifest.permission.CAMERA)) }
+    var hasAudioPermission by remember { mutableStateOf(isGranted(Manifest.permission.RECORD_AUDIO)) }
+    // ONE prompt for both — camera + (optional) mic together, not two annoying
+    // sequential dialogs. Mic denial just yields silent video; camera denial
+    // shows the explainer. Audio never affects safety (the gate scores frames).
     val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted -> hasPermission = granted }
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { result ->
+        result[Manifest.permission.CAMERA]?.let { hasPermission = it }
+        result[Manifest.permission.RECORD_AUDIO]?.let { hasAudioPermission = it }
+    }
     LaunchedEffect(Unit) {
-        if (!hasPermission) permissionLauncher.launch(Manifest.permission.CAMERA)
+        val needed = buildList {
+            if (!hasPermission) add(Manifest.permission.CAMERA)
+            if (!hasAudioPermission) add(Manifest.permission.RECORD_AUDIO)
+        }
+        if (needed.isNotEmpty()) permissionLauncher.launch(needed.toTypedArray())
     }
-
-    // Optional mic permission for video sound — requested lazily when the child
-    // first switches to Video mode (below). Denied -> silent clips, never blocks.
-    var hasAudioPermission by remember {
-        mutableStateOf(
-            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
-                PackageManager.PERMISSION_GRANTED,
-        )
-    }
-    val audioPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted -> hasAudioPermission = granted }
 
     var lensFacing by remember { mutableStateOf(CameraSelector.LENS_FACING_BACK) }
     var previewFlagged by remember { mutableStateOf(false) }
@@ -246,14 +242,6 @@ internal fun CameraScreen(
     // (being unsafe) discarded — nothing reaches the gallery.
     LaunchedEffect(previewFlagged) {
         if (previewFlagged && recording) activeRecording?.stop()
-    }
-
-    // Ask for the mic only when the child actually picks Video (better than a
-    // startup prompt). Best-effort — a denial just means silent clips.
-    LaunchedEffect(mode.isVideo) {
-        if (mode.isVideo && !hasAudioPermission) {
-            audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-        }
     }
 
     val gateReady = gate != null && !gateLoading
@@ -381,7 +369,11 @@ internal fun CameraScreen(
             )
         } else {
             PermissionExplainer(
-                onGrant = { permissionLauncher.launch(Manifest.permission.CAMERA) },
+                onGrant = {
+                    permissionLauncher.launch(
+                        arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO),
+                    )
+                },
                 onCancel = onCancel,
             )
         }
