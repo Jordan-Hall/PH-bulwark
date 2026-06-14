@@ -181,9 +181,35 @@ The engine (§2) is built; the next phases turn it into the **product** the fami
 uses: a maintainable Dioxus app suite, a parent who remotely governs the child's
 filtering VPN, the fastest+secure real-time AI filtering with rich attribution, and
 a longer-term reach into SMS/calls. Each workflow has a dedicated design doc and is
-shippable in reviewable increments. Status as of **2026-06-10**.
+shippable in reviewable increments. Status as of **2026-06-14**.
 
 ### Just shipped (foundation for these workflows)
+- **Staff operators console backend, increments 1–4 (2026-06-14)** — a separate
+  internal `StaffAdmin` service (own accounts/tokens/audit, never guardian- or
+  child-facing), behind `BULWARK_STAFF=1` (default off): auth + mandatory TOTP +
+  RBAC + tamper-evident hash-chain audit (#133, 2026-06-13); guardian-support RPCs
+  `TriggerGuardianReset`/`UnlockGuardianAccount`/`GetGuardianMeta` —
+  metadata/counts only, staff never see the emailed reset code (#184); the NCMEC
+  SafetyCase queue + workflow state machine (OPENED→UNDER_REVIEW→REPORTED_NCMEC→
+  LAW_ENFORCEMENT→CLOSED, with a direct REPORTED_NCMEC→CLOSED edge; hashes + workflow
+  state only, never media) (#188); and live `ClusterControl.Health` fleet data joined
+  for the LOCAL region (other regions stay honestly `probed=false` on the single-box
+  deploy) (#189). → [`docs/design/staff-management-system.md`](docs/design/staff-management-system.md).
+- **On-device content filter without Device Owner — accessibility + OCR is the
+  baseline (2026-06-14)** — the no-VPN content path now actually reads the screen:
+  the NSFW cover is event-driven + surface-bound (drops the instant the foreground
+  app changes; no 30s TTL, no periodic poll, no re-scan under an opaque cover —
+  anti flicker/re-expose) (#174), and OCR runs reliably on the photo path (a static
+  image opened on a new surface always gets one OCR pass; video stays sub-throttled)
+  (#187). **VPN TLS inspection is now fail-CLOSED on the CA (#182):** the tunnel
+  comes up only on a confirmed system-store inspection-CA install (Device Owner) —
+  on a non-managed device it stops cleanly and posts "provision as Device Owner"
+  rather than bricking all HTTPS, and the accessibility/OCR path covers visible
+  content meanwhile. So per-flow HTTPS filtering is the **provisioned-device premium
+  layer**; the accessibility+OCR filter is the **baseline that works on every
+  device** (and the only path that can read cert-pinned/E2E apps). →
+  [`docs/design/on-device-scanning.md`](docs/design/on-device-scanning.md),
+  [`docs/design/server-vpn-mode-and-ca-trust.md`](docs/design/server-vpn-mode-and-ca-trust.md).
 - **Cluster on a real domain + public TLS, public-trust clients, Android CA install
   (2026-06-12)** — the cluster is live at `https://api.predatorhunters.co.uk:8443`
   (+ `vpn.` SAN) behind an auto-issued **Let's Encrypt** cert (acme.sh DNS-01 via

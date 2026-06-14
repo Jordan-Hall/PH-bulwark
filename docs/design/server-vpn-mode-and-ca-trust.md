@@ -1,6 +1,7 @@
 # Server-side VPN mode (tunnel + filter + IP-anonymise) and the CA-trust fix
 
-Status: **Phase 1 (CA-trust install) SHIPPED 2026-06-12; §1/§3-6 DESIGN.** Pairs with [parent-controlled-vpn.md](parent-controlled-vpn.md),
+Status: **Phase 1 (CA-trust install + VPN fail-CLOSED on the CA, #182) SHIPPED
+2026-06-12/06-14; §1/§3-6 DESIGN.** Pairs with [parent-controlled-vpn.md](parent-controlled-vpn.md),
 [realtime-filtering-and-attribution.md](realtime-filtering-and-attribution.md), and the
 existing WireGuard scaffold [`deploy/wireguard/setup-london.sh`](../../deploy/wireguard/setup-london.sh).
 
@@ -108,6 +109,22 @@ pre-existing accounts on it). Until it's managed:
 - **Server-mode does not rescue this**: the region still mints a leaf the device
   must trust, so the CA-trust fix is required there too.
 
+### The layering this establishes (the load-bearing product truth)
+Per-flow HTTPS filtering (VPN **TLS inspection**, on-device or server-tunnel) needs
+the inspection CA trusted in the **system** store → **Device-Owner provisioning** on
+Android 7+. As of **#182 the VPN is fail-CLOSED on this**: the tunnel comes up only
+on a confirmed system-store CA install, so on a non-managed device the per-flow web
+filter is **off by design** (it never bricks HTTPS to no benefit). Therefore:
+
+- The **accessibility + OCR path is the content filter that works WITHOUT Device
+  Owner** — it reads on-screen content after decryption, so it covers the
+  cert-pinned / E2E apps the network can never see. It is the **baseline on every
+  device** (now running device-wide: #174 surface-bound NSFW cover, #187 reliable
+  photo-path OCR).
+- **VPN TLS inspection is the provisioned-device premium layer** — richer per-flow
+  coverage (block/blur/mute, server-side IP-anonymisation) on a managed device, not
+  the baseline. Server-mode is a further premium tier on top.
+
 ---
 
 ## 3. Constraints carried in (non-negotiable)
@@ -126,13 +143,22 @@ pre-existing accounts on it). Until it's managed:
 
 ## 4. Phased plan (each a reviewable PR)
 
-1. ✅ **CA-trust fix (SHIPPED 2026-06-12):** `bulwark-net::vpn::inspection_ca_pem`
-   → JNI `inspectionCaPem(caDir)` → Kotlin `CaTrust.ensureInstalled` →
+1. ✅ **CA-trust fix (SHIPPED 2026-06-12) + VPN fail-CLOSED on the CA (SHIPPED
+   2026-06-14, #182):** `bulwark-net::vpn::inspection_ca_pem` → JNI
+   `inspectionCaPem(caDir)` → Kotlin `CaTrust.ensureInstalled` →
    `DevicePolicyManager.installCaCert` on the Device-Owner path (idempotent via
-   `hasCaCertInstalled`), wired into `MainActivity.requestAntiRemoval`. Honest
-   coverage limit (managed device required) documented in §2. Remaining for this
-   phase: a non-managed-device Settings-guided fallback + an in-app trust-status
-   indicator, and the Pixel install check (post-loop, on-device).
+   `hasCaCertInstalled`). **#182** moves the install into the VpnService
+   `establish()` so the CA is trusted **before** the TLS-inspecting proxy starts
+   (same `ca_dir` the Rust proxy uses, so the installed root matches the minted
+   leaves), and — critically — **refuses to bring the tunnel up** if the CA can't be
+   trusted (`NOT_MANAGED`/`ERROR`): root-caused on-device, an un-trusted inspection
+   CA made every HTTPS app reject the leaf (`CertificateUnknown`) and the device lost
+   connectivity. So a non-managed device now stops cleanly and posts a "provision as
+   Device Owner" status, with the accessibility/OCR path covering visible content,
+   instead of bricking HTTPS. Honest coverage limit (managed device required for the
+   per-flow filter) documented in §2. Remaining for this phase: a non-managed-device
+   Settings-guided fallback + an in-app trust-status indicator, and the on-device
+   install check on a **managed** device.
 2. **WG server hardening (SHIPPED):** `deploy/wireguard/wg-peers.sh` — per-device
    peers keyed by `device_id` (`# bulwark-device:` comment in `wg0.conf`): `init` /
    `add-peer` (client pubkey preferred; private keys never leave the device;
