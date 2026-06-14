@@ -30,6 +30,17 @@
             </intent-filter>
         </activity>
 
+        <!-- The PH Bulwark Browser: a guarded in-app WebView that reads a page's
+             full rendered content (incl. off-viewport) and pre-covers unsafe
+             text/images BEFORE the child reads them — the HTTPS content pre-check
+             a plain VPN can't do without Device Owner. Launched from the app;
+             not exported. FLAG_SECURE keeps it out of screenshots/recents. -->
+        <activity
+            android:name=".browser.BrowserActivity"
+            android:exported="false"
+            android:label="@string/browser_title"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+
         <!-- The filtering VPN client. Android binds this; it owns the TUN fd and
              hands it to the Rust core (libbulwark_client.so) for the real-time
              intercept -> classify -> policy -> block/blur/mute + alert loop. -->
