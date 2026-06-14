@@ -61,7 +61,10 @@ COPY --from=build /srvapp /srvapp
 # /apple-touch-icon.png, /.well-known/security.txt.
 COPY deploy/research/static/ /srv/
 COPY deploy/research/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+# Strip any CR (the repo may check out the script with CRLF on Windows hosts) so
+# the /bin/sh shebang is not "/bin/sh\r", which fails to exec and would take the
+# whole container (and the site) down.
+RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh
 EXPOSE 80 443
 # CMD (not ENTRYPOINT) so the CI smoke test `docker run IMAGE caddy version`
 # still works by overriding the command.
