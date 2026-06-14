@@ -10,7 +10,7 @@ use crate::icons::svg;
 const POLICY: [(&str, &str); 8] = [
     (
         "On the device by default",
-        "The models run on the child's own phone. Deciding whether something is unsafe happens there, not on someone else's server.",
+        "The models run on the child's own devices, whatever the family uses, from a phone to a tablet to a computer. Deciding whether something is unsafe happens there, not on someone else's server.",
     ),
     (
         "We keep no raw content",
