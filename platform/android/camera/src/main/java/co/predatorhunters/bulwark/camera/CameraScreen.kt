@@ -4,9 +4,12 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.Build
 import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.CameraControl
+import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
@@ -114,6 +117,12 @@ internal fun CameraScreen(
     var previewFlagged by remember { mutableStateOf(false) }
     var capturing by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<Notice?>(null) }
+    var selectedFilter by remember { mutableStateOf(CameraFilter.None) }
+    var mode by remember { mutableStateOf(CameraMode.default) }
+    var cameraControl by remember { mutableStateOf<CameraControl?>(null) }
+    var cameraInfo by remember { mutableStateOf<CameraInfo?>(null) }
+    var flashMode by remember { mutableStateOf(ImageCapture.FLASH_MODE_OFF) }
+    var zoomRatio by remember { mutableStateOf(1f) }
 
     val previewView = remember { PreviewView(context) }
     val imageCapture = remember {
@@ -151,11 +160,13 @@ internal fun CameraScreen(
                 }
                 runCatching {
                     p.unbindAll()
-                    p.bindToLifecycle(
+                    val camera = p.bindToLifecycle(
                         lifecycleOwner,
                         CameraSelector.Builder().requireLensFacing(lensFacing).build(),
                         *useCases.toTypedArray(),
                     )
+                    cameraControl = camera.cameraControl
+                    cameraInfo = camera.cameraInfo
                 }
             }, ContextCompat.getMainExecutor(context))
         }
@@ -173,6 +184,19 @@ internal fun CameraScreen(
             if (notice == n) notice = null
         }
     }
+
+    // Apply the selected mode's Camera2 scene hints (Night / Portrait / Pro)
+    // whenever the mode changes or the camera (re)binds. Best-effort — a device
+    // that can't honor a hint simply ignores it (see CameraMode.applySceneHints).
+    LaunchedEffect(mode, cameraControl) {
+        cameraControl?.let { CameraMode.applySceneHints(mode, it) }
+    }
+
+    // Flash applies to the still ImageCapture; zoom drives the bound camera's
+    // control. Both are capture/display settings only — neither affects the RAW
+    // frame the safety gate scores.
+    LaunchedEffect(flashMode) { imageCapture.flashMode = flashMode }
+    LaunchedEffect(zoomRatio, cameraControl) { cameraControl?.setZoomRatio(zoomRatio) }
 
     val gateReady = gate != null && !gateLoading
     val shutterEnabled =
@@ -196,12 +220,22 @@ internal fun CameraScreen(
                         // Could not score -> FAIL CLOSED: not saved.
                         verdict.isFailure -> Notice.CheckFailed
                         g.shouldBlock(verdict.getOrThrow()) -> Notice.BlockedNsfw
-                        captureForResult -> {
-                            onDeliverResult(jpeg, rotation) // finishes the activity
-                            null
+                        else -> {
+                            // SAFE capture only: bake the selected look into the SAVED
+                            // file so it matches the preview. Applied HERE, after the
+                            // gate scored the RAW frame — a filter can never change what
+                            // the gate sees. None returns the original bytes unchanged.
+                            val outJpeg = applyFilterToJpeg(jpeg, rotation, selectedFilter)
+                            val outRotation = if (selectedFilter == CameraFilter.None) rotation else 0
+                            when {
+                                captureForResult -> {
+                                    onDeliverResult(outJpeg, outRotation) // finishes the activity
+                                    null
+                                }
+                                onSaveToGallery(outJpeg) -> Notice.Saved
+                                else -> Notice.SaveFailed
+                            }
                         }
-                        onSaveToGallery(jpeg) -> Notice.Saved
-                        else -> Notice.SaveFailed
                     }
                     capturing = false
                 }
@@ -216,7 +250,19 @@ internal fun CameraScreen(
 
     Box(Modifier.fillMaxSize().background(Ink)) {
         if (hasPermission) {
-            AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
+            AndroidView(
+                factory = { previewView },
+                modifier = Modifier.fillMaxSize(),
+                // Live filter preview: the selected look as a RenderEffect on the
+                // PreviewView (API 31+; older devices preview unfiltered — the SAVED
+                // photo is still filtered). A display transform only; it never
+                // touches what the safety gate scores (the gate scores the RAW frame).
+                update = { pv ->
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        pv.setRenderEffect(selectedFilter.renderEffect())
+                    }
+                },
+            )
         } else {
             PermissionExplainer(
                 onGrant = { permissionLauncher.launch(Manifest.permission.CAMERA) },
@@ -239,9 +285,45 @@ internal fun CameraScreen(
                 Modifier.fillMaxSize().padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                StatusPill(gateLoading = gateLoading, gateReady = gateReady)
+                TopBar(
+                    gateLoading = gateLoading,
+                    gateReady = gateReady,
+                    flashMode = flashMode,
+                    onCycleFlash = { flashMode = nextFlashMode(flashMode) },
+                    zoomRatio = zoomRatio,
+                    showFlash = lensFacing == CameraSelector.LENS_FACING_BACK &&
+                        cameraInfo?.hasFlashUnit() == true,
+                )
                 Spacer(Modifier.weight(1f))
                 notice?.let { n -> if (n != Notice.BlockedNsfw) NoticeBanner(n) }
+                Spacer(Modifier.height(12.dp))
+                // Samsung-style filter strip — only for filter-supporting (still)
+                // modes. The chosen look previews live (above) and bakes into the
+                // saved photo (below).
+                if (mode.supportsFilters) {
+                    FilterStrip(selected = selectedFilter, onSelect = { selectedFilter = it })
+                    Spacer(Modifier.height(12.dp))
+                }
+                // Mode carousel. Only the still modes (Photo / Portrait / Night /
+                // Pro) are offered for now — each applies real Camera2 scene hints;
+                // Video recording is a follow-up (VideoGate scaffold is in place).
+                ModeCarousel(
+                    modes = remember { CameraMode.strip.filter { it.isStill } },
+                    selected = mode,
+                    enabled = !capturing,
+                    onSelect = { mode = it },
+                )
+                Spacer(Modifier.height(12.dp))
+                // Quick-zoom pills (1x / 2x / 5x, clamped to the lens's range).
+                // ZoomChips renders nothing if the camera offers <2 usable stops.
+                ZoomChips(
+                    stops = remember(cameraInfo) {
+                        val maxZoom = cameraInfo?.zoomState?.value?.maxZoomRatio ?: 1f
+                        listOf(1f, 2f, 5f).filter { it <= maxZoom }
+                    },
+                    current = zoomRatio,
+                    onSelect = { zoomRatio = it },
+                )
                 Spacer(Modifier.height(12.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (captureForResult) {
@@ -252,7 +334,13 @@ internal fun CameraScreen(
                         Spacer(Modifier.width(64.dp))
                     }
                     Spacer(Modifier.weight(1f))
-                    ShutterButton(enabled = shutterEnabled, onClick = ::takePhoto)
+                    MorphShutter(
+                        mode = mode,
+                        recording = false,
+                        enabled = shutterEnabled,
+                        busy = capturing,
+                        onClick = ::takePhoto,
+                    )
                     Spacer(Modifier.weight(1f))
                     OutlinedButton(onClick = {
                         lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) {
@@ -408,6 +496,33 @@ private fun decodeForScoring(jpeg: ByteArray, rotationDegrees: Int): Bitmap {
     val bmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, opts)
         ?: throw IllegalStateException("could not decode captured frame")
     return bmp.rotatedBy(rotationDegrees)
+}
+
+/**
+ * Bake [filter] into a captured JPEG for SAVE (full-res, upright). A filter is a
+ * display COLOR transform applied ONLY to a SAFE capture AFTER the gate scored the
+ * RAW frame — it can never push content past the safety check. [CameraFilter.None]
+ * returns the original bytes unchanged (EXIF intact). For a real look the bitmap is
+ * decoded, rotated upright, color-transformed, and re-encoded (orientation baked in,
+ * so callers pass rotation 0). Any decode/encode failure returns the original bytes
+ * — a photo is never lost over a filter error.
+ */
+/** OFF → AUTO → ON → OFF cycle for the flash toggle. */
+private fun nextFlashMode(current: Int): Int = when (current) {
+    ImageCapture.FLASH_MODE_OFF -> ImageCapture.FLASH_MODE_AUTO
+    ImageCapture.FLASH_MODE_AUTO -> ImageCapture.FLASH_MODE_ON
+    else -> ImageCapture.FLASH_MODE_OFF
+}
+
+private fun applyFilterToJpeg(jpeg: ByteArray, rotationDegrees: Int, filter: CameraFilter): ByteArray {
+    if (filter == CameraFilter.None) return jpeg
+    return runCatching {
+        val decoded = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size) ?: return jpeg
+        val baked = filter.apply(decoded.rotatedBy(rotationDegrees))
+        val out = java.io.ByteArrayOutputStream()
+        baked.compress(Bitmap.CompressFormat.JPEG, 95, out)
+        out.toByteArray()
+    }.getOrDefault(jpeg)
 }
 
 // ---------------------------------------------------------------------------

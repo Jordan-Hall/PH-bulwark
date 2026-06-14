@@ -29,10 +29,19 @@
     <string name="save_failed_body">The photo couldn\'t be saved. Please try again.</string>
     <string name="saved_body">Saved to Photos.</string>
 
-    <!-- Video stub -->
+    <!-- Video -->
     <string name="video_stub_title">Video is coming soon</string>
-    <string name="video_stub_body">PH Bulwark Camera can\'t record video yet. Checked, safe
-        video recording is planned for a future update.</string>
+    <string name="video_stub_body">Video recording with the same on-device safety check is on
+        the way. For now, switch back to Photo to keep snapping.</string>
+    <string name="video_checking_body">Checking your video on this phone…</string>
+    <string name="video_saved_body">Video saved to Movies.</string>
+    <string name="video_blocked_title">That video wasn\'t saved</string>
+    <string name="video_blocked_body">Part of this video looked like something that shouldn\'t be
+        recorded, so it was not saved — nothing was kept on this phone and nothing was sent
+        anywhere. If you think this was a mistake you can try again, or talk to your guardian
+        about it.</string>
+    <string name="video_check_failed_body">We couldn\'t check that video, so it wasn\'t saved. Please try again.</string>
+    <string name="video_save_failed_body">The video couldn\'t be saved. Please try again.</string>
 
     <!-- Permission -->
     <string name="permission_title">Camera permission needed</string>
@@ -44,7 +53,36 @@
     <string name="action_ok">OK</string>
     <string name="action_cancel">Cancel</string>
     <string name="cd_shutter">Take photo</string>
+    <string name="cd_record_start">Start recording</string>
+    <string name="cd_record_stop">Stop recording</string>
     <string name="cd_flip">Flip</string>
+    <string name="cd_flash">Flash</string>
+    <string name="flash_off">Flash off</string>
+    <string name="flash_on">Flash on</string>
+    <string name="flash_auto">Flash auto</string>
+    <string name="mode_photo">Photo</string>
+    <string name="mode_portrait">Portrait</string>
+    <string name="mode_night">Night</string>
+    <string name="mode_video">Video</string>
+    <string name="mode_pro">Pro</string>
+    <string name="cd_filters">Filters</string>
+    <string name="cd_zoom">Zoom %1$s</string>
+    <string name="cd_focus_tap">Tap to focus</string>
+    <string name="cd_last_shot">Last shot</string>
+
+    <!-- Pro (manual) tray -->
+    <string name="pro_exposure">Exposure</string>
+    <string name="pro_iso">ISO</string>
+    <string name="pro_auto">Auto</string>
+
+    <!-- Filter names (color looks; never change captured content before the safety check). -->
+    <string name="filter_none">Original</string>
+    <string name="filter_vivid">Vivid</string>
+    <string name="filter_mono">Mono</string>
+    <string name="filter_warm">Warm</string>
+    <string name="filter_cool">Cool</string>
+    <string name="filter_fade">Fade</string>
+    <string name="filter_noir">Noir</string>
 
     <!-- Transparency footer (matches the child app's honesty line). -->
     <string name="privacy_footnote">Photos are checked on this phone only. Nothing leaves the device.</string>
