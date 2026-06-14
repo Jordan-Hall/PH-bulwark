@@ -15,6 +15,7 @@
     "test:web": "vitest run tests/child-onboarding.web.test.ts tests/parent-console.web.test.ts",
     "test:child:android": "vitest run tests/child-onboarding.android.test.ts",
     "smoke:child:web": "tsx smoke.ts",
+    "e2e:research:nav": "node research-nav.e2e.mjs",
     "devices": "adb devices -l",
     "test": "npm run test:web"
   },
