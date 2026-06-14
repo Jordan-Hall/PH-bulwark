@@ -9,6 +9,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Optional: video sound. Requested lazily when Video mode is first used;
+         denial just yields silent clips (audio never affects the safety gate).
+         Still LOCAL-ONLY — the mic feeds the on-device recording only. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <uses-feature android:name="android.hardware.camera.any" android:required="true" />
 

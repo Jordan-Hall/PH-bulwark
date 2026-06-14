@@ -125,6 +125,18 @@ internal fun CameraScreen(
         if (!hasPermission) permissionLauncher.launch(Manifest.permission.CAMERA)
     }
 
+    // Optional mic permission for video sound — requested lazily when the child
+    // first switches to Video mode (below). Denied -> silent clips, never blocks.
+    var hasAudioPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED,
+        )
+    }
+    val audioPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted -> hasAudioPermission = granted }
+
     var lensFacing by remember { mutableStateOf(CameraSelector.LENS_FACING_BACK) }
     var previewFlagged by remember { mutableStateOf(false) }
     var capturing by remember { mutableStateOf(false) }
@@ -236,6 +248,14 @@ internal fun CameraScreen(
         if (previewFlagged && recording) activeRecording?.stop()
     }
 
+    // Ask for the mic only when the child actually picks Video (better than a
+    // startup prompt). Best-effort — a denial just means silent clips.
+    LaunchedEffect(mode.isVideo) {
+        if (mode.isVideo && !hasAudioPermission) {
+            audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
     val gateReady = gate != null && !gateLoading
     // While recording, the shutter stays live so it can STOP (the live analyzer
     // auto-stops on a flag); otherwise it's the still/start-recording gate.
@@ -329,11 +349,13 @@ internal fun CameraScreen(
         }
         if (!shutterEnabled || gate == null) return
         val temp = File(context.cacheDir, "rec_${System.currentTimeMillis()}.mp4")
-        // Video-only (no audio): we never request RECORD_AUDIO, so clips are
-        // silent for now (audio capture is a follow-up).
-        activeRecording = videoCapture.output
+        val pending = videoCapture.output
             .prepareRecording(context, FileOutputOptions.Builder(temp).build())
-            .start(mainExecutor) { event ->
+        // Record sound when the optional mic permission is granted; otherwise the
+        // clip is silent. Audio never affects safety — the gate scores video
+        // FRAMES only. withAudioEnabled() would SecurityException without the grant.
+        if (hasAudioPermission) pending.withAudioEnabled()
+        activeRecording = pending.start(mainExecutor) { event ->
                 when (event) {
                     is VideoRecordEvent.Start -> recording = true
                     is VideoRecordEvent.Finalize -> finalizeRecording(event, temp)
