@@ -1058,6 +1058,44 @@ message StaffAuditPage {
   bool   chain_ok = 3; // chain verified intact at read time
 }
 
+// --- Increment 2: guardian support (SUPPORT + ADMIN) ---------------------------
+// Staff act on a guardian account by EMAIL but never see secrets: a reset emails
+// the guardian a code staff never receive; metadata is counts/flags ONLY (never
+// the email back, child names, ids, tokens, addresses, or any alert content).
+
+message TriggerGuardianResetRequest {
+  string token          = 1; // SUPPORT/ADMIN staff session (or Bearer)
+  string guardian_email = 2; // the guardian whose reset to dispatch
+}
+message TriggerGuardianResetAck {
+  bool   dispatched = 1; // a reset was minted + emailed; false covers unknown
+                         // email / throttled / SMTP-off alike (anti-enumeration)
+  string detail     = 2; // content-free note
+}
+
+message UnlockGuardianRequest {
+  string token          = 1;
+  string guardian_email = 2;
+}
+message UnlockGuardianAck {
+  bool   existed = 1; // an account by that email existed (its lockouts were cleared)
+  string detail  = 2;
+}
+
+message GuardianMetaRequest {
+  string token          = 1;
+  string guardian_email = 2;
+}
+// Content-free guardian metadata: existence + state + counts ONLY.
+message GuardianMeta {
+  bool   exists            = 1;
+  bool   locked            = 2; // currently login-throttled (lockout active)
+  bool   has_recovery_code = 3; // self-service recovery code is set
+  bool   reset_pending     = 4; // an emailed reset token is outstanding
+  uint32 child_count       = 5; // COUNT only
+  uint32 device_count      = 6; // COUNT only (supervised devices)
+}
+
 service StaffAdmin {
   // Bootstrap-gated staff onboarding (see CreateStaffRequest). TOTP enrollment
   // material is returned exactly once in the ack.
@@ -1071,6 +1109,14 @@ service StaffAdmin {
   // Tamper-evident audit log query (ADMIN only). Audited (yes, querying the
   // audit log is itself an audited action).
   rpc QueryStaffAudit(StaffAuditQuery) returns (StaffAuditPage);
+
+  // --- Guardian support (SUPPORT/ADMIN); every call audited, content-free. ---
+  // Email the guardian a reset code (staff never see it). Anti-enumeration ack.
+  rpc TriggerGuardianReset(TriggerGuardianResetRequest) returns (TriggerGuardianResetAck);
+  // Clear a guardian's login lockout (the failed-attempt throttles).
+  rpc UnlockGuardianAccount(UnlockGuardianRequest) returns (UnlockGuardianAck);
+  // Content-free guardian metadata (existence + state + counts only).
+  rpc GetGuardianMeta(GuardianMetaRequest) returns (GuardianMeta);
 }
 
 // ---------------------------------------------------------------------------
