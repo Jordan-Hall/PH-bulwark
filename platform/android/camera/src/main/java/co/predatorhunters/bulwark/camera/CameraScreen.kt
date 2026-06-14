@@ -40,6 +40,7 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -63,6 +64,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -138,6 +140,7 @@ internal fun CameraScreen(
     var capturing by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<Notice?>(null) }
     var selectedFilter by remember { mutableStateOf(CameraFilter.None) }
+    var filtersOpen by remember { mutableStateOf(false) }
     var mode by remember { mutableStateOf(CameraMode.default) }
     var cameraControl by remember { mutableStateOf<CameraControl?>(null) }
     var cameraInfo by remember { mutableStateOf<CameraInfo?>(null) }
@@ -406,6 +409,20 @@ internal fun CameraScreen(
             }
         }
 
+        // Readable control zone: a soft bottom-up gradient so the controls stay
+        // legible over any scene (Samsung/Pixel-style), without hiding the shot.
+        if (hasPermission) {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(320.dp)
+                    .align(Alignment.BottomCenter)
+                    .background(
+                        Brush.verticalGradient(listOf(Color.Transparent, Ink.copy(alpha = 0.72f))),
+                    ),
+            )
+        }
+
         if (hasPermission) {
             Column(
                 Modifier.fillMaxSize().padding(24.dp),
@@ -423,10 +440,9 @@ internal fun CameraScreen(
                 Spacer(Modifier.weight(1f))
                 notice?.let { n -> if (n != Notice.BlockedNsfw) NoticeBanner(n) }
                 Spacer(Modifier.height(12.dp))
-                // Samsung-style filter strip — only for filter-supporting (still)
-                // modes. The chosen look previews live (above) and bakes into the
-                // saved photo (below).
-                if (mode.supportsFilters) {
+                // Filters live BEHIND a toggle (the ✦ button left of the shutter)
+                // so they stop cluttering the view — revealed only when wanted.
+                if (mode.supportsFilters && filtersOpen) {
                     FilterStrip(selected = selectedFilter, onSelect = { selectedFilter = it })
                     Spacer(Modifier.height(12.dp))
                 }
@@ -460,8 +476,10 @@ internal fun CameraScreen(
                         TextButton(onClick = onCancel) {
                             Text(stringResource(R.string.action_cancel), color = Color.White)
                         }
+                    } else if (mode.supportsFilters) {
+                        FilterToggle(open = filtersOpen, onToggle = { filtersOpen = !filtersOpen })
                     } else {
-                        Spacer(Modifier.width(64.dp))
+                        Spacer(Modifier.width(56.dp))
                     }
                     Spacer(Modifier.weight(1f))
                     MorphShutter(
@@ -527,6 +545,22 @@ internal fun CameraScreen(
                 )
             }
         }
+    }
+}
+
+/** Compact toggle (left of the shutter) that shows/hides the filter strip. */
+@Composable
+private fun FilterToggle(open: Boolean, onToggle: () -> Unit) {
+    Box(
+        Modifier
+            .size(56.dp)
+            .clip(CircleShape)
+            .background(if (open) Sky.copy(alpha = 0.25f) else Color.White.copy(alpha = 0.12f))
+            .border(1.dp, if (open) Sky else Color.White.copy(alpha = 0.4f), CircleShape)
+            .clickable(onClick = onToggle),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text("✦", color = if (open) Sky else Color.White, fontSize = 22.sp)
     }
 }
 
