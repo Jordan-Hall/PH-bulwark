@@ -29,9 +29,9 @@ grooming rules are deterministic, explainable, and feasible on any phone, so the
 are *never* offloaded (`bulwark-infer::policy::decide`: `kind == Text → Route::Local`).
 Only heavy media (image/audio/video) is a candidate for cluster offload.
 
-### A.1 The two capture front-ends feeding one brain
+### A.1 The three capture front-ends feeding one brain
 
-There are two independent capture paths that converge on the same analyzers and
+There are three independent capture paths that converge on the same analyzers and
 the same policy:
 
 1. **Network path (TLS inspection).** `bulwark-net` terminates TLS in `proxy.rs`
@@ -41,7 +41,9 @@ the same policy:
    smoltcp `any_ip` listener bound to the original destination, `CONNECT`s to the
    in-process proxy, and splices — so every inspectable TCP flow is decrypted.
    QUIC/UDP-443 is dropped (`QUIC_UDP_PORT`) to force HTTP/3 down onto
-   inspectable TCP/443.
+   inspectable TCP/443. (Requires a trusted inspection CA → Device-Owner-only on
+   Android 7+; on a non-managed device the VPN host filter — DNS + TLS-SNI, **no
+   decryption**, `vpn/sni_dns.rs`, #198 — is the network-layer sibling instead.)
 
 2. **On-device path (accessibility/OCR).** For E2E/cert-pinned apps the network
    can't read (`MONITORED` set: WhatsApp, Signal, Messenger, Instagram, Snapchat,
@@ -49,10 +51,30 @@ the same policy:
    text and notification text and calls `RustBridge.analyzeText(pkg, thread, text)`
    → `bulwark-android` JNI → `bulwark-text` + `bulwark-policy`, all on-device.
 
-Both paths yield a `Verdict` (`bulwark-proto`) and run it through the SAME
+3. **In-app safe browser (`platform/android`, #194, SHIPPED 2026-06-14).** A guarded
+   in-app WebView (PH Bulwark Browser) renders the page locally and injects a
+   DOM-extraction script (`res/raw/bulwark_browser.js`): a `TreeWalker` over text
+   nodes + `querySelectorAll` over `<img>` reports each span/image (tagged + with its
+   document rect) over a `JavascriptInterface` bridge (`browser/BrowserContentFilter.kt`),
+   which routes the text and decoded image bitmaps through the app's **existing**
+   on-device NSFW / grooming classifiers (treated as black boxes) and calls
+   `__bulwarkCensor(id)` to draw an in-document opaque cover over a flagged span/image;
+   a predominantly-flagged page gets a calm full-page block. This is the HTTPS
+   content pre-check the network path cannot do without a trust anchor — the page is
+   rendered locally so the script reads the live DOM. **Fail-OPEN** (the accessibility
+   filter is the always-on backstop), `FLAG_SECURE`, in-memory only (bitmaps recycled,
+   bounded decode). The grooming `thread_id` is per-navigation (a session visits many
+   unrelated pages — same per-surface-id rule the AccessibilityService follows). Honest
+   limit: the DOM walk is post-render, so an on-screen span is briefly visible during
+   the check round-trip (off-screen content is covered before it scrolls in); hardening
+   TODOs (blob:/data:/canvas images, cross-origin iframes, host allow/deny list, a
+   mask-until-first-scan guarantee) are noted in code.
+
+All three paths yield a `Verdict` (`bulwark-proto`) and run it through the SAME
 `bulwark-policy` engine. This single-brain design means a grooming rule that
-fires on a inspected web chat and one that fires on an OCR'd WhatsApp message escalate
-identically (and share thread state shape, keyed by `thread_id`).
+fires on an inspected web chat, one on an OCR'd WhatsApp message, and one on an
+in-app-browser page escalate identically (and share thread state shape, keyed by
+`thread_id`).
 
 ### A.2 Hot path & latency budget
 

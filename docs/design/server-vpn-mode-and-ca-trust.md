@@ -116,14 +116,26 @@ Android 7+. As of **#182 the VPN is fail-CLOSED on this**: the tunnel comes up o
 on a confirmed system-store CA install, so on a non-managed device the per-flow web
 filter is **off by design** (it never bricks HTTPS to no benefit). Therefore:
 
-- The **accessibility + OCR path is the content filter that works WITHOUT Device
-  Owner** — it reads on-screen content after decryption, so it covers the
-  cert-pinned / E2E apps the network can never see. It is the **baseline on every
-  device** (now running device-wide: #174 surface-bound NSFW cover, #187 reliable
-  photo-path OCR).
-- **VPN TLS inspection is the provisioned-device premium layer** — richer per-flow
-  coverage (block/blur/mute, server-side IP-anonymisation) on a managed device, not
-  the baseline. Server-mode is a further premium tier on top.
+- The **existing consumer phone** (no Device Owner, no factory reset — the family
+  device with irreplaceable data) is covered by **THREE complementary layers, none
+  needing a trust anchor**, all feeding the same engine:
+  1. **Accessibility + OCR** — the content filter that works WITHOUT Device Owner,
+     reading on-screen content after decryption, so it covers the cert-pinned / E2E
+     apps the network can never see. It is the **baseline on every device** (now
+     running device-wide: #174 surface-bound NSFW cover, #187 reliable photo-path
+     OCR).
+  2. **DNS + TLS-SNI VPN host filter (#198)** — matches the *cleartext* host that DNS
+     and the TLS ClientHello SNI already reveal and refuses blocklisted hosts (NXDOMAIN
+     sinkhole / flow reset), **without decrypting** anything, so no trust anchor is
+     needed. Fail-SAFE, opt-in, not the Android default.
+  3. **In-app safe browser (#194)** — renders the page locally and runs the existing
+     NSFW / grooming classifiers over the live DOM, censoring flagged spans/images
+     in-document — the HTTPS *content* pre-check the network layer can't do without a
+     trust anchor. Fail-open with the accessibility filter as the backstop.
+- **VPN-with-CA full TLS inspection is the new-device / Device-Owner-only premium
+  layer** — richer per-flow coverage (block/blur/mute, server-side IP-anonymisation)
+  on a managed device, NOT the baseline (it would brick HTTPS on an un-managed device
+  — #182). Server-mode is a further premium tier on top.
 
 ---
 
