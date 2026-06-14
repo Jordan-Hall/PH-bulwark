@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.CameraControl
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
@@ -116,6 +117,8 @@ internal fun CameraScreen(
     var capturing by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<Notice?>(null) }
     var selectedFilter by remember { mutableStateOf(CameraFilter.None) }
+    var mode by remember { mutableStateOf(CameraMode.default) }
+    var cameraControl by remember { mutableStateOf<CameraControl?>(null) }
 
     val previewView = remember { PreviewView(context) }
     val imageCapture = remember {
@@ -153,11 +156,12 @@ internal fun CameraScreen(
                 }
                 runCatching {
                     p.unbindAll()
-                    p.bindToLifecycle(
+                    val camera = p.bindToLifecycle(
                         lifecycleOwner,
                         CameraSelector.Builder().requireLensFacing(lensFacing).build(),
                         *useCases.toTypedArray(),
                     )
+                    cameraControl = camera.cameraControl
                 }
             }, ContextCompat.getMainExecutor(context))
         }
@@ -174,6 +178,13 @@ internal fun CameraScreen(
             delay(3500)
             if (notice == n) notice = null
         }
+    }
+
+    // Apply the selected mode's Camera2 scene hints (Night / Portrait / Pro)
+    // whenever the mode changes or the camera (re)binds. Best-effort — a device
+    // that can't honor a hint simply ignores it (see CameraMode.applySceneHints).
+    LaunchedEffect(mode, cameraControl) {
+        cameraControl?.let { CameraMode.applySceneHints(mode, it) }
     }
 
     val gateReady = gate != null && !gateLoading
@@ -267,9 +278,22 @@ internal fun CameraScreen(
                 Spacer(Modifier.weight(1f))
                 notice?.let { n -> if (n != Notice.BlockedNsfw) NoticeBanner(n) }
                 Spacer(Modifier.height(12.dp))
-                // Samsung-style filter strip (still capture). The chosen look is
-                // previewed live (above) and baked into the saved photo (below).
-                FilterStrip(selected = selectedFilter, onSelect = { selectedFilter = it })
+                // Samsung-style filter strip — only for filter-supporting (still)
+                // modes. The chosen look previews live (above) and bakes into the
+                // saved photo (below).
+                if (mode.supportsFilters) {
+                    FilterStrip(selected = selectedFilter, onSelect = { selectedFilter = it })
+                    Spacer(Modifier.height(12.dp))
+                }
+                // Mode carousel. Only the still modes (Photo / Portrait / Night /
+                // Pro) are offered for now — each applies real Camera2 scene hints;
+                // Video recording is a follow-up (VideoGate scaffold is in place).
+                ModeCarousel(
+                    modes = remember { CameraMode.strip.filter { it.isStill } },
+                    selected = mode,
+                    enabled = !capturing,
+                    onSelect = { mode = it },
+                )
                 Spacer(Modifier.height(12.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (captureForResult) {
