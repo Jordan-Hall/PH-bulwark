@@ -275,6 +275,12 @@ class BulwarkAccessibilityService : AccessibilityService() {
         val nsfw = Nsfw.obtain(this) ?: return // fail-open: no model → no image scan
         val region = nsfw.localize(frame) // null when no tile is flagged
         if (region != null && !region.isEmpty) {
+            // STALE-SURFACE GUARD: the screenshot + inference take time, during
+            // which the foreground app can change. If it has, DROP this result
+            // rather than cover the NEW app with a region scanned from the OLD one
+            // (codex P2). The new surface gets covered by its own scan; the old
+            // cover (if any) was already lifted by the surface-bound removal.
+            if (pkg != lastForegroundPkg) return
             // Flagged → cover (refresh) immediately; reset the clean streak.
             cleanScanCount = 0
             coverPkg = pkg // bind the cover to this surface (drop on app change)
@@ -438,11 +444,36 @@ class BulwarkAccessibilityService : AccessibilityService() {
      *  full-screen block never clobber each other's lifecycle. */
     private var regionOverlay: View? = null
 
-    /** Main-thread handler + a SINGLE reusable lift runnable for the localized
-     *  overlay. Refreshing the cover cancels the prior TTL removal, so a stale
-     *  removal can't lift a still-flagged cover (codex P2). */
+    /** Main-thread handler + a SINGLE reusable RE-VERIFY runnable for the localized
+     *  overlay. Truly static content (a loaded image, a paused video) emits no
+     *  further a11y events, so without this the [REGION_OVERLAY_TTL_MS] backstop
+     *  would BLINDLY lift the cover and RE-EXPOSE still-on-screen explicit imagery
+     *  (codex P1). Instead, when the backstop fires it RE-SCANS the current frame:
+     *  still-flagged → refresh (keep covering); clean → the normal hysteresis
+     *  lifts it. Fires only while a cover is up — not continuous polling. */
     private val regionHandler = Handler(Looper.getMainLooper())
-    private val liftRegionOverlay = Runnable { removeLocalizedOverlay() }
+    private val reverifyRegionOverlay = Runnable { reverifyCover() }
+
+    /**
+     * Re-scan the current frame while a cover is up because the
+     * [REGION_OVERLAY_TTL_MS] backstop fired with no event-driven refresh (static
+     * content). Keeps still-explicit content covered and lets the scan's clean
+     * path lift it once the content is actually gone — never a blind timeout.
+     */
+    private fun reverifyCover() {
+        if (regionOverlay == null) return // nothing covered → nothing to re-verify
+        val pkg = coverPkg ?: lastForegroundPkg
+        if (pkg == null || pkg == packageName ||
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.R
+        ) {
+            removeLocalizedOverlay()
+            return
+        }
+        val root = rootInActiveWindow
+        val thread = if (root != null) threadIdFor(root, pkg) else "scan:$pkg"
+        // Deliberate re-check: NSFW only (no OCR), straight to the capture path.
+        captureAndScan(pkg, thread, ocrText = false)
+    }
 
     private val audioManager by lazy {
         getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
@@ -545,17 +576,17 @@ class BulwarkAccessibilityService : AccessibilityService() {
             // Stop the offending media's SOUND too (covering an adult video must
             // silence it, not just hide the picture). Idempotent while held.
             muteOffendingAudio()
-            // Self-heal: lift the cover if no later frame refreshes it (content
-            // scrolled away and no clean frame arrived to clear it explicitly).
-            // Cancel the PRIOR pending removal first so a refresh of a still-
-            // flagged region doesn't get lifted by a stale earlier TTL.
-            regionHandler.removeCallbacks(liftRegionOverlay)
-            regionHandler.postDelayed(liftRegionOverlay, REGION_OVERLAY_TTL_MS)
+            // Self-heal backstop: if no later frame refreshes the cover (static
+            // content with no a11y events), RE-VERIFY by re-scanning — never a
+            // blind lift (codex P1). Cancel the prior pending re-verify first so a
+            // refresh of a still-flagged region resets the backstop window.
+            regionHandler.removeCallbacks(reverifyRegionOverlay)
+            regionHandler.postDelayed(reverifyRegionOverlay, REGION_OVERLAY_TTL_MS)
         }
     }
 
     private fun removeLocalizedOverlay() {
-        regionHandler.removeCallbacks(liftRegionOverlay)
+        regionHandler.removeCallbacks(reverifyRegionOverlay)
         regionOverlay?.let { v -> runCatching { (getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(v) } }
         regionOverlay = null
         // End the episode (a safety-TTL lift also resets, so the next cover
@@ -636,9 +667,12 @@ class BulwarkAccessibilityService : AccessibilityService() {
          *  cover is also dropped instantly on any app/window change (surface-bound). */
         private const val CLEAN_LIFT_SCANS = 1
 
-        /** SAFETY-net ONLY: clears a cover if accessibility events stop entirely
-         *  (no content-change/scroll to drive a clean-scan lift). Short, because the
-         *  normal lifts are event-driven (clean scan + surface change), not timed. */
+        /** RE-VERIFY interval for a standing cover when no a11y event refreshes it
+         *  (truly static content). On expiry the current frame is RE-SCANNED — a
+         *  still-flagged frame keeps the cover, a clean frame lifts it — so static
+         *  explicit content is never blindly re-exposed (codex P1). Fires only while
+         *  a cover is up; normal lifts are still event-driven (clean scan + surface
+         *  change). */
         private const val REGION_OVERLAY_TTL_MS = 5000L
         // Apps the network can't read (E2E / cert-pinned) → on-device capture path.
         private val MONITORED = setOf(
