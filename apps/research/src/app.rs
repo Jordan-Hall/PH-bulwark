@@ -117,7 +117,7 @@ fn NavBar() -> Element {
             },
             div { class: "nav-inner",
                 Link { class: "brand", to: Route::Home {}, onclick: move |_| menu.set(false),
-                    img { class: "brand-logo", src: PH_LOGO, alt: "Predator Hunters" }
+                    img { class: "brand-logo", src: PH_LOGO, alt: "Predator Hunters", width: "500", height: "168" }
                     span { class: "brand-tag", "Research" }
                 }
                 div { class: "nav-links",
