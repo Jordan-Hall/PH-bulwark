@@ -52,6 +52,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -79,6 +80,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import java.io.File
 import java.util.concurrent.Executors
+import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 
 /** Outcome surfaced to the child after an action. Calm, never shaming. */
@@ -141,6 +143,7 @@ internal fun CameraScreen(
     var notice by remember { mutableStateOf<Notice?>(null) }
     var selectedFilter by remember { mutableStateOf(CameraFilter.None) }
     var filtersOpen by remember { mutableStateOf(false) }
+    var exposureIndex by remember { mutableStateOf(0) }
     var mode by remember { mutableStateOf(CameraMode.default) }
     var cameraControl by remember { mutableStateOf<CameraControl?>(null) }
     var cameraInfo by remember { mutableStateOf<CameraInfo?>(null) }
@@ -256,6 +259,13 @@ internal fun CameraScreen(
         imageCapture.flashMode = flashMode
         cameraControl?.enableTorch(flashMode == ImageCapture.FLASH_MODE_ON)
     }
+
+    // Pro exposure (EV): apply the slider to the live camera; reset to neutral on
+    // leaving Pro so the other modes stay fully automatic.
+    LaunchedEffect(exposureIndex, cameraControl) {
+        runCatching { cameraControl?.setExposureCompensationIndex(exposureIndex) }
+    }
+    LaunchedEffect(mode.isPro) { if (!mode.isPro) exposureIndex = 0 }
     LaunchedEffect(zoomRatio, cameraControl) { cameraControl?.setZoomRatio(zoomRatio) }
 
     // Live safety layer for video: if the preview scene is flagged WHILE
@@ -467,6 +477,19 @@ internal fun CameraScreen(
                     onSelect = { mode = it },
                 )
                 Spacer(Modifier.height(12.dp))
+                // Pro exposure (EV) slider — the real manual control that makes Pro
+                // differ from Photo (shown only when the lens reports an EV range).
+                if (mode.isPro) {
+                    val evRange = cameraInfo?.exposureState?.exposureCompensationRange
+                    if (evRange != null && evRange.upper > evRange.lower) {
+                        ProExposureSlider(
+                            index = exposureIndex,
+                            range = evRange.lower..evRange.upper,
+                            onChange = { exposureIndex = it },
+                        )
+                        Spacer(Modifier.height(12.dp))
+                    }
+                }
                 // Quick-zoom pills (1x / 2x / 5x, clamped to the lens's range).
                 // ZoomChips renders nothing if the camera offers <2 usable stops.
                 ZoomChips(
@@ -552,6 +575,32 @@ internal fun CameraScreen(
                 )
             }
         }
+    }
+}
+
+/** Pro manual exposure (EV) slider — the control that makes Pro differ from Photo. */
+@Composable
+private fun ProExposureSlider(index: Int, range: IntRange, onChange: (Int) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("EV", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.width(10.dp))
+        Slider(
+            value = index.toFloat(),
+            onValueChange = { onChange(it.roundToInt()) },
+            valueRange = range.first.toFloat()..range.last.toFloat(),
+            steps = (range.last - range.first - 1).coerceAtLeast(0),
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(
+            if (index > 0) "+$index" else "$index",
+            color = Color.White,
+            fontSize = 12.sp,
+            modifier = Modifier.width(30.dp),
+        )
     }
 }
 
