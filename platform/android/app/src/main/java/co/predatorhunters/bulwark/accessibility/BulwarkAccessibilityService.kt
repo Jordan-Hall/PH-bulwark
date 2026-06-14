@@ -194,6 +194,19 @@ class BulwarkAccessibilityService : AccessibilityService() {
      */
     private fun maybeCapture(pkg: String, thread: String, ocrText: Boolean) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        // DON'T re-scan while a cover is up: the cover is an opaque overlay, so a
+        // takeScreenshot now captures the COVER (which scores clean), not the
+        // content under it. Re-scanning would falsely read "clean" and lift the
+        // cover — flickering / re-exposing still-explicit DYNAMIC content (a playing
+        // video keeps firing content events under the cover) (code-review). A cover
+        // is lifted by a SURFACE change, not an under-cover re-scan: an app switch /
+        // shade / launcher fires WINDOW_STATE_CHANGED, which clears the cover
+        // (coverPkg mismatch) BEFORE this runs, so the new surface's scan proceeds
+        // with regionOverlay == null. (Limitation: scrolling explicit content away
+        // WITHIN the same app leaves the cover until the surface changes —
+        // safe-sticky; precise in-app lift needs node-level tracking / the
+        // own-browser path, tracked separately.)
+        if (regionOverlay != null) return
         val now = SystemClock.elapsedRealtime()
         // The global gap only throttles repeated scans of the SAME surface. A scan
         // of a DIFFERENT surface is never throttled away: a new foreground (app
@@ -682,12 +695,13 @@ class BulwarkAccessibilityService : AccessibilityService() {
          *  though the NSFW image pass runs on every capture. */
         private const val OCR_MIN_GAP_MS = 6000L
 
-        /** Consecutive CLEAN scans before lifting a cover. 1 = lift as soon as one
-         *  scan after a content change comes back clean (content scrolled away /
-         *  changed) — the wide model gap (benign ≤0.64, explicit ≥0.89) makes a
-         *  false-clean very unlikely, so no multi-scan hysteresis is needed. The
-         *  cover is also dropped instantly on any app/window change (surface-bound). */
-        private const val CLEAN_LIFT_SCANS = 1
+        /** Consecutive CLEAN scans before lifting a cover. Re-scans don't run WHILE
+         *  a cover is up (see maybeCapture — an under-cover screenshot only sees the
+         *  cover), so a cover normally lifts on a SURFACE change, not via this path.
+         *  This 2-scan hysteresis is the belt-and-suspenders guard against an
+         *  in-flight scan that was requested just BEFORE the cover went up and
+         *  completes after: one such stale "clean" frame must not lift the cover. */
+        private const val CLEAN_LIFT_SCANS = 2
 
         // Apps the network can't read (E2E / cert-pinned) → on-device capture path.
         private val MONITORED = setOf(
