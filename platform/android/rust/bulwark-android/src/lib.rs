@@ -141,6 +141,23 @@ impl Engine {
     }
 }
 
+/// Route Rust `tracing`/`log` diagnostics to Android logcat (tag `BulwarkRust`)
+/// so the on-device VPN data path is OBSERVABLE — without this the smoltcp pump,
+/// proxy, DNS forwarder and per-flow decisions log to a void and the tunnel can
+/// only be debugged by guessing. Idempotent (`init_once`); a no-op off-Android.
+#[cfg(target_os = "android")]
+fn init_logging() {
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Debug)
+            .with_tag("BulwarkRust"),
+    );
+}
+
+/// Host builds (the detached-workspace unit tests) don't link android liblog.
+#[cfg(not(target_os = "android"))]
+fn init_logging() {}
+
 /// Process-global engine. `None` until first successful build; if building ever
 /// fails we leave it unset and every call fails open.
 static ENGINE: OnceLock<Option<Engine>> = OnceLock::new();
@@ -678,6 +695,9 @@ pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_startVpn(
     tun_fd: jint,
     config_json: JString,
 ) -> jlong {
+    // Make the on-device data path observable (logcat tag `BulwarkRust`) BEFORE
+    // anything else runs, so proxy/netstack/DNS startup + any failure is captured.
+    init_logging();
     // Warm the engine (ignore failure — analyzeText will fail open if absent).
     let _ = engine();
 
