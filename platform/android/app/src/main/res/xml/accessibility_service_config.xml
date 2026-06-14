@@ -7,7 +7,7 @@
      BulwarkAccessibilityService.captureAndOcr; without it takeScreenshot always
      hits the failure callback and the OCR path is dead. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeWindowContentChanged|typeViewTextChanged|typeNotificationStateChanged|typeWindowStateChanged"
+    android:accessibilityEventTypes="typeWindowContentChanged|typeViewTextChanged|typeNotificationStateChanged|typeWindowStateChanged|typeViewScrolled"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagDefault|flagIncludeNotImportantViews|flagReportViewIds"
     android:canRetrieveWindowContent="true"

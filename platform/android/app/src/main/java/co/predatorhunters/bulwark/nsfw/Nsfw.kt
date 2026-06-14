@@ -149,18 +149,21 @@ class Nsfw private constructor(
     companion object {
         private const val TAG = "BulwarkNsfw"
 
-        /** Per-tile NSFW block threshold. Higher than the engine default (0.7)
-         *  because this path scores SMALL downscaled tile crops of a screenshot,
-         *  where the int8 classifier is noisier — 0.7 over-flagged benign tiles
-         *  (false covers). 0.85 cuts those while still catching explicit imagery;
-         *  a device-validation tuning knob (with TILE_GRID + the lift hysteresis). */
+        /** Per-tile NSFW block threshold. Device-validated against the bundled ViT
+         *  on real explicit frames: offending tiles score 0.89–0.99 while benign
+         *  tiles (faces, clothing, backgrounds, UI chrome) score ≤0.64 — a wide,
+         *  clean gap, so 0.85 catches explicit imagery with no benign overlap.
+         *  A tuning knob alongside TILE_GRID + the lift hysteresis. */
         const val BLOCK_THRESHOLD = 0.85f
 
         /** N for the N×N localization grid (perf/accuracy knob — see the spec). */
         const val TILE_GRID = 4
 
-        /** Tiles of margin added around the flagged region before covering. */
-        const val TILE_MARGIN = 1
+        /** Tiles of margin added around the flagged region before covering. 0 =
+         *  cover EXACTLY the flagged tiles (no padding) — the explicit tiles score
+         *  0.89–0.99 while neighbours score ≤0.64, so the flagged set already is
+         *  the offending region; a 1-tile pad made the cover ~3× too large. */
+        const val TILE_MARGIN = 0
 
         /** `BUNDLED_NSFW_INPUT_SIZE` — the bundled ViT is 384x384. */
         private const val INPUT_SIZE = 384

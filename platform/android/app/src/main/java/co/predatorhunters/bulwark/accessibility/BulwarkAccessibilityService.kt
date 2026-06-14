@@ -44,14 +44,56 @@ import co.predatorhunters.bulwark.tamper.TamperReporter
  */
 class BulwarkAccessibilityService : AccessibilityService() {
 
+    /** Current foreground app package (updated on every event) so a cover can be
+     *  bound to the surface it was placed over. Never our own UI. */
+    @Volatile
+    private var lastForegroundPkg: String? = null
+
+    /** The package a localized cover is currently placed over. A cover belongs to
+     *  ONE surface: the instant the foreground window changes to a DIFFERENT app
+     *  (app switch, notification shade, launcher), the cover is dropped, so it can
+     *  never linger over the wrong screen or block the shade (the stale-cover bug
+     *  that made the phone unusable). */
+    @Volatile
+    private var coverPkg: String? = null
+
     override fun onServiceConnected() {
         RustBridge.ensureLoaded()
+        // Warm the NSFW classifier off the main thread so the first real frame
+        // isn't delayed by the model load.
+        ocrExecutor.execute { runCatching { Nsfw.obtain(this) } }
         Log.i(TAG, "Bulwark accessibility capture connected")
+    }
+
+    override fun onUnbind(intent: android.content.Intent?): Boolean {
+        // Drop any cover when the service unbinds (settings toggle / shutdown) so
+        // it can never be left stuck on screen.
+        removeLocalizedOverlay()
+        return super.onUnbind(intent)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
         val pkg = event.packageName?.toString() ?: return
+        // Track the live foreground app (skip our own UI) for surface-bound covers.
+        // NOT from notification events: a background app posting a notification
+        // fires TYPE_NOTIFICATION_STATE_CHANGED tagged with ITS OWN package while a
+        // different app is on screen — treating that as the foreground would corrupt
+        // the stale-surface guard and drop a legit scan of the real foreground (codex).
+        if (pkg != packageName &&
+            event.eventType != AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED
+        ) {
+            lastForegroundPkg = pkg
+        }
+
+        // SURFACE-BOUND COVER: when the foreground window changes to a DIFFERENT
+        // app/surface than the one a cover was placed over, drop the cover at once
+        // — it must never linger over another app, the launcher, or the
+        // notification shade (which would block pull-down). Event-driven, no TTL.
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            val cp = coverPkg
+            if (cp != null && pkg != cp) removeLocalizedOverlay()
+        }
 
         // Uninstall-guard: when the package installer / Settings opens, check
         // whether it's an attempt to remove US and, if so, alert + bounce away.
@@ -76,8 +118,18 @@ class BulwarkAccessibilityService : AccessibilityService() {
                     if (text.isNotEmpty()) submit(pkg, "notif", text)
                 }
             }
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
-            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
+            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED,
+            AccessibilityEvent.TYPE_VIEW_SCROLLED -> {
+                // Re-scan on ANY on-screen change: content/text/scroll AND a window
+                // coming to the foreground (TYPE_WINDOW_STATE_CHANGED). The window
+                // case matters because, with no timed backstop, returning to a
+                // STATIC explicit screen (e.g. after pulling the notification shade
+                // or switching apps and back) emits only a window-state event — and
+                // without scanning it the static frame would stay UNcovered until
+                // some later content/scroll event (codex). The capture throttle
+                // dedupes the window+content events that fire together on app open.
                 if (monitored) {
                     // Monitored chat: view-tree TEXT → grooming, PLUS a throttled
                     // frame that runs BOTH image-NSFW and OCR. OCR runs even when the
@@ -110,6 +162,17 @@ class BulwarkAccessibilityService : AccessibilityService() {
     @Volatile
     private var lastCaptureAtMs = 0L
 
+    /** Package of the last surface we captured. A capture of a DIFFERENT surface
+     *  bypasses the global [CAPTURE_MIN_GAP_MS] gap so a new foreground always gets
+     *  its own scan (see [maybeCapture]). */
+    @Volatile
+    private var lastCapturePkg: String? = null
+
+    /** Independent OCR sub-throttle: Tesseract is far heavier than the NSFW pass,
+     *  so the image scan runs every capture but OCR only every [OCR_MIN_GAP_MS]. */
+    @Volatile
+    private var lastOcrAtMs = 0L
+
     /**
      * Low-priority single-thread executor for the screenshot callback, the NSFW
      * inference + tiling, and the Tesseract OCR pass, so none of that work runs
@@ -124,16 +187,40 @@ class BulwarkAccessibilityService : AccessibilityService() {
 
     /**
      * Throttle gate for the screen-frame scan. Only on API 30+ (where
-     * [takeScreenshot] exists) and at most once per [OCR_INTERVAL_MS] — the OS
-     * also rate-limits `takeScreenshot` (~1/s), and each tick is a full OCR +
-     * N² NSFW-classifier pass, so we keep it cheap on battery/CPU.
+     * [takeScreenshot] exists). The NSFW image pass runs every capture (at most
+     * once per [CAPTURE_MIN_GAP_MS] — the OS also rate-limits `takeScreenshot`
+     * ~1/s); the heavier Tesseract OCR pass is sub-throttled to [OCR_MIN_GAP_MS]
+     * so frequent NSFW re-scans don't drag in an OCR pass every tick.
      */
     private fun maybeCapture(pkg: String, thread: String, ocrText: Boolean) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        // DON'T re-scan while a cover is up: the cover is an opaque overlay, so a
+        // takeScreenshot now captures the COVER (which scores clean), not the
+        // content under it. Re-scanning would falsely read "clean" and lift the
+        // cover — flickering / re-exposing still-explicit DYNAMIC content (a playing
+        // video keeps firing content events under the cover) (code-review). A cover
+        // is lifted by a SURFACE change, not an under-cover re-scan: an app switch /
+        // shade / launcher fires WINDOW_STATE_CHANGED, which clears the cover
+        // (coverPkg mismatch) BEFORE this runs, so the new surface's scan proceeds
+        // with regionOverlay == null. (Limitation: scrolling explicit content away
+        // WITHIN the same app leaves the cover until the surface changes —
+        // safe-sticky; precise in-app lift needs node-level tracking / the
+        // own-browser path, tracked separately.)
+        if (regionOverlay != null) return
         val now = SystemClock.elapsedRealtime()
-        if (now - lastCaptureAtMs < OCR_INTERVAL_MS) return
+        // The global gap only throttles repeated scans of the SAME surface. A scan
+        // of a DIFFERENT surface is never throttled away: a new foreground (app
+        // switch / shade dismiss / return to a static explicit screen) must get its
+        // own scan, else a recent scan of the OUTGOING surface (e.g. systemui when
+        // the shade opens) would swallow the return scan and leave static explicit
+        // content uncovered with no later content/scroll event to retry (codex).
+        val surfaceChanged = pkg != lastCapturePkg
+        if (!surfaceChanged && now - lastCaptureAtMs < CAPTURE_MIN_GAP_MS) return
         lastCaptureAtMs = now
-        captureAndScan(pkg, thread, ocrText)
+        lastCapturePkg = pkg
+        val doOcr = ocrText && (now - lastOcrAtMs >= OCR_MIN_GAP_MS)
+        if (doOcr) lastOcrAtMs = now
+        captureAndScan(pkg, thread, doOcr)
     }
 
     /**
@@ -229,15 +316,15 @@ class BulwarkAccessibilityService : AccessibilityService() {
         val nsfw = Nsfw.obtain(this) ?: return // fail-open: no model → no image scan
         val region = nsfw.localize(frame) // null when no tile is flagged
         if (region != null && !region.isEmpty) {
-            // Flagged → cover (refresh) immediately; reset the clean streak.
-            cleanScanCount = 0
-            showLocalizedOverlay(region, frame.width, frame.height)
-            if (!coverEpisodeActive) {
-                coverEpisodeActive = true
-                Log.w(TAG, "sexual/explicit imagery in $pkg — covering region (localized)")
-                // Content-free guardian signal — once per episode, not per tick.
-                notifyGuardian(pkg, "{\"reason\":\"Explicit image covered\"}")
-            }
+            // STALE-SURFACE GUARD (worker-thread fast early-out): the screenshot +
+            // inference take time, during which the foreground app can change. Skip
+            // here if it already has — but the AUTHORITATIVE re-check and ALL
+            // cover-state mutations (coverPkg, episode, alert) happen on the MAIN
+            // thread inside showLocalizedOverlay, atomic with addView, so a callback
+            // that passes this check then races an app switch can't cover the new
+            // surface with the old region (codex).
+            if (pkg != lastForegroundPkg) return
+            showLocalizedOverlay(pkg, region, frame.width, frame.height)
         } else if (coverEpisodeActive) {
             // HYSTERESIS: do NOT drop the cover on a single clean frame — the
             // classifier is noisy per-frame and the offending content (esp. a
@@ -391,11 +478,17 @@ class BulwarkAccessibilityService : AccessibilityService() {
      *  full-screen block never clobber each other's lifecycle. */
     private var regionOverlay: View? = null
 
-    /** Main-thread handler + a SINGLE reusable lift runnable for the localized
-     *  overlay. Refreshing the cover cancels the prior TTL removal, so a stale
-     *  removal can't lift a still-flagged cover (codex P2). */
+    /** Main-thread handler for the localized overlay. There is deliberately NO
+     *  timed backstop that re-scans while a cover is up: the cover is an opaque
+     *  TYPE_ACCESSIBILITY_OVERLAY, so any `takeScreenshot` taken while it is
+     *  attached captures the COVER (which always scores clean) instead of the
+     *  underlying image — a re-scan-under-cover would falsely read clean and
+     *  re-expose the static explicit content (codex). Static content therefore
+     *  just STAYS covered; the cover lifts only on (a) a clean scan driven by a
+     *  real on-screen change (content/scroll/text event — when no cover yet
+     *  occludes the new frame) or (b) a surface/window change (app switch / shade
+     *  / launcher → surface-bound removal). */
     private val regionHandler = Handler(Looper.getMainLooper())
-    private val liftRegionOverlay = Runnable { removeLocalizedOverlay() }
 
     private val audioManager by lazy {
         getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
@@ -451,9 +544,16 @@ class BulwarkAccessibilityService : AccessibilityService() {
      * can't be tapped through; the surrounding screen stays interactive because
      * the window is only the rectangle.
      */
-    private fun showLocalizedOverlay(regionPx: Rect, frameW: Int, frameH: Int) {
+    private fun showLocalizedOverlay(pkg: String, regionPx: Rect, frameW: Int, frameH: Int) {
         if (frameW <= 0 || frameH <= 0) return
         regionHandler.post {
+            // AUTHORITATIVE surface re-check on the MAIN thread, atomic with the
+            // addView below: if the foreground changed between the worker-thread
+            // scan and now (the user switched apps / opened the shade), do NOT add a
+            // cover for the old surface over the new one (codex). A pending
+            // surface-bound removal for the new window runs before this post, so
+            // lastForegroundPkg is already the new app here.
+            if (pkg != lastForegroundPkg) return@post
             val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
             val (dispW, dispH) = realDisplaySize(wm)
             val sx = dispW.toFloat() / frameW
@@ -487,34 +587,48 @@ class BulwarkAccessibilityService : AccessibilityService() {
                 PixelFormat.OPAQUE,
             ).apply { gravity = Gravity.TOP or Gravity.START }
 
-            runCatching {
+            val attached = runCatching {
                 if (regionOverlay == null) {
                     wm.addView(view, lp)
                     regionOverlay = view
                 } else {
                     wm.updateViewLayout(view, lp)
                 }
+            }.isSuccess
+            // If WindowManager failed there is NO cover on screen — do not record a
+            // phantom episode or grab exclusive audio focus, which would leave media
+            // muted with no visible cover until some unrelated later event (codex).
+            // Clean up any partial state and bail.
+            if (!attached || regionOverlay == null) {
+                removeLocalizedOverlay()
+                return@post
+            }
+            // Cover is on screen for THIS surface — record cover state HERE on the
+            // main thread (atomic with addView), so a stale worker callback or a
+            // racing surface change can't desync coverPkg/episode from what's
+            // actually displayed. Bind the cover to the surface (drop on app change)
+            // and reset the clean streak.
+            coverPkg = pkg
+            cleanScanCount = 0
+            if (!coverEpisodeActive) {
+                coverEpisodeActive = true
+                Log.w(TAG, "sexual/explicit imagery in $pkg — covering region (localized)")
+                // Content-free guardian signal — once per episode, not per tick.
+                notifyGuardian(pkg, "{\"reason\":\"Explicit image covered\"}")
             }
             // Stop the offending media's SOUND too (covering an adult video must
             // silence it, not just hide the picture). Idempotent while held.
             muteOffendingAudio()
-            // Self-heal: lift the cover if no later frame refreshes it (content
-            // scrolled away and no clean frame arrived to clear it explicitly).
-            // Cancel the PRIOR pending removal first so a refresh of a still-
-            // flagged region doesn't get lifted by a stale earlier TTL.
-            regionHandler.removeCallbacks(liftRegionOverlay)
-            regionHandler.postDelayed(liftRegionOverlay, REGION_OVERLAY_TTL_MS)
         }
     }
 
     private fun removeLocalizedOverlay() {
-        regionHandler.removeCallbacks(liftRegionOverlay)
         regionOverlay?.let { v -> runCatching { (getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(v) } }
         regionOverlay = null
-        // End the episode (a safety-TTL lift also resets, so the next cover
-        // re-alerts and the clean streak starts fresh).
+        // End the episode so the next cover re-alerts and the clean streak starts fresh.
         coverEpisodeActive = false
         cleanScanCount = 0
+        coverPkg = null
         // Cover lifted → let media resume.
         restoreAudio()
     }
@@ -571,19 +685,24 @@ class BulwarkAccessibilityService : AccessibilityService() {
     companion object {
         private const val TAG = "BulwarkA11y"
 
-        /** Minimum gap between screen-frame scans (battery/CPU + OS rate-limit). */
-        private const val OCR_INTERVAL_MS = 4000L
+        /** Minimum gap between screenshots (OS rate-limits `takeScreenshot` ~1/s).
+         *  Scans are EVENT-DRIVEN (content-change / text / scroll) — there is no
+         *  periodic polling timer (deliberate: covering is reactive to on-screen
+         *  changes only, never a background poll). */
+        private const val CAPTURE_MIN_GAP_MS = 1000L
 
-        /** Consecutive CLEAN scans required before lifting a localized cover. The
-         *  cover lifts on sustained-clean (content gone), NOT on one noisy frame —
-         *  hysteresis that stops the cover flickering/vanishing while the offending
-         *  content is still on screen. ~CLEAN_LIFT_SCANS × OCR_INTERVAL_MS of clean. */
+        /** OCR sub-throttle: Tesseract is heavy, so OCR runs at most this often even
+         *  though the NSFW image pass runs on every capture. */
+        private const val OCR_MIN_GAP_MS = 6000L
+
+        /** Consecutive CLEAN scans before lifting a cover. Re-scans don't run WHILE
+         *  a cover is up (see maybeCapture — an under-cover screenshot only sees the
+         *  cover), so a cover normally lifts on a SURFACE change, not via this path.
+         *  This 2-scan hysteresis is the belt-and-suspenders guard against an
+         *  in-flight scan that was requested just BEFORE the cover went up and
+         *  completes after: one such stale "clean" frame must not lift the cover. */
         private const val CLEAN_LIFT_SCANS = 2
 
-        /** SAFETY-net auto-lift: clears a stuck cover only if scans stop entirely
-         *  (e.g. no more accessibility events). The normal lift is the clean-scan
-         *  hysteresis above; this is deliberately long so it never causes a flicker. */
-        private const val REGION_OVERLAY_TTL_MS = 30000L
         // Apps the network can't read (E2E / cert-pinned) → on-device capture path.
         private val MONITORED = setOf(
             "com.whatsapp",
