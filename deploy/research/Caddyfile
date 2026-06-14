@@ -67,3 +67,43 @@ research.predatorhunters.co.uk {
 		-Server
 	}
 }
+
+# ---------------------------------------------------------------------------
+# predatorhunters.co.uk (apex) — the main PH Press site. It runs as its OWN
+# container (ghcr.io/jordan-hall/ph-press), serving plain HTTP on the host
+# loopback 127.0.0.1:8090 (not exposed to the network). This edge Caddy
+# terminates TLS for the apex (a second Let's Encrypt cert via the SAME
+# Cloudflare DNS-01 token already mounted for research) and reverse-proxies to
+# it. Two sites, one box, one :443. The ph-press container owns the app
+# CSP/security headers (passed through unchanged); we add HSTS here for the TLS
+# connection. If that container is down, only the apex 502s — research is
+# unaffected (separate site block).
+# ---------------------------------------------------------------------------
+predatorhunters.co.uk {
+	encode zstd gzip
+
+	tls {
+		dns cloudflare {env.CF_API_TOKEN}
+	}
+
+	handle /healthz {
+		respond "ok" 200
+	}
+
+	reverse_proxy 127.0.0.1:8090 {
+		header_up Host {host}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+		-Server
+	}
+}
+
+# www → apex (canonical 301), TLS via the same DNS-01 token.
+www.predatorhunters.co.uk {
+	tls {
+		dns cloudflare {env.CF_API_TOKEN}
+	}
+	redir https://predatorhunters.co.uk{uri} permanent
+}
