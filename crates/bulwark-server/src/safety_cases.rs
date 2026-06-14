@@ -381,6 +381,93 @@ mod tests {
         assert!(c.jurisdiction.chars().count() <= JURISDICTION_MAX_LEN);
     }
 
+    /// Every workflow state, including UNSPECIFIED (never a valid source/target).
+    const ALL_STATES: [SafetyCaseState; 7] = [
+        SafetyCaseState::Unspecified,
+        SafetyCaseState::Opened,
+        SafetyCaseState::UnderReview,
+        SafetyCaseState::ReportedNcmec,
+        SafetyCaseState::LawEnforcement,
+        SafetyCaseState::Closed,
+        SafetyCaseState::Rejected,
+    ];
+
+    /// The COMPLETE spec of valid one-step edges — the single source of truth the
+    /// matrix below checks `is_valid_transition` against. Forward path plus the
+    /// documented `REPORTED_NCMEC → CLOSED` shortcut and the two REJECTED edges;
+    /// CLOSED/REJECTED are terminal and UNSPECIFIED is never a source/target, so
+    /// every pair NOT in this list must be refused.
+    const VALID_EDGES: [(SafetyCaseState, SafetyCaseState); 7] = [
+        (SafetyCaseState::Opened, SafetyCaseState::UnderReview),
+        (SafetyCaseState::Opened, SafetyCaseState::Rejected),
+        (SafetyCaseState::UnderReview, SafetyCaseState::ReportedNcmec),
+        (SafetyCaseState::UnderReview, SafetyCaseState::Rejected),
+        (
+            SafetyCaseState::ReportedNcmec,
+            SafetyCaseState::LawEnforcement,
+        ),
+        (SafetyCaseState::ReportedNcmec, SafetyCaseState::Closed),
+        (SafetyCaseState::LawEnforcement, SafetyCaseState::Closed),
+    ];
+
+    #[test]
+    fn transition_matrix_accepts_only_the_documented_edges() {
+        // Exhaustively check ALL 7×7 = 49 (from, to) pairs against the spec: a
+        // pair is accepted by `is_valid_transition` IFF it is one of VALID_EDGES.
+        // This subsumes the scattered edge tests and catches any future drift
+        // (a new edge, a dropped terminal guard, an UNSPECIFIED leak).
+        for &from in &ALL_STATES {
+            for &to in &ALL_STATES {
+                let expected = VALID_EDGES.contains(&(from, to));
+                assert_eq!(
+                    is_valid_transition(from, to),
+                    expected,
+                    "transition {from:?} -> {to:?} should be {}",
+                    if expected { "accepted" } else { "refused" }
+                );
+            }
+        }
+        // Sanity: terminal states have NO outgoing edge, UNSPECIFIED has none
+        // either way, and the spec's count matches the validator.
+        for term in [SafetyCaseState::Closed, SafetyCaseState::Rejected] {
+            assert!(
+                ALL_STATES.iter().all(|&to| !is_valid_transition(term, to)),
+                "{term:?} must be terminal (no outgoing edge)"
+            );
+        }
+        assert!(
+            ALL_STATES
+                .iter()
+                .all(|&s| !is_valid_transition(SafetyCaseState::Unspecified, s)
+                    && !is_valid_transition(s, SafetyCaseState::Unspecified)),
+            "UNSPECIFIED is never a valid source or target"
+        );
+    }
+
+    #[test]
+    fn under_review_may_be_rejected() {
+        // The valid UNDER_REVIEW → REJECTED edge (triaged as not a genuine case
+        // after review began) — exercised end-to-end through the store, which the
+        // scattered edge tests did not cover.
+        let s = store();
+        let id = s
+            .open_case(&[3], &[], Category::CsamSuspected as i32, "uk")
+            .unwrap()
+            .case_id;
+        s.transition(&id, SafetyCaseState::UnderReview as i32, "")
+            .unwrap();
+        let c = s
+            .transition(&id, SafetyCaseState::Rejected as i32, "")
+            .unwrap();
+        assert_eq!(c.state, SafetyCaseState::Rejected as i32);
+        // …and REJECTED is terminal even when reached from UNDER_REVIEW.
+        assert_eq!(
+            s.transition(&id, SafetyCaseState::Closed as i32, "")
+                .unwrap_err(),
+            SafetyCaseError::InvalidTransition
+        );
+    }
+
     #[test]
     fn full_forward_path_is_valid() {
         let s = store();
