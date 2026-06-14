@@ -94,6 +94,16 @@ pub use vpn::transparent::run_transparent_listener;
 pub use vpn::{
     elevation_command, is_elevated, run_vpn, wintun_available, CancellationToken, VpnConfig,
 };
+// No-Device-Owner host filter (DNS sinkhole + TLS-SNI reset, NO decryption).
+// unix here = linux/macos/android (the desktop-TUN entry); the JNI fd entry is
+// android-only.
+#[cfg(target_os = "android")]
+pub use vpn::run_android_host_filter;
+#[cfg(all(
+    unix,
+    any(target_os = "linux", target_os = "macos", target_os = "android")
+))]
+pub use vpn::run_vpn_host_filter;
 
 // Re-export the proto SourceChannel so downstream code can name the flow source
 // without a separate bulwark-proto import.

@@ -28,6 +28,12 @@
 pub use tokio_util::sync::CancellationToken;
 
 mod netstack;
+// No-Device-Owner host filter: pure DNS-name + TLS-SNI matching (NO decryption),
+// fail-SAFE. Pure parsers/verdicts, host-compiled + unit-tested everywhere; the
+// `cfg(unix)` netstack pump calls them. `allow(dead_code)` because non-unix
+// builds compile the parsers (so the dev box checks them) without the pump that
+// consumes them.
+mod sni_dns;
 /// Server-side transparent redirect front-end (Linux region box; SO_ORIGINAL_DST).
 #[cfg(target_os = "linux")]
 pub mod transparent;
@@ -181,6 +187,65 @@ pub async fn run_vpn(cfg: VpnConfig, shutdown: CancellationToken) -> Result<()> 
     result?;
     teardown?;
     close
+}
+
+/// Run the **no-Device-Owner host filter** until `shutdown` is cancelled
+/// (unix/Android desktop-TUN path; the Android JNI calls
+/// [`run_android_host_filter`] with the VpnService fd instead).
+///
+/// This is the content filter for an ORDINARY consumer phone with **no Device
+/// Owner and no factory reset**: with no installable trust anchor we cannot — and
+/// MUST NOT — decrypt TLS, so the only host filtering available is matching the
+/// *cleartext* host that DNS and the TLS `ClientHello` SNI already reveal. The
+/// pump ([`netstack::run_netstack_host_filter`]) sinkholes blocklisted DNS names
+/// with `NXDOMAIN`, resets connections whose SNI host is listed, and passes
+/// everything else straight through to its real destination — fail-SAFE, with the
+/// on-screen accessibility filter as the always-on backstop.
+///
+/// The guardian blocklist is resolved from [`crate::HostBlocklist::from_env_or`]
+/// (the same `BULWARK_BLOCKLIST` source the proxy and decrypting pump load).
+///
+/// STATUS: compiled on CI + host-tested (`netstack::handle_host_filtered_flow`,
+/// `netstack::sni_dns`); the loop awaits on-device validation. It is exposed but
+/// NOT yet the default Android data path (selection is a product decision — see
+/// [`run_android_data_path`], which still uses the decrypting pump).
+#[cfg(unix)]
+pub async fn run_vpn_host_filter(cfg: VpnConfig, shutdown: CancellationToken) -> Result<()> {
+    let blocklist = std::sync::Arc::new(crate::HostBlocklist::from_env_or(None)?);
+    let mut tun = open_tun()?;
+    let tun_cfg = TunConfig {
+        name: cfg.tun_name.clone(),
+        ..TunConfig::default()
+    };
+
+    let result = async {
+        tun.up(&tun_cfg)?;
+        tun.install_routing(&tun_cfg)?;
+        netstack::run_netstack_host_filter(tun.as_ref(), blocklist, shutdown).await
+    }
+    .await;
+
+    let teardown = tun.teardown_routing();
+    let close = tun.close();
+
+    result?;
+    teardown?;
+    close
+}
+
+/// Android no-Device-Owner data path: run the DNS+SNI host filter over the
+/// `VpnService` fd until `shutdown` is cancelled. Unlike [`run_android_data_path`]
+/// there is NO in-process TLS-inspecting proxy and NO CA — nothing is decrypted,
+/// so this works on a stock phone with no Device Owner. Selection between this and
+/// the decrypting path is a caller/product decision (not wired as the default).
+#[cfg(target_os = "android")]
+pub async fn run_android_host_filter(
+    tun_fd: std::os::fd::RawFd,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    let blocklist = std::sync::Arc::new(crate::HostBlocklist::from_env_or(None)?);
+    let tun = crate::tun::open_tun_from_fd(tun_fd)?;
+    netstack::run_netstack_host_filter(tun.as_ref(), blocklist, shutdown).await
 }
 
 /// Build the in-process TLS-inspecting interceptor for VPN mode (proxy on
