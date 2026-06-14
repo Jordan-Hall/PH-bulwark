@@ -162,6 +162,12 @@ class BulwarkAccessibilityService : AccessibilityService() {
     @Volatile
     private var lastCaptureAtMs = 0L
 
+    /** Package of the last surface we captured. A capture of a DIFFERENT surface
+     *  bypasses the global [CAPTURE_MIN_GAP_MS] gap so a new foreground always gets
+     *  its own scan (see [maybeCapture]). */
+    @Volatile
+    private var lastCapturePkg: String? = null
+
     /** Independent OCR sub-throttle: Tesseract is far heavier than the NSFW pass,
      *  so the image scan runs every capture but OCR only every [OCR_MIN_GAP_MS]. */
     @Volatile
@@ -189,8 +195,16 @@ class BulwarkAccessibilityService : AccessibilityService() {
     private fun maybeCapture(pkg: String, thread: String, ocrText: Boolean) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
         val now = SystemClock.elapsedRealtime()
-        if (now - lastCaptureAtMs < CAPTURE_MIN_GAP_MS) return
+        // The global gap only throttles repeated scans of the SAME surface. A scan
+        // of a DIFFERENT surface is never throttled away: a new foreground (app
+        // switch / shade dismiss / return to a static explicit screen) must get its
+        // own scan, else a recent scan of the OUTGOING surface (e.g. systemui when
+        // the shade opens) would swallow the return scan and leave static explicit
+        // content uncovered with no later content/scroll event to retry (codex).
+        val surfaceChanged = pkg != lastCapturePkg
+        if (!surfaceChanged && now - lastCaptureAtMs < CAPTURE_MIN_GAP_MS) return
         lastCaptureAtMs = now
+        lastCapturePkg = pkg
         val doOcr = ocrText && (now - lastOcrAtMs >= OCR_MIN_GAP_MS)
         if (doOcr) lastOcrAtMs = now
         captureAndScan(pkg, thread, doOcr)
