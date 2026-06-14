@@ -6,6 +6,10 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.os.Build
 import android.os.SystemClock
 import android.provider.MediaStore
@@ -65,6 +69,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -80,6 +85,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import java.io.File
 import java.util.concurrent.Executors
+import kotlin.math.abs
+import kotlin.math.atan2
 import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 
@@ -144,6 +151,7 @@ internal fun CameraScreen(
     var selectedFilter by remember { mutableStateOf(CameraFilter.None) }
     var filtersOpen by remember { mutableStateOf(false) }
     var exposureIndex by remember { mutableStateOf(0) }
+    var rollDegrees by remember { mutableStateOf(0f) }
     var mode by remember { mutableStateOf(CameraMode.default) }
     var cameraControl by remember { mutableStateOf<CameraControl?>(null) }
     var cameraInfo by remember { mutableStateOf<CameraInfo?>(null) }
@@ -181,6 +189,24 @@ internal fun CameraScreen(
     val workerExecutor = remember { Executors.newSingleThreadExecutor() }
     val mainExecutor = remember { ContextCompat.getMainExecutor(context) }
     DisposableEffect(Unit) { onDispose { workerExecutor.shutdown() } }
+
+    // Horizon level: read device roll from the gravity sensor so the on-screen
+    // level line shows when the shot is tilted (and turns green when level).
+    DisposableEffect(Unit) {
+        val sm = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        val sensor = sm.getDefaultSensor(Sensor.TYPE_GRAVITY)
+            ?: sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        val listener = object : SensorEventListener {
+            override fun onSensorChanged(e: SensorEvent) {
+                rollDegrees = Math.toDegrees(
+                    atan2(e.values[0].toDouble(), e.values[1].toDouble()),
+                ).toFloat()
+            }
+            override fun onAccuracyChanged(s: Sensor?, accuracy: Int) {}
+        }
+        if (sensor != null) sm.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_UI)
+        onDispose { sm.unregisterListener(listener) }
+    }
 
     // Bind the camera; re-runs when permission lands, the lens flips, or the
     // gate becomes ready (the preview shield needs the gate).
@@ -426,6 +452,12 @@ internal fun CameraScreen(
             CheckingOverlay()
         }
 
+        // Horizon level line — during normal framing only (not while checking,
+        // flagged, or blocked). Turns green when the shot is level.
+        if (hasPermission && !capturing && !previewFlagged && notice != Notice.BlockedNsfw) {
+            LevelIndicator(rollDegrees)
+        }
+
         // Readable control zone: a soft bottom-up gradient so the controls stay
         // legible over any scene (Samsung/Pixel-style), without hiding the shot.
         if (hasPermission) {
@@ -575,6 +607,25 @@ internal fun CameraScreen(
                 )
             }
         }
+    }
+}
+
+/** Horizon level: a center line that tilts with the device, green when level. */
+@Composable
+private fun LevelIndicator(rollDegrees: Float) {
+    val level = abs(rollDegrees) < 1.5f
+    val color = if (level) Good else Color.White.copy(alpha = 0.75f)
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        // Faint fixed reference tick at dead-centre.
+        Box(Modifier.width(34.dp).height(2.dp).background(Color.White.copy(alpha = 0.3f)))
+        // The device horizon — rotates with roll; longer + green when level.
+        Box(
+            Modifier
+                .width(if (level) 150.dp else 96.dp)
+                .height(2.dp)
+                .rotate(rollDegrees)
+                .background(color),
+        )
     }
 }
 
