@@ -70,14 +70,16 @@ research.predatorhunters.co.uk {
 
 # ---------------------------------------------------------------------------
 # predatorhunters.co.uk (apex) — the main PH Press site. It runs as its OWN
-# container (ghcr.io/jordan-hall/ph-press), serving plain HTTP on the host
-# loopback 127.0.0.1:8090 (not exposed to the network). This edge Caddy
-# terminates TLS for the apex (a second Let's Encrypt cert via the SAME
-# Cloudflare DNS-01 token already mounted for research) and reverse-proxies to
-# it. Two sites, one box, one :443. The ph-press container owns the app
-# CSP/security headers (passed through unchanged); we add HSTS here for the TLS
-# connection. If that container is down, only the apex 502s — research is
-# unaffected (separate site block).
+# container (ghcr.io/jordan-hall/ph-press), serving plain HTTP on :8090, joined
+# to the shared user-defined Docker network `ph-net` (this research container
+# joins it too — see research-site.yml). This edge Caddy terminates TLS for the
+# apex (a second Let's Encrypt cert via the SAME Cloudflare DNS-01 token already
+# mounted for research) and reverse-proxies to `ph-press:8090` over that network.
+# NOTE: it must be the container name, NOT 127.0.0.1 — both run in bridge mode,
+# so 127.0.0.1 here is THIS container, not the host or ph-press. Two sites, one
+# box, one :443. ph-press owns the app CSP/security headers (passed through
+# unchanged); we add HSTS here. If ph-press is down, only the apex 502s —
+# research is unaffected (separate site block).
 # ---------------------------------------------------------------------------
 predatorhunters.co.uk {
 	encode zstd gzip
@@ -90,7 +92,7 @@ predatorhunters.co.uk {
 		respond "ok" 200
 	}
 
-	reverse_proxy 127.0.0.1:8090 {
+	reverse_proxy ph-press:8090 {
 		header_up Host {host}
 	}
 
