@@ -2846,7 +2846,10 @@ mod tests {
         assert!(!recovery.is_empty());
         let m1 = store.staff_guardian_meta("G@x.com"); // case-insensitive (normalized)
         assert!(m1.exists);
-        assert!(m1.has_recovery_code, "a freshly created account has a recovery code");
+        assert!(
+            m1.has_recovery_code,
+            "a freshly created account has a recovery code"
+        );
         assert!(!m1.locked);
         assert!(!m1.reset_pending);
         assert_eq!(m1.child_count, 0);
