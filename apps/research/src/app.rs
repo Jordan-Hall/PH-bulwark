@@ -53,6 +53,7 @@ pub fn App() -> Element {
     rsx! {
         dioxus::document::Link { rel: "icon", href: FAVICON }
         div { class: "theme-root",
+            a { class: "skip-link", href: "#main", "Skip to content" }
             div { class: "stage-bg" }
             div { class: "stage-grid" }
             div { class: "stage-grain" }
@@ -67,7 +68,7 @@ pub fn App() -> Element {
 fn Shell() -> Element {
     rsx! {
         NavBar {}
-        main { Outlet::<Route> {} }
+        main { id: "main", tabindex: "-1", Outlet::<Route> {} }
         ClosingCta {}
         SiteFooter {}
     }
@@ -81,6 +82,16 @@ fn nav_class(current: &Route, target: &Route) -> &'static str {
     }
 }
 
+/// `aria-current="page"` on the active nav link (omitted otherwise), so screen
+/// readers announce the current page, not just the visual highlight.
+fn nav_aria(current: &Route, target: &Route) -> Option<&'static str> {
+    if current == target {
+        Some("page")
+    } else {
+        None
+    }
+}
+
 #[component]
 fn NavBar() -> Element {
     let route = use_route::<Route>();
@@ -88,18 +99,24 @@ fn NavBar() -> Element {
     let burger_icon = if menu() { "close" } else { "menu" };
     let burger_label = if menu() { "Close menu" } else { "Open menu" };
     rsx! {
-        nav { class: "nav",
+        nav {
+            class: "nav",
+            onkeydown: move |e| {
+                if e.key().to_string() == "Escape" {
+                    menu.set(false);
+                }
+            },
             div { class: "nav-inner",
                 Link { class: "brand", to: Route::Home {}, onclick: move |_| menu.set(false),
                     img { class: "brand-logo", src: PH_LOGO, alt: "Predator Hunters" }
                     span { class: "brand-tag", "Research" }
                 }
                 div { class: "nav-links",
-                    Link { class: nav_class(&route, &Route::Research {}), to: Route::Research {}, "Research" }
-                    Link { class: nav_class(&route, &Route::Systems {}), to: Route::Systems {}, "Systems" }
-                    Link { class: nav_class(&route, &Route::Approach {}), to: Route::Approach {}, "Approach" }
-                    Link { class: nav_class(&route, &Route::About {}), to: Route::About {}, "About" }
-                    Link { class: nav_class(&route, &Route::Contact {}), to: Route::Contact {}, "Contact" }
+                    Link { class: nav_class(&route, &Route::Research {}), "aria-current": nav_aria(&route, &Route::Research {}), to: Route::Research {}, "Research" }
+                    Link { class: nav_class(&route, &Route::Systems {}), "aria-current": nav_aria(&route, &Route::Systems {}), to: Route::Systems {}, "Systems" }
+                    Link { class: nav_class(&route, &Route::Approach {}), "aria-current": nav_aria(&route, &Route::Approach {}), to: Route::Approach {}, "Approach" }
+                    Link { class: nav_class(&route, &Route::About {}), "aria-current": nav_aria(&route, &Route::About {}), to: Route::About {}, "About" }
+                    Link { class: nav_class(&route, &Route::Contact {}), "aria-current": nav_aria(&route, &Route::Contact {}), to: Route::Contact {}, "Contact" }
                 }
                 div { class: "nav-right",
                     button {
