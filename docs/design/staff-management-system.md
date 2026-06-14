@@ -12,9 +12,10 @@ surface is content-free by message shape, mirroring the invariants already
 enforced in [`bulwark.proto`](../../crates/bulwark-proto/proto/bulwark.proto)
 (hash-only `Evidence`, redacted `AlertEvent`, content-free `ChildConfig`).
 
-Status: **Increments 1–4 SHIPPED** (proto `StaffAdmin` + `crates/bulwark-server/src/staff.rs`
-+ `safety_cases.rs` + live fleet data + opt-in mount behind `BULWARK_STAFF=1`).
-Increment 5 (the `apps/staff` Dioxus console) is DESIGN.
+Status: **Increments 1–4 SHIPPED** (#133 2026-06-13, #184/#188/#189 2026-06-14):
+proto `StaffAdmin` + `crates/bulwark-server/src/staff.rs` + `safety_cases.rs` + live
+fleet data + opt-in mount behind `BULWARK_STAFF=1`. Increment 5 (the `apps/staff`
+Dioxus console) is DESIGN.
 
 ---
 
@@ -52,7 +53,7 @@ Enforced **by construction**, not by role flag:
 3. **Server-side reality check** — routine operations move to content-free RPCs;
    shell access (SSM) becomes break-glass only, separately logged.
 
-## 3. AuthN / AuthZ (Increment 1 — SHIPPED)
+## 3. AuthN / AuthZ (Increment 1 — SHIPPED #133, 2026-06-13)
 
 - **Separate `StaffStore`** (`crates/bulwark-server/src/staff.rs`), persisted to
   `staff.json` + `staff_audit.json` under `BULWARK_STATE_DIR` — never mixed into
@@ -96,34 +97,39 @@ every family's binary), different release train, and cheap code-sharing (copy th
 
 ## 5. Phased plan
 
-1. **Increment 1 (SHIPPED)** — proto `StaffAdmin` (CreateStaff bootstrap-gated,
-   StaffLogin with TOTP, ListRegions/GetFleetHealth content-free static,
-   QueryStaffAudit) + `staff.rs` (store, TOTP, RBAC, sessions, hash-chain audit,
-   12 in-module tests) + opt-in mount (`BULWARK_STAFF=1`).
-2. **Increment 2 (SHIPPED)** — guardian support: `TriggerGuardianReset` (reuses
-   `AccountStore::request_password_reset` + `ResetMailer`; staff never see the
-   code), `UnlockGuardianAccount`, `GetGuardianMeta` (metadata + counts only).
-   SUPPORT + ADMIN.
-3. **Increment 3 (SHIPPED 2026-06-14)** — safety-report queue: a `SafetyCase`
+1. **Increment 1 (SHIPPED #133, 2026-06-13)** — proto `StaffAdmin` (CreateStaff
+   bootstrap-gated, StaffLogin with TOTP, ListRegions/GetFleetHealth content-free
+   static, QueryStaffAudit) + `staff.rs` (store, TOTP, RBAC, sessions, hash-chain
+   audit, 12 in-module tests) + opt-in mount (`BULWARK_STAFF=1`).
+2. **Increment 2 (SHIPPED #184, 2026-06-14)** — guardian support:
+   `TriggerGuardianReset` (reuses `AccountStore::request_password_reset` +
+   `ResetMailer`; staff never see the code), `UnlockGuardianAccount`,
+   `GetGuardianMeta` (metadata + counts only). SUPPORT + ADMIN.
+3. **Increment 3 (SHIPPED #188, 2026-06-14)** — safety-report queue: a `SafetyCase`
    store (`crates/bulwark-server/src/safety_cases.rs`, in-memory + optional
-   `safety_cases.json` persistence) + the NCMEC workflow state machine
-   (OPENED→UNDER_REVIEW→REPORTED_NCMEC→LAW_ENFORCEMENT→CLOSED, plus REJECTED;
-   CLOSED/REJECTED terminal) behind `OpenSafetyCase` / `ListSafetyCases` /
-   `TransitionSafetyCase` / `GetSafetyCase`, SAFETY_OFFICER+ADMIN-gated
-   (`SAFETY_ROLES`), every transition appended to the staff hash-chain audit.
-   Cases carry content sha256 + pHash + category + region + workflow state + an
-   opaque NCMEC reference ONLY — no media, names, or message text.
-4. **Increment 4 (SHIPPED 2026-06-14)** — real fleet data: the LOCAL region's
+   `safety_cases.json` persistence) + the NCMEC workflow state machine behind
+   `OpenSafetyCase` / `ListSafetyCases` / `TransitionSafetyCase` / `GetSafetyCase`,
+   SAFETY_OFFICER+ADMIN-gated (`SAFETY_ROLES`), every transition appended to the
+   staff hash-chain audit. Forward path
+   OPENED→UNDER_REVIEW→REPORTED_NCMEC→LAW_ENFORCEMENT→CLOSED, **plus a direct
+   `REPORTED_NCMEC→CLOSED` edge** (many NCMEC reports are triaged and resolved
+   without a separate law-enforcement handoff — forcing the LE state through would
+   misrecord the legal workflow); REJECTED is reachable from OPENED or UNDER_REVIEW;
+   CLOSED and REJECTED are terminal. Cases carry content sha256 + pHash + category +
+   region + workflow state + an opaque NCMEC reference ONLY — no media, names, or
+   message text.
+4. **Increment 4 (SHIPPED #189, 2026-06-14)** — real fleet data: the LOCAL region's
    `RegionInfo`/`FleetHealth` now joins this node's live `ClusterControl.Health`
    snapshot (`probed=true`, `healthy` from `accepting_work`, per-node
    `HealthStatus` in `FleetHealth.nodes` — queue depth / latency / load, already
    content-free), the enrolled WG peer **count** (`WgPeerStore::peer_count`), the
    enrolled-device **count** (`AccountStore::staff_enrolled_device_count`), and
-   the TLS-cert expiry from `BULWARK_TLS_CERT_EXPIRY_TS` (env, no x509 dep). No
-   cross-region gossip on the single-box deploy, so any region OTHER than the one
-   this node serves (`BULWARK_REGION`) stays honestly `probed=false`. No proto
-   change (the fields already existed). Region accept/drain is deferred to a
-   follow-up (it proxies `ClusterControl.Drain`, a mutating capacity action).
+   the TLS-cert expiry from `BULWARK_TLS_CERT_EXPIRY_TS` (env, no x509 dep).
+   **Single-region honesty caveat:** no cross-region gossip on the single-box
+   deploy, so any region OTHER than the one this node serves (`BULWARK_REGION`)
+   stays honestly `probed=false` rather than faking a green light. No proto change
+   (the fields already existed). Region accept/drain is deferred to a follow-up
+   (it proxies `ClusterControl.Drain`, a mutating capacity action).
 5. **Increment 5 — `apps/staff` Dioxus web console** + Midscene tests; follow-ups:
    TOTP-secret encryption at rest, mTLS-bound staff sessions, audit-file sealing.
 

@@ -1,7 +1,8 @@
 # PH Bulwark — Production-Readiness Audit (authoritative gap map)
 
-Refreshed **2026-06-12** to match shipped reality (domain/TLS cutover + Android
-CA-trust install since the 2026-06-09 pass; perception/VPN layer landed earlier).
+Refreshed **2026-06-14** to match shipped reality (the accessibility+OCR content
+filter now runs device-wide and the VPN is fail-CLOSED on the inspection CA, since
+the 2026-06-12 domain/TLS + CA-trust pass; perception/VPN layer landed earlier).
 Pairs with [PLAN.md](../PLAN.md).
 
 > **Live gate for opening public beta:** [`public-beta-readiness.md`](public-beta-readiness.md)
@@ -15,7 +16,7 @@ validation (can't be fully CI-verified here).
 ## TL;DR
 - **Live in production** (London EC2, `--features onnx,whisper,ffmpeg`, fail-CLOSED): **image** NSFW (bundled ViT), **audio** (whisper transcribe → `bulwark-text` grooming/adult), **video** (ffmpeg demux → frame NSFW + speech transcription → blur/mute remediation by timecode, same-format). Plus `bulwark-text`/`-policy`/`-store`/`-alert`/`-flow`/`-core`/`-proto`.
 - **Fail-CLOSED is in:** uncovered media → `Category::Unspecified` → policy `fail_closed_uncovered` → Block+alert. The deploy ships the models, so the old "default build silently allows all media" hole is closed **for the deployed server**. (A bare `cargo build` with no features still no-ops media — keep deploys on the feature set.)
-- **Not yet device-validated:** the **transparent-VPN data path** (fd-driven smoltcp pump + Android startVpn wiring implemented + host-tested 2026-06-10; Pixel validation remains). **Not yet functional:** **on-device OCR/agent**, **family-supervision**, and **WebRTC** video remediation.
+- **No-Device-Owner content filter is the accessibility + OCR path** (now runs device-wide: surface-bound NSFW cover #174 + reliable photo OCR #187, fixes from on-device validation). The **transparent-VPN per-flow filter** is the **Device-Owner premium layer** — as of #182 it is **fail-CLOSED on the inspection CA** (no trusted system-store CA ⇒ no tunnel; on a non-managed device it stays off by design rather than bricking HTTPS). Its data path (fd-driven smoltcp pump + Android startVpn wiring) is host-tested but **not yet validated on a managed device**. **Not yet functional:** cross-platform `bulwark-agent` screenshot/overlay orchestration, **family-supervision**, and **WebRTC** video remediation.
 
 ---
 
@@ -29,7 +30,7 @@ validation (can't be fully CI-verified here).
 | **VPN pump** 🧪 | 🟠 implemented, device validation pending | fd-driven `run_netstack` poll-loop **live on unix/Android** (per-flow TCP terminate → CONNECT → splice; DNS forward; QUIC drop) and `run_android_data_path` wires the JNI `startVpn` (in-process TLS-inspecting proxy + pump over the VpnService fd). Host-tested + Android cross-compile. Remaining: **Pixel on-device validation**; Windows/wintun pump still fail-closed by design. |
 | VPN binary fatal-exit | ⏳ | Falls out when the pump lands; `bulwark_proxy` (explicit proxy) works today. |
 | Windows TUN addressing 🧪 | ⏳ | `up()` needs addr/MTU/route; part of the device-validated pump pass. |
-| **On-device OCR/agent** 🧪 | ❌ | `bulwark-agent` OCR is a no-op + not depended on by the client. The E2E/pinned-app (WhatsApp/Signal) story. Plan: **capability-detect ML Kit / on-device STT / NNAPI, fall back to Tesseract/whisper/CPU** (support all phones); needs the Pixel. |
+| **On-device accessibility + OCR (no-Device-Owner content filter)** 🧪 | 🟠 runs device-wide, fixes from on-device validation landed | The native Android accessibility path now actively reads the screen: surface-bound NSFW cover (event-driven, drops on app switch, no 30s TTL / no periodic poll / no re-scan under an opaque cover, #174) + reliable photo-path OCR (a static image on a new surface always gets one OCR pass; video sub-throttled, #187) → grooming/NSFW pipeline. These fixes came **from on-device validation** (#161). This is the **content filter that works without Device Owner** and the only path that can read cert-pinned / E2E apps (WhatsApp/Signal). Remaining: the cross-platform `bulwark-agent` screenshot/overlay orchestration (Windows/macOS/Linux capture) + capability-detect ML Kit/STT/NNAPI accelerator path → bundled Tesseract/whisper/CPU floor. |
 | **Supervision connectors** 🧪 | ❌ | 4 connectors are no-op stubs; need per-platform **OAuth app credentials**. (Arguably subsumed by the on-device agent.) |
 
 ## 🟠 P1 — simplified / incomplete
@@ -47,7 +48,7 @@ validation (can't be fully CI-verified here).
 | **UI coverage fake** | ✅ live (2026-06-10) | `/api/coverage` now derives one row per LEARNED host from the injected `CoverageSource`; `PinningRegistry::snapshot()` + `NetInterceptor::pinning_snapshot()` feed it; `bulwark_proxy` embeds the dashboard (`BULWARK_UI_BIND`, default 127.0.0.1:8081). Hardcoded rows deleted. |
 | Linux/macOS routing unwired 🧪 | ⏳ | Tested route-plans exist but `install_routing` isn't wired; gated behind the pump. |
 | **Cluster TLS: real domain + public cert** | ✅ live (2026-06-12) | Cluster reachable at `https://api.predatorhunters.co.uk:8443` (+ `vpn.` SAN) with a **Let's Encrypt** cert auto-issued on the box via acme.sh DNS-01 (Cloudflare), self-signed cluster CA as the fallback. Clients are **public-trust-by-default, pin-optional**: parent console (`tls-webpki-roots`) + child/relay JNI trust public roots when no CA is pinned, so a CA-less pairing payload pairs cleanly; private-CA pinning stays for self-hosted. |
-| **Android inspection-CA install** | ✅ shipped (2026-06-12) | `bulwark-net::vpn::inspection_ca_pem` exports the per-install root (public cert only) over JNI (`inspectionCaPem`); `CaTrust` installs it into the **system** trust store via `DevicePolicyManager.installCaCert` when Device Owner (idempotent), fixing "connection not private". Honest limit: a non-managed device can't make apps trust a user CA (Android 7+), so transparent HTTPS needs a managed device; the OCR path is the fallback. → [`docs/design/server-vpn-mode-and-ca-trust.md`](design/server-vpn-mode-and-ca-trust.md) Phase 1. |
+| **Android inspection-CA install + VPN fail-CLOSED on CA** | ✅ shipped (CA install 2026-06-12; on-start fail-closed 2026-06-14) | `bulwark-net::vpn::inspection_ca_pem` exports the per-install root (public cert only) over JNI (`inspectionCaPem`); `CaTrust` installs it into the **system** trust store via `DevicePolicyManager.installCaCert` when Device Owner (idempotent), fixing "connection not private". **#182:** the VpnService now installs+verifies the CA **before** the proxy starts and **refuses to bring the tunnel up** if it can't be trusted (non-managed / not Device Owner) — that prevents the network-brick where every HTTPS flow rejected the un-trusted TLS-inspection leaf; it stops cleanly and posts a "provision as Device Owner" status instead, while the accessibility/OCR path keeps covering visible content. Honest limit: a non-managed device can't make apps trust a user CA (Android 7+), so transparent HTTPS (the per-flow filter) needs a managed device. → [`docs/design/server-vpn-mode-and-ca-trust.md`](design/server-vpn-mode-and-ca-trust.md) Phase 1. |
 | Linux/macOS desktop truststore/keystore 🧪 | ⏳ | Windows DPAPI + `certutil` install ship; the **Android** CA install now ships (above); Linux/macOS desktop CA install + non-Windows keystore still pending (desktop child filter is Windows-gated). |
 
 ## 🟡 P2 — polish / planned
@@ -61,7 +62,7 @@ validation (can't be fully CI-verified here).
 1. ✅ **Fail-CLOSED + ship models** — done (deploy ships onnx/whisper/ffmpeg, fail-closed).
 2. ✅ **Real perception** — image/audio/video detect + video remediate — done + live.
 3. **Transparent VPN pump on-device validation** — pump + Android wiring implemented + host-tested (2026-06-10); needs the **Pixel** (gates Linux/macOS routing). 🧪
-4. **On-device OCR/agent** — E2E coverage; capability-detect + fallback; needs the **Pixel**. 🧪
+4. **On-device accessibility + OCR (no-Device-Owner content filter)** — now runs device-wide (device-validated #174/#187); remaining is the cross-platform `bulwark-agent` capture/overlay + capability-detect accelerator fallback. 🧪
 5. **Supervision OAuth** — needs **external app credentials**. 🧪
 6. **Still CI-doable here, no devices:** `bulwark-infer` run(), UI live coverage, cluster gossip/quorum (pinning-detect hook shipped 2026-06-10).
 

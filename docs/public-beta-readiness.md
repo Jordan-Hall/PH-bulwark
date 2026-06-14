@@ -12,7 +12,7 @@ credential / model validation · ❌ not functional / not built · ⛔ won't-do 
 
 ---
 
-## Verdict (2026-06-13): **NO-GO for stranger beta.**
+## Verdict (2026-06-14): **NO-GO for stranger beta.**
 
 PH Bulwark is **ready for an internal / trusted-tester cohort that can build from
 source and accept unsigned APKs**, but **NOT** for inviting the general public.
@@ -45,11 +45,11 @@ When both are cleared, re-evaluate against the **minimum bar** at the bottom.
 | CI builds the child APK (Linux runner, JNI core + `assembleDebug`) | ✅ | `.github/workflows/android.yml` (uploads `bulwark-child-debug-apk`). |
 | **Signed release APK** | ❌ owner-blocked | `app/build.gradle.kts` release signing is conditional on `ANDROID_KEYSTORE_BASE64` (+3 siblings); unset → release stays unsigned. `release.md` §3. |
 | Pairing (mint code/QR → child redeem) | 🧪 | Server primitives + payload v2 shipped (PR #104; seeded config PR #125); gRPC e2e in `crates/bulwark-server/tests/e2e_accounts_pairing.rs` + `e2e_app_workflow_harness.rs`. **Not device-signed-off end-to-end.** |
-| Transparent VPN filtering (intercept→classify→verdict→block/blur/mute) | 🧪 | `run_netstack` / `run_android_data_path` implemented + host-tested 2026-06-10; **Pixel validation pending** (`production-readiness.md` P0 "VPN pump"). |
+| Transparent VPN per-flow filtering (intercept→classify→verdict→block/blur/mute) | 🧪 Device-Owner-gated | `run_netstack` / `run_android_data_path` implemented + host-tested 2026-06-10. As of #182 the VPN is **fail-CLOSED on the inspection CA**: the tunnel comes up only on a confirmed system-store CA install (Device Owner) — on a non-managed device it stays **off by design** (won't brick HTTPS), and the accessibility+OCR path is the active content filter instead. Needs a **managed / Device-Owner device** to validate end-to-end (`production-readiness.md` P0 + the CA-install row). |
 | Protection-status / anti-removal alert | 🧪 | Tamper heartbeat → `PROTECTION_DISABLED` alert wired (`bulwark-server::tamper`, `RustBridge.reportTamper`; `docs/design/tamper-protection.md`); device round-trip unverified. |
 | Child SOS → guardian | 🧪 | `FamilySafety.RaiseSos` / `CHILD_SOS` server-side + `e2e_family_safety.rs`; child UI `platform/android/app/.../Sos.kt` (two-tap, content-free, honest "no guardian took it" path). Device delivery unverified. |
-| On-device screen agent (E2E / pinned apps) | ❌ in-progress | Cross-platform orchestration in `bulwark-agent`; native Android capture/overlay not built (`docs/design/on-device-scanning.md`). |
-| HTTPS CA trust on a normal (un-managed) device | ❌ (by OS) | Android 7+ forbids a user CA being trusted by other apps; full inspection needs Device-Owner (`installCaCert`, shipped 2026-06-12, `production-readiness.md`). Un-managed = partial coverage (honest). |
+| On-device accessibility + OCR content filter (E2E / pinned apps, no Device Owner) | 🧪 | The native Android accessibility path now reads the screen device-wide — surface-bound NSFW cover (#174) + reliable photo-path OCR (#187), fixes from on-device validation — feeding the grooming/NSFW pipeline. This is the **content filter that needs no Device Owner** and the only path that can read cert-pinned / E2E apps. Cross-platform `bulwark-agent` capture/overlay (Win/macOS/Linux) still in progress (`docs/design/on-device-scanning.md`). |
+| HTTPS CA trust on a normal (un-managed) device | ❌ (by OS) | Android 7+ forbids a user CA being trusted by other apps; the per-flow VPN filter (TLS inspection) needs Device-Owner (`installCaCert`, shipped 2026-06-12). As of #182 the VPN is **fail-CLOSED on this**: without a trusted system-store CA the tunnel does not come up, so an un-managed device runs the **accessibility+OCR filter** rather than a partially-broken VPN. `production-readiness.md` P1 CA-install row. |
 
 ### B. Camera app — `co.predatorhunters.bulwark.camera`
 
