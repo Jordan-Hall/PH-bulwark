@@ -48,11 +48,14 @@ use crate::accounts::{
     LoginThrottle,
 };
 use crate::persist::JsonFile;
+use crate::safety_cases::{SafetyCaseError, SafetyCaseStore};
 use bulwark_proto::v1::staff_admin_server::StaffAdmin;
 use bulwark_proto::v1::{
-    CreateStaffRequest, FleetHealth, FleetHealthRequest, GuardianMeta, GuardianMetaRequest,
-    RegionInfo, Regions, RegionsRequest, StaffAck, StaffAuditEntry, StaffAuditPage,
-    StaffAuditQuery, StaffLoginRequest, StaffRole, StaffSession, TriggerGuardianResetAck,
+    CreateStaffRequest, FleetHealth, FleetHealthRequest, GetSafetyCaseRequest, GuardianMeta,
+    GuardianMetaRequest, ListSafetyCasesRequest, OpenSafetyCaseAck, OpenSafetyCaseRequest,
+    RegionInfo, Regions, RegionsRequest, SafetyCase, SafetyCaseState, SafetyCases, StaffAck,
+    StaffAuditEntry, StaffAuditPage, StaffAuditQuery, StaffLoginRequest, StaffRole, StaffSession,
+    TransitionSafetyCaseAck, TransitionSafetyCaseRequest, TriggerGuardianResetAck,
     TriggerGuardianResetRequest, UnlockGuardianAck, UnlockGuardianRequest,
 };
 use ring::rand::{SecureRandom, SystemRandom};
@@ -97,6 +100,10 @@ pub const ALL_STAFF_ROLES: [StaffRole; 4] = [
 /// Guardian-support RPCs (reset / unlock / metadata) are SUPPORT or ADMIN only —
 /// OPERATOR is fleet-only and SAFETY_OFFICER is case-only (least privilege).
 pub const SUPPORT_ROLES: [StaffRole; 2] = [StaffRole::Support, StaffRole::Admin];
+
+/// Safety-report queue (NCMEC workflow) RPCs are SAFETY_OFFICER or ADMIN only —
+/// SUPPORT is guardian-only and OPERATOR is fleet-only (least privilege).
+pub const SAFETY_ROLES: [StaffRole; 2] = [StaffRole::SafetyOfficer, StaffRole::Admin];
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -147,6 +154,19 @@ impl From<StaffError> for Status {
             }
             StaffError::Validation(m) => Status::invalid_argument(m),
             StaffError::Internal => Status::internal("internal error"),
+        }
+    }
+}
+
+impl From<SafetyCaseError> for Status {
+    fn from(e: SafetyCaseError) -> Self {
+        match e {
+            SafetyCaseError::Validation(m) => Status::invalid_argument(m),
+            SafetyCaseError::NotFound => Status::not_found("no such safety case"),
+            SafetyCaseError::InvalidTransition => {
+                Status::failed_precondition("invalid safety-case workflow transition")
+            }
+            SafetyCaseError::Internal => Status::internal("internal error"),
         }
     }
 }
@@ -906,6 +926,10 @@ pub struct StaffAdminService {
     /// Reset-code mailer — present lets `TriggerGuardianReset` actually email the
     /// guardian. `None` → a reset is minted but `dispatched` is false (SMTP off).
     reset_mailer: Option<crate::reset_mailer::ResetMailer>,
+    /// Safety-report queue (NCMEC workflow). Always present — defaults to an
+    /// in-memory store so the SAFETY_OFFICER RPCs work even without a state dir;
+    /// service.rs swaps in the persistent one when `BULWARK_STATE_DIR` is set.
+    safety_cases: SafetyCaseStore,
 }
 
 impl StaffAdminService {
@@ -915,6 +939,7 @@ impl StaffAdminService {
             regions,
             accounts: None,
             reset_mailer: None,
+            safety_cases: SafetyCaseStore::new(),
         }
     }
 
@@ -929,6 +954,13 @@ impl StaffAdminService {
     /// guardian reset actually emails the code (which staff never see).
     pub fn with_reset_mailer(mut self, mailer: crate::reset_mailer::ResetMailer) -> Self {
         self.reset_mailer = Some(mailer);
+        self
+    }
+
+    /// Swap in a specific [`SafetyCaseStore`] (e.g. the persistent one rooted at
+    /// `BULWARK_STATE_DIR`). Defaults to an in-memory store otherwise.
+    pub fn with_safety_cases(mut self, cases: SafetyCaseStore) -> Self {
+        self.safety_cases = cases;
         self
     }
 
@@ -1175,6 +1207,98 @@ impl StaffAdmin for StaffAdminService {
             child_count: m.child_count,
             device_count: m.device_count,
         }))
+    }
+
+    async fn open_safety_case(
+        &self,
+        req: Request<OpenSafetyCaseRequest>,
+    ) -> Result<Response<OpenSafetyCaseAck>, Status> {
+        let token = Self::token_or_meta(&req, &req.get_ref().token);
+        let ident = self.store.authorize(&token, &SAFETY_ROLES)?;
+        let r = req.into_inner();
+        let case = self.safety_cases.open_case(
+            &r.sha256,
+            &r.perceptual_hash,
+            r.category,
+            &r.jurisdiction,
+        )?;
+        // Content-free audit: the case id + opening state only — never a hash,
+        // an email, or any content.
+        let state_name = SafetyCaseState::try_from(case.state)
+            .map(|s| s.as_str_name())
+            .unwrap_or("UNKNOWN");
+        self.store.audit_append(
+            &ident.staff_id,
+            ident.role,
+            "safety_case.open",
+            &case.case_id,
+            &format!("state={state_name}"),
+        );
+        Ok(Response::new(OpenSafetyCaseAck {
+            safety_case: Some(case),
+        }))
+    }
+
+    async fn list_safety_cases(
+        &self,
+        req: Request<ListSafetyCasesRequest>,
+    ) -> Result<Response<SafetyCases>, Status> {
+        let token = Self::token_or_meta(&req, &req.get_ref().token);
+        let ident = self.store.authorize(&token, &SAFETY_ROLES)?;
+        let r = req.into_inner();
+        let cases = self.safety_cases.list_cases(r.state_filter);
+        self.store.audit_append(
+            &ident.staff_id,
+            ident.role,
+            "safety_case.list",
+            "",
+            &format!("count={}", cases.len()),
+        );
+        Ok(Response::new(SafetyCases { cases }))
+    }
+
+    async fn transition_safety_case(
+        &self,
+        req: Request<TransitionSafetyCaseRequest>,
+    ) -> Result<Response<TransitionSafetyCaseAck>, Status> {
+        let token = Self::token_or_meta(&req, &req.get_ref().token);
+        let ident = self.store.authorize(&token, &SAFETY_ROLES)?;
+        let r = req.into_inner();
+        let case = self
+            .safety_cases
+            .transition(&r.case_id, r.new_state, &r.ncmec_reference)?;
+        // Audit the new state by its stable enum name — content-free.
+        let state_name = SafetyCaseState::try_from(case.state)
+            .map(|s| s.as_str_name())
+            .unwrap_or("UNKNOWN");
+        self.store.audit_append(
+            &ident.staff_id,
+            ident.role,
+            "safety_case.transition",
+            &case.case_id,
+            &format!("state={state_name}"),
+        );
+        Ok(Response::new(TransitionSafetyCaseAck {
+            safety_case: Some(case),
+        }))
+    }
+
+    async fn get_safety_case(
+        &self,
+        req: Request<GetSafetyCaseRequest>,
+    ) -> Result<Response<SafetyCase>, Status> {
+        let token = Self::token_or_meta(&req, &req.get_ref().token);
+        let ident = self.store.authorize(&token, &SAFETY_ROLES)?;
+        let r = req.into_inner();
+        let case = self.safety_cases.get_case(&r.case_id)?;
+        self.store.audit_append(
+            &ident.staff_id,
+            ident.role,
+            "safety_case.get",
+            &case.case_id,
+            "",
+        );
+        Ok(Response::new(case))
     }
 }
 
@@ -1601,5 +1725,146 @@ mod tests {
         assert_eq!(v.len(), 2);
         assert_eq!(v[0].region, "uk");
         assert_eq!(v[1].endpoint, "nyc:8443");
+    }
+
+    /// Sign in a fresh staff account of `role` (created by an ADMIN) over the
+    /// store, returning its session token.
+    fn login_role(store: &StaffStore, admin_token: &str, email: &str, role: StaffRole) -> String {
+        let (_, secret, _) = store
+            .create_staff(admin_token, "", email, "rolepassword123", role as i32, "R")
+            .unwrap();
+        let (token, _, _, _) = store
+            .login(email, "rolepassword123", &current_code(&secret))
+            .unwrap();
+        token
+    }
+
+    #[tokio::test]
+    async fn rpc_safety_case_workflow_rbac_and_audit() {
+        use bulwark_proto::v1::Category;
+        let (store, admin_token, _) = bootstrap_store();
+        // A SAFETY_OFFICER (allowed) plus SUPPORT + OPERATOR (both refused).
+        let safety_token = login_role(
+            &store,
+            &admin_token,
+            "officer@ph.example",
+            StaffRole::SafetyOfficer,
+        );
+        let support_token = login_role(
+            &store,
+            &admin_token,
+            "support@ph.example",
+            StaffRole::Support,
+        );
+        let operator_token = login_role(
+            &store,
+            &admin_token,
+            "operator@ph.example",
+            StaffRole::Operator,
+        );
+        let svc = StaffAdminService::new(store.clone(), vec![]);
+
+        // Neither SUPPORT nor OPERATOR may open a case (least privilege — only
+        // SAFETY_OFFICER + ADMIN are in SAFETY_ROLES).
+        for refused in [&support_token, &operator_token] {
+            let err = svc
+                .open_safety_case(Request::new(OpenSafetyCaseRequest {
+                    token: refused.clone(),
+                    sha256: vec![1, 2, 3],
+                    perceptual_hash: vec![],
+                    category: Category::CsamSuspected as i32,
+                    jurisdiction: "uk".into(),
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        }
+
+        // SAFETY_OFFICER opens a case (state = OPENED, case_id assigned).
+        let opened = svc
+            .open_safety_case(Request::new(OpenSafetyCaseRequest {
+                token: safety_token.clone(),
+                sha256: vec![0xab, 0xcd],
+                perceptual_hash: vec![0x01],
+                category: Category::CsamSuspected as i32,
+                jurisdiction: "uk".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let case = opened.safety_case.unwrap();
+        assert_eq!(case.state, SafetyCaseState::Opened as i32);
+        let case_id = case.case_id.clone();
+        assert!(!case_id.is_empty());
+
+        // An invalid skip (OPENED → REPORTED_NCMEC) is FAILED_PRECONDITION.
+        let err = svc
+            .transition_safety_case(Request::new(TransitionSafetyCaseRequest {
+                token: safety_token.clone(),
+                case_id: case_id.clone(),
+                new_state: SafetyCaseState::ReportedNcmec as i32,
+                ncmec_reference: "x".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+
+        // Valid step OPENED → UNDER_REVIEW.
+        let moved = svc
+            .transition_safety_case(Request::new(TransitionSafetyCaseRequest {
+                token: safety_token.clone(),
+                case_id: case_id.clone(),
+                new_state: SafetyCaseState::UnderReview as i32,
+                ncmec_reference: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            moved.safety_case.unwrap().state,
+            SafetyCaseState::UnderReview as i32
+        );
+
+        // List (no filter) sees the case; GetSafetyCase returns it by id.
+        let listed = svc
+            .list_safety_cases(Request::new(ListSafetyCasesRequest {
+                token: safety_token.clone(),
+                state_filter: SafetyCaseState::Unspecified as i32,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(listed.cases.len(), 1);
+        let got = svc
+            .get_safety_case(Request::new(GetSafetyCaseRequest {
+                token: safety_token.clone(),
+                case_id: case_id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(got.case_id, case_id);
+
+        // An unknown case id is NOT_FOUND.
+        let err = svc
+            .get_safety_case(Request::new(GetSafetyCaseRequest {
+                token: safety_token.clone(),
+                case_id: "nope".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+
+        // Every safety action is audited (content-free) on the staff chain.
+        let (entries, _, chain_ok) = store.query_audit(0, 0);
+        assert!(chain_ok);
+        assert!(entries.iter().any(|e| e.action == "safety_case.open"));
+        assert!(entries
+            .iter()
+            .any(|e| e.action == "safety_case.transition" && e.target == case_id));
+        // The audit detail carries the state NAME, never a hash or content.
+        assert!(entries.iter().any(
+            |e| e.action == "safety_case.open" && e.detail == "state=SAFETY_CASE_STATE_OPENED"
+        ));
     }
 }

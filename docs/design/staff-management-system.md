@@ -12,8 +12,8 @@ surface is content-free by message shape, mirroring the invariants already
 enforced in [`bulwark.proto`](../../crates/bulwark-proto/proto/bulwark.proto)
 (hash-only `Evidence`, redacted `AlertEvent`, content-free `ChildConfig`).
 
-Status: **Increment 1 SHIPPED** (proto `StaffAdmin` + `crates/bulwark-server/src/staff.rs`
-+ opt-in mount behind `BULWARK_STAFF=1`). Increments 2–5 are DESIGN.
+Status: **Increments 1–3 SHIPPED** (proto `StaffAdmin` + `crates/bulwark-server/src/staff.rs`
++ `safety_cases.rs` + opt-in mount behind `BULWARK_STAFF=1`). Increments 4–5 are DESIGN.
 
 ---
 
@@ -99,13 +99,19 @@ every family's binary), different release train, and cheap code-sharing (copy th
    StaffLogin with TOTP, ListRegions/GetFleetHealth content-free static,
    QueryStaffAudit) + `staff.rs` (store, TOTP, RBAC, sessions, hash-chain audit,
    12 in-module tests) + opt-in mount (`BULWARK_STAFF=1`).
-2. **Increment 2 — guardian support**: `TriggerGuardianReset` (reuses
+2. **Increment 2 (SHIPPED)** — guardian support: `TriggerGuardianReset` (reuses
    `AccountStore::request_password_reset` + `ResetMailer`; staff never see the
    code), `UnlockGuardianAccount`, `GetGuardianMeta` (metadata + counts only).
    SUPPORT + ADMIN.
-3. **Increment 3 — safety-report queue**: `SafetyCase` store + NCMEC workflow
-   state machine, SAFETY_OFFICER-gated, every transition audited; cases carry
-   hashes only.
+3. **Increment 3 (SHIPPED 2026-06-14)** — safety-report queue: a `SafetyCase`
+   store (`crates/bulwark-server/src/safety_cases.rs`, in-memory + optional
+   `safety_cases.json` persistence) + the NCMEC workflow state machine
+   (OPENED→UNDER_REVIEW→REPORTED_NCMEC→LAW_ENFORCEMENT→CLOSED, plus REJECTED;
+   CLOSED/REJECTED terminal) behind `OpenSafetyCase` / `ListSafetyCases` /
+   `TransitionSafetyCase` / `GetSafetyCase`, SAFETY_OFFICER+ADMIN-gated
+   (`SAFETY_ROLES`), every transition appended to the staff hash-chain audit.
+   Cases carry content sha256 + pHash + category + region + workflow state + an
+   opaque NCMEC reference ONLY — no media, names, or message text.
 4. **Increment 4 — real fleet data**: join `ClusterControl.Health` snapshots;
    cert expiry from deploy (env, no x509 dep); WG peer counts; region accept/drain.
 5. **Increment 5 — `apps/staff` Dioxus web console** + Midscene tests; follow-ups:

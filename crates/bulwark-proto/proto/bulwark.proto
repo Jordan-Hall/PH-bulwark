@@ -1096,6 +1096,89 @@ message GuardianMeta {
   uint32 device_count      = 6; // COUNT only (supervised devices)
 }
 
+// --- Increment 3: safety-report queue / NCMEC workflow (SAFETY_OFFICER + ADMIN) -
+// The legal escalation queue for CSAM_SUSPECTED events. It manages WORKFLOW STATE
+// ONLY — there is no media to review (report-never-store): a case carries a case
+// id, the content sha256 + perceptual hash, the category, timestamps, a region-
+// granularity jurisdiction, the workflow state, and an opaque NCMEC report
+// reference. NEVER media, names, message text, child/device ids, or addresses.
+// Every transition is appended to the staff hash-chain audit log.
+
+// NCMEC escalation workflow state. Forward path:
+// OPENED -> UNDER_REVIEW -> REPORTED_NCMEC -> LAW_ENFORCEMENT -> CLOSED. A
+// REPORTED_NCMEC case may also close directly (REPORTED_NCMEC -> CLOSED) when a
+// report is resolved without a separate law-enforcement handoff. REJECTED is the
+// not-a-case terminal (reachable from OPENED / UNDER_REVIEW). UNSPECIFIED (0) is
+// reserved so an unset state can never read as a real workflow position.
+enum SafetyCaseState {
+  SAFETY_CASE_STATE_UNSPECIFIED = 0;
+  SAFETY_CASE_STATE_OPENED          = 1; // ingested from a CSAM_SUSPECTED event
+  SAFETY_CASE_STATE_UNDER_REVIEW    = 2; // a safety officer is triaging it
+  SAFETY_CASE_STATE_REPORTED_NCMEC  = 3; // filed with NCMEC (ncmec_reference set)
+  SAFETY_CASE_STATE_LAW_ENFORCEMENT = 4; // handed to law enforcement
+  SAFETY_CASE_STATE_CLOSED          = 5; // resolved (terminal)
+  SAFETY_CASE_STATE_REJECTED        = 6; // not a genuine case (terminal)
+}
+
+// One safety case. CONTENT-FREE BY SHAPE: hashes + category + timestamps +
+// region + workflow state + an opaque NCMEC reference. There is intentionally NO
+// field that can carry media, names, message text, or per-child/per-device ids.
+message SafetyCase {
+  string          case_id          = 1; // server-assigned, content-free random id
+  bytes           sha256           = 2; // content hash of the flagged media
+  bytes           perceptual_hash  = 3; // pHash for known-hash / near-dup matching
+  Category        category         = 4; // expected CSAM_SUSPECTED (reused enum)
+  string          jurisdiction     = 5; // REGION granularity only ("uk" | "us" | ...)
+  SafetyCaseState state            = 6; // current workflow position
+  string          ncmec_reference  = 7; // opaque NCMEC report id (set at REPORTED_NCMEC)
+  int64           opened_ts        = 8; // unix ms; server-stamped at OpenSafetyCase
+  int64           updated_ts       = 9; // unix ms; server-stamped on every transition
+}
+
+// Ingest a new case from a CSAM_SUSPECTED event. SERVER-stamps case_id/opened_ts/
+// updated_ts and forces state = OPENED. Carries hashes + category + region only.
+message OpenSafetyCaseRequest {
+  string   token           = 1; // SAFETY_OFFICER/ADMIN staff session (or Bearer)
+  bytes    sha256          = 2; // required content hash
+  bytes    perceptual_hash = 3; // optional pHash
+  Category category        = 4; // the flagged category (expected CSAM_SUSPECTED)
+  string   jurisdiction    = 5; // region granularity only
+}
+
+message OpenSafetyCaseAck {
+  SafetyCase safety_case = 1; // the opened case (case_id assigned, state = OPENED)
+}
+
+message ListSafetyCasesRequest {
+  string          token         = 1;
+  // Optional state filter; UNSPECIFIED (0) returns every state.
+  SafetyCaseState state_filter  = 2;
+}
+
+message SafetyCases {
+  repeated SafetyCase cases = 1; // newest-opened first
+}
+
+// Drive a case through one validated transition. Invalid edges (a skip, a move
+// out of a terminal state, an UNSPECIFIED target) are refused FAILED_PRECONDITION.
+message TransitionSafetyCaseRequest {
+  string          token           = 1;
+  string          case_id         = 2; // the case to transition
+  SafetyCaseState new_state       = 3; // must be a valid successor of the current state
+  // Required when new_state == REPORTED_NCMEC (the NCMEC report id); ignored
+  // otherwise. Opaque reference only — never content.
+  string          ncmec_reference = 4;
+}
+
+message TransitionSafetyCaseAck {
+  SafetyCase safety_case = 1; // the case after the transition
+}
+
+message GetSafetyCaseRequest {
+  string token   = 1;
+  string case_id = 2;
+}
+
 service StaffAdmin {
   // Bootstrap-gated staff onboarding (see CreateStaffRequest). TOTP enrollment
   // material is returned exactly once in the ack.
@@ -1117,6 +1200,17 @@ service StaffAdmin {
   rpc UnlockGuardianAccount(UnlockGuardianRequest) returns (UnlockGuardianAck);
   // Content-free guardian metadata (existence + state + counts only).
   rpc GetGuardianMeta(GuardianMetaRequest) returns (GuardianMeta);
+
+  // --- Safety-report queue / NCMEC workflow (SAFETY_OFFICER/ADMIN). ---
+  // Every call is audited; cases carry hashes + workflow state only (no media).
+  // Ingest a new case from a CSAM_SUSPECTED event (server-stamps id/ts, OPENED).
+  rpc OpenSafetyCase(OpenSafetyCaseRequest) returns (OpenSafetyCaseAck);
+  // List cases (newest first), optionally filtered by workflow state.
+  rpc ListSafetyCases(ListSafetyCasesRequest) returns (SafetyCases);
+  // Drive a case through ONE validated workflow transition (invalid edges refused).
+  rpc TransitionSafetyCase(TransitionSafetyCaseRequest) returns (TransitionSafetyCaseAck);
+  // Fetch one case by id (content-free).
+  rpc GetSafetyCase(GetSafetyCaseRequest) returns (SafetyCase);
 }
 
 // ---------------------------------------------------------------------------

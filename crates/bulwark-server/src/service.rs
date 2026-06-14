@@ -430,6 +430,13 @@ pub async fn run(
                     staff_svc = staff_svc.with_reset_mailer(mailer);
                 }
             }
+            // Persistent safety-report queue (NCMEC workflow, increment 3) under
+            // the state dir when one is configured; in-memory otherwise. Cases
+            // carry hashes + workflow state only — no media, ever.
+            if let Some(dir) = &cfg.state_dir {
+                staff_svc = staff_svc
+                    .with_safety_cases(crate::safety_cases::SafetyCaseStore::with_state_dir(dir)?);
+            }
             router = router.add_service(StaffAdminServer::new(staff_svc));
             tracing::info!(
                 "staff admin ENABLED — separate staff accounts, TOTP required, every action audited"
