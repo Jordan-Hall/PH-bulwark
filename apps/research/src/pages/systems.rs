@@ -37,10 +37,10 @@ pub fn Systems() -> Element {
                         span { class: "sec-index", "PH Camera · ships first" }
                         h2 { style: "margin-top:14px;", "A camera that won't take an unsafe photo." }
                         p { class: "lede", style: "margin-top:18px;",
-                            "Children get pushed into taking photos they should never take. PH Camera checks every frame on the phone before anything is saved. If a shot is unsafe it never becomes a file."
+                            "Children get pushed into taking photos they should never take. PH Camera checks every frame on the device before anything is saved. If a shot is unsafe it never becomes a file."
                         }
                         p { class: "prose", style: "margin-top:14px;",
-                            "The app asks for no internet permission at all, so the phone itself guarantees that nothing it sees can leave it. Nothing is stored, nothing is logged, nothing is sent. If the safety check cannot run, the camera will not save the shot. Safe is the only default."
+                            "The app asks for no internet permission at all, so the device itself guarantees that nothing it sees can leave it. Nothing is stored, nothing is logged, nothing is sent. If the safety check cannot run, the camera will not save the shot. Safe is the only default."
                         }
                     }
                     div { class: "reveal",
@@ -93,8 +93,8 @@ pub fn Systems() -> Element {
             div { class: "wrap",
                 div { class: "sec-head",
                     span { class: "sec-index", "The roadmap" }
-                    h2 { "One device, covered end to end." }
-                    p { class: "lede", "The camera guards what a child creates. The shield guards what reaches them. Together they cover the whole phone, and both run the same models the research builds." }
+                    h2 { "Every device, covered end to end." }
+                    p { class: "lede", "The camera guards what a child creates. The shield guards what reaches them. Together they cover the whole device, and both run the same models the research builds. Android comes first, with Windows, iOS, iPad and Mac on the roadmap, because protection should follow a child across everything they use, not stop at one phone." }
                 }
                 div { style: "margin-top:8px; display:flex; gap:12px; flex-wrap:wrap;",
                     Link { class: "btn btn-primary", to: Route::Waitlist {},

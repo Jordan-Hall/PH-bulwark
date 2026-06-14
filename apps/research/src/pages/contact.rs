@@ -10,7 +10,7 @@ const LANES: [(&str, &str, &str, &str, &str); 4] = [
     (
         "spark",
         "Backers & funders",
-        "We are self-funded and looking for people who back safety research. Help us put protective models on more children’s phones.",
+        "We are self-funded and looking for people who back safety research. Help us put protective models on more children's devices, across every platform they use.",
         "research@predatorhunters.co.uk",
         "mailto:research@predatorhunters.co.uk?subject=Funding%20Predator%20Hunters%20Research",
     ),
@@ -42,7 +42,7 @@ pub fn Contact() -> Element {
     rsx! {
         crate::components::Seo {
             title: "Contact: work with us | Predator Hunters Research",
-            description: "Work with us. Backers, on-device ML engineers and safeguarding partners helping put privacy-first protective AI on more children's phones.",
+            description: "Work with us. Backers, on-device ML engineers and safeguarding partners helping put privacy-first protective AI on more children's devices, across every platform.",
             path: "/contact",
             image: "/og/contact.png",
         }
