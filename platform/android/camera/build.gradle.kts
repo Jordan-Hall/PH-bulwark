@@ -114,11 +114,13 @@ dependencies {
     // Theme.Material3.* XML themes referenced by AndroidManifest.xml (same as :app).
     implementation("com.google.android.material:material:1.12.0")
 
-    // CameraX (Apache-2.0) — preview + in-memory photo capture + live analysis.
+    // CameraX (Apache-2.0) — preview + in-memory photo capture + live analysis
+    // + gated video recording (camera-video).
     implementation("androidx.camera:camera-core:1.3.4")
     implementation("androidx.camera:camera-camera2:1.3.4")
     implementation("androidx.camera:camera-lifecycle:1.3.4")
     implementation("androidx.camera:camera-view:1.3.4")
+    implementation("androidx.camera:camera-video:1.3.4")
 
     // ONNX Runtime Android (MIT) — runs the bundled NSFW model fully on-device.
     // NNAPI accelerator when present, CPU otherwise (NsfwGate capability-detects).
