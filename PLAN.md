@@ -184,6 +184,54 @@ a longer-term reach into SMS/calls. Each workflow has a dedicated design doc and
 shippable in reviewable increments. Status as of **2026-06-14**.
 
 ### Just shipped (foundation for these workflows)
+- **Layered no-Device-Owner protection — in-app safe browser + DNS/SNI host
+  filter (2026-06-14)** — the existing consumer phone (no Device Owner, no factory
+  reset) is now protected by THREE complementary layers, none needing a trust
+  anchor: (1) the **accessibility on-screen content filter** (all apps, always-on),
+  (2) a **DNS + TLS-SNI host filter** (#198) and (3) an **in-app safe browser**
+  (#194). VPN-with-CA full TLS inspection stays the **new-device / Device-Owner-only
+  premium** layer (it would brick HTTPS otherwise — #182). See
+  [`docs/design/server-vpn-mode-and-ca-trust.md`](docs/design/server-vpn-mode-and-ca-trust.md) §2.
+  - **In-app safe browser (#194)** — a guarded in-app WebView (`platform/android`,
+    PH Bulwark Browser) injects a DOM-extraction script that reads a page's full
+    rendered text + images (visible AND off-viewport), routes them through the app's
+    existing on-device NSFW / grooming classifiers, and draws in-document censor
+    covers over flagged spans/images (a calm full-page block when a page is
+    predominantly flagged). `FLAG_SECURE`; fail-open with the accessibility filter as
+    backstop; in-memory only (bitmaps recycled). This is the HTTPS content pre-check a
+    plain VPN cannot do without a trust anchor — the page renders locally so the
+    script reads the live DOM. (Honest: the DOM walk is post-render, so an on-screen
+    span is briefly visible during the check round-trip; off-screen content is covered
+    before it scrolls in. Hardening TODOs noted in code.) →
+    [`docs/design/realtime-filtering-and-attribution.md`](docs/design/realtime-filtering-and-attribution.md) §A.1.
+  - **DNS + TLS-SNI host filter (#198)** — `bulwark-net::vpn::sni_dns` + `netstack`:
+    a cleartext-DNS NXDOMAIN sinkhole + ClientHello-**SNI** block (matches the
+    cleartext host DNS and the TLS handshake already reveal — **no decryption**),
+    fail-SAFE sibling of the untouched fail-CLOSED decrypting pump, reuses the
+    existing `HostBlocklist`. **Opt-in, NOT the Android default** (selection is a
+    product decision; `startVpn` still uses the decrypting pump). On-device
+    validation pending. →
+    [`docs/design/vpn-data-path-plan.md`](docs/design/vpn-data-path-plan.md) "Mode B".
+- **Samsung-style child-safety camera (#199, 2026-06-14)** — `platform/android/camera`:
+  an NsfwGate-first capture (the RAW frame is scored BEFORE any filter is baked in, so
+  a color filter can never push content past the gate), a filter strip (live preview
+  look + bake-on-save after the gate), a mode carousel (Photo / Portrait / Night / Pro
+  with real Camera2 scene hints), and polished controls (flash / zoom chips /
+  MorphShutter). **Still capture only — real video recording is a follow-up** (the
+  `VideoGate` per-frame scaffold is in place). Reuses the shipped FOSS NSFW classifier.
+- **Transparent-VPN fail-closed egress gate (#197, 2026-06-14)** — `bulwark-net::vpn::transport`:
+  `decide_egress(filter_location, filter_active)` is a pure/total/**fail-CLOSED**
+  selector — server-mode carries traffic ONLY when the region's grant confirms
+  `filter_active == true`, otherwise **Block** (never an unfiltered tunnel, never a
+  silent on-device fallback). Behind the `wg-client` feature it adds the server-tunnel
+  egress runner over boringtun. **Advances issue #144; does NOT close it** — the
+  netstack capture-loop wiring, threading the on-device `filter_active`, and on-device
+  validation remain, so the wired path is honestly INERT (blocks) today. →
+  [`docs/design/server-vpn-mode-and-ca-trust.md`](docs/design/server-vpn-mode-and-ca-trust.md) §4(5).
+- **Manager production-polish (#195, 2026-06-14)** — `apps/parent`: the children
+  roster now **auto-loads on the Children tab's mount** (was wired only to the manual
+  Refresh button), plus clippy `-D warnings` / CI-parity cleanup. No new features — a
+  refinement pass; the existing aesthetic and protective framing already met the bar.
 - **Staff operators console backend, increments 1–4 (2026-06-14)** — a separate
   internal `StaffAdmin` service (own accounts/tokens/audit, never guardian- or
   child-facing), behind `BULWARK_STAFF=1` (default off): auth + mandatory TOTP +
@@ -266,8 +314,14 @@ shippable in reviewable increments. Status as of **2026-06-14**.
   from the pinning registry (`bulwark_proxy` embeds it on 127.0.0.1:8081).
 - **Midscene UI-test harness** — `tools/ui-tests/` drives the apps' web target
   cross-platform (no device); optional Android path.
-- **Native Android onboarding** — guided one-permission-at-a-time setup journey +
-  proper VpnService-consent flow (the model the Dioxus child mirrors).
+- **Native Android onboarding (strings externalized 2026-06-14, #196)** — the
+  shipped child app's guided guardian setup journey (Welcome → Transparency →
+  per-permission grant steps → Pair → Done) + read-only status dashboard, with real
+  permission/enrollment-state wiring and the brand palette. #196 externalized ALL
+  user-facing copy from `Onboarding.kt` into `strings.xml` (~75 entries, i18n-ready) —
+  byte-identical, behaviour-preserving, no new screens/logic. (This is the SHIPPED
+  native child journey — distinct from finish-plan Workflow A, which is the
+  *Manager* console get-started journey in `apps/parent`.)
 
 ### Workflow A — Dioxus console + child design preview (code-split + router)
 **`apps/parent` (the guardian console) is the shipped Dioxus app.** `apps/child` is a

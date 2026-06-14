@@ -1,6 +1,6 @@
 # Completeness triage — stubs / WIP / "not yet" across the codebase
 
-Status as of 2026-06-13. A repo-wide scan found **4 hard markers** (`todo!`/
+Status as of 2026-06-14. A repo-wide scan found **4 hard markers** (`todo!`/
 `unimplemented!`/`FIXME`) and ~248 soft markers (`stub`, `for now`, `no-op`,
 `not yet`, `placeholder`, `fail-open`, "honest"). The overwhelming majority of
 the soft hits are **deliberate design** — fail-open/fail-CLOSED fallbacks,
@@ -50,10 +50,16 @@ their semantics autonomously is a safety regression risk** (filters-always-activ
   Owner. Needed before a desktop child build ships.
 - **QUIC / UDP-443 downgrade blocking** (`bulwark-net/src/quic.rs`): apps that
   speak QUIC can currently bypass TLS inspection on the network path (the
-  on-device agent still covers rendered content). Real filtering gap.
+  on-device agent — and, for browsing, the in-app safe browser #194 — still cover
+  rendered content). Real filtering gap. (The #198 host-filter pump also drops
+  QUIC/443 on its path.)
 - **Transparent VPN mode** (`apps/parent` shows "use Proxy for now"): Phase 3
   `transparent.rs` landed (#128); full transparent capture is being rebuilt on
-  the permissive netstack.
+  the permissive netstack. **Advanced 2026-06-14:** a fail-closed server-egress
+  gate (`vpn/transport.rs::decide_egress`, #197 — advances #144, does NOT close
+  it) + a no-Device-Owner DNS + TLS-SNI host filter (`vpn/sni_dns.rs`, #198 —
+  opt-in, no decryption, fail-SAFE) both landed as code; netstack capture-loop
+  wiring + on-device validation remain, so neither is wired as the Android default.
 - **Video remediation** (`bulwark-video`): `ffmpeg` feature; default returns
   nothing. Staged per the video-remediation vision.
 - **Desktop VpnService `todo!()` packet loops** (`bulwark-net/src/lib.rs`): need
