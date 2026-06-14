@@ -106,6 +106,9 @@ pub fn Systems() -> Element {
                         span { class: "ic", dangerous_inner_html: svg("arrow-right") }
                     }
                 }
+                p { class: "prose", style: "margin-top:28px; padding-top:18px; border-top:1px solid var(--hair); font-size:.86rem; color:var(--muted); max-width:60ch;",
+                    "Intended use. These tools are for a guardian protecting their own minor child, on a device they own and control. They are not for monitoring adults, partners, or anyone else, and not for covert surveillance. We build to UK GDPR and the ICO's Children's Code, and monitoring law varies by country, so please check what applies where you are."
+                }
             }
         }
     }

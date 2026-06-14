@@ -179,6 +179,10 @@ em.em { font-style: italic; color: var(--head); }
 /* The wordmark's letters are white-filled (built for a dark field). On the dark
    theme it floats free; in light mode it needs a small dark plate to read. */
 html[data-theme="light"] .brand-logo { background: #0b1320; padding: 5px 9px; border-radius: 9px; filter: none; }
+/* Skip-to-content link: off-screen until keyboard-focused. */
+.skip-link { position: absolute; left: 8px; top: -56px; z-index: 200; background: var(--grad); color: var(--on-grad); padding: 10px 16px; border-radius: 8px; font-family: var(--sans); font-weight: 700; font-size: .9rem; transition: top .15s ease; }
+.skip-link:focus { top: 8px; outline: 2px solid var(--head); outline-offset: 2px; }
+main:focus { outline: none; }
 .nav-links { display: flex; align-items: center; gap: 4px; }
 .nav-link { font-size: .92rem; color: var(--ink-2); padding: 9px 14px; border-radius: 999px; transition: color .18s, background .18s; }
 .nav-link:hover { color: var(--head); background: var(--hair); }
