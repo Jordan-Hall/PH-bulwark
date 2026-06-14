@@ -9,6 +9,7 @@ import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraControl
+import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
@@ -119,6 +120,9 @@ internal fun CameraScreen(
     var selectedFilter by remember { mutableStateOf(CameraFilter.None) }
     var mode by remember { mutableStateOf(CameraMode.default) }
     var cameraControl by remember { mutableStateOf<CameraControl?>(null) }
+    var cameraInfo by remember { mutableStateOf<CameraInfo?>(null) }
+    var flashMode by remember { mutableStateOf(ImageCapture.FLASH_MODE_OFF) }
+    var zoomRatio by remember { mutableStateOf(1f) }
 
     val previewView = remember { PreviewView(context) }
     val imageCapture = remember {
@@ -162,6 +166,7 @@ internal fun CameraScreen(
                         *useCases.toTypedArray(),
                     )
                     cameraControl = camera.cameraControl
+                    cameraInfo = camera.cameraInfo
                 }
             }, ContextCompat.getMainExecutor(context))
         }
@@ -186,6 +191,12 @@ internal fun CameraScreen(
     LaunchedEffect(mode, cameraControl) {
         cameraControl?.let { CameraMode.applySceneHints(mode, it) }
     }
+
+    // Flash applies to the still ImageCapture; zoom drives the bound camera's
+    // control. Both are capture/display settings only — neither affects the RAW
+    // frame the safety gate scores.
+    LaunchedEffect(flashMode) { imageCapture.flashMode = flashMode }
+    LaunchedEffect(zoomRatio, cameraControl) { cameraControl?.setZoomRatio(zoomRatio) }
 
     val gateReady = gate != null && !gateLoading
     val shutterEnabled =
@@ -274,7 +285,15 @@ internal fun CameraScreen(
                 Modifier.fillMaxSize().padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                StatusPill(gateLoading = gateLoading, gateReady = gateReady)
+                TopBar(
+                    gateLoading = gateLoading,
+                    gateReady = gateReady,
+                    flashMode = flashMode,
+                    onCycleFlash = { flashMode = nextFlashMode(flashMode) },
+                    zoomRatio = zoomRatio,
+                    showFlash = lensFacing == CameraSelector.LENS_FACING_BACK &&
+                        cameraInfo?.hasFlashUnit() == true,
+                )
                 Spacer(Modifier.weight(1f))
                 notice?.let { n -> if (n != Notice.BlockedNsfw) NoticeBanner(n) }
                 Spacer(Modifier.height(12.dp))
@@ -295,6 +314,17 @@ internal fun CameraScreen(
                     onSelect = { mode = it },
                 )
                 Spacer(Modifier.height(12.dp))
+                // Quick-zoom pills (1x / 2x / 5x, clamped to the lens's range).
+                // ZoomChips renders nothing if the camera offers <2 usable stops.
+                ZoomChips(
+                    stops = remember(cameraInfo) {
+                        val maxZoom = cameraInfo?.zoomState?.value?.maxZoomRatio ?: 1f
+                        listOf(1f, 2f, 5f).filter { it <= maxZoom }
+                    },
+                    current = zoomRatio,
+                    onSelect = { zoomRatio = it },
+                )
+                Spacer(Modifier.height(12.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (captureForResult) {
                         TextButton(onClick = onCancel) {
@@ -304,7 +334,13 @@ internal fun CameraScreen(
                         Spacer(Modifier.width(64.dp))
                     }
                     Spacer(Modifier.weight(1f))
-                    ShutterButton(enabled = shutterEnabled, onClick = ::takePhoto)
+                    MorphShutter(
+                        mode = mode,
+                        recording = false,
+                        enabled = shutterEnabled,
+                        busy = capturing,
+                        onClick = ::takePhoto,
+                    )
                     Spacer(Modifier.weight(1f))
                     OutlinedButton(onClick = {
                         lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) {
@@ -471,6 +507,13 @@ private fun decodeForScoring(jpeg: ByteArray, rotationDegrees: Int): Bitmap {
  * so callers pass rotation 0). Any decode/encode failure returns the original bytes
  * — a photo is never lost over a filter error.
  */
+/** OFF → AUTO → ON → OFF cycle for the flash toggle. */
+private fun nextFlashMode(current: Int): Int = when (current) {
+    ImageCapture.FLASH_MODE_OFF -> ImageCapture.FLASH_MODE_AUTO
+    ImageCapture.FLASH_MODE_AUTO -> ImageCapture.FLASH_MODE_ON
+    else -> ImageCapture.FLASH_MODE_OFF
+}
+
 private fun applyFilterToJpeg(jpeg: ByteArray, rotationDegrees: Int, filter: CameraFilter): ByteArray {
     if (filter == CameraFilter.None) return jpeg
     return runCatching {
