@@ -12,8 +12,9 @@ surface is content-free by message shape, mirroring the invariants already
 enforced in [`bulwark.proto`](../../crates/bulwark-proto/proto/bulwark.proto)
 (hash-only `Evidence`, redacted `AlertEvent`, content-free `ChildConfig`).
 
-Status: **Increments 1–3 SHIPPED** (proto `StaffAdmin` + `crates/bulwark-server/src/staff.rs`
-+ `safety_cases.rs` + opt-in mount behind `BULWARK_STAFF=1`). Increments 4–5 are DESIGN.
+Status: **Increments 1–4 SHIPPED** (proto `StaffAdmin` + `crates/bulwark-server/src/staff.rs`
++ `safety_cases.rs` + live fleet data + opt-in mount behind `BULWARK_STAFF=1`).
+Increment 5 (the `apps/staff` Dioxus console) is DESIGN.
 
 ---
 
@@ -112,8 +113,17 @@ every family's binary), different release train, and cheap code-sharing (copy th
    (`SAFETY_ROLES`), every transition appended to the staff hash-chain audit.
    Cases carry content sha256 + pHash + category + region + workflow state + an
    opaque NCMEC reference ONLY — no media, names, or message text.
-4. **Increment 4 — real fleet data**: join `ClusterControl.Health` snapshots;
-   cert expiry from deploy (env, no x509 dep); WG peer counts; region accept/drain.
+4. **Increment 4 (SHIPPED 2026-06-14)** — real fleet data: the LOCAL region's
+   `RegionInfo`/`FleetHealth` now joins this node's live `ClusterControl.Health`
+   snapshot (`probed=true`, `healthy` from `accepting_work`, per-node
+   `HealthStatus` in `FleetHealth.nodes` — queue depth / latency / load, already
+   content-free), the enrolled WG peer **count** (`WgPeerStore::peer_count`), the
+   enrolled-device **count** (`AccountStore::staff_enrolled_device_count`), and
+   the TLS-cert expiry from `BULWARK_TLS_CERT_EXPIRY_TS` (env, no x509 dep). No
+   cross-region gossip on the single-box deploy, so any region OTHER than the one
+   this node serves (`BULWARK_REGION`) stays honestly `probed=false`. No proto
+   change (the fields already existed). Region accept/drain is deferred to a
+   follow-up (it proxies `ClusterControl.Drain`, a mutating capacity action).
 5. **Increment 5 — `apps/staff` Dioxus web console** + Midscene tests; follow-ups:
    TOTP-secret encryption at rest, mTLS-bound staff sessions, audit-file sealing.
 
