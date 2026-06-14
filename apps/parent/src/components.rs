@@ -145,6 +145,9 @@ pub fn ChildVpnRow(child: ProtoChild) -> Element {
                             match set_child_config(&child_id, &device_id, &region, &endpoint, enabled, profile, filter_location).await {
                                 Ok(v) => {
                                     note.set(Some(format!("Sent · config v{v} — waiting for the child to confirm…")));
+                                    // Release the button BEFORE the confirm-poll so the
+                                    // guardian can adjust and re-apply during the wait
+                                    // (a fresh Apply just supersedes this version).
                                     busy.set(false);
                                     // The child acks the applied version on its next
                                     // config poll (every 60s while filtering runs, and
