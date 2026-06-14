@@ -8,8 +8,8 @@ use crate::assets::{FAVICON, PH_LOGO};
 use crate::components::{ClosingCta, SiteFooter};
 use crate::icons::svg;
 use crate::pages::{
-    About, Approach, Contact, Home, NotFound, PhBulwark, PhCamera, Privacy, Research, Security,
-    Systems, Waitlist,
+    About, Approach, Contact, Coverage, Home, NotFound, PhBulwark, PhCamera, Privacy, Research,
+    Security, Systems, Waitlist,
 };
 
 #[derive(Routable, Clone, PartialEq)]
@@ -19,6 +19,8 @@ pub enum Route {
     Home {},
     #[route("/research")]
     Research {},
+    #[route("/coverage")]
+    Coverage {},
     #[route("/systems")]
     Systems {},
     #[route("/systems/ph-camera")]
