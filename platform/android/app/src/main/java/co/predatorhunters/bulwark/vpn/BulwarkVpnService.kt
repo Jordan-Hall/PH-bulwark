@@ -44,6 +44,45 @@ class BulwarkVpnService : VpnService() {
 
     private fun establish() {
         RustBridge.ensureLoaded()
+
+        // Trust the TLS-inspection CA in the SYSTEM store BEFORE the proxy starts.
+        // The proxy TLS-inspects every HTTPS flow, presenting a leaf minted under the
+        // per-install inspection CA; unless that CA is system-trusted, every app rejects the
+        // leaf (fatal alert CertificateUnknown) and, since ~all traffic is HTTPS,
+        // the device loses connectivity entirely ("network not working"). Only a
+        // Device Owner can install into the system store (Android 7+ ignores user
+        // CAs), so on a NON-managed device we must NOT bring the tunnel up — that
+        // would brick the network with no benefit. The on-device accessibility/OCR
+        // path still covers visible content meanwhile. Same ca_dir the Rust proxy
+        // uses (filesDir/ca), so the installed root matches the minted leaves.
+        val caResult = co.predatorhunters.bulwark.admin.CaTrust.ensureInstalled(this)
+        Log.i(TAG, "inspection CA trust: $caResult")
+        // FAIL CLOSED: bring the tunnel up ONLY on a CONFIRMED system-store install
+        // (Device Owner). Every other result means the inspection CA is NOT trusted,
+        // so the TLS-inspecting proxy would present leaves apps reject (CertificateUnknown) and,
+        // since ~all traffic is HTTPS, the device loses connectivity ("network not
+        // working"):
+        //   NOT_MANAGED — not Device Owner (Android 7+ ignores user-store CAs)
+        //   NO_CA       — the CA could not be loaded/generated (engine/ca_dir issue)
+        //   ERROR       — installCaCert failed
+        // (Note: DevicePolicyManager.installCaCert on a Device Owner is the platform
+        // mechanism for system trust — non-pinned apps using the default trust config
+        // accept it; cert-pinned / custom-trust-anchor apps are the documented
+        // residual the on-device accessibility/OCR path covers, never the wire.)
+        val caTrusted = caResult == co.predatorhunters.bulwark.admin.CaTrust.Result.INSTALLED_SYSTEM ||
+            caResult == co.predatorhunters.bulwark.admin.CaTrust.Result.ALREADY_TRUSTED
+        if (!caTrusted) {
+            Log.e(
+                TAG,
+                "not bringing up the tunnel: inspection CA not system-trusted " +
+                    "($caResult; needs Device-Owner provisioning) — would break all HTTPS",
+            )
+            notifyProvisioningRequired()
+            running = false
+            stopSelf()
+            return
+        }
+
         val pfd = Builder()
             .setSession("PH Bulwark")
             .setMtu(1500)
@@ -168,10 +207,42 @@ class BulwarkVpnService : VpnService() {
             .build()
     }
 
+    /**
+     * Guardian-facing status when web filtering can't start because the inspection
+     * CA isn't system-trusted (device not provisioned as Device Owner). A separate
+     * high-importance channel + notification id from the ongoing one, since the
+     * service stops right after (the ongoing foreground notice goes away).
+     */
+    private fun notifyProvisioningRequired() {
+        runCatching {
+            val mgr = getSystemService(NotificationManager::class.java)
+            mgr.createNotificationChannel(
+                NotificationChannel(
+                    STATUS_CHANNEL,
+                    "PH Bulwark status",
+                    NotificationManager.IMPORTANCE_HIGH,
+                ),
+            )
+            val n = Notification.Builder(this, STATUS_CHANNEL)
+                .setContentTitle("PH Bulwark — setup needed")
+                .setContentText(
+                    "Web filtering needs this device set up as a managed (Device " +
+                        "Owner) device so secure sites can be filtered. Open PH " +
+                        "Bulwark to finish setup.",
+                )
+                .setSmallIcon(android.R.drawable.stat_sys_warning)
+                .setAutoCancel(true)
+                .build()
+            mgr.notify(STATUS_NOTIF_ID, n)
+        }
+    }
+
     companion object {
         private const val TAG = "BulwarkVpn"
         private const val CHANNEL = "bulwark_vpn"
+        private const val STATUS_CHANNEL = "bulwark_status"
         private const val NOTIF_ID = 1001
+        private const val STATUS_NOTIF_ID = 1002
         private const val CONFIG_POLL_MS = 60_000L
 
         /** Live "the filtering service is up" flag for [ChildConfigSync]. */
