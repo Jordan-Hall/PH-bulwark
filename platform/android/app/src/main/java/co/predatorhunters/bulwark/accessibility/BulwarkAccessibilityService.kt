@@ -218,8 +218,29 @@ class BulwarkAccessibilityService : AccessibilityService() {
         if (!surfaceChanged && now - lastCaptureAtMs < CAPTURE_MIN_GAP_MS) return
         lastCaptureAtMs = now
         lastCapturePkg = pkg
-        val doOcr = ocrText && (now - lastOcrAtMs >= OCR_MIN_GAP_MS)
-        if (doOcr) lastOcrAtMs = now
+        // OCR cadence is split for PHOTO vs VIDEO:
+        //  - PHOTO / new surface: a still photo (gallery, browser image, a chat
+        //    screen just opened) emits a burst of events and then NOTHING. The
+        //    OCR clock alone would skip it whenever the previous OCR was < 6s ago,
+        //    and no later event would ever retry → text-in-image never read. So a
+        //    surface change ALWAYS gets one OCR pass (it already bypasses the
+        //    capture gap above for the NSFW pass; OCR must match or the photo path
+        //    is unreliable — the gallery/browser/new-chat case).
+        //  - VIDEO / same surface: frames change continuously and fire ~1/s
+        //    content events, so OCR is sub-throttled to OCR_MIN_GAP_MS to sample
+        //    captions/overlaid text on a reasonable cadence without OCR'ing every
+        //    tick (CPU thrash). Event-driven only — no periodic poll (per #174).
+        // (Limitation: a NEW still image within the SAME app/surface inside the 6s
+        //  gap — swiping to the next gallery photo, the next image in a tab — is
+        //  NSFW-scanned every capture but not re-OCR'd until the gap elapses; same
+        //  class as the scroll-away limitation noted above. Safe-sticky.)
+        val doOcr = ocrText && (surfaceChanged || now - lastOcrAtMs >= OCR_MIN_GAP_MS)
+        if (doOcr) {
+            lastOcrAtMs = now
+            // Content-free diagnostic: which OCR cadence fired (new surface = photo
+            // path; same surface = throttled video path). Package only, NEVER text.
+            Log.i(TAG, "OCR scan ($pkg): ${if (surfaceChanged) "new-surface" else "same-surface"}")
+        }
         captureAndScan(pkg, thread, doOcr)
     }
 
@@ -691,8 +712,11 @@ class BulwarkAccessibilityService : AccessibilityService() {
          *  changes only, never a background poll). */
         private const val CAPTURE_MIN_GAP_MS = 1000L
 
-        /** OCR sub-throttle: Tesseract is heavy, so OCR runs at most this often even
-         *  though the NSFW image pass runs on every capture. */
+        /** OCR sub-throttle for the SAME surface (the video cadence): Tesseract is
+         *  heavy, so on a continuously-changing surface OCR samples at most this
+         *  often even though the NSFW image pass runs on every capture. A SURFACE
+         *  CHANGE (the photo cadence) bypasses this gap so a still image that emits
+         *  no further events is never skipped (see maybeCapture). */
         private const val OCR_MIN_GAP_MS = 6000L
 
         /** Consecutive CLEAN scans before lifting a cover. Re-scans don't run WHILE

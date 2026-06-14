@@ -77,6 +77,11 @@ object Ocr {
             val text = t.utF8Text?.trim()
             // Release the native image reference promptly; keep the engine.
             runCatching { t.clear() }
+            // CONTENT-FREE diagnostic: log the CHAR COUNT only so on-device
+            // validation can confirm OCR is extracting text (and how much) without
+            // ever logging the text itself (no-media invariant). 0 chars = OCR ran
+            // but the frame held no readable glyphs.
+            Log.i(TAG, "OCR extracted ${text?.length ?: 0} chars")
             text?.takeIf { it.isNotEmpty() }
         }
     }.onFailure { Log.i(TAG, "OCR recognise failed (fail-open): ${it.message}") }.getOrNull()
