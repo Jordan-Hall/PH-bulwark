@@ -32,6 +32,12 @@ mod netstack;
 #[cfg(target_os = "linux")]
 pub mod transparent;
 
+/// Transparent-capture egress selection (on-device proxy vs the boringtun
+/// server-filter tunnel). The pure, fail-closed [`transport::decide_egress`]
+/// selector compiles on every host; the boringtun egress runner is gated on the
+/// `wg-client` feature. See the module docs for the fail-closed contract.
+pub mod transport;
+
 // Userspace WireGuard CLIENT (Phase 5 — the transport leg for
 // `filter_location == FILTER_ON_SERVER`). Default OFF; `--features wg-client`
 // pulls in boringtun (BSD-3-Clause). `wg` is the noise state machine;

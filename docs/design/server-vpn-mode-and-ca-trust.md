@@ -203,6 +203,21 @@ filter is **off by design** (it never bricks HTTPS to no benefit). Therefore:
 4. **`filter_location` in the proto + ChildConfig + parent toggle** (additive).
 5. **boringtun client in the Android shell** + reconcile (bring tunnel up/down on
    the toggle) + kill-switch wiring to the existing lockdown.
+   **Device-side egress plumbing SHIPPED (code-level, fail-closed; advances #144):**
+   `crates/bulwark-net/src/vpn/transport.rs` adds the transparent-capture egress
+   **selector** (`decide_egress(filter_location, filter_active)` — pure, total,
+   host-tested) and, behind the `wg-client` feature, the **server-tunnel egress
+   runner** that bridges captured raw IP packets into the `wg_pump` boringtun
+   tunnel and injects the region's decrypted returns back (the "boringtun
+   transport → return path" leg). The fail-closed gate IS the deliverable: server
+   egress is reached ONLY when the region's grant confirms `filter_active == true`;
+   `false` (its honest default today) ⇒ `FilterEgress::Block` — never an unfiltered
+   tunnel, never a silent on-device fallback (the centerpiece test proves
+   `filter_active=false` opens no transport). STILL TODO before any child uses it:
+   wiring the selector into `netstack.rs`'s capture loop per child-config, threading
+   the on-device WgProvision client's `filter_active` into `decide_egress`, the
+   Manager toggle, kill-switch, and on-device validation (§6). Because `filter_active`
+   is honestly false today, the wired path is INERT (blocks) — correct + intended.
 6. **End-to-end validation** on the Pixel: on-device mode vs cloud mode, IP shows
    the region in cloud mode, filter fires in both, fail-closed on tunnel drop.
 
