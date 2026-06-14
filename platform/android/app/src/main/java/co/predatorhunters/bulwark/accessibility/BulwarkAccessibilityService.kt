@@ -445,36 +445,17 @@ class BulwarkAccessibilityService : AccessibilityService() {
      *  full-screen block never clobber each other's lifecycle. */
     private var regionOverlay: View? = null
 
-    /** Main-thread handler + a SINGLE reusable RE-VERIFY runnable for the localized
-     *  overlay. Truly static content (a loaded image, a paused video) emits no
-     *  further a11y events, so without this the [REGION_OVERLAY_TTL_MS] backstop
-     *  would BLINDLY lift the cover and RE-EXPOSE still-on-screen explicit imagery
-     *  (codex P1). Instead, when the backstop fires it RE-SCANS the current frame:
-     *  still-flagged → refresh (keep covering); clean → the normal hysteresis
-     *  lifts it. Fires only while a cover is up — not continuous polling. */
+    /** Main-thread handler for the localized overlay. There is deliberately NO
+     *  timed backstop that re-scans while a cover is up: the cover is an opaque
+     *  TYPE_ACCESSIBILITY_OVERLAY, so any `takeScreenshot` taken while it is
+     *  attached captures the COVER (which always scores clean) instead of the
+     *  underlying image — a re-scan-under-cover would falsely read clean and
+     *  re-expose the static explicit content (codex). Static content therefore
+     *  just STAYS covered; the cover lifts only on (a) a clean scan driven by a
+     *  real on-screen change (content/scroll/text event — when no cover yet
+     *  occludes the new frame) or (b) a surface/window change (app switch / shade
+     *  / launcher → surface-bound removal). */
     private val regionHandler = Handler(Looper.getMainLooper())
-    private val reverifyRegionOverlay = Runnable { reverifyCover() }
-
-    /**
-     * Re-scan the current frame while a cover is up because the
-     * [REGION_OVERLAY_TTL_MS] backstop fired with no event-driven refresh (static
-     * content). Keeps still-explicit content covered and lets the scan's clean
-     * path lift it once the content is actually gone — never a blind timeout.
-     */
-    private fun reverifyCover() {
-        if (regionOverlay == null) return // nothing covered → nothing to re-verify
-        val pkg = coverPkg ?: lastForegroundPkg
-        if (pkg == null || pkg == packageName ||
-            Build.VERSION.SDK_INT < Build.VERSION_CODES.R
-        ) {
-            removeLocalizedOverlay()
-            return
-        }
-        val root = rootInActiveWindow
-        val thread = if (root != null) threadIdFor(root, pkg) else "scan:$pkg"
-        // Deliberate re-check: NSFW only (no OCR), straight to the capture path.
-        captureAndScan(pkg, thread, ocrText = false)
-    }
 
     private val audioManager by lazy {
         getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
@@ -573,16 +554,24 @@ class BulwarkAccessibilityService : AccessibilityService() {
                 PixelFormat.OPAQUE,
             ).apply { gravity = Gravity.TOP or Gravity.START }
 
-            runCatching {
+            val attached = runCatching {
                 if (regionOverlay == null) {
                     wm.addView(view, lp)
                     regionOverlay = view
                 } else {
                     wm.updateViewLayout(view, lp)
                 }
+            }.isSuccess
+            // If WindowManager failed there is NO cover on screen — do not record a
+            // phantom episode or grab exclusive audio focus, which would leave media
+            // muted with no visible cover until some unrelated later event (codex).
+            // Clean up any partial state and bail.
+            if (!attached || regionOverlay == null) {
+                removeLocalizedOverlay()
+                return@post
             }
-            // Cover is now on screen for THIS surface — record cover state HERE on
-            // the main thread (atomic with addView), so a stale worker callback or a
+            // Cover is on screen for THIS surface — record cover state HERE on the
+            // main thread (atomic with addView), so a stale worker callback or a
             // racing surface change can't desync coverPkg/episode from what's
             // actually displayed. Bind the cover to the surface (drop on app change)
             // and reset the clean streak.
@@ -597,21 +586,13 @@ class BulwarkAccessibilityService : AccessibilityService() {
             // Stop the offending media's SOUND too (covering an adult video must
             // silence it, not just hide the picture). Idempotent while held.
             muteOffendingAudio()
-            // Self-heal backstop: if no later frame refreshes the cover (static
-            // content with no a11y events), RE-VERIFY by re-scanning — never a
-            // blind lift (codex P1). Cancel the prior pending re-verify first so a
-            // refresh of a still-flagged region resets the backstop window.
-            regionHandler.removeCallbacks(reverifyRegionOverlay)
-            regionHandler.postDelayed(reverifyRegionOverlay, REGION_OVERLAY_TTL_MS)
         }
     }
 
     private fun removeLocalizedOverlay() {
-        regionHandler.removeCallbacks(reverifyRegionOverlay)
         regionOverlay?.let { v -> runCatching { (getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(v) } }
         regionOverlay = null
-        // End the episode (a safety-TTL lift also resets, so the next cover
-        // re-alerts and the clean streak starts fresh).
+        // End the episode so the next cover re-alerts and the clean streak starts fresh.
         coverEpisodeActive = false
         cleanScanCount = 0
         coverPkg = null
@@ -688,13 +669,6 @@ class BulwarkAccessibilityService : AccessibilityService() {
          *  cover is also dropped instantly on any app/window change (surface-bound). */
         private const val CLEAN_LIFT_SCANS = 1
 
-        /** RE-VERIFY interval for a standing cover when no a11y event refreshes it
-         *  (truly static content). On expiry the current frame is RE-SCANNED — a
-         *  still-flagged frame keeps the cover, a clean frame lifts it — so static
-         *  explicit content is never blindly re-exposed (codex P1). Fires only while
-         *  a cover is up; normal lifts are still event-driven (clean scan + surface
-         *  change). */
-        private const val REGION_OVERLAY_TTL_MS = 5000L
         // Apps the network can't read (E2E / cert-pinned) → on-device capture path.
         private val MONITORED = setOf(
             "com.whatsapp",
