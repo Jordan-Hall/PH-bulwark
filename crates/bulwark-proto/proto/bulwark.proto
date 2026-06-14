@@ -1005,7 +1005,9 @@ message RegionsRequest {
 message RegionInfo {
   string region                = 1; // "uk" | "us" | ...
   string endpoint              = 2; // the gRPC endpoint guardians connect to
-  bool   probed                = 3; // false until live probing ships (increment 4)
+  bool   probed                = 3; // true once the serving node joined live data
+                                     //   (the LOCAL region only; cross-region is
+                                     //   probed=false — no cross-region gossip)
   bool   healthy               = 4; // meaningful only when probed == true
   string deploy_version        = 5; // serving binary version
   int64  tls_cert_expiry_ts    = 6; // unix ms; 0 = unknown
@@ -1028,7 +1030,8 @@ message FleetHealthRequest {
 message FleetHealth {
   string region            = 1;
   RegionInfo info          = 2;
-  repeated HealthStatus nodes = 3; // empty until increment 4 joins ClusterControl
+  repeated HealthStatus nodes = 3; // this node's live HealthStatus for the LOCAL
+                                    //   region; empty for a non-local region
 }
 
 // Query the tamper-evident staff audit chain. ADMIN only. The page reports

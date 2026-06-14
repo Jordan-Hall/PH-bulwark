@@ -340,6 +340,13 @@ impl WgPeerStore {
         }
         Ok(address)
     }
+
+    /// Number of enrolled WireGuard peers (a COUNT only — never peer
+    /// identities, keys, or addresses). Feeds the staff fleet dashboard.
+    pub fn peer_count(&self) -> u32 {
+        let inner = self.inner.lock().expect("wg peer mutex poisoned");
+        inner.by_device.len() as u32
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -78,6 +78,18 @@ const STAFF_PASSWORD_MIN: usize = 12;
 /// `BULWARK_STAFF_SESSION_TTL_SECS` (positive integer seconds).
 const DEFAULT_STAFF_SESSION_TTL_SECS: i64 = 2 * 3600;
 
+/// This region's TLS-cert expiry (unix ms) from `BULWARK_TLS_CERT_EXPIRY_TS`,
+/// surfaced on the LOCAL region's `RegionInfo`. No x509 dependency: the deploy
+/// sets it (e.g. from `openssl x509 -enddate`) so the staff dashboard can warn
+/// before a cert lapses. `0` (unset / unparseable) = unknown.
+fn tls_cert_expiry_ts_from_env() -> i64 {
+    std::env::var("BULWARK_TLS_CERT_EXPIRY_TS")
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(0)
+}
+
 /// The configured staff-session TTL in milliseconds (env override, else default).
 fn staff_session_ttl_ms() -> i64 {
     std::env::var("BULWARK_STAFF_SESSION_TTL_SECS")
@@ -930,6 +942,28 @@ pub struct StaffAdminService {
     /// in-memory store so the SAFETY_OFFICER RPCs work even without a state dir;
     /// service.rs swaps in the persistent one when `BULWARK_STATE_DIR` is set.
     safety_cases: SafetyCaseStore,
+    /// Live fleet-data sources for THIS node's region (increment 4). `None`
+    /// handles leave the corresponding gauge at its honest default so a
+    /// region with no live source reports `probed = false`.
+    fleet: FleetSources,
+}
+
+/// Optional live data sources backing the fleet dashboard (increment 4). The
+/// local `Cluster` knows only its OWN cluster's members — there is no cross-
+/// region gossip on the single-box deployment — so live data populates ONLY
+/// the region whose name matches `local_region`; every other configured region
+/// stays `probed = false` (honest: we have no live snapshot for it).
+#[derive(Clone, Default)]
+struct FleetSources {
+    /// This node's cluster handle (queue depth / latency / load via `health`).
+    cluster: Option<Arc<bulwark_cluster::Cluster>>,
+    /// This node's WireGuard peer store (enrolled-peer COUNT only).
+    wg_peers: Option<crate::wg_provision::WgPeerStore>,
+    /// The region name this node serves (`BULWARK_REGION`); live data attaches
+    /// to the `RegionInfo` whose `region` equals this. Empty = match nothing.
+    local_region: String,
+    /// This region's TLS-cert expiry (unix ms; 0 = unknown).
+    tls_cert_expiry_ts: i64,
 }
 
 impl StaffAdminService {
@@ -940,6 +974,7 @@ impl StaffAdminService {
             accounts: None,
             reset_mailer: None,
             safety_cases: SafetyCaseStore::new(),
+            fleet: FleetSources::default(),
         }
     }
 
@@ -964,20 +999,49 @@ impl StaffAdminService {
         self
     }
 
+    /// Attach this node's [`Cluster`](bulwark_cluster::Cluster) so the LOCAL
+    /// region's `RegionInfo`/`FleetHealth` reports a LIVE `HealthStatus`
+    /// (queue depth / latency / load — already content-free) and `probed = true`.
+    pub fn with_cluster(mut self, cluster: Arc<bulwark_cluster::Cluster>) -> Self {
+        self.fleet.cluster = Some(cluster);
+        self
+    }
+
+    /// Attach this node's [`WgPeerStore`](crate::wg_provision::WgPeerStore) so the
+    /// LOCAL region reports the enrolled WireGuard peer COUNT (never identities).
+    pub fn with_wg_peers(mut self, wg_peers: crate::wg_provision::WgPeerStore) -> Self {
+        self.fleet.wg_peers = Some(wg_peers);
+        self
+    }
+
+    /// Name the region THIS node serves (live fleet data attaches to the
+    /// `RegionInfo` whose `region` equals this) and set its TLS-cert expiry.
+    pub fn with_local_region(mut self, region: &str, tls_cert_expiry_ts: i64) -> Self {
+        self.fleet.local_region = region.to_string();
+        self.fleet.tls_cert_expiry_ts = tls_cert_expiry_ts;
+        self
+    }
+
     /// Regions from `BULWARK_STAFF_REGIONS`, else this node itself
-    /// (`BULWARK_REGION`, default "self", at `BULWARK_BIND`).
+    /// (`BULWARK_REGION`, default "self", at `BULWARK_BIND`). The local region
+    /// name + TLS-cert expiry are read from the environment so live fleet data
+    /// (increment 4) attaches to the right `RegionInfo`.
     pub fn from_env(store: StaffStore) -> Self {
+        let local_region = std::env::var("BULWARK_REGION").unwrap_or_else(|_| "self".into());
         let regions = std::env::var("BULWARK_STAFF_REGIONS")
             .ok()
             .map(|s| parse_regions(&s))
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| {
                 vec![StaticRegion {
-                    region: std::env::var("BULWARK_REGION").unwrap_or_else(|_| "self".into()),
+                    region: local_region.clone(),
                     endpoint: std::env::var("BULWARK_BIND").unwrap_or_default(),
                 }]
             });
-        Self::new(store, regions)
+        let mut svc = Self::new(store, regions);
+        svc.fleet.local_region = local_region;
+        svc.fleet.tls_cert_expiry_ts = tls_cert_expiry_ts_from_env();
+        svc
     }
 
     /// Effective token: the explicit field first, then `authorization: Bearer`.
@@ -988,9 +1052,10 @@ impl StaffAdminService {
         bearer_token(req).unwrap_or_default()
     }
 
-    /// Static, content-free RegionInfo (probing is increment 4 — `probed` is
-    /// honestly false rather than guessing `healthy`).
-    fn region_info(r: &StaticRegion, now: i64) -> RegionInfo {
+    /// Content-free `RegionInfo` for a NON-local region (or any region when no
+    /// live source is attached): `probed = false`, honest zero gauges. We have
+    /// no live snapshot for a region other than the one this node serves.
+    fn static_region_info(r: &StaticRegion, now: i64) -> RegionInfo {
         RegionInfo {
             region: r.region.clone(),
             endpoint: r.endpoint.clone(),
@@ -1002,6 +1067,70 @@ impl StaffAdminService {
             enrolled_device_count: 0,
             ts: now,
         }
+    }
+
+    /// This node's LIVE `HealthStatus` via [`bulwark_cluster::Cluster`], or
+    /// `None` when no cluster handle is attached. Content-free (queue depth /
+    /// in-flight / load / latency gauges).
+    async fn local_node_health(&self) -> Option<bulwark_proto::v1::HealthStatus> {
+        use bulwark_cluster::ClusterMember;
+        let cluster = self.fleet.cluster.as_ref()?;
+        cluster
+            .health(bulwark_proto::v1::HealthRequest::default())
+            .await
+            .ok()
+    }
+
+    /// Is `r` the region THIS node serves (so live data attaches to it)?
+    fn is_local_region(&self, r: &StaticRegion) -> bool {
+        !self.fleet.local_region.is_empty() && r.region == self.fleet.local_region
+    }
+
+    /// Content-free `RegionInfo` for `r`, joining LIVE data when `r` is the
+    /// region THIS node serves: `probed = true`, `healthy` from the node's
+    /// `accepting_work`, plus WG peer + enrolled-device COUNTS, the deploy
+    /// version, and this region's TLS-cert expiry. A non-local region falls back
+    /// to [`Self::static_region_info`]. `health` is the LOCAL node's snapshot
+    /// (the caller fetches it once via [`Self::local_node_health`] so a single
+    /// RPC serves both this summary and `FleetHealth.nodes`).
+    fn region_info_with_health(
+        &self,
+        r: &StaticRegion,
+        now: i64,
+        health: Option<&bulwark_proto::v1::HealthStatus>,
+    ) -> RegionInfo {
+        if !self.is_local_region(r) {
+            return Self::static_region_info(r, now);
+        }
+        // A live cluster snapshot makes the node `probed` + sets `healthy` from
+        // `accepting_work`; without one we still surface the COUNTS + cert expiry
+        // we DO have but stay honest that the node itself wasn't probed.
+        RegionInfo {
+            region: r.region.clone(),
+            endpoint: r.endpoint.clone(),
+            probed: health.is_some(),
+            healthy: health.is_some_and(|h| h.accepting_work),
+            deploy_version: env!("CARGO_PKG_VERSION").to_string(),
+            tls_cert_expiry_ts: self.fleet.tls_cert_expiry_ts,
+            wg_peer_count: self.fleet.wg_peers.as_ref().map_or(0, |s| s.peer_count()),
+            enrolled_device_count: self
+                .accounts
+                .as_ref()
+                .map_or(0, |a| a.staff_enrolled_device_count()),
+            ts: now,
+        }
+    }
+
+    /// Content-free `RegionInfo` for `r`, fetching the local node's live health
+    /// when `r` is the region this node serves (else the static fallback).
+    async fn live_region_info(&self, r: &StaticRegion, now: i64) -> RegionInfo {
+        // Only probe the cluster for the local region (no cross-region snapshot).
+        let health = if self.is_local_region(r) {
+            self.local_node_health().await
+        } else {
+            None
+        };
+        self.region_info_with_health(r, now, health.as_ref())
     }
 }
 
@@ -1055,11 +1184,10 @@ impl StaffAdmin for StaffAdminService {
         self.store
             .audit_append(&ident.staff_id, ident.role, "fleet.list_regions", "", "");
         let now = StaffStore::now_ms();
-        let regions = self
-            .regions
-            .iter()
-            .map(|r| Self::region_info(r, now))
-            .collect();
+        let mut regions = Vec::with_capacity(self.regions.len());
+        for r in &self.regions {
+            regions.push(self.live_region_info(r, now).await);
+        }
         Ok(Response::new(Regions { regions }))
     }
 
@@ -1080,12 +1208,24 @@ impl StaffAdmin for StaffAdminService {
             .regions
             .iter()
             .find(|x| x.region == region)
-            .ok_or_else(|| Status::not_found("no such region"))?;
+            .ok_or_else(|| Status::not_found("no such region"))?
+            .clone();
+        // Fetch the local node's live snapshot ONCE (only for the local region),
+        // serving both the RegionInfo summary and the per-node `nodes` list.
+        let health = if self.is_local_region(&cfg) {
+            self.local_node_health().await
+        } else {
+            None
+        };
+        let info = self.region_info_with_health(&cfg, StaffStore::now_ms(), health.as_ref());
+        // Per-node ClusterControl `HealthStatus` snapshots for the LOCAL region
+        // (queue depth / latency / load — already content-free). A non-local
+        // region has no live snapshot here, so `nodes` stays empty.
+        let nodes = health.into_iter().collect();
         Ok(Response::new(FleetHealth {
             region: cfg.region.clone(),
-            info: Some(Self::region_info(cfg, StaffStore::now_ms())),
-            // Per-node ClusterControl snapshots join in increment 4.
-            nodes: vec![],
+            info: Some(info),
+            nodes,
         }))
     }
 
@@ -1681,6 +1821,8 @@ mod tests {
             .into_inner();
         assert_eq!(regions.regions.len(), 1);
         assert_eq!(regions.regions[0].region, "uk");
+        // No live source attached → honest static default (increment-4 probing off).
+        assert!(!regions.regions[0].probed);
 
         // Unknown region → NOT_FOUND.
         let err = svc
@@ -1725,6 +1867,98 @@ mod tests {
         assert_eq!(v.len(), 2);
         assert_eq!(v[0].region, "uk");
         assert_eq!(v[1].endpoint, "nyc:8443");
+    }
+
+    #[tokio::test]
+    async fn fleet_health_joins_live_data_for_the_local_region_only() {
+        use crate::wg_provision::WgPeerStore;
+
+        let (store, _token, _) = bootstrap_store();
+        // A guardian account with one paired (enrolled) device → device count 1.
+        let accounts = AccountStore::new();
+        accounts
+            .create_account("p@x.com", "password123", "P")
+            .unwrap();
+        let (gtoken, _, _) = accounts.login("p@x.com", "password123").unwrap();
+        let (code, _) = accounts.create_pair_code(&gtoken, "Kid").unwrap();
+        accounts.redeem_pair_code(&code, "dev-1").unwrap();
+        // A WG peer store with one enrolled peer → peer count 1. A canonical
+        // 44-char base64 of 32 bytes (data_encoding's decoder is strict).
+        let wg = WgPeerStore::new();
+        wg.register_peer("dev-1", &data_encoding::BASE64.encode(&[1u8; 32]))
+            .unwrap();
+        // This node's cluster (live HealthStatus source).
+        let cluster = std::sync::Arc::new(bulwark_cluster::Cluster::new(
+            bulwark_cluster::ClusterConfig::default(),
+        ));
+
+        let svc = StaffAdminService::new(
+            store.clone(),
+            vec![
+                StaticRegion {
+                    region: "uk".into(),
+                    endpoint: "lon.example:8443".into(),
+                },
+                StaticRegion {
+                    region: "us".into(),
+                    endpoint: "nyc.example:8443".into(),
+                },
+            ],
+        )
+        .with_accounts(accounts.clone())
+        .with_wg_peers(wg)
+        .with_cluster(cluster)
+        .with_local_region("uk", 1_900_000_000_000);
+
+        let token = login_role(&store, &_token, "op@ph.example", StaffRole::Operator);
+
+        // The LOCAL region ("uk") is probed live: healthy, counts, cert expiry.
+        let regions = svc
+            .list_regions(Request::new(RegionsRequest {
+                token: token.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let uk = regions.regions.iter().find(|r| r.region == "uk").unwrap();
+        assert!(uk.probed, "local region must be probed live");
+        assert!(uk.healthy, "a fresh cluster accepts work");
+        assert_eq!(uk.wg_peer_count, 1);
+        assert_eq!(uk.enrolled_device_count, 1);
+        assert_eq!(uk.tls_cert_expiry_ts, 1_900_000_000_000);
+        assert!(!uk.deploy_version.is_empty());
+
+        // A NON-local region ("us") has no live snapshot → honest static default.
+        let us = regions.regions.iter().find(|r| r.region == "us").unwrap();
+        assert!(!us.probed);
+        assert_eq!(us.wg_peer_count, 0);
+        assert_eq!(us.enrolled_device_count, 0);
+        assert_eq!(us.tls_cert_expiry_ts, 0);
+
+        // GetFleetHealth on the local region carries the live per-node HealthStatus.
+        let fh = svc
+            .get_fleet_health(Request::new(FleetHealthRequest {
+                token: token.clone(),
+                region: "uk".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(fh.info.unwrap().probed);
+        assert_eq!(fh.nodes.len(), 1, "local node HealthStatus joined");
+        assert!(fh.nodes[0].accepting_work);
+
+        // A non-local region's health has no node snapshots.
+        let fh_us = svc
+            .get_fleet_health(Request::new(FleetHealthRequest {
+                token,
+                region: "us".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!fh_us.info.unwrap().probed);
+        assert!(fh_us.nodes.is_empty());
     }
 
     /// Sign in a fresh staff account of `role` (created by an ADMIN) over the

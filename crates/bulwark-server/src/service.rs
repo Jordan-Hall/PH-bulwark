@@ -413,6 +413,23 @@ pub async fn run(
         // Built once and shared: StaffAdmin owns it, and FamilySafety authorizes
         // broadcasts against the SAME staff sessions (so a SAFETY_OFFICER/ADMIN
         // session authenticates a broadcast and stamps a real audit id).
+        // WireGuard peer store (FILTER_ON_SERVER): built HERE (before the staff
+        // and WgProvision blocks) so the staff fleet dashboard can read its
+        // enrolled-peer COUNT. Persists the desired peer set to wg_peers.json
+        // under the state dir; an on-box reconciler applies it (the gRPC path
+        // never touches wg(8)). `None` outside accounts mode (no provisioning).
+        let wg_peers = if accounts.is_some() {
+            Some(
+                match &cfg.state_dir {
+                    Some(dir) => WgPeerStore::with_state_dir(dir)?,
+                    None => WgPeerStore::new(),
+                }
+                .with_reserved_from_env(),
+            )
+        } else {
+            None
+        };
+
         let staff_store = if cfg.staff_enabled {
             let staff = match &cfg.state_dir {
                 Some(dir) => StaffStore::with_state_dir(dir)?,
@@ -436,6 +453,18 @@ pub async fn run(
             if let Some(dir) = &cfg.state_dir {
                 staff_svc = staff_svc
                     .with_safety_cases(crate::safety_cases::SafetyCaseStore::with_state_dir(dir)?);
+            }
+            // Live fleet data (increment 4): attach THIS node's cluster handle
+            // (live HealthStatus for the local region) + the WG peer store.
+            // `from_env` already set the local region name + TLS-cert expiry, so
+            // live gauges land on the right RegionInfo. Cross-region data is out
+            // of scope (no cross-region gossip on the single-box deploy) — other
+            // regions stay probed=false.
+            if let Some(c) = &cluster {
+                staff_svc = staff_svc.with_cluster(c.clone());
+            }
+            if let Some(wg) = &wg_peers {
+                staff_svc = staff_svc.with_wg_peers(wg.clone());
             }
             router = router.add_service(StaffAdminServer::new(staff_svc));
             tracing::info!(
@@ -515,12 +544,10 @@ pub async fn run(
             // persists the DESIRED peer set (wg_peers.json under the state
             // dir) — an on-box reconciler applies it with
             // deploy/wireguard/wg-peers.sh; the gRPC path never touches wg(8).
-            // Region material comes from BULWARK_WG_* env (from_env).
-            let wg_peers = match &cfg.state_dir {
-                Some(dir) => WgPeerStore::with_state_dir(dir)?,
-                None => WgPeerStore::new(),
-            }
-            .with_reserved_from_env();
+            // Region material comes from BULWARK_WG_* env (from_env). The store
+            // was built above (so the staff fleet dashboard shares its count);
+            // in accounts mode it is always Some.
+            let wg_peers = wg_peers.unwrap_or_else(WgPeerStore::new);
             router = router.add_service(WgProvisionServer::new(WgProvisionService::from_env(
                 wg_peers,
                 accounts.clone(),

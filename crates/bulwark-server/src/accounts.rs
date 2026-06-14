@@ -954,6 +954,15 @@ impl AccountStore {
         }
     }
 
+    /// STAFF FLEET: total number of enrolled supervised devices across ALL
+    /// families (a COUNT only — never device ids, child ids, addresses, or any
+    /// per-device identity). Feeds the staff fleet dashboard's
+    /// `enrolled_device_count`.
+    pub fn staff_enrolled_device_count(&self) -> u32 {
+        let inner = self.inner.lock().expect("account mutex poisoned");
+        inner.device_to_child.len() as u32
+    }
+
     /// Generate a fresh emailed reset token (plaintext) + its Argon2id hash. Same
     /// readable base32 grouping as the recovery code so a guardian can type it back.
     fn new_reset_token(&self) -> Result<(String, String), AccountError> {
