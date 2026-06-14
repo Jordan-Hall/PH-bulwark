@@ -19,7 +19,10 @@ import java.util.concurrent.Executors
  * The injected page script ([co.predatorhunters.bulwark] `res/raw/bulwark_browser.js`)
  * walks the FULL rendered DOM — visible AND off-viewport — and posts each text run
  * and image element here as `{ id, text|src, rect }`. This class routes that
- * content through the app's EXISTING on-device classifiers, treated as black boxes:
+ * content through the app's EXISTING on-device checks, treated as black boxes
+ * (off-screen content is therefore covered before it scrolls into view; on-screen
+ * content is covered immediately after the check round-trip — see the timing note
+ * on [BrowserActivity]):
  *
  *  - text  -> [RustBridge.analyzeText] (the same grooming/harmful-text path the
  *             AccessibilityService uses) — returns a JSON verdict.
@@ -79,13 +82,28 @@ class BrowserContentFilter(
     @Volatile
     private var pageBlocked = false
 
-    /** Reset when a new URL begins loading so totals don't carry across pages. */
+    /**
+     * Per-NAVIGATION grooming thread id. A browser visits many unrelated pages in
+     * one activity — each page is a separate "surface", so text from different
+     * pages must NOT pool into one grooming thread (the AccessibilityService makes
+     * the same point: a constant id would share the state machine's per-thread
+     * 7-day history across unrelated screens). [reset] advances this on every
+     * navigation, giving within-page context but cross-page isolation.
+     */
+    private val pageSeq = java.util.concurrent.atomic.AtomicInteger(0)
+
+    @Volatile
+    private var pageThread = "browser:0"
+
+    /** Reset when a new URL begins loading so totals + the grooming thread don't
+     *  carry across pages. */
     fun reset() {
         seenText.clear()
         seenImage.clear()
         totalTextChars = 0
         flaggedTextChars = 0
         pageBlocked = false
+        pageThread = "browser:${pageSeq.incrementAndGet()}"
     }
 
     /**
@@ -125,7 +143,7 @@ class BrowserContentFilter(
         if (!seenText.add(text.hashCode())) return // already classified this run
 
         totalTextChars += text.length
-        val verdict = runCatching { RustBridge.analyzeText(BROWSER_APP, BROWSER_THREAD, text) }
+        val verdict = runCatching { RustBridge.analyzeText(BROWSER_APP, pageThread, text) }
             .getOrDefault("{\"error\":\"bridge unavailable\"}")
 
         if (isFlagged(verdict)) {
@@ -237,11 +255,10 @@ class BrowserContentFilter(
     companion object {
         private const val TAG = "BulwarkBrowser"
 
-        /** App/thread labels for the text bridge. A constant per-surface thread id
-         *  keeps the grooming state machine's history scoped to this browser
-         *  surface (not shared with the chat-app threads). */
+        /** App label for the text bridge — a distinct "package" so the browser's
+         *  grooming history is isolated from the chat-app threads. The per-page
+         *  thread id is computed per navigation (see [pageThread]). */
         private const val BROWSER_APP = "co.predatorhunters.bulwark.browser"
-        private const val BROWSER_THREAD = "browser"
 
         private const val FETCH_TIMEOUT_MS = 8000
 

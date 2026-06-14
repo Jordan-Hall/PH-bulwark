@@ -57,17 +57,24 @@ private val Colors = lightColorScheme(
 
 /**
  * The PH Bulwark Browser — a guarded in-app web view that can see a page's FULL
- * rendered content (including off-viewport) and pre-cover unsafe content BEFORE
- * the child reads it. This is the thing a plain VPN can't do for HTTPS without
- * Device Owner: the page is decrypted and rendered locally, so the injected
- * extraction script reads the live DOM and the app's existing on-device
- * classifiers check each text run and image as it loads.
+ * rendered content (including off-viewport) and cover unsafe content. This is the
+ * thing a plain VPN can't do for HTTPS without Device Owner: the page is rendered
+ * locally, so the injected extraction script reads the live DOM — including the
+ * off-screen content a screenshot of the viewport can't see — and the app's
+ * existing on-device checks evaluate each text run and image as it loads.
  *
  * Pipeline (see [BrowserContentFilter] + `res/raw/bulwark_browser.js`):
  *   load URL -> inject extraction JS on page finish -> JS walks DOM (text + img,
- *   visible + off-screen) -> native classifiers -> on a hit, JS draws an opaque
+ *   visible + off-screen) -> native content checks -> on a hit, JS draws an opaque
  *   in-page cover over that element; a predominantly-flagged page shows a calm
  *   full-screen block notice.
+ *
+ * TIMING (honest): the DOM walk is post-render, so a flagged span/image is briefly
+ * visible during the check round-trip (image checks add a fetch + decode), then
+ * covered. A future hardening pass can mask-until-first-scan (an opaque "checking…"
+ * overlay raised on page start, lifted after the first extraction completes) for a
+ * true before-shown guarantee. Off-screen content is covered before it scrolls
+ * into view, since the initial walk already sees the whole document.
  *
  * [WindowManager.LayoutParams.FLAG_SECURE] is set before `setContent` so the
  * window is excluded from screenshots, screen recording, the recents thumbnail,

@@ -53,6 +53,10 @@
   }
 
   // --- TEXT: walk text nodes, attribute each run to its parent element. ------
+  // TODO(hardening): this reads the parent element's full innerText, so deeply
+  // nested elements can over-capture / double-count a subtree's text. Fine for a
+  // first version (the native side de-dupes identical runs by hash); a tighter
+  // pass would emit only the immediate text-node value per node.
   function collectText() {
     var batch = [];
     var walker = document.createTreeWalker(
