@@ -118,12 +118,18 @@ class BulwarkAccessibilityService : AccessibilityService() {
                     if (text.isNotEmpty()) submit(pkg, "notif", text)
                 }
             }
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
             AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED,
             AccessibilityEvent.TYPE_VIEW_SCROLLED -> {
-                // Re-scan on ANY on-screen change incl. scroll, so a cover tracks
-                // the content as it moves and lifts the moment it scrolls away
-                // (event-driven — no periodic polling, no timed auto-lift).
+                // Re-scan on ANY on-screen change: content/text/scroll AND a window
+                // coming to the foreground (TYPE_WINDOW_STATE_CHANGED). The window
+                // case matters because, with no timed backstop, returning to a
+                // STATIC explicit screen (e.g. after pulling the notification shade
+                // or switching apps and back) emits only a window-state event — and
+                // without scanning it the static frame would stay UNcovered until
+                // some later content/scroll event (codex). The capture throttle
+                // dedupes the window+content events that fire together on app open.
                 if (monitored) {
                     // Monitored chat: view-tree TEXT → grooming, PLUS a throttled
                     // frame that runs BOTH image-NSFW and OCR. OCR runs even when the
