@@ -146,7 +146,15 @@ internal fun CameraScreen(
     var recording by remember { mutableStateOf(false) }
     var activeRecording by remember { mutableStateOf<Recording?>(null) }
 
-    val previewView = remember { PreviewView(context) }
+    val previewView = remember {
+        PreviewView(context).apply {
+            // COMPATIBLE (TextureView) — the default PERFORMANCE mode renders the
+            // camera into a separate SurfaceView overlay that setRenderEffect can't
+            // touch, so the live filter preview wouldn't show. TextureView renders
+            // into the view layer, so the filter RenderEffect actually applies.
+            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+        }
+    }
     val imageCapture = remember {
         ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
@@ -180,7 +188,6 @@ internal fun CameraScreen(
                 if (disposed) return@addListener
                 provider = p
                 val preview = Preview.Builder().build()
-                    .also { it.setSurfaceProvider(previewView.surfaceProvider) }
                 // Video mode binds VideoCapture in place of ImageCapture (CameraX
                 // can't run both alongside analysis); the live preview-shield
                 // analyzer stays bound in BOTH modes so the safety layer holds.
@@ -204,6 +211,11 @@ internal fun CameraScreen(
                         CameraSelector.Builder().requireLensFacing(lensFacing).build(),
                         *useCases.toTypedArray(),
                     )
+                    // Attach the preview surface AFTER unbind+bind. Setting it
+                    // before unbindAll (while the old use case still held the
+                    // surface) left the preview BLACK on the Photo->Video swap
+                    // until a full rebind (the flip-twice workaround).
+                    preview.setSurfaceProvider(previewView.surfaceProvider)
                     cameraControl = camera.cameraControl
                     cameraInfo = camera.cameraInfo
                 }
@@ -234,7 +246,13 @@ internal fun CameraScreen(
     // Flash applies to the still ImageCapture; zoom drives the bound camera's
     // control. Both are capture/display settings only — neither affects the RAW
     // frame the safety gate scores.
-    LaunchedEffect(flashMode) { imageCapture.flashMode = flashMode }
+    // Flash ON drives a continuous TORCH (a real, visible light) via the camera
+    // control, AND sets the capture flash; AUTO/OFF leave the torch off and let
+    // the capture decide. Re-applied on (re)bind since the control changes.
+    LaunchedEffect(flashMode, cameraControl) {
+        imageCapture.flashMode = flashMode
+        cameraControl?.enableTorch(flashMode == ImageCapture.FLASH_MODE_ON)
+    }
     LaunchedEffect(zoomRatio, cameraControl) { cameraControl?.setZoomRatio(zoomRatio) }
 
     // Live safety layer for video: if the preview scene is flagged WHILE
