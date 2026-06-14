@@ -86,6 +86,24 @@ object CaTrust {
     }
 
     /**
+     * Read-only check: is the per-install inspection CA already trusted in the
+     * SYSTEM store? Cheap and side-effect-free — for status UI that runs on every
+     * resume. Short-circuits to `false` when not Device Owner (a non-managed
+     * device can never have it system-trusted), avoiding a Rust/JNI call on the
+     * hot path. Never installs anything.
+     */
+    fun isInstalled(ctx: Context): Boolean {
+        if (!Lockdown.isDeviceOwner(ctx)) return false
+        return runCatching {
+            RustBridge.ensureLoaded()
+            val pem = RustBridge.inspectionCaPem(RustBridge.inspectionCaDir(ctx))
+            if (pem.isBlank()) return false
+            val der = pemToDer(pem)
+            Lockdown.dpm(ctx).hasCaCertInstalled(Lockdown.adminComponent(ctx), der)
+        }.getOrDefault(false)
+    }
+
+    /**
      * PEM → DER. `installCaCert`/`hasCaCertInstalled` accept either, but parsing
      * to a real X.509 first rejects garbage early and yields the canonical DER.
      */

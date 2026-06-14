@@ -138,8 +138,30 @@ internal data class SetupState(
      * on-device regardless — this just lets the dashboard say it's rolling out.
      */
     val cloudFilteringRequested: Boolean = false,
+    /**
+     * This app is the Android **Device Owner** — the only role that can install
+     * the per-install TLS-inspection CA into the SYSTEM trust store. Without it,
+     * the filtering VPN fail-closes (it would break all HTTPS), so this gates
+     * whether full network filtering can run at all. Defaulted so existing call
+     * sites (DoneStep summary, journey) stay source-compatible.
+     */
+    val isDeviceOwner: Boolean = false,
+    /**
+     * The per-install TLS-inspection CA is trusted in the SYSTEM store. Together
+     * with [isDeviceOwner] this is what lets inspected HTTPS validate instead of
+     * showing "connection not private".
+     */
+    val caInstalled: Boolean = false,
 ) {
     val vpnReady: Boolean get() = vpnConsented || vpnRunning
+
+    /**
+     * The honest "Protection active" definition: Device Owner + inspection CA
+     * system-trusted + the filtering tunnel actually up. [vpnRunning] alone is
+     * already gated on CA trust by the service's fail-closed [establish] path,
+     * but we state all three so the reason ladder can name the missing piece.
+     */
+    val protectionActive: Boolean get() = isDeviceOwner && caInstalled && vpnRunning
 }
 
 /**
@@ -729,6 +751,11 @@ private fun PairStep(
 
 @Composable
 private fun DoneStep(state: SetupState, onFinish: () -> Unit) {
+    // Honest finish: only claim "Protection active" when the tunnel is genuinely
+    // up (managed device + CA trusted). Otherwise this is a setup-saved state and
+    // the dashboard's managed-device guidance carries the next step — never a
+    // green "active" that contradicts the dashboard.
+    val active = state.protectionActive
     StepScaffold(
         primaryLabel = "Go to dashboard",
         onPrimary = onFinish,
@@ -737,14 +764,14 @@ private fun DoneStep(state: SetupState, onFinish: () -> Unit) {
             Modifier
                 .size(96.dp)
                 .clip(CircleShape)
-                .background(Color(0xFFE7F4EE)),
+                .background(if (active) Color(0xFFE7F4EE) else Color(0xFFFBF2DE)),
             contentAlignment = Alignment.Center,
         ) {
-            Text("✓", color = Good, fontSize = 48.sp, fontWeight = FontWeight.ExtraBold)
+            Text(if (active) "✓" else "→", color = if (active) Good else Warn, fontSize = 48.sp, fontWeight = FontWeight.ExtraBold)
         }
         Spacer(Modifier.height(24.dp))
         Text(
-            "Protection is active",
+            if (active) "Protection active" else "Setup saved",
             color = Navy,
             fontSize = 28.sp,
             fontWeight = FontWeight.ExtraBold,
@@ -752,7 +779,12 @@ private fun DoneStep(state: SetupState, onFinish: () -> Unit) {
         )
         Spacer(Modifier.height(10.dp))
         Text(
-            "All set. PH Bulwark now quietly keeps this device safe — and it never hides what it's doing.",
+            if (active) {
+                "All set. PH Bulwark now quietly keeps this device safe — and it never hides what it's doing."
+            } else {
+                "Your setup is saved. The dashboard shows the last step to turn on full " +
+                    "web filtering — on-device chat safety is already watching meanwhile."
+            },
             color = Slate,
             fontSize = 16.sp,
             textAlign = TextAlign.Center,
@@ -767,7 +799,8 @@ private fun DoneStep(state: SetupState, onFinish: () -> Unit) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 SummaryRow("Paired with parent app", state.paired)
                 SummaryRow("Chat safety on", state.accessibilityOn)
-                SummaryRow("Network filtering on", state.vpnReady)
+                SummaryRow("Network filtering ready", state.vpnReady)
+                SummaryRow("Managed device (full filtering)", state.isDeviceOwner, optionalWhenOff = true)
                 SummaryRow("Anti-removal", state.antiRemovalOn, optionalWhenOff = true)
             }
         }
@@ -787,6 +820,11 @@ internal fun StatusDashboard(
     onOpenAccessibility: () -> Unit,
     onStartVpn: () -> Unit,
     onReconfigure: () -> Unit,
+    /** True only on a fresh/no-accounts device where the app may legitimately
+     *  launch managed provisioning itself; surfaces the one-tap entry. */
+    canProvisionManaged: Boolean = false,
+    /** Launch the platform managed-provisioning flow (Device Owner setup). */
+    onProvisionManaged: () -> Unit = {},
 ) {
     Column(
         Modifier
@@ -797,12 +835,16 @@ internal fun StatusDashboard(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        val allOn = isFullySetUp(state)
+        // HONEST header: "Protection active" requires the filtering tunnel to be
+        // genuinely up — which the service only allows on a managed (Device Owner)
+        // device with the inspection CA system-trusted. Everything short of that
+        // is "Setup needed" with one calm, guardian-facing reason.
+        val active = state.protectionActive
         Box(
             Modifier
                 .size(112.dp)
                 .clip(CircleShape)
-                .background(if (allOn) Color(0x1F57A639) else Color(0x1F996D14)),
+                .background(if (active) Color(0x1F57A639) else Color(0x1F996D14)),
             contentAlignment = Alignment.Center,
         ) {
             Image(
@@ -815,19 +857,15 @@ internal fun StatusDashboard(
         }
         Text("PH BULWARK", color = Slate, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
         Text(
-            if (allOn) "You're protected" else "Almost protected",
+            if (active) "Protection active" else "Setup needed",
             color = Navy,
             fontSize = 26.sp,
             fontWeight = FontWeight.ExtraBold,
             textAlign = TextAlign.Center,
         )
         Text(
-            if (allOn) {
-                "PH Bulwark is quietly keeping this device safe."
-            } else {
-                "A couple of things need a quick fix — the buttons below will sort it."
-            },
-            color = if (allOn) Good else Warn,
+            statusReason(state),
+            color = if (active) Good else Warn,
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
             textAlign = TextAlign.Center,
@@ -848,7 +886,11 @@ internal fun StatusDashboard(
                 Text("Status", color = Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                 SummaryRow("Paired with parent app", state.paired)
                 SummaryRow("Chat safety on", state.accessibilityOn)
-                SummaryRow("Network filtering on", state.vpnReady)
+                // HONEST: network filtering is "on" only when the tunnel is truly
+                // up. The service fail-closes off a managed device, so consent
+                // alone must not read as "filtering on".
+                SummaryRow("Network filtering on", state.vpnRunning)
+                SummaryRow("Managed device (full filtering)", state.isDeviceOwner, optionalWhenOff = true)
                 SummaryRow("Anti-removal", state.antiRemovalOn, optionalWhenOff = true)
                 if (state.cloudFilteringRequested) {
                     Row(
@@ -894,10 +936,22 @@ internal fun StatusDashboard(
             }
         }
 
+        // The blocker for full web filtering: only a Device Owner can system-trust
+        // the on-device TLS-inspection certificate, so an unmanaged device gets the
+        // honest "what to do next" instead of a silent half-protected state.
+        if (!state.isDeviceOwner) {
+            ManagedSetupCard(
+                canProvisionManaged = canProvisionManaged,
+                onProvisionManaged = onProvisionManaged,
+            )
+        }
+
         if (!state.accessibilityOn) {
             DashboardAction("Turn on chat safety", onOpenAccessibility)
         }
-        if (!state.vpnReady) {
+        // Honest: offer the action whenever filtering is not actually running
+        // (consent without a live tunnel still needs a tap to (re)start it).
+        if (!state.vpnRunning) {
             DashboardAction("Turn on network filtering", onStartVpn)
         }
 
@@ -912,6 +966,114 @@ internal fun StatusDashboard(
         }
 
         PrivacyFooter()
+    }
+}
+
+/**
+ * ONE calm, guardian-facing line explaining the current protection state. The
+ * ladder names the single most important missing piece (most-blocking first) so
+ * the dashboard never says "Protection active" and "do X" at the same time.
+ */
+internal fun statusReason(state: SetupState): String = when {
+    state.protectionActive ->
+        "PH Bulwark is quietly keeping this device safe."
+    !state.paired ->
+        "Finish pairing with the parent app to link this device to your family."
+    !state.isDeviceOwner ->
+        "Full web filtering needs this set up as a managed device. " +
+            "Until then, on-device chat safety still watches what's on screen."
+    !state.caInstalled ->
+        "Finishing secure-site setup so filtered sites stay trusted. " +
+            "Re-open filtering if this doesn't clear shortly."
+    !state.vpnConsented ->
+        "Turn on network filtering to check web and app traffic on this device."
+    else ->
+        "Network filtering is starting up. If it doesn't come on, tap " +
+            "\"Turn on network filtering\" below."
+}
+
+/**
+ * Guidance for getting this device to **Device Owner**, the only role that can
+ * system-trust the on-device TLS-inspection certificate so secure sites can be
+ * filtered. Two honest, real paths — never a button that pretends to do what the
+ * app can't. Where the platform genuinely allows in-app managed provisioning
+ * (a fresh / no-accounts device), the one-tap entry is offered.
+ */
+@Composable
+private fun ManagedSetupCard(
+    canProvisionManaged: Boolean,
+    onProvisionManaged: () -> Unit,
+) {
+    Card(
+        Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        elevation = CardDefaults.cardElevation(1.dp),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Turn on full web filtering", color = Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Text(
+                "To filter secure (https) sites, this device has to be set up as a " +
+                    "managed device. That lets PH Bulwark trust its own on-device " +
+                    "inspection certificate so pages still load normally. Choose the " +
+                    "path that matches your device:",
+                color = Slate,
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
+            )
+            ProvisionPath(
+                badge = "A",
+                title = "A brand-new or factory-reset device",
+                body = "Start it from the first \"Hi there\" setup screen and scan the " +
+                    "managed-setup QR from PH Bulwark Manager. The device sets itself " +
+                    "up managed automatically.",
+            )
+            ProvisionPath(
+                badge = "B",
+                title = "A device already in use",
+                body = "Remove every account in Settings first, then a guardian runs the " +
+                    "one-time managed-setup command from a computer, and you re-add the " +
+                    "accounts. PH Bulwark Manager has the step-by-step guide.",
+            )
+            if (canProvisionManaged) {
+                Spacer(Modifier.height(2.dp))
+                Button(
+                    onClick = onProvisionManaged,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Navy, contentColor = Color.White),
+                ) {
+                    Text("Set up as a managed device", fontWeight = FontWeight.SemiBold)
+                }
+                Text(
+                    "Available because this device has no accounts yet.",
+                    color = Slate,
+                    fontSize = 11.sp,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProvisionPath(badge: String, title: String, body: String) {
+    Row(verticalAlignment = Alignment.Top) {
+        Box(
+            Modifier
+                .size(24.dp)
+                .clip(CircleShape)
+                .background(Color(0xFFEAF1F6)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(badge, color = Navy, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        }
+        Spacer(Modifier.width(10.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(title, color = Ink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            Text(body, color = Slate, fontSize = 12.sp, lineHeight = 16.sp)
+        }
     }
 }
 
