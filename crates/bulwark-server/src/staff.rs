@@ -50,9 +50,10 @@ use crate::accounts::{
 use crate::persist::JsonFile;
 use bulwark_proto::v1::staff_admin_server::StaffAdmin;
 use bulwark_proto::v1::{
-    CreateStaffRequest, FleetHealth, FleetHealthRequest, RegionInfo, Regions, RegionsRequest,
-    StaffAck, StaffAuditEntry, StaffAuditPage, StaffAuditQuery, StaffLoginRequest, StaffRole,
-    StaffSession,
+    CreateStaffRequest, FleetHealth, FleetHealthRequest, GuardianMeta, GuardianMetaRequest,
+    RegionInfo, Regions, RegionsRequest, StaffAck, StaffAuditEntry, StaffAuditPage, StaffAuditQuery,
+    StaffLoginRequest, StaffRole, StaffSession, TriggerGuardianResetAck, TriggerGuardianResetRequest,
+    UnlockGuardianAck, UnlockGuardianRequest,
 };
 use ring::rand::{SecureRandom, SystemRandom};
 use tonic::{Request, Response, Status};
@@ -92,6 +93,10 @@ pub const ALL_STAFF_ROLES: [StaffRole; 4] = [
     StaffRole::Operator,
     StaffRole::Admin,
 ];
+
+/// Guardian-support RPCs (reset / unlock / metadata) are SUPPORT or ADMIN only —
+/// OPERATOR is fleet-only and SAFETY_OFFICER is case-only (least privilege).
+pub const SUPPORT_ROLES: [StaffRole; 2] = [StaffRole::Support, StaffRole::Admin];
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -895,11 +900,36 @@ fn parse_regions(s: &str) -> Vec<StaticRegion> {
 pub struct StaffAdminService {
     store: StaffStore,
     regions: Vec<StaticRegion>,
+    /// Guardian account store — present enables the increment-2 support RPCs
+    /// (reset / unlock / metadata). `None` → those RPCs return FAILED_PRECONDITION.
+    accounts: Option<crate::accounts::AccountStore>,
+    /// Reset-code mailer — present lets `TriggerGuardianReset` actually email the
+    /// guardian. `None` → a reset is minted but `dispatched` is false (SMTP off).
+    reset_mailer: Option<crate::reset_mailer::ResetMailer>,
 }
 
 impl StaffAdminService {
     pub fn new(store: StaffStore, regions: Vec<StaticRegion>) -> Self {
-        Self { store, regions }
+        Self {
+            store,
+            regions,
+            accounts: None,
+            reset_mailer: None,
+        }
+    }
+
+    /// Attach the guardian [`AccountStore`](crate::accounts::AccountStore) so the
+    /// guardian-support RPCs can act on guardian accounts (by email, content-free).
+    pub fn with_accounts(mut self, accounts: crate::accounts::AccountStore) -> Self {
+        self.accounts = Some(accounts);
+        self
+    }
+
+    /// Attach the [`ResetMailer`](crate::reset_mailer::ResetMailer) so a staff
+    /// guardian reset actually emails the code (which staff never see).
+    pub fn with_reset_mailer(mut self, mailer: crate::reset_mailer::ResetMailer) -> Self {
+        self.reset_mailer = Some(mailer);
+        self
     }
 
     /// Regions from `BULWARK_STAFF_REGIONS`, else this node itself
@@ -1047,6 +1077,103 @@ impl StaffAdmin for StaffAdminService {
             entries,
             next_seq,
             chain_ok,
+        }))
+    }
+
+    async fn trigger_guardian_reset(
+        &self,
+        req: Request<TriggerGuardianResetRequest>,
+    ) -> Result<Response<TriggerGuardianResetAck>, Status> {
+        let token = Self::token_or_meta(&req, &req.get_ref().token);
+        let r = req.into_inner();
+        let ident = self.store.authorize(&token, &SUPPORT_ROLES)?;
+        let accounts = self.accounts.as_ref().ok_or_else(|| {
+            Status::failed_precondition("guardian support unavailable (accounts not configured)")
+        })?;
+        // Mint + email the reset via the SAME path as self-service; staff NEVER see
+        // the code. dispatched=false covers unknown email / throttled / SMTP-off
+        // alike (anti-enumeration — staff can't probe which emails exist).
+        let dispatched = match accounts.request_password_reset(&r.guardian_email) {
+            Ok(Some((recipient, code))) => match &self.reset_mailer {
+                Some(mailer) => mailer
+                    .send_reset_code(
+                        &recipient,
+                        &code,
+                        crate::accounts::reset_token_ttl_minutes(),
+                    )
+                    .await
+                    .is_ok(),
+                None => false,
+            },
+            _ => false,
+        };
+        // Content-free audit: never the guardian email/id; only the outcome.
+        self.store.audit_append(
+            &ident.staff_id,
+            ident.role,
+            "guardian.reset",
+            "",
+            if dispatched { "dispatched" } else { "no-op" },
+        );
+        Ok(Response::new(TriggerGuardianResetAck {
+            dispatched,
+            detail: "if the account exists, a reset code was emailed to the guardian".to_string(),
+        }))
+    }
+
+    async fn unlock_guardian_account(
+        &self,
+        req: Request<UnlockGuardianRequest>,
+    ) -> Result<Response<UnlockGuardianAck>, Status> {
+        let token = Self::token_or_meta(&req, &req.get_ref().token);
+        let r = req.into_inner();
+        let ident = self.store.authorize(&token, &SUPPORT_ROLES)?;
+        let accounts = self.accounts.as_ref().ok_or_else(|| {
+            Status::failed_precondition("guardian support unavailable (accounts not configured)")
+        })?;
+        let existed = accounts.staff_clear_lockout(&r.guardian_email);
+        self.store.audit_append(
+            &ident.staff_id,
+            ident.role,
+            "guardian.unlock",
+            "",
+            if existed { "cleared" } else { "no-account" },
+        );
+        Ok(Response::new(UnlockGuardianAck {
+            existed,
+            detail: if existed {
+                "sign-in lockout cleared".to_string()
+            } else {
+                "no account with that email".to_string()
+            },
+        }))
+    }
+
+    async fn get_guardian_meta(
+        &self,
+        req: Request<GuardianMetaRequest>,
+    ) -> Result<Response<GuardianMeta>, Status> {
+        let token = Self::token_or_meta(&req, &req.get_ref().token);
+        let r = req.into_inner();
+        let ident = self.store.authorize(&token, &SUPPORT_ROLES)?;
+        let accounts = self.accounts.as_ref().ok_or_else(|| {
+            Status::failed_precondition("guardian support unavailable (accounts not configured)")
+        })?;
+        let m = accounts.staff_guardian_meta(&r.guardian_email);
+        self.store.audit_append(
+            &ident.staff_id,
+            ident.role,
+            "guardian.meta",
+            "",
+            if m.exists { "hit" } else { "miss" },
+        );
+        Ok(Response::new(GuardianMeta {
+            exists: m.exists,
+            locked: m.locked,
+            has_recovery_code: m.has_recovery_code,
+            reset_pending: m.reset_pending,
+            child_count: m.child_count,
+            device_count: m.device_count,
         }))
     }
 }

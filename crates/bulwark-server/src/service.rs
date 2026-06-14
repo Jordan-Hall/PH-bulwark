@@ -419,9 +419,18 @@ pub async fn run(
                 None => StaffStore::new(),
             }
             .with_bootstrap_from_env();
-            router = router.add_service(StaffAdminServer::new(StaffAdminService::from_env(
-                staff.clone(),
-            )));
+            // Wire the guardian AccountStore + reset mailer so the increment-2
+            // support RPCs (reset / unlock / metadata) can act on guardian accounts
+            // (by email, content-free). Absent accounts → those RPCs return
+            // FAILED_PRECONDITION; absent SMTP → a reset mints but can't email.
+            let mut staff_svc = StaffAdminService::from_env(staff.clone());
+            if let Some(acc) = &accounts {
+                staff_svc = staff_svc.with_accounts(acc.clone());
+                if let Some(mailer) = crate::reset_mailer::ResetMailer::from_env() {
+                    staff_svc = staff_svc.with_reset_mailer(mailer);
+                }
+            }
+            router = router.add_service(StaffAdminServer::new(staff_svc));
             tracing::info!(
                 "staff admin ENABLED — separate staff accounts, TOTP required, every action audited"
             );

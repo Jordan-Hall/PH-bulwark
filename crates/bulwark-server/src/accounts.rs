@@ -132,6 +132,31 @@ fn reset_token_ttl_ms() -> i64 {
         .saturating_mul(1000)
 }
 
+/// Reset-token TTL in whole minutes (the figure shown in the reset email). Public
+/// so the staff guardian-support path renders the same TTL as self-service reset.
+pub fn reset_token_ttl_minutes() -> i64 {
+    (reset_token_ttl_ms() / 60_000).max(1)
+}
+
+/// Content-free guardian metadata for the staff support path — existence, lockout
+/// state, recovery/reset flags, and COUNTS only. Never names, ids, tokens, emails,
+/// addresses, or any message/alert content.
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+pub struct GuardianMetaData {
+    /// An account with the queried email exists.
+    pub exists: bool,
+    /// A sign-in lockout (failed-attempt throttle) is currently active.
+    pub locked: bool,
+    /// A self-service recovery code is set.
+    pub has_recovery_code: bool,
+    /// An emailed reset token is outstanding.
+    pub reset_pending: bool,
+    /// Number of children this guardian is assigned to (COUNT only).
+    pub child_count: u32,
+    /// Number of those children with a supervised device (COUNT only).
+    pub device_count: u32,
+}
+
 /// Pairing codes are a short-lived, single-use linking credential.
 const PAIR_CODE_TTL_SECS: i64 = 15 * 60;
 /// Single global key for the pair-code redeem throttle: redemption is
@@ -872,6 +897,61 @@ impl AccountStore {
         }
         self.persist_locked(&inner);
         Ok(Some((email_key, code)))
+    }
+
+    /// STAFF SUPPORT: clear a guardian's in-memory failed-attempt lockouts (login,
+    /// reset-guess, and reset-request throttles) so a locked-out guardian can try
+    /// again at once. Touches NO password, session, recovery code, or content.
+    /// Returns whether an account with that email exists (for an honest ack). The
+    /// caller (StaffAdmin) audits the action.
+    pub fn staff_clear_lockout(&self, email: &str) -> bool {
+        let key = normalize_email(email);
+        let mut inner = self.inner.lock().expect("account mutex poisoned");
+        inner.login_fails.remove(&key);
+        inner.reset_fails.remove(&key);
+        inner.request_fails.remove(&key);
+        let existed = inner.by_email.contains_key(&key);
+        self.persist_locked(&inner);
+        existed
+    }
+
+    /// STAFF SUPPORT: content-free metadata for one guardian account (existence,
+    /// lockout state, recovery/reset flags, child + device COUNTS). Never returns
+    /// names, ids, tokens, the email, addresses, or any message/alert content.
+    pub fn staff_guardian_meta(&self, email: &str) -> GuardianMetaData {
+        let key = normalize_email(email);
+        let now = Self::now_ms();
+        let (max_fails, window_ms) = login_throttle_params();
+        let inner = self.inner.lock().expect("account mutex poisoned");
+        let acct = match inner.by_email.get(&key) {
+            Some(a) => a,
+            None => return GuardianMetaData::default(), // exists = false, all zero
+        };
+        let account_id = acct.account_id.clone();
+        let locked = inner
+            .login_fails
+            .get(&key)
+            .is_some_and(|t| throttle_locked(t, now, window_ms, max_fails));
+        let has_recovery_code = acct.recovery_phc.is_some();
+        let reset_pending = acct.reset_token.is_some();
+        let mut child_count = 0u32;
+        let mut device_count = 0u32;
+        for c in inner.children.values() {
+            if c.guardians.contains(&account_id) {
+                child_count = child_count.saturating_add(1);
+                if !c.device_id.trim().is_empty() {
+                    device_count = device_count.saturating_add(1);
+                }
+            }
+        }
+        GuardianMetaData {
+            exists: true,
+            locked,
+            has_recovery_code,
+            reset_pending,
+            child_count,
+            device_count,
+        }
     }
 
     /// Generate a fresh emailed reset token (plaintext) + its Argon2id hash. Same
@@ -2751,5 +2831,45 @@ mod tests {
         assert!(code
             .chars()
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-'));
+    }
+
+    #[test]
+    fn staff_guardian_meta_is_content_free_and_counts_only() {
+        let store = AccountStore::new();
+        // Unknown email → exists=false, everything zero (anti-enumeration shape).
+        let m0 = store.staff_guardian_meta("nobody@x.com");
+        assert_eq!(m0, GuardianMetaData::default());
+        assert!(!m0.exists);
+
+        let (_id, created, recovery) = store.create_account("g@x.com", "oldpassword", "G").unwrap();
+        assert!(created);
+        assert!(!recovery.is_empty());
+        let m1 = store.staff_guardian_meta("G@x.com"); // case-insensitive (normalized)
+        assert!(m1.exists);
+        assert!(m1.has_recovery_code, "a freshly created account has a recovery code");
+        assert!(!m1.locked);
+        assert!(!m1.reset_pending);
+        assert_eq!(m1.child_count, 0);
+        assert_eq!(m1.device_count, 0);
+    }
+
+    #[test]
+    fn staff_clear_lockout_reports_existence_and_is_safe_on_unknown() {
+        let store = AccountStore::new();
+        store.create_account("g@x.com", "oldpassword", "G").unwrap();
+        // Existing account → true; unknown email → false (no panic, idempotent).
+        assert!(store.staff_clear_lockout("g@x.com"));
+        assert!(store.staff_clear_lockout("g@x.com")); // idempotent
+        assert!(!store.staff_clear_lockout("nobody@x.com"));
+    }
+
+    #[test]
+    fn staff_meta_reflects_a_pending_emailed_reset() {
+        let store = AccountStore::new();
+        store.create_account("g@x.com", "oldpassword", "G").unwrap();
+        // request_password_reset mints + stores a reset token for a real account.
+        let dispatched = store.request_password_reset("g@x.com").unwrap();
+        assert!(dispatched.is_some(), "a real account mints a reset token");
+        assert!(store.staff_guardian_meta("g@x.com").reset_pending);
     }
 }
