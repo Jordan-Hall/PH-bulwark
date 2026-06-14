@@ -57,13 +57,25 @@ class BulwarkVpnService : VpnService() {
         // uses (filesDir/ca), so the installed root matches the minted leaves.
         val caResult = co.predatorhunters.bulwark.admin.CaTrust.ensureInstalled(this)
         Log.i(TAG, "inspection CA trust: $caResult")
-        if (caResult == co.predatorhunters.bulwark.admin.CaTrust.Result.NOT_MANAGED ||
-            caResult == co.predatorhunters.bulwark.admin.CaTrust.Result.ERROR
-        ) {
+        // FAIL CLOSED: bring the tunnel up ONLY on a CONFIRMED system-store install
+        // (Device Owner). Every other result means the inspection CA is NOT trusted,
+        // so the MITM proxy would mint leaves apps reject (CertificateUnknown) and,
+        // since ~all traffic is HTTPS, the device loses connectivity ("network not
+        // working"):
+        //   NOT_MANAGED — not Device Owner (Android 7+ ignores user-store CAs)
+        //   NO_CA       — the CA could not be loaded/generated (engine/ca_dir issue)
+        //   ERROR       — installCaCert failed
+        // (Note: DevicePolicyManager.installCaCert on a Device Owner is the platform
+        // mechanism for system trust — non-pinned apps using the default trust config
+        // accept it; cert-pinned / custom-trust-anchor apps are the documented
+        // residual the on-device accessibility/OCR path covers, never the wire.)
+        val caTrusted = caResult == co.predatorhunters.bulwark.admin.CaTrust.Result.INSTALLED_SYSTEM ||
+            caResult == co.predatorhunters.bulwark.admin.CaTrust.Result.ALREADY_TRUSTED
+        if (!caTrusted) {
             Log.e(
                 TAG,
-                "not bringing up the tunnel: inspection CA is not system-trusted " +
-                    "(needs Device-Owner provisioning) — would break all HTTPS",
+                "not bringing up the tunnel: inspection CA not system-trusted " +
+                    "($caResult; needs Device-Owner provisioning) — would break all HTTPS",
             )
             notifyProvisioningRequired()
             running = false
