@@ -1,11 +1,14 @@
 package co.predatorhunters.bulwark.camera
 
 import android.Manifest
+import android.content.ContentValues
+import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.SystemClock
+import android.provider.MediaStore
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraControl
@@ -18,6 +21,14 @@ import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.core.UseCase
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.video.FallbackStrategy
+import androidx.camera.video.FileOutputOptions
+import androidx.camera.video.Quality
+import androidx.camera.video.QualitySelector
+import androidx.camera.video.Recorder
+import androidx.camera.video.Recording
+import androidx.camera.video.VideoCapture
+import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -64,6 +75,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import java.io.File
 import java.util.concurrent.Executors
 import kotlinx.coroutines.delay
 
@@ -123,6 +135,8 @@ internal fun CameraScreen(
     var cameraInfo by remember { mutableStateOf<CameraInfo?>(null) }
     var flashMode by remember { mutableStateOf(ImageCapture.FLASH_MODE_OFF) }
     var zoomRatio by remember { mutableStateOf(1f) }
+    var recording by remember { mutableStateOf(false) }
+    var activeRecording by remember { mutableStateOf<Recording?>(null) }
 
     val previewView = remember { PreviewView(context) }
     val imageCapture = remember {
@@ -130,12 +144,25 @@ internal fun CameraScreen(
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
             .build()
     }
+    val videoCapture = remember {
+        VideoCapture.withOutput(
+            Recorder.Builder()
+                .setQualitySelector(
+                    QualitySelector.from(
+                        Quality.HD,
+                        FallbackStrategy.lowerQualityOrHigherThan(Quality.SD),
+                    ),
+                )
+                .build(),
+        )
+    }
     val workerExecutor = remember { Executors.newSingleThreadExecutor() }
+    val mainExecutor = remember { ContextCompat.getMainExecutor(context) }
     DisposableEffect(Unit) { onDispose { workerExecutor.shutdown() } }
 
     // Bind the camera; re-runs when permission lands, the lens flips, or the
     // gate becomes ready (the preview shield needs the gate).
-    DisposableEffect(hasPermission, lensFacing, gate) {
+    DisposableEffect(hasPermission, lensFacing, gate, mode.isVideo) {
         var disposed = false
         var provider: ProcessCameraProvider? = null
         if (hasPermission) {
@@ -146,7 +173,11 @@ internal fun CameraScreen(
                 provider = p
                 val preview = Preview.Builder().build()
                     .also { it.setSurfaceProvider(previewView.surfaceProvider) }
-                val useCases = mutableListOf<UseCase>(preview, imageCapture)
+                // Video mode binds VideoCapture in place of ImageCapture (CameraX
+                // can't run both alongside analysis); the live preview-shield
+                // analyzer stays bound in BOTH modes so the safety layer holds.
+                val captureUseCase: UseCase = if (mode.isVideo) videoCapture else imageCapture
+                val useCases = mutableListOf<UseCase>(preview, captureUseCase)
                 if (gate != null) {
                     val analysis = ImageAnalysis.Builder()
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -198,9 +229,18 @@ internal fun CameraScreen(
     LaunchedEffect(flashMode) { imageCapture.flashMode = flashMode }
     LaunchedEffect(zoomRatio, cameraControl) { cameraControl?.setZoomRatio(zoomRatio) }
 
+    // Live safety layer for video: if the preview scene is flagged WHILE
+    // recording, stop immediately. The finalized clip is then re-scanned and
+    // (being unsafe) discarded — nothing reaches the gallery.
+    LaunchedEffect(previewFlagged) {
+        if (previewFlagged && recording) activeRecording?.stop()
+    }
+
     val gateReady = gate != null && !gateLoading
-    val shutterEnabled =
-        hasPermission && gateReady && !previewFlagged && !capturing && notice != Notice.BlockedNsfw
+    // While recording, the shutter stays live so it can STOP (the live analyzer
+    // auto-stops on a flag); otherwise it's the still/start-recording gate.
+    val shutterEnabled = hasPermission && gateReady && notice != Notice.BlockedNsfw &&
+        !capturing && (recording || !previewFlagged)
 
     fun takePhoto() {
         val g = gate ?: return
@@ -246,6 +286,60 @@ internal fun CameraScreen(
                 }
             },
         )
+    }
+
+    // Video: record to an APP-PRIVATE temp file, then VideoGate.rescan EVERY
+    // sampled frame before publishing. A single flagged frame (or any failure)
+    // deletes the temp and publishes nothing — the clip is never user-visible
+    // until a fully-clean re-scan (VideoGate's documented two-layer contract).
+    fun finalizeRecording(event: VideoRecordEvent.Finalize, temp: File) {
+        recording = false
+        activeRecording = null
+        if (event.hasError()) {
+            temp.delete()
+            notice = Notice.SaveFailed
+            return
+        }
+        val g = gate
+        if (g == null) {
+            temp.delete()
+            notice = Notice.CheckFailed
+            return
+        }
+        capturing = true // re-scan in progress: gate the shutter, show busy
+        workerExecutor.execute {
+            val result = VideoGate.rescan(temp, g)
+            val published = result == VideoGate.Result.Clean && publishVideoToGallery(context, temp)
+            temp.delete()
+            mainExecutor.execute {
+                notice = when (result) {
+                    VideoGate.Result.Clean -> if (published) Notice.Saved else Notice.SaveFailed
+                    VideoGate.Result.Blocked -> Notice.BlockedNsfw
+                    VideoGate.Result.CheckFailed -> Notice.CheckFailed
+                }
+                capturing = false
+            }
+        }
+    }
+
+    fun toggleRecording() {
+        if (recording) {
+            activeRecording?.stop()
+            return
+        }
+        if (!shutterEnabled || gate == null) return
+        val temp = File(context.cacheDir, "rec_${System.currentTimeMillis()}.mp4")
+        // Video-only (no audio): we never request RECORD_AUDIO, so clips are
+        // silent for now (audio capture is a follow-up).
+        activeRecording = videoCapture.output
+            .prepareRecording(context, FileOutputOptions.Builder(temp).build())
+            .start(mainExecutor) { event ->
+                when (event) {
+                    is VideoRecordEvent.Start -> recording = true
+                    is VideoRecordEvent.Finalize -> finalizeRecording(event, temp)
+                    else -> Unit
+                }
+            }
     }
 
     Box(Modifier.fillMaxSize().background(Ink)) {
@@ -308,9 +402,13 @@ internal fun CameraScreen(
                 // Pro) are offered for now — each applies real Camera2 scene hints;
                 // Video recording is a follow-up (VideoGate scaffold is in place).
                 ModeCarousel(
-                    modes = remember { CameraMode.strip.filter { it.isStill } },
+                    // Video is offered only when saving to the gallery — the
+                    // "return a result" contract (onDeliverResult) is photo-only.
+                    modes = remember(captureForResult) {
+                        if (captureForResult) CameraMode.strip.filter { it.isStill } else CameraMode.strip
+                    },
                     selected = mode,
-                    enabled = !capturing,
+                    enabled = !capturing && !recording,
                     onSelect = { mode = it },
                 )
                 Spacer(Modifier.height(12.dp))
@@ -336,19 +434,22 @@ internal fun CameraScreen(
                     Spacer(Modifier.weight(1f))
                     MorphShutter(
                         mode = mode,
-                        recording = false,
+                        recording = recording,
                         enabled = shutterEnabled,
                         busy = capturing,
-                        onClick = ::takePhoto,
+                        onClick = { if (mode.isVideo) toggleRecording() else takePhoto() },
                     )
                     Spacer(Modifier.weight(1f))
-                    OutlinedButton(onClick = {
-                        lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) {
-                            CameraSelector.LENS_FACING_FRONT
-                        } else {
-                            CameraSelector.LENS_FACING_BACK
-                        }
-                    }) {
+                    OutlinedButton(
+                        enabled = !recording,
+                        onClick = {
+                            lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) {
+                                CameraSelector.LENS_FACING_FRONT
+                            } else {
+                                CameraSelector.LENS_FACING_BACK
+                            }
+                        },
+                    ) {
                         Text(stringResource(R.string.cd_flip), color = Color.White, fontSize = 12.sp)
                     }
                 }
@@ -524,6 +625,30 @@ private fun applyFilterToJpeg(jpeg: ByteArray, rotationDegrees: Int, filter: Cam
         out.toByteArray()
     }.getOrDefault(jpeg)
 }
+
+/**
+ * Publish a re-scanned-clean recording to the gallery (MediaStore Movies): copy
+ * the app-private temp into a pending entry, then clear IS_PENDING. The caller
+ * deletes the temp afterwards and only ever calls this AFTER a clean [VideoGate]
+ * re-scan — an unsafe clip is never published.
+ */
+private fun publishVideoToGallery(context: Context, temp: File): Boolean = runCatching {
+    val resolver = context.contentResolver
+    val values = ContentValues().apply {
+        put(MediaStore.Video.Media.DISPLAY_NAME, "PHBulwark_${System.currentTimeMillis()}.mp4")
+        put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+        put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/PH Bulwark")
+        put(MediaStore.Video.Media.IS_PENDING, 1)
+    }
+    val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+        ?: return@runCatching false
+    resolver.openOutputStream(uri)?.use { out -> temp.inputStream().use { it.copyTo(out) } }
+        ?: return@runCatching false
+    values.clear()
+    values.put(MediaStore.Video.Media.IS_PENDING, 0)
+    resolver.update(uri, values, null, null)
+    true
+}.getOrDefault(false)
 
 // ---------------------------------------------------------------------------
 // Small UI pieces (existing app's calm visual language)
