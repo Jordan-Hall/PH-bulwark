@@ -51,7 +51,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -87,16 +89,16 @@ internal val Danger = Color(0xFFC0392B)
 // ---------------------------------------------------------------------------
 // Server model — keep IDs/endpoints identical to the previous screen.
 // ---------------------------------------------------------------------------
-internal data class ServerOption(val id: String, val label: String, val endpoint: String)
+internal data class ServerOption(val id: String, val labelRes: Int, val endpoint: String)
 
 internal val Servers = listOf(
     ServerOption(
         "uk",
-        "UK - London",
+        R.string.server_uk,
         "https://api.predatorhunters.co.uk:8443",
     ),
-    ServerOption("us", "US cloud", "https://us.cloud.phbulwark.app"),
-    ServerOption("self", "Self-hosted", ""),
+    ServerOption("us", R.string.server_us, "https://us.cloud.phbulwark.app"),
+    ServerOption("self", R.string.server_self, ""),
 )
 
 internal const val DEFAULT_SERVER = "uk"
@@ -218,7 +220,7 @@ internal fun OnboardingJourney(
             ProgressDots(current = progressIndex, total = ProgressSteps.size)
             Spacer(Modifier.height(6.dp))
             Text(
-                "Step ${progressIndex + 1} of ${ProgressSteps.size}",
+                stringResource(R.string.step_progress, progressIndex + 1, ProgressSteps.size),
                 color = Slate,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Medium,
@@ -308,19 +310,19 @@ internal fun OnboardingJourney(
 @Composable
 private fun WelcomeStep(onNext: () -> Unit) {
     StepScaffold(
-        primaryLabel = "Get started",
+        primaryLabel = stringResource(R.string.welcome_cta),
         onPrimary = onNext,
     ) {
         Image(
             painter = painterResource(R.drawable.bulwark_logo),
-            contentDescription = "PH Bulwark Shield",
+            contentDescription = stringResource(R.string.cd_shield),
             modifier = Modifier
                 .size(112.dp)
                 .clip(RoundedCornerShape(24.dp)),
         )
         Spacer(Modifier.height(24.dp))
         Text(
-            "Welcome to PH Bulwark",
+            stringResource(R.string.welcome_title),
             color = Navy,
             fontSize = 30.sp,
             fontWeight = FontWeight.ExtraBold,
@@ -328,29 +330,29 @@ private fun WelcomeStep(onNext: () -> Unit) {
         )
         Spacer(Modifier.height(12.dp))
         Text(
-            "A calmer way to keep this device safe. We'll guide you through setup — it takes about two minutes.",
+            stringResource(R.string.welcome_body),
             color = Slate,
             fontSize = 16.sp,
             fontWeight = FontWeight.Medium,
             textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(20.dp))
-        TrustChip("Private by design")
+        TrustChip(stringResource(R.string.welcome_chip))
     }
 }
 
 @Composable
 private fun TransparencyStep(onBack: () -> Unit, onNext: () -> Unit) {
     StepScaffold(
-        primaryLabel = "I understand",
+        primaryLabel = stringResource(R.string.transparency_cta),
         onPrimary = onNext,
-        secondaryLabel = "Back",
+        secondaryLabel = stringResource(R.string.action_back),
         onSecondary = onBack,
     ) {
         StepIcon("🛡️")
         Spacer(Modifier.height(20.dp))
         Text(
-            "What PH Bulwark does",
+            stringResource(R.string.transparency_title),
             color = Navy,
             fontSize = 26.sp,
             fontWeight = FontWeight.ExtraBold,
@@ -358,16 +360,16 @@ private fun TransparencyStep(onBack: () -> Unit, onNext: () -> Unit) {
         )
         Spacer(Modifier.height(12.dp))
         Text(
-            "It checks content on this device for safety and flags signs of grooming or harmful material.",
+            stringResource(R.string.transparency_body),
             color = Ink,
             fontSize = 16.sp,
             textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(18.dp))
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            PromiseRow("This is not spying. Messages are checked on the device itself.")
-            PromiseRow("Only redacted safety alerts ever leave this device — never the words.")
-            PromiseRow("Protection is always visible. It is never hidden, and can be turned off anytime.")
+            PromiseRow(stringResource(R.string.transparency_promise_1))
+            PromiseRow(stringResource(R.string.transparency_promise_2))
+            PromiseRow(stringResource(R.string.transparency_promise_3))
         }
     }
 }
@@ -381,14 +383,14 @@ private fun AccessibilityStep(
 ) {
     PermissionScaffold(
         emoji = "💬",
-        title = "On-device chat safety",
-        body = "Lets PH Bulwark read the text already shown on screen in messaging apps, so it can spot grooming even in end-to-end-encrypted chats.",
-        whyLine = "Why we need this: encrypted chats can only be checked where they are read — right here on the device.",
+        title = stringResource(R.string.accessibility_title),
+        body = stringResource(R.string.accessibility_body),
+        whyLine = stringResource(R.string.accessibility_why),
         granted = granted,
-        grantedLabel = "Chat safety is on",
-        actionLabel = "Turn on chat safety",
-        reGrantLabel = "Open accessibility settings",
-        trust = "Nothing you type is sent anywhere. Checks happen on-device.",
+        grantedLabel = stringResource(R.string.accessibility_granted),
+        actionLabel = stringResource(R.string.accessibility_action),
+        reGrantLabel = stringResource(R.string.accessibility_regrant),
+        trust = stringResource(R.string.accessibility_trust),
         onGrant = onGrant,
         onBack = onBack,
         onNext = onNext,
@@ -405,14 +407,14 @@ private fun VpnStep(
 ) {
     PermissionScaffold(
         emoji = "🌐",
-        title = "Network filtering",
-        body = "A private on-device filter checks web and app traffic for unsafe content and blocks it before it loads.",
-        whyLine = "Why we need this: Android routes traffic through a local VPN so the filter can see and stop harmful content.",
+        title = stringResource(R.string.vpn_title),
+        body = stringResource(R.string.vpn_body),
+        whyLine = stringResource(R.string.vpn_why),
         granted = ready,
-        grantedLabel = if (running) "Filtering is active" else "Filtering is ready",
-        actionLabel = "Turn on filtering",
-        reGrantLabel = "Re-check filtering",
-        trust = "The filter runs on this device. Browsing is not logged or sent away.",
+        grantedLabel = stringResource(if (running) R.string.vpn_granted_active else R.string.vpn_granted_ready),
+        actionLabel = stringResource(R.string.vpn_action),
+        reGrantLabel = stringResource(R.string.vpn_regrant),
+        trust = stringResource(R.string.vpn_trust),
         onGrant = onGrant,
         onBack = onBack,
         onNext = onNext,
@@ -427,16 +429,16 @@ private fun AntiRemovalStep(
     onNext: () -> Unit,
 ) {
     StepScaffold(
-        primaryLabel = "Continue",
+        primaryLabel = stringResource(R.string.action_continue),
         onPrimary = onNext,
-        secondaryLabel = "Back",
+        secondaryLabel = stringResource(R.string.action_back),
         onSecondary = onBack,
     ) {
         StepIcon("🔒")
         Spacer(Modifier.height(18.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                "Anti-removal",
+                stringResource(R.string.anti_removal_title),
                 color = Navy,
                 fontSize = 26.sp,
                 fontWeight = FontWeight.ExtraBold,
@@ -446,20 +448,24 @@ private fun AntiRemovalStep(
         }
         Spacer(Modifier.height(12.dp))
         Text(
-            "Optional. Helps protection stay on by making PH Bulwark harder to remove or switch off by accident.",
+            stringResource(R.string.anti_removal_body),
             color = Ink,
             fontSize = 16.sp,
             textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            "This is usually set up by the parent app on a managed device. You can safely skip it for now.",
+            stringResource(R.string.anti_removal_note),
             color = Slate,
             fontSize = 14.sp,
             textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(20.dp))
-        StatusLine(active = enabled, on = "Anti-removal is active", off = "Managed by the parent app")
+        StatusLine(
+            active = enabled,
+            on = stringResource(R.string.anti_removal_on),
+            off = stringResource(R.string.anti_removal_off),
+        )
         if (!enabled) {
             Spacer(Modifier.height(16.dp))
             OutlinedButton(
@@ -469,7 +475,7 @@ private fun AntiRemovalStep(
                     .height(48.dp),
                 shape = RoundedCornerShape(12.dp),
             ) {
-                Text("Enable device admin (advanced)", color = Navy, fontWeight = FontWeight.SemiBold)
+                Text(stringResource(R.string.anti_removal_advanced), color = Navy, fontWeight = FontWeight.SemiBold)
             }
         }
     }
@@ -494,7 +500,8 @@ private fun PairStep(
         mutableStateOf<PairingState>(if (alreadyPaired) PairingState.Success("") else PairingState.Idle)
     }
     val scope = rememberCoroutineScope()
-    val caPath = RustBridge.clusterCaPath(androidx.compose.ui.platform.LocalContext.current)
+    val context = LocalContext.current
+    val caPath = RustBridge.clusterCaPath(context)
     // Whether this device already holds the server's pinned certificate (from a
     // previous setup code); refreshed after a successful pin below.
     var caPinned by remember { mutableStateOf(File(caPath).exists()) }
@@ -506,8 +513,9 @@ private fun PairStep(
     val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
         result.contents?.let { fullSetupCode = it }
     }
+    val scanPrompt = stringResource(R.string.pair_scan_prompt)
     val payloadResult = remember(fullSetupCode) {
-        if (fullSetupCode.isBlank()) null else parseSetupPayload(fullSetupCode)
+        if (fullSetupCode.isBlank()) null else parseSetupPayload(context, fullSetupCode)
     }
     val payload = (payloadResult as? SetupPayloadResult.Parsed)?.payload
     val payloadError = (payloadResult as? SetupPayloadResult.Invalid)?.message
@@ -533,7 +541,7 @@ private fun PairStep(
         payloadError == null && !payloadExpired && !needsCa
 
     StepScaffold(
-        primaryLabel = if (paired) "Continue" else "Pair this device",
+        primaryLabel = if (paired) stringResource(R.string.action_continue) else stringResource(R.string.pair_cta),
         onPrimary = {
             if (paired) {
                 onNext()
@@ -551,18 +559,22 @@ private fun PairStep(
                             val pinned = runCatching { File(caPath).writeText(caPem) }.isSuccess
                             if (!pinned) {
                                 return@withContext PairingOutcome.Error(
-                                    "Could not save the server's certificate on this device. Nothing was sent — please try again.",
+                                    context.getString(R.string.pair_err_save_cert),
                                 )
                             }
                         }
                         runCatching {
                             RustBridge.ensureLoaded()
                             parsePairingResult(
+                                context,
                                 RustBridge.redeemPairCode(pairEndpoint, pairCode, deviceId, caPath),
                             )
                         }.getOrElse {
                             PairingOutcome.Error(
-                                "Enrollment bridge unavailable: ${it.message ?: it.javaClass.simpleName}",
+                                context.getString(
+                                    R.string.pair_err_bridge,
+                                    it.message ?: it.javaClass.simpleName,
+                                ),
                             )
                         }
                     }
@@ -585,13 +597,13 @@ private fun PairStep(
         },
         primaryEnabled = paired || (readyToPair && !loading),
         primaryLoading = loading,
-        secondaryLabel = "Back",
+        secondaryLabel = stringResource(R.string.action_back),
         onSecondary = onBack,
     ) {
         StepIcon("🔗")
         Spacer(Modifier.height(16.dp))
         Text(
-            if (paired) "Paired with the parent app" else "Pair with the parent app",
+            stringResource(if (paired) R.string.pair_title_done else R.string.pair_title),
             color = Navy,
             fontSize = 26.sp,
             fontWeight = FontWeight.ExtraBold,
@@ -599,11 +611,7 @@ private fun PairStep(
         )
         Spacer(Modifier.height(10.dp))
         Text(
-            if (paired) {
-                "This device is linked to your family. Alerts will reach the guardian."
-            } else {
-                "Scan the setup QR from the parent console, paste the setup code, or pick a server and type the short code."
-            },
+            stringResource(if (paired) R.string.pair_body_done else R.string.pair_body),
             color = Slate,
             fontSize = 15.sp,
             textAlign = TextAlign.Center,
@@ -616,14 +624,14 @@ private fun PairStep(
                     scanLauncher.launch(
                         ScanOptions()
                             .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                            .setPrompt("Point the camera at the setup QR in PH Bulwark Manager")
+                            .setPrompt(scanPrompt)
                             .setBeepEnabled(false)
                             .setOrientationLocked(false),
                     )
                 },
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Scan the setup QR")
+                Text(stringResource(R.string.pair_scan))
             }
             Spacer(Modifier.height(10.dp))
             OutlinedTextField(
@@ -632,8 +640,8 @@ private fun PairStep(
                 modifier = Modifier.fillMaxWidth(),
                 minLines = 2,
                 maxLines = 4,
-                label = { Text("Full setup code") },
-                placeholder = { Text("Or paste the setup code copied from the parent console") },
+                label = { Text(stringResource(R.string.pair_full_code_label)) },
+                placeholder = { Text(stringResource(R.string.pair_full_code_hint)) },
             )
             Spacer(Modifier.height(12.dp))
             if (payload != null) {
@@ -644,16 +652,18 @@ private fun PairStep(
                     elevation = CardDefaults.cardElevation(1.dp),
                 ) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("From the parent console", color = Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                        if (payload.childName.isNotBlank()) DetailLine("Child", payload.childName)
-                        DetailLine("Server", payload.serverEndpoint)
-                        DetailLine("Code", payload.pairCode)
+                        Text(stringResource(R.string.pair_from_console), color = Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                        if (payload.childName.isNotBlank()) {
+                            DetailLine(stringResource(R.string.pair_detail_child), payload.childName)
+                        }
+                        DetailLine(stringResource(R.string.pair_detail_server), payload.serverEndpoint)
+                        DetailLine(stringResource(R.string.pair_detail_code), payload.pairCode)
                         DetailLine(
-                            "Certificate",
+                            stringResource(R.string.pair_detail_certificate),
                             when {
-                                payload.clusterCaPem != null -> "Included — pinned before connecting"
-                                payload.caOmitted -> "Not in this code — paste the full setup code"
-                                else -> "Not needed — server uses a public certificate"
+                                payload.clusterCaPem != null -> stringResource(R.string.pair_cert_included)
+                                payload.caOmitted -> stringResource(R.string.pair_cert_omitted)
+                                else -> stringResource(R.string.pair_cert_public)
                             },
                         )
                     }
@@ -666,7 +676,7 @@ private fun PairStep(
                     elevation = CardDefaults.cardElevation(1.dp),
                 ) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text("Server", color = Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                        Text(stringResource(R.string.pair_server_heading), color = Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
                         Servers.forEach { opt ->
                             ServerRow(
                                 option = opt,
@@ -686,8 +696,8 @@ private fun PairStep(
                                 },
                                 modifier = Modifier.fillMaxWidth(),
                                 singleLine = true,
-                                label = { Text("Self-hosted URL") },
-                                placeholder = { Text("https://your-server:8443") },
+                                label = { Text(stringResource(R.string.pair_self_hosted_label)) },
+                                placeholder = { Text(stringResource(R.string.pair_self_hosted_hint)) },
                                 keyboardOptions = KeyboardOptions(
                                     keyboardType = KeyboardType.Uri,
                                     imeAction = ImeAction.Done,
@@ -702,7 +712,7 @@ private fun PairStep(
                     onValueChange = { code = normalizedPairCode(it).take(12) },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
-                    label = { Text("Code from parent app") },
+                    label = { Text(stringResource(R.string.pair_short_code_label)) },
                     keyboardOptions = KeyboardOptions(
                         capitalization = KeyboardCapitalization.Characters,
                         keyboardType = KeyboardType.Ascii,
@@ -717,34 +727,34 @@ private fun PairStep(
                     Text(payloadError, color = Danger, fontSize = 13.sp)
                 payloadExpired ->
                     Text(
-                        "This setup code has expired — ask for a new one from the parent console.",
+                        stringResource(R.string.pair_expired),
                         color = Warn,
                         fontSize = 13.sp,
                     )
                 needsCa && payload != null ->
                     Text(
-                        "The QR version of this setup code doesn't carry the certificate this secure server needs. Use the parent console's copy button and paste the full setup code instead.",
+                        stringResource(R.string.pair_needs_ca_qr),
                         color = Warn,
                         fontSize = 13.sp,
                     )
                 needsCa ->
                     Text(
-                        "This server uses a secure connection that has to be verified first. Paste the full setup code from the parent console — the short code alone isn't enough here.",
+                        stringResource(R.string.pair_needs_ca),
                         color = Warn,
                         fontSize = 13.sp,
                     )
                 current is PairingState.Loading ->
-                    Text("Contacting selected server...", color = Slate, fontSize = 13.sp)
+                    Text(stringResource(R.string.pair_contacting), color = Slate, fontSize = 13.sp)
                 current is PairingState.Success ->
-                    Text("Paired. This device is ready.", color = Good, fontSize = 13.sp)
+                    Text(stringResource(R.string.pair_success_short), color = Good, fontSize = 13.sp)
                 current is PairingState.Error ->
                     Text(current.message, color = Danger, fontSize = 13.sp)
                 !endpointReady ->
-                    Text("Enter a self-hosted URL first.", color = Warn, fontSize = 13.sp)
+                    Text(stringResource(R.string.pair_need_self_url), color = Warn, fontSize = 13.sp)
             }
         } else {
             Spacer(Modifier.height(20.dp))
-            StatusLine(active = true, on = "This device is paired", off = "")
+            StatusLine(active = true, on = stringResource(R.string.pair_status_paired), off = "")
         }
     }
 }
@@ -757,7 +767,7 @@ private fun DoneStep(state: SetupState, onFinish: () -> Unit) {
     // green "active" that contradicts the dashboard.
     val active = state.protectionActive
     StepScaffold(
-        primaryLabel = "Go to dashboard",
+        primaryLabel = stringResource(R.string.done_cta),
         onPrimary = onFinish,
     ) {
         Box(
@@ -771,7 +781,7 @@ private fun DoneStep(state: SetupState, onFinish: () -> Unit) {
         }
         Spacer(Modifier.height(24.dp))
         Text(
-            if (active) "Protection active" else "Setup saved",
+            stringResource(if (active) R.string.done_title_active else R.string.done_title_saved),
             color = Navy,
             fontSize = 28.sp,
             fontWeight = FontWeight.ExtraBold,
@@ -779,12 +789,7 @@ private fun DoneStep(state: SetupState, onFinish: () -> Unit) {
         )
         Spacer(Modifier.height(10.dp))
         Text(
-            if (active) {
-                "All set. PH Bulwark now quietly keeps this device safe — and it never hides what it's doing."
-            } else {
-                "Your setup is saved. The dashboard shows the last step to turn on full " +
-                    "web filtering — on-device chat safety is already watching meanwhile."
-            },
+            stringResource(if (active) R.string.done_body_active else R.string.done_body_saved),
             color = Slate,
             fontSize = 16.sp,
             textAlign = TextAlign.Center,
@@ -797,11 +802,11 @@ private fun DoneStep(state: SetupState, onFinish: () -> Unit) {
             elevation = CardDefaults.cardElevation(1.dp),
         ) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                SummaryRow("Paired with parent app", state.paired)
-                SummaryRow("Chat safety on", state.accessibilityOn)
-                SummaryRow("Network filtering ready", state.vpnReady)
-                SummaryRow("Managed device (full filtering)", state.isDeviceOwner, optionalWhenOff = true)
-                SummaryRow("Anti-removal", state.antiRemovalOn, optionalWhenOff = true)
+                SummaryRow(stringResource(R.string.summary_paired), state.paired)
+                SummaryRow(stringResource(R.string.summary_chat_safety), state.accessibilityOn)
+                SummaryRow(stringResource(R.string.summary_filtering_ready), state.vpnReady)
+                SummaryRow(stringResource(R.string.summary_managed), state.isDeviceOwner, optionalWhenOff = true)
+                SummaryRow(stringResource(R.string.summary_anti_removal), state.antiRemovalOn, optionalWhenOff = true)
             }
         }
     }
@@ -828,6 +833,7 @@ internal fun StatusDashboard(
     /** Launch the platform managed-provisioning flow (Device Owner setup). */
     onProvisionManaged: () -> Unit = {},
 ) {
+    val context = LocalContext.current
     Column(
         Modifier
             .fillMaxSize()
@@ -851,22 +857,22 @@ internal fun StatusDashboard(
         ) {
             Image(
                 painter = painterResource(R.drawable.bulwark_logo),
-                contentDescription = "PH Bulwark Shield",
+                contentDescription = stringResource(R.string.cd_shield),
                 modifier = Modifier
                     .size(76.dp)
                     .clip(RoundedCornerShape(18.dp)),
             )
         }
-        Text("PH BULWARK", color = Slate, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
+        Text(stringResource(R.string.dashboard_brand), color = Slate, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
         Text(
-            if (active) "Protection active" else "Setup needed",
+            stringResource(if (active) R.string.dashboard_title_active else R.string.dashboard_title_setup),
             color = Navy,
             fontSize = 26.sp,
             fontWeight = FontWeight.ExtraBold,
             textAlign = TextAlign.Center,
         )
         Text(
-            statusReason(state),
+            statusReason(context, state),
             color = if (active) Good else Warn,
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
@@ -885,15 +891,15 @@ internal fun StatusDashboard(
             elevation = CardDefaults.cardElevation(1.dp),
         ) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("Status", color = Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                SummaryRow("Paired with parent app", state.paired)
-                SummaryRow("Chat safety on", state.accessibilityOn)
+                Text(stringResource(R.string.dashboard_status_heading), color = Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                SummaryRow(stringResource(R.string.summary_paired), state.paired)
+                SummaryRow(stringResource(R.string.summary_chat_safety), state.accessibilityOn)
                 // HONEST: network filtering is "on" only when the tunnel is truly
                 // up. The service fail-closes off a managed device, so consent
                 // alone must not read as "filtering on".
-                SummaryRow("Network filtering on", state.vpnRunning)
-                SummaryRow("Managed device (full filtering)", state.isDeviceOwner, optionalWhenOff = true)
-                SummaryRow("Anti-removal", state.antiRemovalOn, optionalWhenOff = true)
+                SummaryRow(stringResource(R.string.summary_filtering_on), state.vpnRunning)
+                SummaryRow(stringResource(R.string.summary_managed), state.isDeviceOwner, optionalWhenOff = true)
+                SummaryRow(stringResource(R.string.summary_anti_removal), state.antiRemovalOn, optionalWhenOff = true)
                 if (state.cloudFilteringRequested) {
                     Row(
                         Modifier
@@ -906,7 +912,7 @@ internal fun StatusDashboard(
                         Text("☁", color = Sky, fontSize = 14.sp)
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            "Your guardian asked for cloud filtering — it's on its way. Until then, protection keeps running right here on this device.",
+                            stringResource(R.string.dashboard_cloud_note),
                             color = Navy,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium,
@@ -924,16 +930,16 @@ internal fun StatusDashboard(
             elevation = CardDefaults.cardElevation(1.dp),
         ) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("This device", color = Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                Text(stringResource(R.string.dashboard_this_device), color = Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                 if (enrollment != null) {
-                    DetailLine("Server", enrollment.clusterEndpoint)
-                    DetailLine("Child", shortId(enrollment.childId))
-                    DetailLine("Device", shortId(enrollment.deviceId))
+                    DetailLine(stringResource(R.string.dashboard_detail_server), enrollment.clusterEndpoint)
+                    DetailLine(stringResource(R.string.dashboard_detail_child), shortId(enrollment.childId))
+                    DetailLine(stringResource(R.string.dashboard_detail_device), shortId(enrollment.deviceId))
                     if (enrollment.deviceOwnerProvisioned) {
-                        DetailLine("Management", "Device Owner lockdown active")
+                        DetailLine(stringResource(R.string.dashboard_management), stringResource(R.string.dashboard_management_active))
                     }
                 } else {
-                    DetailLine("Device", shortId(deviceId))
+                    DetailLine(stringResource(R.string.dashboard_detail_device), shortId(deviceId))
                 }
             }
         }
@@ -949,12 +955,12 @@ internal fun StatusDashboard(
         }
 
         if (!state.accessibilityOn) {
-            DashboardAction("Turn on chat safety", onOpenAccessibility)
+            DashboardAction(stringResource(R.string.dashboard_action_chat), onOpenAccessibility)
         }
         // Honest: offer the action whenever filtering is not actually running
         // (consent without a live tunnel still needs a tap to (re)start it).
         if (!state.vpnRunning) {
-            DashboardAction("Turn on network filtering", onStartVpn)
+            DashboardAction(stringResource(R.string.dashboard_action_filtering), onStartVpn)
         }
 
         // The in-app safe browser: a guarded web view that pre-checks a page's
@@ -968,7 +974,7 @@ internal fun StatusDashboard(
                 .height(48.dp),
             shape = RoundedCornerShape(12.dp),
         ) {
-            Text("Review setup", color = Navy, fontWeight = FontWeight.SemiBold)
+            Text(stringResource(R.string.dashboard_review), color = Navy, fontWeight = FontWeight.SemiBold)
         }
 
         PrivacyFooter()
@@ -980,23 +986,16 @@ internal fun StatusDashboard(
  * ladder names the single most important missing piece (most-blocking first) so
  * the dashboard never says "Protection active" and "do X" at the same time.
  */
-internal fun statusReason(state: SetupState): String = when {
-    state.protectionActive ->
-        "PH Bulwark is quietly keeping this device safe."
-    !state.paired ->
-        "Finish pairing with the parent app to link this device to your family."
-    !state.isDeviceOwner ->
-        "Full web filtering needs this set up as a managed device. " +
-            "Until then, on-device chat safety still watches what's on screen."
-    !state.caInstalled ->
-        "Finishing secure-site setup so filtered sites stay trusted. " +
-            "Re-open filtering if this doesn't clear shortly."
-    !state.vpnConsented ->
-        "Turn on network filtering to check web and app traffic on this device."
-    else ->
-        "Network filtering is starting up. If it doesn't come on, tap " +
-            "\"Turn on network filtering\" below."
-}
+internal fun statusReason(context: android.content.Context, state: SetupState): String = context.getString(
+    when {
+        state.protectionActive -> R.string.reason_active
+        !state.paired -> R.string.reason_pair
+        !state.isDeviceOwner -> R.string.reason_managed
+        !state.caInstalled -> R.string.reason_ca
+        !state.vpnConsented -> R.string.reason_consent
+        else -> R.string.reason_starting
+    },
+)
 
 /**
  * Guidance for getting this device to **Device Owner**, the only role that can
@@ -1017,29 +1016,22 @@ private fun ManagedSetupCard(
         elevation = CardDefaults.cardElevation(1.dp),
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("Turn on full web filtering", color = Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Text(stringResource(R.string.managed_title), color = Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold)
             Text(
-                "To filter secure (https) sites, this device has to be set up as a " +
-                    "managed device. That lets PH Bulwark trust its own on-device " +
-                    "inspection certificate so pages still load normally. Choose the " +
-                    "path that matches your device:",
+                stringResource(R.string.managed_body),
                 color = Slate,
                 fontSize = 13.sp,
                 lineHeight = 18.sp,
             )
             ProvisionPath(
                 badge = "A",
-                title = "A brand-new or factory-reset device",
-                body = "Start it from the first \"Hi there\" setup screen and scan the " +
-                    "managed-setup QR from PH Bulwark Manager. The device sets itself " +
-                    "up managed automatically.",
+                title = stringResource(R.string.managed_path_a_title),
+                body = stringResource(R.string.managed_path_a_body),
             )
             ProvisionPath(
                 badge = "B",
-                title = "A device already in use",
-                body = "Remove every account in Settings first, then a guardian runs the " +
-                    "one-time managed-setup command from a computer, and you re-add the " +
-                    "accounts. PH Bulwark Manager has the step-by-step guide.",
+                title = stringResource(R.string.managed_path_b_title),
+                body = stringResource(R.string.managed_path_b_body),
             )
             if (canProvisionManaged) {
                 Spacer(Modifier.height(2.dp))
@@ -1051,10 +1043,10 @@ private fun ManagedSetupCard(
                     shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = Navy, contentColor = Color.White),
                 ) {
-                    Text("Set up as a managed device", fontWeight = FontWeight.SemiBold)
+                    Text(stringResource(R.string.managed_cta), fontWeight = FontWeight.SemiBold)
                 }
                 Text(
-                    "Available because this device has no accounts yet.",
+                    stringResource(R.string.managed_available_note),
                     color = Slate,
                     fontSize = 11.sp,
                 )
@@ -1170,9 +1162,9 @@ private fun PermissionScaffold(
     onNext: () -> Unit,
 ) {
     StepScaffold(
-        primaryLabel = if (granted) "Continue" else actionLabel,
+        primaryLabel = if (granted) stringResource(R.string.action_continue) else actionLabel,
         onPrimary = { if (granted) onNext() else onGrant() },
-        secondaryLabel = "Back",
+        secondaryLabel = stringResource(R.string.action_back),
         onSecondary = onBack,
     ) {
         StepIcon(emoji)
@@ -1201,7 +1193,7 @@ private fun PermissionScaffold(
             )
         }
         Spacer(Modifier.height(18.dp))
-        StatusLine(active = granted, on = grantedLabel, off = "Not turned on yet")
+        StatusLine(active = granted, on = grantedLabel, off = stringResource(R.string.action_not_on_yet))
         if (granted) {
             Spacer(Modifier.height(12.dp))
             OutlinedButton(
@@ -1320,11 +1312,13 @@ private fun SummaryRow(label: String, active: Boolean, optionalWhenOff: Boolean 
         Spacer(Modifier.width(10.dp))
         Text(label, color = Ink, fontSize = 14.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
         Text(
-            when {
-                active -> "On"
-                optionalWhenOff -> "Optional"
-                else -> "Off"
-            },
+            stringResource(
+                when {
+                    active -> R.string.state_on
+                    optionalWhenOff -> R.string.state_optional
+                    else -> R.string.state_off
+                },
+            ),
             color = when {
                 active -> Good
                 optionalWhenOff -> Slate
@@ -1365,7 +1359,7 @@ private fun OptionalPill() {
             .background(Color(0xFFF1F4F6))
             .padding(horizontal = 10.dp, vertical = 4.dp),
     ) {
-        Text("Optional", color = Slate, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        Text(stringResource(R.string.anti_removal_optional), color = Slate, fontSize = 11.sp, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -1391,7 +1385,7 @@ private fun ServerRow(option: ServerOption, selected: Boolean, onClick: () -> Un
         }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(option.label, color = Ink, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
+            Text(stringResource(option.labelRes), color = Ink, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
             if (option.endpoint.isNotBlank()) {
                 Text(option.endpoint, color = Slate, fontSize = 11.sp)
             }
@@ -1415,8 +1409,8 @@ private fun PrivacyFooter() {
         colors = CardDefaults.cardColors(containerColor = NavyDeep),
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("Private by design", color = Sky, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-            Text("Only redacted safety alerts leave this device.", color = Color(0xFFCFE0EC), fontSize = 12.sp)
+            Text(stringResource(R.string.footer_title), color = Sky, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            Text(stringResource(R.string.footer_body), color = Color(0xFFCFE0EC), fontSize = 12.sp)
         }
     }
 }
@@ -1441,12 +1435,12 @@ internal fun normalizedPairCode(input: String): String =
 internal fun shortId(id: String): String =
     if (id.length <= 16) id else "${id.take(8)}...${id.takeLast(6)}"
 
-internal fun parsePairingResult(json: String): PairingOutcome {
+internal fun parsePairingResult(context: android.content.Context, json: String): PairingOutcome {
     val obj = runCatching { JSONObject(json) }.getOrElse {
-        return PairingOutcome.Error("Enrollment returned an unreadable response")
+        return PairingOutcome.Error(context.getString(R.string.pair_err_unreadable_response))
     }
     if (!obj.optBoolean("ok", false)) {
-        return PairingOutcome.Error(obj.optString("error", "Enrollment failed"))
+        return PairingOutcome.Error(obj.optString("error", context.getString(R.string.pair_err_default)))
     }
     val childId = obj.optString("child_id").takeIf { it.isNotBlank() }
     val familyId = obj.optString("family_id").takeIf { it.isNotBlank() }
@@ -1456,7 +1450,7 @@ internal fun parsePairingResult(json: String): PairingOutcome {
     return if (childId != null && familyId != null) {
         PairingOutcome.Success(childId = childId, familyId = familyId, deviceToken = deviceToken)
     } else {
-        PairingOutcome.Error("Enrollment response was missing account ids")
+        PairingOutcome.Error(context.getString(R.string.pair_err_missing_ids))
     }
 }
 
@@ -1516,25 +1510,21 @@ internal sealed interface SetupPayloadResult {
  * optional). Every failure is a calm, plain-language message — never a stack
  * trace, and nothing from the pasted text is ever echoed back.
  */
-internal fun parseSetupPayload(raw: String): SetupPayloadResult {
+internal fun parseSetupPayload(context: android.content.Context, raw: String): SetupPayloadResult {
     val obj = runCatching { JSONObject(raw.trim()) }.getOrElse {
-        return SetupPayloadResult.Invalid(
-            "That doesn't look like a setup code yet — paste the whole code copied from the parent console.",
-        )
+        return SetupPayloadResult.Invalid(context.getString(R.string.pair_err_invalid_code))
     }
     val version = obj.optInt("v", 0)
     if (version < 1) {
-        return SetupPayloadResult.Invalid(
-            "This setup code is incomplete — ask for a new one from the parent console.",
-        )
+        return SetupPayloadResult.Invalid(context.getString(R.string.pair_err_incomplete))
     }
     val endpoint = obj.optString("server_endpoint").trim()
     if (!(endpoint.startsWith("http://") || endpoint.startsWith("https://"))) {
-        return SetupPayloadResult.Invalid("This setup code has no usable server address — ask for a new one.")
+        return SetupPayloadResult.Invalid(context.getString(R.string.pair_err_no_server))
     }
     val pairCode = normalizedPairCode(obj.optString("pair_code"))
     if (pairCode.length < 4) {
-        return SetupPayloadResult.Invalid("This setup code has no usable pair code — ask for a new one.")
+        return SetupPayloadResult.Invalid(context.getString(R.string.pair_err_no_paircode))
     }
     val caB64 = obj.optString("cluster_ca_pem_b64").trim()
     val caPem = if (caB64.isEmpty()) {
@@ -1542,9 +1532,7 @@ internal fun parseSetupPayload(raw: String): SetupPayloadResult {
     } else {
         val decoded = runCatching { String(Base64.decode(caB64, Base64.DEFAULT), Charsets.UTF_8) }.getOrNull()
         if (decoded == null || !decoded.contains("-----BEGIN CERTIFICATE-----")) {
-            return SetupPayloadResult.Invalid(
-                "The server certificate inside this setup code is unreadable — ask for a new one.",
-            )
+            return SetupPayloadResult.Invalid(context.getString(R.string.pair_err_bad_cert))
         }
         decoded
     }

@@ -8,4 +8,164 @@
         device and notifies the guardian if it is turned off or removed. Enabled with guardian
         consent; visible in Settings and removable by the guardian.</string>
     <string name="browser_title">PH Bulwark Browser</string>
+
+    <!-- =====================================================================
+         Guided guardian setup journey (Onboarding.kt). Calm, trustworthy copy
+         — a child-safety helper, not a security tool. Apostrophes are wrapped
+         in "…" so aapt accepts them; "%1$d"/"%1$s" carry runtime values. -->
+
+    <!-- Content descriptions -->
+    <string name="cd_shield">PH Bulwark Shield</string>
+
+    <!-- Progress -->
+    <string name="step_progress">"Step %1$d of %2$d"</string>
+
+    <!-- Welcome -->
+    <string name="welcome_title">Welcome to PH Bulwark</string>
+    <string name="welcome_body">"A calmer way to keep this device safe. We'll guide you through setup — it takes about two minutes."</string>
+    <string name="welcome_chip">Private by design</string>
+    <string name="welcome_cta">Get started</string>
+
+    <!-- Transparency -->
+    <string name="transparency_title">What PH Bulwark does</string>
+    <string name="transparency_body">It checks content on this device for safety and flags signs of grooming or harmful material.</string>
+    <string name="transparency_promise_1">This is not spying. Messages are checked on the device itself.</string>
+    <string name="transparency_promise_2">Only redacted safety alerts ever leave this device — never the words.</string>
+    <string name="transparency_promise_3">Protection is always visible. It is never hidden, and can be turned off anytime.</string>
+    <string name="transparency_cta">I understand</string>
+
+    <!-- Shared step controls -->
+    <string name="action_back">Back</string>
+    <string name="action_continue">Continue</string>
+    <string name="action_not_on_yet">Not turned on yet</string>
+
+    <!-- Accessibility step (on-device chat safety) -->
+    <string name="accessibility_title">On-device chat safety</string>
+    <string name="accessibility_body">Lets PH Bulwark read the text already shown on screen in messaging apps, so it can spot grooming even in end-to-end-encrypted chats.</string>
+    <string name="accessibility_why">"Why we need this: encrypted chats can only be checked where they are read — right here on the device."</string>
+    <string name="accessibility_granted">Chat safety is on</string>
+    <string name="accessibility_action">Turn on chat safety</string>
+    <string name="accessibility_regrant">Open accessibility settings</string>
+    <string name="accessibility_trust">Nothing you type is sent anywhere. Checks happen on-device.</string>
+
+    <!-- VPN step (network filtering) -->
+    <string name="vpn_title">Network filtering</string>
+    <string name="vpn_body">A private on-device filter checks web and app traffic for unsafe content and blocks it before it loads.</string>
+    <string name="vpn_why">"Why we need this: Android routes traffic through a local VPN so the filter can see and stop harmful content."</string>
+    <string name="vpn_granted_active">Filtering is active</string>
+    <string name="vpn_granted_ready">Filtering is ready</string>
+    <string name="vpn_action">Turn on filtering</string>
+    <string name="vpn_regrant">Re-check filtering</string>
+    <string name="vpn_trust">The filter runs on this device. Browsing is not logged or sent away.</string>
+
+    <!-- Anti-removal step (optional) -->
+    <string name="anti_removal_title">Anti-removal</string>
+    <string name="anti_removal_optional">Optional</string>
+    <string name="anti_removal_body">Optional. Helps protection stay on by making PH Bulwark harder to remove or switch off by accident.</string>
+    <string name="anti_removal_note">This is usually set up by the parent app on a managed device. You can safely skip it for now.</string>
+    <string name="anti_removal_on">Anti-removal is active</string>
+    <string name="anti_removal_off">Managed by the parent app</string>
+    <string name="anti_removal_advanced">Enable device admin (advanced)</string>
+
+    <!-- Pair step -->
+    <string name="pair_title_done">Paired with the parent app</string>
+    <string name="pair_title">Pair with the parent app</string>
+    <string name="pair_body_done">This device is linked to your family. Alerts will reach the guardian.</string>
+    <string name="pair_body">Scan the setup QR from the parent console, paste the setup code, or pick a server and type the short code.</string>
+    <string name="pair_scan">Scan the setup QR</string>
+    <string name="pair_scan_prompt">Point the camera at the setup QR in PH Bulwark Manager</string>
+    <string name="pair_full_code_label">Full setup code</string>
+    <string name="pair_full_code_hint">Or paste the setup code copied from the parent console</string>
+    <string name="pair_from_console">From the parent console</string>
+    <string name="pair_detail_child">Child</string>
+    <string name="pair_detail_server">Server</string>
+    <string name="pair_detail_code">Code</string>
+    <string name="pair_detail_certificate">Certificate</string>
+    <string name="pair_cert_included">Included — pinned before connecting</string>
+    <string name="pair_cert_omitted">Not in this code — paste the full setup code</string>
+    <string name="pair_cert_public">Not needed — server uses a public certificate</string>
+    <string name="pair_server_heading">Server</string>
+    <string name="pair_self_hosted_label">Self-hosted URL</string>
+    <string name="pair_self_hosted_hint">https://your-server:8443</string>
+    <string name="pair_short_code_label">Code from parent app</string>
+    <string name="pair_status_paired">This device is paired</string>
+    <string name="pair_cta">Pair this device</string>
+    <!-- Validation / progress messages -->
+    <string name="pair_err_invalid_code">"That doesn't look like a setup code yet — paste the whole code copied from the parent console."</string>
+    <string name="pair_err_incomplete">This setup code is incomplete — ask for a new one from the parent console.</string>
+    <string name="pair_err_no_server">This setup code has no usable server address — ask for a new one.</string>
+    <string name="pair_err_no_paircode">This setup code has no usable pair code — ask for a new one.</string>
+    <string name="pair_err_bad_cert">The server certificate inside this setup code is unreadable — ask for a new one.</string>
+    <string name="pair_err_unreadable_response">Enrollment returned an unreadable response</string>
+    <string name="pair_err_default">Enrollment failed</string>
+    <string name="pair_err_missing_ids">Enrollment response was missing account ids</string>
+    <string name="pair_err_save_cert">"Could not save the server's certificate on this device. Nothing was sent — please try again."</string>
+    <string name="pair_err_bridge">"Enrollment bridge unavailable: %1$s"</string>
+    <string name="pair_expired">This setup code has expired — ask for a new one from the parent console.</string>
+    <string name="pair_needs_ca_qr">"The QR version of this setup code doesn't carry the certificate this secure server needs. Use the parent console's copy button and paste the full setup code instead."</string>
+    <string name="pair_needs_ca">"This server uses a secure connection that has to be verified first. Paste the full setup code from the parent console — the short code alone isn't enough here."</string>
+    <string name="pair_contacting">Contacting selected server...</string>
+    <string name="pair_success_short">Paired. This device is ready.</string>
+    <string name="pair_need_self_url">Enter a self-hosted URL first.</string>
+
+    <!-- Done step -->
+    <string name="done_cta">Go to dashboard</string>
+    <string name="done_title_active">Protection active</string>
+    <string name="done_title_saved">Setup saved</string>
+    <string name="done_body_active">"All set. PH Bulwark now quietly keeps this device safe — and it never hides what it's doing."</string>
+    <string name="done_body_saved">Your setup is saved. The dashboard shows the last step to turn on full web filtering — on-device chat safety is already watching meanwhile.</string>
+
+    <!-- Status summary rows (Done + Dashboard) -->
+    <string name="summary_paired">Paired with parent app</string>
+    <string name="summary_chat_safety">Chat safety on</string>
+    <string name="summary_filtering_ready">Network filtering ready</string>
+    <string name="summary_filtering_on">Network filtering on</string>
+    <string name="summary_managed">Managed device (full filtering)</string>
+    <string name="summary_anti_removal">Anti-removal</string>
+    <string name="state_on">On</string>
+    <string name="state_off">Off</string>
+    <string name="state_optional">Optional</string>
+
+    <!-- Status dashboard -->
+    <string name="dashboard_brand">PH BULWARK</string>
+    <string name="dashboard_title_active">Protection active</string>
+    <string name="dashboard_title_setup">Setup needed</string>
+    <string name="dashboard_status_heading">Status</string>
+    <string name="dashboard_this_device">This device</string>
+    <string name="dashboard_detail_server">Server</string>
+    <string name="dashboard_detail_child">Child</string>
+    <string name="dashboard_detail_device">Device</string>
+    <string name="dashboard_management">Management</string>
+    <string name="dashboard_management_active">Device Owner lockdown active</string>
+    <string name="dashboard_cloud_note">"Your guardian asked for cloud filtering — it's on its way. Until then, protection keeps running right here on this device."</string>
+    <string name="dashboard_action_chat">Turn on chat safety</string>
+    <string name="dashboard_action_filtering">Turn on network filtering</string>
+    <string name="dashboard_review">Review setup</string>
+
+    <!-- Status reason ladder -->
+    <string name="reason_active">PH Bulwark is quietly keeping this device safe.</string>
+    <string name="reason_pair">Finish pairing with the parent app to link this device to your family.</string>
+    <string name="reason_managed">"Full web filtering needs this set up as a managed device. Until then, on-device chat safety still watches what's on screen."</string>
+    <string name="reason_ca">Finishing secure-site setup so filtered sites stay trusted. Re-open filtering if this doesn\'t clear shortly.</string>
+    <string name="reason_consent">Turn on network filtering to check web and app traffic on this device.</string>
+    <string name="reason_starting">"Network filtering is starting up. If it doesn't come on, tap \"Turn on network filtering\" below."</string>
+
+    <!-- Managed-setup guidance card -->
+    <string name="managed_title">Turn on full web filtering</string>
+    <string name="managed_body">To filter secure (https) sites, this device has to be set up as a managed device. That lets PH Bulwark trust its own on-device inspection certificate so pages still load normally. Choose the path that matches your device:</string>
+    <string name="managed_path_a_title">A brand-new or factory-reset device</string>
+    <string name="managed_path_a_body">"Start it from the first \"Hi there\" setup screen and scan the managed-setup QR from PH Bulwark Manager. The device sets itself up managed automatically."</string>
+    <string name="managed_path_b_title">A device already in use</string>
+    <string name="managed_path_b_body">Remove every account in Settings first, then a guardian runs the one-time managed-setup command from a computer, and you re-add the accounts. PH Bulwark Manager has the step-by-step guide.</string>
+    <string name="managed_cta">Set up as a managed device</string>
+    <string name="managed_available_note">Available because this device has no accounts yet.</string>
+
+    <!-- Privacy footer -->
+    <string name="footer_title">Private by design</string>
+    <string name="footer_body">Only redacted safety alerts leave this device.</string>
+
+    <!-- Server option labels (network/region choice on the pair step) -->
+    <string name="server_uk">UK - London</string>
+    <string name="server_us">US cloud</string>
+    <string name="server_self">Self-hosted</string>
 </resources>
