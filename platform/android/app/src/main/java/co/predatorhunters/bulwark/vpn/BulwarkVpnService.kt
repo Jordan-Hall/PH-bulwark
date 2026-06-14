@@ -46,8 +46,8 @@ class BulwarkVpnService : VpnService() {
         RustBridge.ensureLoaded()
 
         // Trust the TLS-inspection CA in the SYSTEM store BEFORE the proxy starts.
-        // The proxy MITMs every HTTPS flow with a leaf minted under the per-install
-        // inspection CA; unless that CA is system-trusted, every app rejects the
+        // The proxy TLS-inspects every HTTPS flow, presenting a leaf minted under the
+        // per-install inspection CA; unless that CA is system-trusted, every app rejects the
         // leaf (fatal alert CertificateUnknown) and, since ~all traffic is HTTPS,
         // the device loses connectivity entirely ("network not working"). Only a
         // Device Owner can install into the system store (Android 7+ ignores user
@@ -59,7 +59,7 @@ class BulwarkVpnService : VpnService() {
         Log.i(TAG, "inspection CA trust: $caResult")
         // FAIL CLOSED: bring the tunnel up ONLY on a CONFIRMED system-store install
         // (Device Owner). Every other result means the inspection CA is NOT trusted,
-        // so the MITM proxy would mint leaves apps reject (CertificateUnknown) and,
+        // so the TLS-inspecting proxy would present leaves apps reject (CertificateUnknown) and,
         // since ~all traffic is HTTPS, the device loses connectivity ("network not
         // working"):
         //   NOT_MANAGED — not Device Owner (Android 7+ ignores user-store CAs)
