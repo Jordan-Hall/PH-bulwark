@@ -23,6 +23,13 @@ research.predatorhunters.co.uk {
 		respond "ok" 200
 	}
 
+	# Server functions (the waitlist endpoint) go to the Dioxus fullstack server
+	# running beside Caddy. If that process is down this 502s and the form falls
+	# back to mailto — the rest of the site (served below) is unaffected.
+	handle /api/* {
+		reverse_proxy 127.0.0.1:3000
+	}
+
 	# Everything else: pre-rendered per-route HTML (SSG), falling back to the
 	# SPA shell. `{path}/index.html` serves the pre-rendered page for a route
 	# (e.g. /research → /research/index.html); unknown paths hit /index.html and
