@@ -79,7 +79,7 @@ pub fn Research() -> Element {
                 p { class: "eyebrow rise d1", "Research" }
                 h1 { class: "rise d2",
                     "Catch the danger. "
-                    span { class: "grad-text", "Keep none of the child." }
+                    span { class: "grad-text", "Protect the child." }
                 }
                 p { class: "lede rise d3",
                     "A small family of focused models, each doing one safety job well. Most already run in our alpha. The rest are still in the lab. They run on the device itself, and none of them keep raw content."

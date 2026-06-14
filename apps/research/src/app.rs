@@ -8,7 +8,8 @@ use crate::assets::{FAVICON, PH_LOGO};
 use crate::components::{ClosingCta, SiteFooter};
 use crate::icons::svg;
 use crate::pages::{
-    About, Approach, Contact, Home, NotFound, Privacy, Research, Security, Systems, Waitlist,
+    About, Approach, Contact, Coverage, Download, Home, NotFound, PhBulwark, PhCamera, Privacy,
+    Research, Security, Systems, Waitlist,
 };
 
 #[derive(Routable, Clone, PartialEq)]
@@ -18,14 +19,22 @@ pub enum Route {
     Home {},
     #[route("/research")]
     Research {},
+    #[route("/coverage")]
+    Coverage {},
     #[route("/systems")]
     Systems {},
+    #[route("/systems/ph-camera")]
+    PhCamera {},
+    #[route("/systems/ph-bulwark")]
+    PhBulwark {},
     #[route("/approach")]
     Approach {},
     #[route("/about")]
     About {},
     #[route("/contact")]
     Contact {},
+    #[route("/download")]
+    Download {},
     #[route("/privacy")]
     Privacy {},
     #[route("/security")]
@@ -108,7 +117,7 @@ fn NavBar() -> Element {
             },
             div { class: "nav-inner",
                 Link { class: "brand", to: Route::Home {}, onclick: move |_| menu.set(false),
-                    img { class: "brand-logo", src: PH_LOGO, alt: "Predator Hunters" }
+                    img { class: "brand-logo", src: PH_LOGO, alt: "Predator Hunters", width: "500", height: "168" }
                     span { class: "brand-tag", "Research" }
                 }
                 div { class: "nav-links",

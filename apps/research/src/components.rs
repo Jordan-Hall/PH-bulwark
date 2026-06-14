@@ -77,7 +77,7 @@ pub fn SiteFooter() -> Element {
                 div { class: "footer-top",
                     div {
                         Link { class: "brand", to: Route::Home {},
-                            img { class: "brand-logo", src: PH_LOGO, alt: "Predator Hunters" }
+                            img { class: "brand-logo", src: PH_LOGO, alt: "Predator Hunters", width: "500", height: "168" }
                             span { class: "brand-tag", "Research" }
                         }
                         p { class: "footer-blurb",
@@ -89,7 +89,9 @@ pub fn SiteFooter() -> Element {
                         ul {
                             li { Link { to: Route::Research {}, "The models" } }
                             li { Link { to: Route::Approach {}, "Our approach" } }
-                            li { Link { to: Route::Approach {}, "Principles" } }
+                            li { Link { to: Route::Coverage {}, "What we catch" } }
+                            li { Link { to: Route::Systems {}, "Systems" } }
+                            li { Link { to: Route::Download {}, "Download the apps" } }
                         }
                     }
                     div {
@@ -112,7 +114,7 @@ pub fn SiteFooter() -> Element {
                             li { a { href: "https://predatorhunters.co.uk", target: "_blank", rel: "noopener", "Press & journalism ↗" } }
                         }
                         div { style: "margin-top:18px;",
-                            img { class: "brand-logo", src: PH_LOGO, alt: "Predator Hunters", style: "height:46px;" }
+                            img { class: "brand-logo", src: PH_LOGO, alt: "Predator Hunters", width: "500", height: "168", style: "height:46px;" }
                         }
                     }
                 }

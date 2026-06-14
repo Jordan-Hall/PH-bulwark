@@ -24,7 +24,13 @@
          first paint. No flash of unstyled content: the page is fully styled the
          moment it renders. (Source lives here; there is no external CSS request.) -->
     <style>
-@import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,400;1,9..144,500&family=Hanken+Grotesk:wght@400;500;600;700&family=Spline+Sans+Mono:wght@400;500;600&display=swap');
+/* Self-hosted fonts (no Google Fonts request → no visitor IP leak to a third
+   party, and the CSP can stay 'self'). Variable woff2, latin subset, served
+   from /fonts/ and long-cached. Weight ranges match what the site requested. */
+@font-face{font-family:'Fraunces';font-style:normal;font-weight:400 600;font-display:swap;src:url('/fonts/fraunces.woff2') format('woff2');}
+@font-face{font-family:'Fraunces';font-style:italic;font-weight:400 500;font-display:swap;src:url('/fonts/fraunces-italic.woff2') format('woff2');}
+@font-face{font-family:'Hanken Grotesk';font-style:normal;font-weight:400 700;font-display:swap;src:url('/fonts/hanken.woff2') format('woff2');}
+@font-face{font-family:'Spline Sans Mono';font-style:normal;font-weight:400 600;font-display:swap;src:url('/fonts/spline.woff2') format('woff2');}
 
 :root {
   /* Stage (dark default) */
