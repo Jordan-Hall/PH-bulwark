@@ -820,6 +820,8 @@ internal fun StatusDashboard(
     onOpenAccessibility: () -> Unit,
     onStartVpn: () -> Unit,
     onReconfigure: () -> Unit,
+    /** Open the in-app PH Bulwark Browser (full-content pre-checked web view). */
+    onOpenBrowser: () -> Unit = {},
     /** True only on a fresh/no-accounts device where the app may legitimately
      *  launch managed provisioning itself; surfaces the one-tap entry. */
     canProvisionManaged: Boolean = false,
@@ -954,6 +956,10 @@ internal fun StatusDashboard(
         if (!state.vpnRunning) {
             DashboardAction("Turn on network filtering", onStartVpn)
         }
+
+        // The in-app safe browser: a guarded web view that pre-checks a page's
+        // full rendered content (visible + off-screen) before the child reads it.
+        DashboardAction("Open safe browser", onOpenBrowser)
 
         OutlinedButton(
             onClick = onReconfigure,

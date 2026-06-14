@@ -7,4 +7,5 @@
     <string name="device_admin_description">Keeps Predator Hunters Bulwark child-safety protection active on this
         device and notifies the guardian if it is turned off or removed. Enabled with guardian
         consent; visible in Settings and removable by the guardian.</string>
+    <string name="browser_title">PH Bulwark Browser</string>
 </resources>

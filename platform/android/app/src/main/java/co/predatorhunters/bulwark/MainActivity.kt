@@ -152,6 +152,7 @@ class MainActivity : ComponentActivity() {
                     onOpenAccessibility = ::openAccessibilitySettings,
                     onStartVpn = ::requestVpnConsent,
                     onReconfigure = { forceJourney = true },
+                    onOpenBrowser = ::openSafeBrowser,
                     canProvisionManaged = canProvisionManaged(),
                     onProvisionManaged = ::launchManagedProvisioning,
                 )
@@ -197,6 +198,12 @@ class MainActivity : ComponentActivity() {
 
     private fun openAccessibilitySettings() {
         startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+    }
+
+    /** Open the in-app PH Bulwark Browser (guarded web view that pre-checks a
+     *  page's full rendered content before the child reads it). */
+    private fun openSafeBrowser() {
+        startActivity(Intent(this, co.predatorhunters.bulwark.browser.BrowserActivity::class.java))
     }
 
     /**
