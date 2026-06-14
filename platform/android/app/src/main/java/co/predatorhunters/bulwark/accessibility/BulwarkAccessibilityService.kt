@@ -76,7 +76,15 @@ class BulwarkAccessibilityService : AccessibilityService() {
         event ?: return
         val pkg = event.packageName?.toString() ?: return
         // Track the live foreground app (skip our own UI) for surface-bound covers.
-        if (pkg != packageName) lastForegroundPkg = pkg
+        // NOT from notification events: a background app posting a notification
+        // fires TYPE_NOTIFICATION_STATE_CHANGED tagged with ITS OWN package while a
+        // different app is on screen — treating that as the foreground would corrupt
+        // the stale-surface guard and drop a legit scan of the real foreground (codex).
+        if (pkg != packageName &&
+            event.eventType != AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED
+        ) {
+            lastForegroundPkg = pkg
+        }
 
         // SURFACE-BOUND COVER: when the foreground window changes to a DIFFERENT
         // app/surface than the one a cover was placed over, drop the cover at once
@@ -275,22 +283,15 @@ class BulwarkAccessibilityService : AccessibilityService() {
         val nsfw = Nsfw.obtain(this) ?: return // fail-open: no model → no image scan
         val region = nsfw.localize(frame) // null when no tile is flagged
         if (region != null && !region.isEmpty) {
-            // STALE-SURFACE GUARD: the screenshot + inference take time, during
-            // which the foreground app can change. If it has, DROP this result
-            // rather than cover the NEW app with a region scanned from the OLD one
-            // (codex P2). The new surface gets covered by its own scan; the old
-            // cover (if any) was already lifted by the surface-bound removal.
+            // STALE-SURFACE GUARD (worker-thread fast early-out): the screenshot +
+            // inference take time, during which the foreground app can change. Skip
+            // here if it already has — but the AUTHORITATIVE re-check and ALL
+            // cover-state mutations (coverPkg, episode, alert) happen on the MAIN
+            // thread inside showLocalizedOverlay, atomic with addView, so a callback
+            // that passes this check then races an app switch can't cover the new
+            // surface with the old region (codex).
             if (pkg != lastForegroundPkg) return
-            // Flagged → cover (refresh) immediately; reset the clean streak.
-            cleanScanCount = 0
-            coverPkg = pkg // bind the cover to this surface (drop on app change)
-            showLocalizedOverlay(region, frame.width, frame.height)
-            if (!coverEpisodeActive) {
-                coverEpisodeActive = true
-                Log.w(TAG, "sexual/explicit imagery in $pkg — covering region (localized)")
-                // Content-free guardian signal — once per episode, not per tick.
-                notifyGuardian(pkg, "{\"reason\":\"Explicit image covered\"}")
-            }
+            showLocalizedOverlay(pkg, region, frame.width, frame.height)
         } else if (coverEpisodeActive) {
             // HYSTERESIS: do NOT drop the cover on a single clean frame — the
             // classifier is noisy per-frame and the offending content (esp. a
@@ -529,9 +530,16 @@ class BulwarkAccessibilityService : AccessibilityService() {
      * can't be tapped through; the surrounding screen stays interactive because
      * the window is only the rectangle.
      */
-    private fun showLocalizedOverlay(regionPx: Rect, frameW: Int, frameH: Int) {
+    private fun showLocalizedOverlay(pkg: String, regionPx: Rect, frameW: Int, frameH: Int) {
         if (frameW <= 0 || frameH <= 0) return
         regionHandler.post {
+            // AUTHORITATIVE surface re-check on the MAIN thread, atomic with the
+            // addView below: if the foreground changed between the worker-thread
+            // scan and now (the user switched apps / opened the shade), do NOT add a
+            // cover for the old surface over the new one (codex). A pending
+            // surface-bound removal for the new window runs before this post, so
+            // lastForegroundPkg is already the new app here.
+            if (pkg != lastForegroundPkg) return@post
             val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
             val (dispW, dispH) = realDisplaySize(wm)
             val sx = dispW.toFloat() / frameW
@@ -572,6 +580,19 @@ class BulwarkAccessibilityService : AccessibilityService() {
                 } else {
                     wm.updateViewLayout(view, lp)
                 }
+            }
+            // Cover is now on screen for THIS surface — record cover state HERE on
+            // the main thread (atomic with addView), so a stale worker callback or a
+            // racing surface change can't desync coverPkg/episode from what's
+            // actually displayed. Bind the cover to the surface (drop on app change)
+            // and reset the clean streak.
+            coverPkg = pkg
+            cleanScanCount = 0
+            if (!coverEpisodeActive) {
+                coverEpisodeActive = true
+                Log.w(TAG, "sexual/explicit imagery in $pkg — covering region (localized)")
+                // Content-free guardian signal — once per episode, not per tick.
+                notifyGuardian(pkg, "{\"reason\":\"Explicit image covered\"}")
             }
             // Stop the offending media's SOUND too (covering an adult video must
             // silence it, not just hide the picture). Idempotent while held.
