@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.Build
 import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -114,6 +115,7 @@ internal fun CameraScreen(
     var previewFlagged by remember { mutableStateOf(false) }
     var capturing by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<Notice?>(null) }
+    var selectedFilter by remember { mutableStateOf(CameraFilter.None) }
 
     val previewView = remember { PreviewView(context) }
     val imageCapture = remember {
@@ -196,12 +198,22 @@ internal fun CameraScreen(
                         // Could not score -> FAIL CLOSED: not saved.
                         verdict.isFailure -> Notice.CheckFailed
                         g.shouldBlock(verdict.getOrThrow()) -> Notice.BlockedNsfw
-                        captureForResult -> {
-                            onDeliverResult(jpeg, rotation) // finishes the activity
-                            null
+                        else -> {
+                            // SAFE capture only: bake the selected look into the SAVED
+                            // file so it matches the preview. Applied HERE, after the
+                            // gate scored the RAW frame — a filter can never change what
+                            // the gate sees. None returns the original bytes unchanged.
+                            val outJpeg = applyFilterToJpeg(jpeg, rotation, selectedFilter)
+                            val outRotation = if (selectedFilter == CameraFilter.None) rotation else 0
+                            when {
+                                captureForResult -> {
+                                    onDeliverResult(outJpeg, outRotation) // finishes the activity
+                                    null
+                                }
+                                onSaveToGallery(outJpeg) -> Notice.Saved
+                                else -> Notice.SaveFailed
+                            }
                         }
-                        onSaveToGallery(jpeg) -> Notice.Saved
-                        else -> Notice.SaveFailed
                     }
                     capturing = false
                 }
@@ -216,7 +228,19 @@ internal fun CameraScreen(
 
     Box(Modifier.fillMaxSize().background(Ink)) {
         if (hasPermission) {
-            AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
+            AndroidView(
+                factory = { previewView },
+                modifier = Modifier.fillMaxSize(),
+                // Live filter preview: the selected look as a RenderEffect on the
+                // PreviewView (API 31+; older devices preview unfiltered — the SAVED
+                // photo is still filtered). A display transform only; it never
+                // touches what the safety gate scores (the gate scores the RAW frame).
+                update = { pv ->
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        pv.setRenderEffect(selectedFilter.renderEffect())
+                    }
+                },
+            )
         } else {
             PermissionExplainer(
                 onGrant = { permissionLauncher.launch(Manifest.permission.CAMERA) },
@@ -242,6 +266,10 @@ internal fun CameraScreen(
                 StatusPill(gateLoading = gateLoading, gateReady = gateReady)
                 Spacer(Modifier.weight(1f))
                 notice?.let { n -> if (n != Notice.BlockedNsfw) NoticeBanner(n) }
+                Spacer(Modifier.height(12.dp))
+                // Samsung-style filter strip (still capture). The chosen look is
+                // previewed live (above) and baked into the saved photo (below).
+                FilterStrip(selected = selectedFilter, onSelect = { selectedFilter = it })
                 Spacer(Modifier.height(12.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (captureForResult) {
@@ -408,6 +436,26 @@ private fun decodeForScoring(jpeg: ByteArray, rotationDegrees: Int): Bitmap {
     val bmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, opts)
         ?: throw IllegalStateException("could not decode captured frame")
     return bmp.rotatedBy(rotationDegrees)
+}
+
+/**
+ * Bake [filter] into a captured JPEG for SAVE (full-res, upright). A filter is a
+ * display COLOR transform applied ONLY to a SAFE capture AFTER the gate scored the
+ * RAW frame — it can never push content past the safety check. [CameraFilter.None]
+ * returns the original bytes unchanged (EXIF intact). For a real look the bitmap is
+ * decoded, rotated upright, color-transformed, and re-encoded (orientation baked in,
+ * so callers pass rotation 0). Any decode/encode failure returns the original bytes
+ * — a photo is never lost over a filter error.
+ */
+private fun applyFilterToJpeg(jpeg: ByteArray, rotationDegrees: Int, filter: CameraFilter): ByteArray {
+    if (filter == CameraFilter.None) return jpeg
+    return runCatching {
+        val decoded = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size) ?: return jpeg
+        val baked = filter.apply(decoded.rotatedBy(rotationDegrees))
+        val out = java.io.ByteArrayOutputStream()
+        baked.compress(Bitmap.CompressFormat.JPEG, 95, out)
+        out.toByteArray()
+    }.getOrDefault(jpeg)
 }
 
 // ---------------------------------------------------------------------------
