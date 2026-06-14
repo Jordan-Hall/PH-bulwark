@@ -54,14 +54,16 @@ research.predatorhunters.co.uk {
 		X-Frame-Options "DENY"
 		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
 		Cross-Origin-Opener-Policy "same-origin"
-		# CSP. script-src needs 'unsafe-inline' because the page ships three
-		# first-party inline scripts (the flash-free theme-init + two Dioxus
-		# wasm-bootstrap blocks that are regenerated each build, so a hash list
-		# is not maintainable) plus 'wasm-unsafe-eval' for the wasm runtime.
-		# Fonts are now self-hosted (/fonts/*.woff2), so style-src/font-src are
-		# 'self' — no Google Fonts origins. object-src/frame-ancestors/base-uri/
+		# CSP. script-src needs 'unsafe-eval' because Dioxus-web's renderer
+		# (sledgehammer_bindgen) builds its DOM-op function with `new Function`,
+		# which CSP treats as eval — without it the wasm app fails to render
+		# after hydration (client-side navigation silently breaks). 'unsafe-inline'
+		# is for the three first-party inline scripts (flash-free theme-init + two
+		# Dioxus wasm-bootstrap blocks regenerated each build); 'wasm-unsafe-eval'
+		# for wasm compilation. Fonts are self-hosted (/fonts/*.woff2), so
+		# style-src/font-src stay 'self'. object-src/frame-ancestors/base-uri/
 		# form-action are locked down.
-		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 		-Server
 	}
 }
