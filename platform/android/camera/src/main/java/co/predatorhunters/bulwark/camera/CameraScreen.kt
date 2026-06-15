@@ -3,6 +3,7 @@ package co.predatorhunters.bulwark.camera
 import android.Manifest
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -409,6 +410,19 @@ internal fun CameraScreen(
             }
     }
 
+    // Open the device gallery (where saved photos can be viewed AND edited with
+    // the system editor) — the in-app thumbnail/editor builds on this next.
+    fun openGallery() {
+        runCatching {
+            context.startActivity(
+                Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "image/*")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                },
+            )
+        }
+    }
+
     Box(Modifier.fillMaxSize().background(Ink)) {
         if (hasPermission) {
             AndroidView(
@@ -538,10 +552,17 @@ internal fun CameraScreen(
                         TextButton(onClick = onCancel) {
                             Text(stringResource(R.string.action_cancel), color = Color.White)
                         }
-                    } else if (mode.supportsFilters) {
-                        FilterToggle(open = filtersOpen, onToggle = { filtersOpen = !filtersOpen })
                     } else {
-                        Spacer(Modifier.width(56.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            GalleryButton(onOpen = { openGallery() })
+                            if (mode.supportsFilters) {
+                                Spacer(Modifier.width(10.dp))
+                                FilterToggle(
+                                    open = filtersOpen,
+                                    onToggle = { filtersOpen = !filtersOpen },
+                                )
+                            }
+                        }
                     }
                     Spacer(Modifier.weight(1f))
                     MorphShutter(
@@ -682,6 +703,22 @@ private fun CheckingOverlay() {
                 fontWeight = FontWeight.Medium,
             )
         }
+    }
+}
+
+/** Opens the device gallery (view + edit saved shots). */
+@Composable
+private fun GalleryButton(onOpen: () -> Unit) {
+    Box(
+        Modifier
+            .size(56.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color.White.copy(alpha = 0.12f))
+            .border(1.dp, Color.White.copy(alpha = 0.4f), RoundedCornerShape(14.dp))
+            .clickable(onClick = onOpen),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text("▦", color = Color.White, fontSize = 24.sp)
     }
 }
 
