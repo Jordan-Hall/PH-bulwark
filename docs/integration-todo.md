@@ -43,8 +43,10 @@ Several types were defined independently by multiple crates and must become one:
 ## 2. Confirm cross-crate public APIs the wiring assumes
 - `bulwark_text::TextAnalyzer::analyze_span(&str, &TextSpan, i64) -> Verdict` (used by
   `bulwark-server` `TextAnalyzerAdapter` and `bulwark-client`).
-- `bulwark_net::NetInterceptor::new(NetConfig)` + `CapturedFlow`/`FlowPayload` field names
-  (used by `bulwark-client::adapt_flow`; `FlowPayload::from_net` is a placeholder).
+- `bulwark_net::NetInterceptor::new(NetConfig)` + `CapturedFlow`/`FlowPayload` field names.
+  ✅ **Resolved** (see §1): the `bulwark-client` adapter / `FlowPayload::from_net` placeholder
+  was removed — the type is canonical in `bulwark-core::flow` and `bulwark-net::convert` builds
+  `FlowPayload::Http` directly.
 - `bulwark_policy::{Policy::default(), PolicyContext{device,source_channel,age_profile}, AgeProfile::default()}`.
 - `bulwark_store::SqliteStore::open_in_memory() -> Arc<dyn Store>` (used by `bulwark-ui` main) — implement or rename.
 - `bulwark_core::DeviceId` path (prelude) vs `bulwark_core::ids::DeviceId` (used by `bulwark-agent`).

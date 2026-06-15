@@ -1,6 +1,7 @@
 # Completeness triage — stubs / WIP / "not yet" across the codebase
 
-Status as of 2026-06-14. A repo-wide scan found **4 hard markers** (`todo!`/
+Status as of 2026-06-14 (reconciled 2026-06-15: two bucket-A items below were
+found already shipped and are marked **✅ DONE**). A repo-wide scan found **4 hard markers** (`todo!`/
 `unimplemented!`/`FIXME`) and ~248 soft markers (`stub`, `for now`, `no-op`,
 `not yet`, `placeholder`, `fail-open`, "honest"). The overwhelming majority of
 the soft hits are **deliberate design** — fail-open/fail-CLOSED fallbacks,
@@ -21,10 +22,10 @@ item into four buckets so "is it done?" has an honest answer.
 |---|---|---|
 | On-device OCR → grooming | `platform/android` accessibility agent; [on-device-agent.md](design/on-device-agent.md) incr. 1 | Tesseract (`tesseract4android`) on a `takeScreenshot()` frame → existing `analyzeText` grooming. Replaces the removed ML Kit (which was never invoked). |
 | On-device NSFW + localized tiled cover-up | same agent; incr. 2–3 | ONNX ViT classifier per-tile → `TYPE_ACCESSIBILITY_OVERLAY` over flagged tiles + margin. |
-| Manager native push connector | `apps/parent` | Register a UnifiedPush endpoint + receive alerts in background (pairs with #136). Client side of the now-FOSS push path. |
+| Manager native push connector **✅ DONE** | `apps/parent` | Shipped: `api::register_push_target` → `Review.RegisterPushTarget`, endpoint persistence (`servers.rs`), the UnifiedPush settings screen (`screens.rs`), and the receive-side `PushService` (MainActivity.kt) + connector dep — with tests. (End-to-end background receive still wants an on-device distributor to validate.) |
 | Manager signed APK on FOSS channels | `apps/parent` + release CI | `dx build --platform android` artifact joins the 3 channels (child + camera already wired in `android-release.yml`). |
 | Child app QR pairing scan (native) | `platform/android` | ZXing dep present; wire the scan→setup-payload path (the Dioxus *preview* still says "scanning coming soon" — preview only, lower priority). |
-| Staff account id for family-safety broadcast | `crates/bulwark-server/src/family_safety.rs` | Replace the `BULWARK_STAFF_BROADCAST_TOKEN` placeholder with a real staff account id now that StaffAdmin (#133) exists. |
+| Staff account id for family-safety broadcast **✅ DONE** | `crates/bulwark-server/src/family_safety.rs` | Shipped: `with_staff_store` wired in `service.rs` (when `BULWARK_STAFF=1`); a `SAFETY_OFFICER`/`ADMIN` staff session authorizes `SendSafetyBroadcast` and stamps the real staff account id into `issued_by`; the shared `BULWARK_STAFF_BROADCAST_TOKEN` is the legacy fallback. Both paths unit-tested. |
 
 ## Bucket B — deliberate, CORRECT stubs/fallbacks → leave (do NOT "fix")
 

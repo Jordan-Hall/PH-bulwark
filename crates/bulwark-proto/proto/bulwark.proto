@@ -1230,11 +1230,12 @@ service StaffAdmin {
 //   * SendSafetyBroadcast: a PH-STAFF-ORIGINATED region-wide family safety
 //     notice ("amber-alert-like") fanned out to guardian consoles. HARD RULE:
 //     never crowd-sourced and never a public accusation — staff issue notices,
-//     guardians read them. AUTH PLACEHOLDER: gated by a server-side shared
-//     staff token (BULWARK_STAFF_BROADCAST_TOKEN; unset = the rpc is off)
-//     until the per-staff accounts/roles system ships (separate design in
-//     progress). TODO(staff-system): the placeholder `staff_token` migrates to
-//     a real per-staff credential via NEW fields/metadata — never renumbering.
+//     guardians read them. AUTH: a per-staff SESSION token (StaffAdmin role
+//     SAFETY_OFFICER or ADMIN) authorizes a broadcast and stamps that account's
+//     id into `issued_by` — the primary path now that the staff accounts system
+//     (StaffAdmin, #133) has shipped and is wired in (server.rs `with_staff_store`).
+//     The shared BULWARK_STAFF_BROADCAST_TOKEN stays a LEGACY fallback, used only
+//     when no staff store is wired; with neither configured the rpc is off.
 //   * ListSafetyBroadcasts: active notices for late-joining guardian consoles
 //     (the live stream only reaches connected ones) and, later, child devices
 //     (the non-dismissable-until-acknowledged child notice is a follow-up
@@ -1276,16 +1277,18 @@ message SafetyBroadcast {
   // acknowledged. The child-device display + acknowledge flow is a follow-up
   // increment; the flag ships now so the message shape is stable.
   bool     notify_child_devices = 8;
-  // Staff identity stamp. PLACEHOLDER value ("staff-shared-token") until the
-  // staff accounts system lands, then a real staff account id — same field.
+  // Staff identity stamp: the authenticated staff account id (per-staff session
+  // auth, now shipped via StaffAdmin), or the legacy "staff-shared-token" marker
+  // on the shared-token fallback path.
   string   issued_by    = 9;
 }
 
 message SendSafetyBroadcastRequest {
-  // PLACEHOLDER staff credential: the server-side shared token
-  // (BULWARK_STAFF_BROADCAST_TOKEN). TODO(staff-system): replaced by the
-  // per-staff session credential from the staff-management design — added as
-  // a NEW field / metadata header, never by renumbering this one.
+  // Staff credential. PRIMARY path: a per-staff SESSION token (StaffAdmin
+  // SAFETY_OFFICER/ADMIN) — accepted in this field OR via the
+  // `authorization: Bearer` metadata header. The shared
+  // BULWARK_STAFF_BROADCAST_TOKEN is the LEGACY fallback (only when no staff
+  // store is wired). Field kept stable (never renumbered).
   string staff_token = 1;
   SafetyBroadcast broadcast = 2; // broadcast_id/issued_ts/issued_by are server-stamped
 }
