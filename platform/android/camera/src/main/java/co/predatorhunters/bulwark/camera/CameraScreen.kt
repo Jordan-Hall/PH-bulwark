@@ -19,6 +19,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraControl
 import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
@@ -35,9 +36,12 @@ import androidx.camera.video.Recording
 import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,6 +50,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -71,8 +76,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
@@ -80,6 +89,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -96,6 +106,13 @@ private enum class Notice { BlockedNsfw, CheckFailed, SaveFailed, Saved }
 
 /** Min interval between live preview scores (CPU ViT ~100-300 ms on a Pixel 7). */
 private const val PREVIEW_SCORE_INTERVAL_MS = 300L
+
+/**
+ * Min interval between live AR face detections — faster than the NSFW score so
+ * stickers track smoothly. UltraFace RFB-320 is ~1.2 MB and runs in a few ms, so
+ * the cost is dominated by the (shared) frame decode.
+ */
+private const val FACE_DETECT_INTERVAL_MS = 120L
 
 /** Max long edge of the decode used to score a capture (model input is 384). */
 private const val SCORING_MAX_DIM = 512
@@ -116,6 +133,7 @@ private const val SCORING_MAX_DIM = 512
 internal fun CameraScreen(
     gate: NsfwGate?,
     gateLoading: Boolean,
+    faceDetector: FaceDetector?,
     captureForResult: Boolean,
     onSaveToGallery: (ByteArray) -> Boolean,
     onDeliverResult: (ByteArray, Int) -> Unit,
@@ -151,8 +169,25 @@ internal fun CameraScreen(
     var notice by remember { mutableStateOf<Notice?>(null) }
     var selectedFilter by remember { mutableStateOf(CameraFilter.None) }
     var filtersOpen by remember { mutableStateOf(false) }
+    // AR "funny face" stickers (display overlay + baked into a SAFE save only).
+    var selectedSticker by remember { mutableStateOf(ArSticker.None) }
+    var arOpen by remember { mutableStateOf(false) }
+    var detectedFaces by remember { mutableStateOf<List<android.graphics.RectF>>(emptyList()) }
+    // The analyzer (bound once) reads "is a sticker active?" through this stable
+    // holder so toggling a sticker doesn't need a camera rebind. Kept in sync below.
+    val arActiveRef = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
+    arActiveRef.set(selectedSticker != ArSticker.None)
     var exposureIndex by remember { mutableStateOf(0) }
     var rollDegrees by remember { mutableStateOf(0f) }
+    var levelVisible by remember { mutableStateOf(false) }
+    var levelMoveTick by remember { mutableStateOf(0) }
+    var lastThumb by remember { mutableStateOf<Bitmap?>(null) }
+    var controlsVisible by remember { mutableStateOf(true) }
+    var tapCount by remember { mutableStateOf(0) }
+    var showGallery by remember { mutableStateOf(false) }
+    var focusPoint by remember { mutableStateOf<Offset?>(null) }
+    var focusTick by remember { mutableStateOf(0) }
+    var showPrivacy by remember { mutableStateOf(false) }
     var mode by remember { mutableStateOf(CameraMode.default) }
     var cameraControl by remember { mutableStateOf<CameraControl?>(null) }
     var cameraInfo by remember { mutableStateOf<CameraInfo?>(null) }
@@ -199,9 +234,15 @@ internal fun CameraScreen(
             ?: sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         val listener = object : SensorEventListener {
             override fun onSensorChanged(e: SensorEvent) {
-                rollDegrees = Math.toDegrees(
+                val newRoll = Math.toDegrees(
                     atan2(e.values[0].toDouble(), e.values[1].toDouble()),
                 ).toFloat()
+                // Only reveal the level guide while the camera is actually moving.
+                if (abs(newRoll - rollDegrees) > 0.4f) {
+                    levelVisible = true
+                    levelMoveTick++
+                }
+                rollDegrees = newRoll
             }
             override fun onAccuracyChanged(s: Sensor?, accuracy: Int) {}
         }
@@ -211,7 +252,7 @@ internal fun CameraScreen(
 
     // Bind the camera; re-runs when permission lands, the lens flips, or the
     // gate becomes ready (the preview shield needs the gate).
-    DisposableEffect(hasPermission, lensFacing, gate, mode.isVideo) {
+    DisposableEffect(hasPermission, lensFacing, gate, faceDetector, mode.isVideo) {
         var disposed = false
         var provider: ProcessCameraProvider? = null
         if (hasPermission) {
@@ -231,9 +272,20 @@ internal fun CameraScreen(
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                         .build()
+                    // ONE analyzer (Preview+Capture+Analysis is the safe CameraX
+                    // combo; a 2nd analysis would fail to bind). The NSFW score is
+                    // UNCHANGED; AR face detection reuses the SAME decoded frame and
+                    // runs only while a sticker is selected (best-effort, off the
+                    // safety path).
                     analysis.setAnalyzer(
                         workerExecutor,
-                        PreviewShieldAnalyzer(gate) { flagged -> previewFlagged = flagged },
+                        PreviewShieldAnalyzer(
+                            gate = gate,
+                            faceDetector = faceDetector,
+                            arActive = { arActiveRef.get() },
+                            onFlagged = { flagged -> previewFlagged = flagged },
+                            onFaces = { faces -> detectedFaces = faces },
+                        ),
                     )
                     useCases += analysis
                 }
@@ -260,12 +312,46 @@ internal fun CameraScreen(
         }
     }
 
+    // Drop any stale AR boxes the instant the sticker is cleared (the analyzer
+    // stops emitting faces while AR is off, so clear what was last shown).
+    LaunchedEffect(selectedSticker) {
+        if (selectedSticker == ArSticker.None) detectedFaces = emptyList()
+    }
+
     // Transient notices auto-dismiss; the BLOCKED explanation stays until "OK".
     LaunchedEffect(notice) {
         val n = notice
         if (n != null && n != Notice.BlockedNsfw) {
             delay(3500)
             if (notice == n) notice = null
+        }
+    }
+
+    // Controls auto-hide after idle for a clear view; a tap on the preview or any
+    // control resets the timer, and any notice forces them back so it's seen.
+    LaunchedEffect(
+        controlsVisible, tapCount, mode, selectedFilter, zoomRatio,
+        flashMode, exposureIndex, filtersOpen, capturing,
+    ) {
+        if (controlsVisible) {
+            delay(5000)
+            controlsVisible = false
+        }
+    }
+    LaunchedEffect(notice) { if (notice != null) controlsVisible = true }
+
+    // The level guide shows only while moving, then fades after ~1.2s of stillness.
+    LaunchedEffect(levelMoveTick) {
+        delay(1200)
+        levelVisible = false
+    }
+
+    // The tap-to-focus ring + brightness bar stay ~3s after the tap (and reset on
+    // each brightness drag), then fade.
+    LaunchedEffect(focusTick) {
+        if (focusPoint != null) {
+            delay(3000)
+            focusPoint = null
         }
     }
 
@@ -292,7 +378,6 @@ internal fun CameraScreen(
     LaunchedEffect(exposureIndex, cameraControl) {
         runCatching { cameraControl?.setExposureCompensationIndex(exposureIndex) }
     }
-    LaunchedEffect(mode.isPro) { if (!mode.isPro) exposureIndex = 0 }
     LaunchedEffect(zoomRatio, cameraControl) { cameraControl?.setZoomRatio(zoomRatio) }
 
     // Live safety layer for video: if the preview scene is flagged WHILE
@@ -327,18 +412,30 @@ internal fun CameraScreen(
                         verdict.isFailure -> Notice.CheckFailed
                         g.shouldBlock(verdict.getOrThrow()) -> Notice.BlockedNsfw
                         else -> {
-                            // SAFE capture only: bake the selected look into the SAVED
-                            // file so it matches the preview. Applied HERE, after the
-                            // gate scored the RAW frame — a filter can never change what
-                            // the gate sees. None returns the original bytes unchanged.
-                            val outJpeg = applyFilterToJpeg(jpeg, rotation, selectedFilter)
-                            val outRotation = if (selectedFilter == CameraFilter.None) rotation else 0
+                            // SAFE capture only: bake the selected look + AR sticker
+                            // into the SAVED file so it matches the preview. Applied
+                            // HERE, AFTER the gate scored the RAW frame above — neither
+                            // a filter nor a sticker can change what the gate sees (it
+                            // never scores a filtered/stickered frame). No filter AND
+                            // no sticker returns the original bytes unchanged.
+                            val outJpeg = applyLooksToJpeg(
+                                jpeg, rotation, selectedFilter, selectedSticker, faceDetector,
+                            )
+                            val outRotation =
+                                if (selectedFilter == CameraFilter.None && selectedSticker.isNone) {
+                                    rotation
+                                } else {
+                                    0
+                                }
                             when {
                                 captureForResult -> {
                                     onDeliverResult(outJpeg, outRotation) // finishes the activity
                                     null
                                 }
-                                onSaveToGallery(outJpeg) -> Notice.Saved
+                                onSaveToGallery(outJpeg) -> {
+                                    lastThumb = decodeThumb(outJpeg, outRotation)
+                                    Notice.Saved
+                                }
                                 else -> Notice.SaveFailed
                             }
                         }
@@ -423,6 +520,15 @@ internal fun CameraScreen(
         }
     }
 
+    fun flipCamera() {
+        if (recording) return
+        lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) {
+            CameraSelector.LENS_FACING_FRONT
+        } else {
+            CameraSelector.LENS_FACING_BACK
+        }
+    }
+
     Box(Modifier.fillMaxSize().background(Ink)) {
         if (hasPermission) {
             AndroidView(
@@ -449,6 +555,86 @@ internal fun CameraScreen(
             )
         }
 
+        // AR "funny face" overlay — a DISPLAY layer over the preview surface (never
+        // read back; CameraX scores the sensor, not this Canvas). The front camera
+        // preview is mirrored, so the boxes are mirrored to track the child. Hidden
+        // while a notice/blocked overlay is up so the safety message stays clear.
+        if (hasPermission && !selectedSticker.isNone && notice != Notice.BlockedNsfw &&
+            !previewFlagged
+        ) {
+            ArOverlay(
+                sticker = selectedSticker,
+                faces = detectedFaces,
+                mirrored = lensFacing == CameraSelector.LENS_FACING_FRONT,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        // Tap the preview to reveal the auto-hidden controls; double-tap flips the
+        // camera (no button needed). Sits below the controls in z-order, so taps on
+        // a control still reach the control.
+        if (hasPermission) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) {
+                        detectTapGestures(
+                            onTap = { offset ->
+                                controlsVisible = true
+                                tapCount++
+                                // Tap-to-focus at the tapped point.
+                                focusPoint = offset
+                                focusTick++
+                                runCatching {
+                                    val pt = previewView.meteringPointFactory
+                                        .createPoint(offset.x, offset.y)
+                                    cameraControl?.startFocusAndMetering(
+                                        FocusMeteringAction.Builder(pt).build(),
+                                    )
+                                }
+                            },
+                            onDoubleTap = { flipCamera() },
+                        )
+                    },
+            )
+        }
+
+        // Tap-to-focus ring at the tapped point (fades after ~0.9s).
+        focusPoint?.let { fp ->
+            Box(
+                Modifier
+                    .offset {
+                        IntOffset(
+                            (fp.x - 36.dp.toPx()).roundToInt(),
+                            (fp.y - 36.dp.toPx()).roundToInt(),
+                        )
+                    }
+                    .size(72.dp)
+                    .border(1.5.dp, Color.White, CircleShape),
+            )
+        }
+
+        // Samsung-style brightness bar by the focus point — drag up to brighten.
+        focusPoint?.let { fp ->
+            val evRange = cameraInfo?.exposureState?.exposureCompensationRange
+            if (evRange != null && evRange.upper > evRange.lower) {
+                Box(
+                    Modifier.offset {
+                        IntOffset(
+                            (fp.x + 44.dp.toPx()).roundToInt(),
+                            (fp.y - 75.dp.toPx()).roundToInt(),
+                        )
+                    },
+                ) {
+                    BrightnessBar(
+                        index = exposureIndex,
+                        range = evRange.lower..evRange.upper,
+                        onChange = { exposureIndex = it; focusTick++ },
+                    )
+                }
+            }
+        }
+
         // Preview shield: the live scene looks unsafe -> pause + explain.
         if (hasPermission && previewFlagged && notice != Notice.BlockedNsfw) {
             Scrim {
@@ -466,15 +652,17 @@ internal fun CameraScreen(
             CheckingOverlay()
         }
 
-        // Horizon level line — during normal framing only (not while checking,
-        // flagged, or blocked). Turns green when the shot is level.
-        if (hasPermission && !capturing && !previewFlagged && notice != Notice.BlockedNsfw) {
+        // Horizon level guide — only while actively moving the camera (and not
+        // while checking/flagged/blocked). Shows the tilt angle; green when level.
+        if (hasPermission && levelVisible && !capturing && !previewFlagged &&
+            notice != Notice.BlockedNsfw
+        ) {
             LevelIndicator(rollDegrees)
         }
 
         // Readable control zone: a soft bottom-up gradient so the controls stay
         // legible over any scene (Samsung/Pixel-style), without hiding the shot.
-        if (hasPermission) {
+        if (hasPermission && controlsVisible) {
             Box(
                 Modifier
                     .fillMaxWidth()
@@ -486,7 +674,7 @@ internal fun CameraScreen(
             )
         }
 
-        if (hasPermission) {
+        if (hasPermission && controlsVisible) {
             Column(
                 Modifier.fillMaxSize().padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -499,6 +687,7 @@ internal fun CameraScreen(
                     zoomRatio = zoomRatio,
                     showFlash = lensFacing == CameraSelector.LENS_FACING_BACK &&
                         cameraInfo?.hasFlashUnit() == true,
+                    onSafetyClick = { showPrivacy = true },
                 )
                 Spacer(Modifier.weight(1f))
                 notice?.let { n -> if (n != Notice.BlockedNsfw) NoticeBanner(n) }
@@ -509,20 +698,33 @@ internal fun CameraScreen(
                     FilterStrip(selected = selectedFilter, onSelect = { selectedFilter = it })
                     Spacer(Modifier.height(12.dp))
                 }
-                // Mode carousel. Only the still modes (Photo / Portrait / Night /
-                // Pro) are offered for now — each applies real Camera2 scene hints;
-                // Video recording is a follow-up (VideoGate scaffold is in place).
-                ModeCarousel(
-                    // Video is offered only when saving to the gallery — the
-                    // "return a result" contract (onDeliverResult) is photo-only.
-                    modes = remember(captureForResult) {
-                        if (captureForResult) CameraMode.strip.filter { it.isStill } else CameraMode.strip
-                    },
-                    selected = mode,
-                    enabled = !capturing && !recording,
-                    onSelect = { mode = it },
-                )
-                Spacer(Modifier.height(12.dp))
+                // AR "funny face" sticker strip — behind its own toggle (the ☺
+                // button), revealed only when wanted. Stills only (it bakes into a
+                // still capture, like the filter strip).
+                if (mode.supportsFilters && arOpen) {
+                    ArStickerStrip(selected = selectedSticker, onSelect = { selectedSticker = it })
+                    Spacer(Modifier.height(12.dp))
+                }
+                // Still-mode carousel (Photo / Portrait / Night / Pro) — shown only
+                // in PHOTO mode; video has no sub-modes (the menu is one OR the other).
+                if (!mode.isVideo) {
+                    ModeCarousel(
+                        modes = remember { CameraMode.strip.filter { it.isStill } },
+                        selected = mode,
+                        enabled = !capturing && !recording,
+                        onSelect = { mode = it },
+                    )
+                    Spacer(Modifier.height(12.dp))
+                }
+                // Top-level PHOTO / VIDEO switch (capture-for-result is photo-only).
+                if (!captureForResult) {
+                    PhotoVideoToggle(
+                        isVideo = mode.isVideo,
+                        enabled = !capturing && !recording,
+                        onSelect = { wantVideo -> mode = if (wantVideo) CameraMode.Video else CameraMode.Photo },
+                    )
+                    Spacer(Modifier.height(12.dp))
+                }
                 // Pro exposure (EV) slider — the real manual control that makes Pro
                 // differ from Photo (shown only when the lens reports an EV range).
                 if (mode.isPro) {
@@ -548,23 +750,43 @@ internal fun CameraScreen(
                 )
                 Spacer(Modifier.height(12.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (captureForResult) {
-                        TextButton(onClick = onCancel) {
-                            Text(stringResource(R.string.action_cancel), color = Color.White)
-                        }
-                    } else {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            GalleryButton(onOpen = { openGallery() })
-                            if (mode.supportsFilters) {
-                                Spacer(Modifier.width(10.dp))
-                                FilterToggle(
-                                    open = filtersOpen,
-                                    onToggle = { filtersOpen = !filtersOpen },
-                                )
+                    // Equal-weight side slots keep the shutter dead-centre.
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                        if (captureForResult) {
+                            TextButton(onClick = onCancel) {
+                                Text(stringResource(R.string.action_cancel), color = Color.White)
+                            }
+                        } else {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                GalleryButton(thumb = lastThumb, onOpen = { showGallery = true })
+                                if (mode.supportsFilters) {
+                                    Spacer(Modifier.width(10.dp))
+                                    // Filters and AR are mutually-exclusive panels —
+                                    // opening one closes the other (keep the view calm).
+                                    FilterToggle(
+                                        open = filtersOpen,
+                                        onToggle = {
+                                            filtersOpen = !filtersOpen
+                                            if (filtersOpen) arOpen = false
+                                        },
+                                    )
+                                    // AR offered only when the face detector loaded
+                                    // (best-effort) — never advertise what can't work.
+                                    if (faceDetector != null) {
+                                        Spacer(Modifier.width(10.dp))
+                                        ArToggle(
+                                            open = arOpen,
+                                            active = !selectedSticker.isNone,
+                                            onToggle = {
+                                                arOpen = !arOpen
+                                                if (arOpen) filtersOpen = false
+                                            },
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
-                    Spacer(Modifier.weight(1f))
                     MorphShutter(
                         mode = mode,
                         recording = recording,
@@ -572,27 +794,10 @@ internal fun CameraScreen(
                         busy = capturing,
                         onClick = { if (mode.isVideo) toggleRecording() else takePhoto() },
                     )
-                    Spacer(Modifier.weight(1f))
-                    OutlinedButton(
-                        enabled = !recording,
-                        onClick = {
-                            lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) {
-                                CameraSelector.LENS_FACING_FRONT
-                            } else {
-                                CameraSelector.LENS_FACING_BACK
-                            }
-                        },
-                    ) {
-                        Text(stringResource(R.string.cd_flip), color = Color.White, fontSize = 12.sp)
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
+                        FlipButton(enabled = !recording, onClick = { flipCamera() })
                     }
                 }
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    stringResource(R.string.privacy_footnote),
-                    color = Color(0xFFCFE0EC),
-                    fontSize = 12.sp,
-                    textAlign = TextAlign.Center,
-                )
             }
         }
 
@@ -628,6 +833,23 @@ internal fun CameraScreen(
                 )
             }
         }
+
+        // Privacy explainer — shown only when the safety chip is tapped.
+        if (showPrivacy) {
+            Scrim {
+                OverlayCard(
+                    title = stringResource(R.string.status_check_ready),
+                    body = stringResource(R.string.privacy_footnote),
+                    buttonLabel = stringResource(R.string.action_ok),
+                    onButton = { showPrivacy = false },
+                )
+            }
+        }
+
+        // Built-in gallery overlay (in-app view + hand-off to the device editor).
+        if (showGallery) {
+            GalleryScreen(onClose = { showGallery = false })
+        }
     }
 }
 
@@ -635,18 +857,66 @@ internal fun CameraScreen(
 @Composable
 private fun LevelIndicator(rollDegrees: Float) {
     val level = abs(rollDegrees) < 1.5f
-    val color = if (level) Good else Color.White.copy(alpha = 0.75f)
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        // Faint fixed reference tick at dead-centre.
-        Box(Modifier.width(34.dp).height(2.dp).background(Color.White.copy(alpha = 0.3f)))
-        // The device horizon — rotates with roll; longer + green when level.
+    val color = if (level) Good else Color.White.copy(alpha = 0.85f)
+    Column(
+        Modifier.fillMaxSize(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        // The actual tilt angle (or "Level" when square).
+        Text(
+            if (level) "Level" else "${abs(rollDegrees.roundToInt())}°",
+            color = color,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Spacer(Modifier.height(10.dp))
+        Box(contentAlignment = Alignment.Center) {
+            // Faint fixed reference tick at dead-centre.
+            Box(Modifier.width(34.dp).height(2.dp).background(Color.White.copy(alpha = 0.3f)))
+            // The device horizon — rotates with roll; longer + green when level.
+            Box(
+                Modifier
+                    .width(if (level) 150.dp else 96.dp)
+                    .height(2.dp)
+                    .rotate(rollDegrees)
+                    .background(color),
+            )
+        }
+    }
+}
+
+/** Vertical brightness (EV) bar shown by the focus point — drag up to brighten. */
+@Composable
+private fun BrightnessBar(index: Int, range: IntRange, onChange: (Int) -> Unit) {
+    var acc by remember { mutableStateOf(0f) }
+    Column(
+        Modifier
+            .width(40.dp)
+            .height(150.dp)
+            .pointerInput(range) {
+                detectVerticalDragGestures { _, dragAmount ->
+                    acc += -dragAmount
+                    val step = (acc / 28f).toInt()
+                    if (step != 0) {
+                        onChange((index + step).coerceIn(range.first, range.last))
+                        acc -= step * 28f
+                    }
+                }
+            },
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text("☀", color = if (index > 0) Sky else Color.White, fontSize = 18.sp)
+        Spacer(Modifier.height(4.dp))
         Box(
             Modifier
-                .width(if (level) 150.dp else 96.dp)
-                .height(2.dp)
-                .rotate(rollDegrees)
-                .background(color),
+                .width(3.dp)
+                .weight(1f)
+                .clip(RoundedCornerShape(50))
+                .background(Color.White.copy(alpha = 0.5f)),
         )
+        Spacer(Modifier.height(4.dp))
+        Text(if (index > 0) "+$index" else "$index", color = Color.White, fontSize = 10.sp)
     }
 }
 
@@ -706,9 +976,9 @@ private fun CheckingOverlay() {
     }
 }
 
-/** Opens the device gallery (view + edit saved shots). */
+/** Opens the device gallery; shows the last shot as a thumbnail once there is one. */
 @Composable
-private fun GalleryButton(onOpen: () -> Unit) {
+private fun GalleryButton(thumb: Bitmap?, onOpen: () -> Unit) {
     Box(
         Modifier
             .size(56.dp)
@@ -718,7 +988,66 @@ private fun GalleryButton(onOpen: () -> Unit) {
             .clickable(onClick = onOpen),
         contentAlignment = Alignment.Center,
     ) {
-        Text("▦", color = Color.White, fontSize = 24.sp)
+        if (thumb != null) {
+            Image(
+                bitmap = thumb.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Text("▦", color = Color.White, fontSize = 24.sp)
+        }
+    }
+}
+
+/** Top-level PHOTO / VIDEO switch — the mode menu is one or the other, not both. */
+@Composable
+private fun PhotoVideoToggle(isVideo: Boolean, enabled: Boolean, onSelect: (Boolean) -> Unit) {
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(50))
+            .background(Color.White.copy(alpha = 0.1f))
+            .padding(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        PvPill("PHOTO", selected = !isVideo, enabled = enabled) { onSelect(false) }
+        PvPill("VIDEO", selected = isVideo, enabled = enabled) { onSelect(true) }
+    }
+}
+
+@Composable
+private fun PvPill(label: String, selected: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(50))
+            .background(if (selected) Sky.copy(alpha = 0.9f) else Color.Transparent)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 18.dp, vertical = 8.dp),
+    ) {
+        Text(
+            label,
+            color = Color.White,
+            fontSize = 13.sp,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            letterSpacing = 1.sp,
+        )
+    }
+}
+
+/** Flip front/back camera — an icon button (double-tap the preview does this too). */
+@Composable
+private fun FlipButton(enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .size(56.dp)
+            .clip(CircleShape)
+            .background(Color.White.copy(alpha = if (enabled) 0.12f else 0.05f))
+            .border(1.dp, Color.White.copy(alpha = if (enabled) 0.4f else 0.15f), CircleShape)
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text("⟲", color = Color.White.copy(alpha = if (enabled) 1f else 0.4f), fontSize = 26.sp)
     }
 }
 
@@ -735,6 +1064,25 @@ private fun FilterToggle(open: Boolean, onToggle: () -> Unit) {
         contentAlignment = Alignment.Center,
     ) {
         Text("✦", color = if (open) Sky else Color.White, fontSize = 22.sp)
+    }
+}
+
+/** Compact toggle (left of the shutter) that shows/hides the AR sticker strip. */
+@Composable
+private fun ArToggle(open: Boolean, active: Boolean, onToggle: () -> Unit) {
+    // Highlight when the panel is open OR a sticker is currently applied, so the
+    // child can tell at a glance an AR look is on even with the strip collapsed.
+    val lit = open || active
+    Box(
+        Modifier
+            .size(56.dp)
+            .clip(CircleShape)
+            .background(if (lit) Sky.copy(alpha = 0.25f) else Color.White.copy(alpha = 0.12f))
+            .border(1.dp, if (lit) Sky else Color.White.copy(alpha = 0.4f), CircleShape)
+            .clickable(onClick = onToggle),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text("☺", color = if (lit) Sky else Color.White, fontSize = 24.sp)
     }
 }
 
@@ -776,41 +1124,73 @@ internal fun VideoStubScreen(onDone: () -> Unit) {
  * never sneak a flagged capture through). Enters the flagged state on a single
  * flagged frame (protective), exits after two consecutive safe frames (no
  * flicker at the threshold boundary). A per-frame hiccup keeps the last state.
+ *
+ * The SINGLE bound analyzer (Preview+Capture+Analysis is the safe CameraX combo)
+ * ALSO drives the AR face overlay: from the SAME decoded upright bitmap it runs
+ * the best-effort [FaceDetector] on its own throttle, but ONLY while [arActive]
+ * (a sticker is selected). The NSFW score is unconditional and UNCHANGED — face
+ * detection reads the already-decoded frame and never alters the safety path.
  */
 private class PreviewShieldAnalyzer(
     private val gate: NsfwGate,
+    private val faceDetector: FaceDetector?,
+    private val arActive: () -> Boolean,
     private val onFlagged: (Boolean) -> Unit,
+    private val onFaces: (List<android.graphics.RectF>) -> Unit,
 ) : ImageAnalysis.Analyzer {
     private var lastRunMs = 0L
+    private var lastFaceRunMs = 0L
     private var safeStreak = 0
     private var flagged = false
 
     override fun analyze(image: ImageProxy) {
         val now = SystemClock.elapsedRealtime()
-        if (now - lastRunMs < PREVIEW_SCORE_INTERVAL_MS) {
+        // The face overlay wants a higher cadence than the NSFW score; bail early
+        // only when NEITHER is due so a frame can serve either layer.
+        val scoreDue = now - lastRunMs >= PREVIEW_SCORE_INTERVAL_MS
+        val faceDue = faceDetector != null && arActive() &&
+            now - lastFaceRunMs >= FACE_DETECT_INTERVAL_MS
+        if (!scoreDue && !faceDue) {
             image.close()
             return
         }
-        lastRunMs = now
         val bitmap = runCatching {
             val rotation = image.imageInfo.rotationDegrees
             image.toBitmap().rotatedBy(rotation)
         }.getOrNull()
         image.close()
         if (bitmap == null) return
-        val score = runCatching { gate.score(bitmap) }.getOrNull() ?: return
-        if (gate.shouldBlock(score)) {
-            safeStreak = 0
-            if (!flagged) {
-                flagged = true
-                onFlagged(true)
+        // Both layers consume `bitmap` via createScaledBitmap (which copies), so
+        // recycle our decode at the end — at face cadence this is allocated often.
+        try {
+            // AR face boxes (best-effort): reuse the decoded frame; never touches
+            // the gate. Emit even an empty list so a face leaving the frame clears
+            // stickers.
+            if (faceDue) {
+                lastFaceRunMs = now
+                val faces = runCatching { faceDetector!!.detect(bitmap).map { it.box } }.getOrNull()
+                if (faces != null) onFaces(faces)
             }
-        } else {
-            safeStreak++
-            if (flagged && safeStreak >= 2) {
-                flagged = false
-                onFlagged(false)
+
+            // Authoritative NSFW score — unconditional, unchanged.
+            if (!scoreDue) return
+            lastRunMs = now
+            val score = runCatching { gate.score(bitmap) }.getOrNull() ?: return
+            if (gate.shouldBlock(score)) {
+                safeStreak = 0
+                if (!flagged) {
+                    flagged = true
+                    onFlagged(true)
+                }
+            } else {
+                safeStreak++
+                if (flagged && safeStreak >= 2) {
+                    flagged = false
+                    onFlagged(false)
+                }
             }
+        } finally {
+            bitmap.recycle()
         }
     }
 }
@@ -839,15 +1219,16 @@ private fun decodeForScoring(jpeg: ByteArray, rotationDegrees: Int): Bitmap {
     return bmp.rotatedBy(rotationDegrees)
 }
 
-/**
- * Bake [filter] into a captured JPEG for SAVE (full-res, upright). A filter is a
- * display COLOR transform applied ONLY to a SAFE capture AFTER the gate scored the
- * RAW frame — it can never push content past the safety check. [CameraFilter.None]
- * returns the original bytes unchanged (EXIF intact). For a real look the bitmap is
- * decoded, rotated upright, color-transformed, and re-encoded (orientation baked in,
- * so callers pass rotation 0). Any decode/encode failure returns the original bytes
- * — a photo is never lost over a filter error.
- */
+/** A small upright thumbnail of a saved capture for the gallery button. */
+private fun decodeThumb(jpeg: ByteArray, rotationDegrees: Int): Bitmap? = runCatching {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, bounds)
+    var sample = 1
+    while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 160) sample *= 2
+    val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+    BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, opts)?.rotatedBy(rotationDegrees)
+}.getOrNull()
+
 /** OFF → AUTO → ON → OFF cycle for the flash toggle. */
 private fun nextFlashMode(current: Int): Int = when (current) {
     ImageCapture.FLASH_MODE_OFF -> ImageCapture.FLASH_MODE_AUTO
@@ -855,11 +1236,52 @@ private fun nextFlashMode(current: Int): Int = when (current) {
     else -> ImageCapture.FLASH_MODE_OFF
 }
 
-private fun applyFilterToJpeg(jpeg: ByteArray, rotationDegrees: Int, filter: CameraFilter): ByteArray {
-    if (filter == CameraFilter.None) return jpeg
+/**
+ * Bake the selected colour [filter] AND AR [sticker] into a captured JPEG for SAVE
+ * (full-res, upright). Both are display transforms applied ONLY to a SAFE capture
+ * AFTER the gate scored the RAW frame, so they can never push content past the
+ * safety check (the gate never sees a filtered/stickered frame). When NEITHER a
+ * filter nor a sticker is selected the original bytes are returned unchanged (EXIF
+ * intact). Otherwise the bitmap is decoded ONCE, rotated upright, colour-transformed,
+ * then — for an AR sticker — re-detected at full res and stamped (drawn AFTER the
+ * filter so the sticker isn't tinted). Orientation is baked in (callers pass
+ * rotation 0). Any failure returns the original bytes — a photo is never lost over
+ * a filter/sticker error.
+ */
+private fun applyLooksToJpeg(
+    jpeg: ByteArray,
+    rotationDegrees: Int,
+    filter: CameraFilter,
+    sticker: ArSticker,
+    faceDetector: FaceDetector?,
+): ByteArray {
+    if (filter == CameraFilter.None && sticker.isNone) return jpeg
     return runCatching {
         val decoded = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size) ?: return jpeg
-        val baked = filter.apply(decoded.rotatedBy(rotationDegrees))
+        val upright = decoded.rotatedBy(rotationDegrees)
+        // Filter first (a fresh ARGB_8888 bitmap); None returns `upright` as-is.
+        var baked = filter.apply(upright)
+        if (!sticker.isNone && faceDetector != null) {
+            // Run a FRESH full-res detect (a different instant/resolution than the
+            // preview — preview boxes cannot be reused) and stamp on the SAME
+            // non-mirrored saved bitmap. The saved JPEG is never mirrored
+            // (ImageCapture MIRROR_MODE_OFF), so detect-and-draw on one bitmap is
+            // self-consistent — no front-camera mirror needed here (unlike the
+            // preview overlay, whose display IS mirrored).
+            val faces = faceDetector.detect(upright).map { it.box }
+            if (faces.isNotEmpty()) {
+                // Draw onto a mutable copy so the filtered bitmap stays intact.
+                if (!baked.isMutable) {
+                    baked = baked.copy(Bitmap.Config.ARGB_8888, true)
+                }
+                sticker.drawOn(
+                    android.graphics.Canvas(baked),
+                    faces,
+                    baked.width.toFloat(),
+                    baked.height.toFloat(),
+                )
+            }
+        }
         val out = java.io.ByteArrayOutputStream()
         baked.compress(Bitmap.CompressFormat.JPEG, 95, out)
         out.toByteArray()
