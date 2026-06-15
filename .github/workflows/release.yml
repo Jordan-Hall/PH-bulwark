@@ -215,6 +215,39 @@ jobs:
           name: ph-bulwark-child-android
           path: dist/*
 
+  camera-android-attach:
+    name: attach camera APK
+    # The `child-android` job's android.yml call ALSO uploads the
+    # `bulwark-camera-debug-apk` artifact (the standalone child-safety camera),
+    # so reuse that same build instead of a second Android toolchain run.
+    needs: child-android
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the camera APK built by the android.yml call
+        uses: actions/download-artifact@v7
+        with:
+          name: bulwark-camera-debug-apk
+          path: apk
+      - name: Stage + checksum (stable asset name)
+        # Debug-signed sideload APK for testers (same posture as the child APK;
+        # Play-store signing is store-publish.yml). The pinned NSFW model is
+        # bundled at build time, so this is the full, functional camera.
+        run: |
+          mkdir -p dist
+          cp "$(find apk -name '*-debug.apk' | head -n1)" dist/ph-bulwark-camera-android.apk
+          (cd dist && sha256sum ph-bulwark-camera-android.apk > SHA256SUMS-camera-android)
+      - name: Attach to the GitHub Release (tag builds)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+      - name: Upload as a workflow artifact (manual dispatch)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: ph-bulwark-camera-android
+          path: dist/*
+
   apple-ffi-scaffold:
     name: apple child-shell FFI scaffold (opt-in)
     # GATED OFF by default. GitHub does not expose `secrets` in a job-level
