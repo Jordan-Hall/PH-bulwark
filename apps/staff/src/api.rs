@@ -67,8 +67,6 @@ pub async fn list_regions(token: String) -> anyhow::Result<Regions> {
 }
 
 /// Content-free per-region health (RegionInfo + per-node HealthStatus gauges).
-/// Wired into the per-region node-health view in the next increment.
-#[allow(dead_code)]
 pub async fn get_fleet_health(token: String, region: String) -> anyhow::Result<FleetHealth> {
     let mut c = client().await?;
     Ok(c.get_fleet_health(FleetHealthRequest { token, region })

@@ -124,9 +124,85 @@ pub fn Fleet() -> Element {
                         RegionTile { region: region.clone() }
                     }
                 }
+                // Per-node HealthStatus for each LOCAL (probed) region — a
+                // non-local region has no live node data (no cross-region gossip).
+                for region in r.regions.iter().filter(|reg| reg.probed) {
+                    NodesView { key: "{region.region}", region: region.region.clone() }
+                }
             },
         }}
     }
+}
+
+/// Per-node live HealthStatus gauges for one region (content-free: ids + gauges).
+#[component]
+fn NodesView(region: String) -> Element {
+    let state = use_context::<StaffState>();
+    let region_for_fetch = region.clone();
+    let health = use_resource(move || {
+        let region = region_for_fetch.clone();
+        let token = state.token();
+        async move {
+            crate::api::get_fleet_health(token, region)
+                .await
+                .map_err(|e| e.to_string())
+        }
+    });
+    let snap = health.read().as_ref().cloned();
+
+    rsx! {
+        div { class: "section-h", style: "margin-top:20px;",
+            h2 { "Nodes — {region.to_uppercase()}" }
+        }
+        {match snap {
+            None => rsx! { div { class: "loading", "Loading node health…" } },
+            Some(Err(e)) => rsx! { div { class: "err", "Couldn't load node health: {e}" } },
+            Some(Ok(h)) => rsx! {
+                if h.nodes.is_empty() {
+                    div { class: "loading", "No live node snapshots for this region." }
+                }
+                table {
+                    thead {
+                        tr {
+                            th { "Node" }
+                            th { "Accepting" }
+                            th { "Queue" }
+                            th { "In-flight" }
+                            th { "CPU" }
+                            th { "GPU" }
+                            th { "Mem (MB)" }
+                            th { "p50 ms" }
+                            th { "p99 ms" }
+                        }
+                    }
+                    tbody {
+                        for node in h.nodes.iter() {
+                            tr { key: "{node.node_id}",
+                                td { class: "mono", "{node.node_id}" }
+                                td {
+                                    span { class: if node.accepting_work { "ok" } else { "bad" },
+                                        if node.accepting_work { "Yes" } else { "No" }
+                                    }
+                                }
+                                td { "{node.queue_depth}" }
+                                td { "{node.inflight}" }
+                                td { "{pct(node.cpu_load)}" }
+                                td { "{pct(node.gpu_load)}" }
+                                td { "{node.mem_used_mb}" }
+                                td { "{node.p50_latency_ms}" }
+                                td { "{node.p99_latency_ms}" }
+                            }
+                        }
+                    }
+                }
+            },
+        }}
+    }
+}
+
+/// A 0.0–1.0 load as a clamped whole-percent string.
+fn pct(v: f32) -> String {
+    format!("{:.0}%", (v * 100.0).clamp(0.0, 100.0))
 }
 
 #[component]
