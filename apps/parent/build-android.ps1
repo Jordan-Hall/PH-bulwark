@@ -43,19 +43,26 @@ $proc = Start-Process -FilePath "dx" `
 $deadline = (Get-Date).AddMinutes($TimeoutMin)
 $ok = $false
 while ((Get-Date) -lt $deadline) {
-    if ($proc.HasExited) { $ok = $true; break }     # dx returned by itself
-    $txt = (Get-Content $dxlog -Raw -ErrorAction SilentlyContinue)
+    if ($proc.HasExited) {
+        # A *clean* --device build HANGS (never exits), so an exit is far more
+        # often the failure signature than success — distinguish by exit code.
+        if ($proc.ExitCode -eq 0) { $ok = $true; break }
+        Get-Content "$dxlog.err" -Raw -ErrorAction SilentlyContinue | Write-Host
+        throw "dx build exited $($proc.ExitCode) - see $dxlog / $dxlog.err"
+    }
+    # Cargo/rustc errors land on STDERR ($dxlog.err); scan BOTH streams.
+    $txt = (Get-Content $dxlog -Raw -ErrorAction SilentlyContinue) +
+        (Get-Content "$dxlog.err" -Raw -ErrorAction SilentlyContinue)
     if ($txt -match "build completed successfully") { $ok = $true; break }
-    if ($txt -match "(?m)^Error:|BUILD FAILED|could not compile|error\[E") {
+    if ($txt -match "(?m)BUILD FAILED|could not compile|error\[E") {
         Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-        throw "dx build failed — see $dxlog"
+        throw "dx build failed - see $dxlog / $dxlog.err"
     }
     Start-Sleep -Seconds 5
 }
 # dx hangs after a clean build with --device; stop it now that the APK is built.
 if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
-Get-Process dx -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-if (-not $ok) { throw "dx build did not report completion within $TimeoutMin min — see $dxlog" }
+if (-not $ok) { throw "dx build did not report completion within $TimeoutMin min - see $dxlog" }
 Write-Host "dx build completed; dx stopped." -ForegroundColor Green
 
 $gen = Join-Path $root "target/dx/bulwark-parent/debug/android/app"
