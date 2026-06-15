@@ -35,6 +35,7 @@ import androidx.camera.video.Recording
 import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -73,6 +74,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
@@ -153,6 +156,7 @@ internal fun CameraScreen(
     var filtersOpen by remember { mutableStateOf(false) }
     var exposureIndex by remember { mutableStateOf(0) }
     var rollDegrees by remember { mutableStateOf(0f) }
+    var lastThumb by remember { mutableStateOf<Bitmap?>(null) }
     var mode by remember { mutableStateOf(CameraMode.default) }
     var cameraControl by remember { mutableStateOf<CameraControl?>(null) }
     var cameraInfo by remember { mutableStateOf<CameraInfo?>(null) }
@@ -338,7 +342,10 @@ internal fun CameraScreen(
                                     onDeliverResult(outJpeg, outRotation) // finishes the activity
                                     null
                                 }
-                                onSaveToGallery(outJpeg) -> Notice.Saved
+                                onSaveToGallery(outJpeg) -> {
+                                    lastThumb = decodeThumb(outJpeg, outRotation)
+                                    Notice.Saved
+                                }
                                 else -> Notice.SaveFailed
                             }
                         }
@@ -554,7 +561,7 @@ internal fun CameraScreen(
                         }
                     } else {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            GalleryButton(onOpen = { openGallery() })
+                            GalleryButton(thumb = lastThumb, onOpen = { openGallery() })
                             if (mode.supportsFilters) {
                                 Spacer(Modifier.width(10.dp))
                                 FilterToggle(
@@ -706,9 +713,9 @@ private fun CheckingOverlay() {
     }
 }
 
-/** Opens the device gallery (view + edit saved shots). */
+/** Opens the device gallery; shows the last shot as a thumbnail once there is one. */
 @Composable
-private fun GalleryButton(onOpen: () -> Unit) {
+private fun GalleryButton(thumb: Bitmap?, onOpen: () -> Unit) {
     Box(
         Modifier
             .size(56.dp)
@@ -718,7 +725,16 @@ private fun GalleryButton(onOpen: () -> Unit) {
             .clickable(onClick = onOpen),
         contentAlignment = Alignment.Center,
     ) {
-        Text("▦", color = Color.White, fontSize = 24.sp)
+        if (thumb != null) {
+            Image(
+                bitmap = thumb.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Text("▦", color = Color.White, fontSize = 24.sp)
+        }
     }
 }
 
@@ -848,6 +864,16 @@ private fun decodeForScoring(jpeg: ByteArray, rotationDegrees: Int): Bitmap {
  * so callers pass rotation 0). Any decode/encode failure returns the original bytes
  * — a photo is never lost over a filter error.
  */
+/** A small upright thumbnail of a saved capture for the gallery button. */
+private fun decodeThumb(jpeg: ByteArray, rotationDegrees: Int): Bitmap? = runCatching {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, bounds)
+    var sample = 1
+    while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 160) sample *= 2
+    val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+    BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, opts)?.rotatedBy(rotationDegrees)
+}.getOrNull()
+
 /** OFF → AUTO → ON → OFF cycle for the flash toggle. */
 private fun nextFlashMode(current: Int): Int = when (current) {
     ImageCapture.FLASH_MODE_OFF -> ImageCapture.FLASH_MODE_AUTO
