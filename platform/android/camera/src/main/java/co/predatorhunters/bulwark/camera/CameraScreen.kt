@@ -19,6 +19,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraControl
 import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
@@ -48,6 +49,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -73,6 +75,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -85,6 +88,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -164,6 +168,8 @@ internal fun CameraScreen(
     var controlsVisible by remember { mutableStateOf(true) }
     var tapCount by remember { mutableStateOf(0) }
     var showGallery by remember { mutableStateOf(false) }
+    var focusPoint by remember { mutableStateOf<Offset?>(null) }
+    var focusTick by remember { mutableStateOf(0) }
     var mode by remember { mutableStateOf(CameraMode.default) }
     var cameraControl by remember { mutableStateOf<CameraControl?>(null) }
     var cameraInfo by remember { mutableStateOf<CameraInfo?>(null) }
@@ -303,6 +309,14 @@ internal fun CameraScreen(
     LaunchedEffect(levelMoveTick) {
         delay(1200)
         levelVisible = false
+    }
+
+    // The tap-to-focus ring fades shortly after the tap.
+    LaunchedEffect(focusTick) {
+        if (focusPoint != null) {
+            delay(900)
+            focusPoint = null
+        }
     }
 
     // Apply the selected mode's Camera2 scene hints (Night / Portrait / Pro)
@@ -506,13 +520,38 @@ internal fun CameraScreen(
                     .fillMaxSize()
                     .pointerInput(Unit) {
                         detectTapGestures(
-                            onTap = {
+                            onTap = { offset ->
                                 controlsVisible = true
                                 tapCount++
+                                // Tap-to-focus at the tapped point.
+                                focusPoint = offset
+                                focusTick++
+                                runCatching {
+                                    val pt = previewView.meteringPointFactory
+                                        .createPoint(offset.x, offset.y)
+                                    cameraControl?.startFocusAndMetering(
+                                        FocusMeteringAction.Builder(pt).build(),
+                                    )
+                                }
                             },
                             onDoubleTap = { flipCamera() },
                         )
                     },
+            )
+        }
+
+        // Tap-to-focus ring at the tapped point (fades after ~0.9s).
+        focusPoint?.let { fp ->
+            Box(
+                Modifier
+                    .offset {
+                        IntOffset(
+                            (fp.x - 36.dp.toPx()).roundToInt(),
+                            (fp.y - 36.dp.toPx()).roundToInt(),
+                        )
+                    }
+                    .size(72.dp)
+                    .border(1.5.dp, Color.White, CircleShape),
             )
         }
 
@@ -617,23 +656,25 @@ internal fun CameraScreen(
                 )
                 Spacer(Modifier.height(12.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (captureForResult) {
-                        TextButton(onClick = onCancel) {
-                            Text(stringResource(R.string.action_cancel), color = Color.White)
-                        }
-                    } else {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            GalleryButton(thumb = lastThumb, onOpen = { showGallery = true })
-                            if (mode.supportsFilters) {
-                                Spacer(Modifier.width(10.dp))
-                                FilterToggle(
-                                    open = filtersOpen,
-                                    onToggle = { filtersOpen = !filtersOpen },
-                                )
+                    // Equal-weight side slots keep the shutter dead-centre.
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                        if (captureForResult) {
+                            TextButton(onClick = onCancel) {
+                                Text(stringResource(R.string.action_cancel), color = Color.White)
+                            }
+                        } else {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                GalleryButton(thumb = lastThumb, onOpen = { showGallery = true })
+                                if (mode.supportsFilters) {
+                                    Spacer(Modifier.width(10.dp))
+                                    FilterToggle(
+                                        open = filtersOpen,
+                                        onToggle = { filtersOpen = !filtersOpen },
+                                    )
+                                }
                             }
                         }
                     }
-                    Spacer(Modifier.weight(1f))
                     MorphShutter(
                         mode = mode,
                         recording = recording,
@@ -641,8 +682,9 @@ internal fun CameraScreen(
                         busy = capturing,
                         onClick = { if (mode.isVideo) toggleRecording() else takePhoto() },
                     )
-                    Spacer(Modifier.weight(1f))
-                    FlipButton(enabled = !recording, onClick = { flipCamera() })
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
+                        FlipButton(enabled = !recording, onClick = { flipCamera() })
+                    }
                 }
             }
         }
