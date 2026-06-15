@@ -71,6 +71,12 @@
     <string name="cd_focus_tap">Tap to focus</string>
     <string name="cd_last_shot">Last shot</string>
 
+    <!-- Dual (front + back at once) — capability-gated; only shown when the
+         device supports CameraX ConcurrentCamera with both lenses. -->
+    <string name="cd_dual">Both cameras</string>
+    <string name="dual_label">DUAL</string>
+    <string name="cd_dual_swap">Swap which camera is large</string>
+
     <!-- Pro (manual) tray -->
     <string name="pro_exposure">Exposure</string>
     <string name="pro_iso">ISO</string>

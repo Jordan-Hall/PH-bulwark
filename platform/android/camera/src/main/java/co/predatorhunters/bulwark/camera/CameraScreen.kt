@@ -19,6 +19,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraControl
 import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ConcurrentCamera
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
@@ -26,6 +27,7 @@ import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.core.UseCase
+import androidx.camera.core.UseCaseGroup
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.FileOutputOptions
@@ -102,7 +104,7 @@ import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 
 /** Outcome surfaced to the child after an action. Calm, never shaming. */
-private enum class Notice { BlockedNsfw, CheckFailed, SaveFailed, Saved }
+internal enum class Notice { BlockedNsfw, CheckFailed, SaveFailed, Saved }
 
 /** Min interval between live preview scores (CPU ViT ~100-300 ms on a Pixel 7). */
 private const val PREVIEW_SCORE_INTERVAL_MS = 300L
@@ -195,6 +197,13 @@ internal fun CameraScreen(
     var zoomRatio by remember { mutableStateOf(1f) }
     var recording by remember { mutableStateOf(false) }
     var activeRecording by remember { mutableStateOf<Recording?>(null) }
+    // Dual (front + back at once) — capability-gated. `dualSupported` is set once
+    // the provider loads (only then is the toggle offered); `dualOn` drives the
+    // concurrent bind; `frontIsLarge` is which lens fills the frame (tap the PiP
+    // inset to swap). Dual is photo-only and forced off when entering Video.
+    var dualSupported by remember { mutableStateOf(false) }
+    var dualOn by remember { mutableStateOf(false) }
+    var frontIsLarge by remember { mutableStateOf(false) }
 
     val previewView = remember {
         PreviewView(context).apply {
@@ -204,6 +213,16 @@ internal fun CameraScreen(
             // into the view layer, so the filter RenderEffect actually applies.
             implementationMode = PreviewView.ImplementationMode.COMPATIBLE
         }
+    }
+    // Dual mode draws TWO live previews. These are stable across recompositions
+    // (the concurrent surfaces must not be torn down by Compose). COMPATIBLE so
+    // getBitmap() returns the displayed frame (no RenderEffect is ever set on
+    // them — the gate scores the raw frames these show).
+    val backPreviewView = remember {
+        PreviewView(context).apply { implementationMode = PreviewView.ImplementationMode.COMPATIBLE }
+    }
+    val frontPreviewView = remember {
+        PreviewView(context).apply { implementationMode = PreviewView.ImplementationMode.COMPATIBLE }
     }
     val imageCapture = remember {
         ImageCapture.Builder()
@@ -250,9 +269,11 @@ internal fun CameraScreen(
         onDispose { sm.unregisterListener(listener) }
     }
 
-    // Bind the camera; re-runs when permission lands, the lens flips, or the
-    // gate becomes ready (the preview shield needs the gate).
-    DisposableEffect(hasPermission, lensFacing, gate, faceDetector, mode.isVideo) {
+    // Bind the camera; re-runs when permission lands, the lens flips, the gate
+    // becomes ready (the preview shield needs the gate), or dual mode / its
+    // large-lens choice changes. unbindAll() on every (re)bind prevents leaking a
+    // concurrent session when leaving Dual / switching to Video / flipping.
+    DisposableEffect(hasPermission, lensFacing, gate, faceDetector, mode.isVideo, dualOn, frontIsLarge) {
         var disposed = false
         var provider: ProcessCameraProvider? = null
         if (hasPermission) {
@@ -261,6 +282,71 @@ internal fun CameraScreen(
                 val p = future.get()
                 if (disposed) return@addListener
                 provider = p
+                // Capability-detect concurrent dual ONCE the provider is up — the
+                // toggle is offered only when this device lists a both-lens combo.
+                dualSupported = DualCamera.isSupported(p)
+
+                // --- DUAL: two cameras concurrently, each its own Preview. ---
+                // Photo-only (Video forces dualOn=false below). The authoritative
+                // safety gate for a dual capture is per-source at capture time
+                // (takeDualPhoto); the live shield here is advisory (back stream).
+                if (dualOn && !mode.isVideo && dualSupported) {
+                    val backPreview = Preview.Builder().build()
+                    val frontPreview = Preview.Builder().build()
+                    // Advisory live shield on the BACK group: attached
+                    // unconditionally when the gate is ready. If concurrent limits
+                    // can't accept the extra use case, DualCamera.bind() returns
+                    // null and we fall back to the single-camera path below — the
+                    // per-source capture gate (takeDualPhoto) is the authoritative
+                    // safety layer regardless. No target resolution — concurrent
+                    // mode caps it, so let CameraX choose.
+                    val backGroupBuilder = UseCaseGroup.Builder().addUseCase(backPreview)
+                    if (gate != null) {
+                        val analysis = ImageAnalysis.Builder()
+                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                            .build()
+                        analysis.setAnalyzer(
+                            workerExecutor,
+                            PreviewShieldAnalyzer(
+                                gate = gate,
+                                faceDetector = null, // no AR in dual
+                                arActive = { false },
+                                onFlagged = { flagged -> previewFlagged = flagged },
+                                onFaces = {},
+                            ),
+                        )
+                        backGroupBuilder.addUseCase(analysis)
+                    }
+                    val backGroup = backGroupBuilder.build()
+                    val frontGroup = UseCaseGroup.Builder().addUseCase(frontPreview).build()
+                    val concurrent = DualCamera.bind(
+                        provider = p,
+                        lifecycleOwner = lifecycleOwner,
+                        backPreview = backPreview,
+                        frontPreview = frontPreview,
+                        backGroup = backGroup,
+                        frontGroup = frontGroup,
+                    )
+                    if (concurrent != null) {
+                        backPreview.setSurfaceProvider(backPreviewView.surfaceProvider)
+                        frontPreview.setSurfaceProvider(frontPreviewView.surfaceProvider)
+                        // Drive flash/zoom/EV off the LARGE camera's control.
+                        val largeCam = concurrent.cameras.firstOrNull {
+                            it.cameraInfo.lensFacing ==
+                                if (frontIsLarge) CameraSelector.LENS_FACING_FRONT
+                                else CameraSelector.LENS_FACING_BACK
+                        } ?: concurrent.cameras.firstOrNull()
+                        cameraControl = largeCam?.cameraControl
+                        cameraInfo = largeCam?.cameraInfo
+                        return@addListener
+                    }
+                    // Concurrent bind FAILED on this device despite the capability
+                    // report — fall back to single-camera (below). Never crash.
+                    dualOn = false
+                }
+
+                // --- SINGLE camera (unchanged path). ---
                 val preview = Preview.Builder().build()
                 // Video mode binds VideoCapture in place of ImageCapture (CameraX
                 // can't run both alongside analysis); the live preview-shield
@@ -311,6 +397,16 @@ internal fun CameraScreen(
             provider?.unbindAll()
         }
     }
+
+    // Dual is photo-only; entering Video forces it off (concurrent + VideoCapture
+    // is even more constrained). The rebind effect picks up the dualOn change.
+    LaunchedEffect(mode.isVideo) {
+        if (mode.isVideo && dualOn) dualOn = false
+    }
+    // Clear any stale preview-shield flag when dual toggles — the fresh bind's
+    // analyzer re-evaluates from scratch, so a flag from the prior binding must
+    // not linger and pin the shutter disabled.
+    LaunchedEffect(dualOn) { previewFlagged = false }
 
     // Drop any stale AR boxes the instant the sticker is cleared (the analyzer
     // stops emitting faces while AR is off, so clear what was last shown).
@@ -451,6 +547,68 @@ internal fun CameraScreen(
         )
     }
 
+    // DUAL capture: grab the live frame of BOTH cameras, gate EACH source on its
+    // own at full gate resolution (strictly stronger than scoring the shrunken
+    // composite — the front inset is never down-scaled before scoring), and ONLY
+    // when BOTH pass composite the PiP and save. Fail-closed: a null/unscorable/
+    // flagged source saves NOTHING (same posture as the single takePhoto path).
+    // HONEST LIMIT: the saved frame is preview-resolution (getBitmap of the live
+    // surface), not a full-res ImageCapture — concurrent mode can't bind a still
+    // capture on both, so the composite is built from the previews. No filter/AR
+    // and no RenderEffect are applied to the dual previews, so getBitmap() is the
+    // raw frame the gate scores.
+    fun takeDualPhoto() {
+        val g = gate ?: return
+        if (!shutterEnabled) return
+        capturing = true
+        // PreviewView.getBitmap() MUST be read on the main thread (it asserts the
+        // main thread internally). The shutter onClick already runs on main, so
+        // snapshot BOTH live frames here, then hand the (off-main) scoring +
+        // compositing to the worker. A null snapshot is unscorable -> fail closed.
+        val back = runCatching { backPreviewView.bitmap }.getOrNull()
+        val front = runCatching { frontPreviewView.bitmap }.getOrNull()
+        workerExecutor.execute {
+            // AUTHORITATIVE: per-source score; null return == both safe.
+            val gateVerdict = DualCamera.gateDualSources(g, back, front)
+            val outcome: Notice? = when {
+                gateVerdict != null -> gateVerdict // BlockedNsfw / CheckFailed — nothing written
+                else -> {
+                    // Both safe: composite (large fills, small insets) then save.
+                    val large = if (frontIsLarge) front else back
+                    val small = if (frontIsLarge) back else front
+                    if (large == null || small == null) {
+                        Notice.CheckFailed
+                    } else {
+                        val composite = runCatching { DualCamera.composite(large, small) }.getOrNull()
+                        val jpeg = composite?.let {
+                            runCatching {
+                                val out = java.io.ByteArrayOutputStream()
+                                it.compress(Bitmap.CompressFormat.JPEG, 95, out)
+                                out.toByteArray()
+                            }.getOrNull()
+                        }
+                        when {
+                            jpeg == null -> Notice.SaveFailed
+                            captureForResult -> {
+                                onDeliverResult(jpeg, 0) // already upright; finishes the activity
+                                null
+                            }
+                            onSaveToGallery(jpeg) -> {
+                                lastThumb = decodeThumb(jpeg, 0)
+                                Notice.Saved
+                            }
+                            else -> Notice.SaveFailed
+                        }
+                    }
+                }
+            }
+            mainExecutor.execute {
+                if (outcome != null) notice = outcome
+                capturing = false
+            }
+        }
+    }
+
     // Video: record to an APP-PRIVATE temp file, then VideoGate.rescan EVERY
     // sampled frame before publishing. A single flagged frame (or any failure)
     // deletes the temp and publishes nothing — the clip is never user-visible
@@ -522,6 +680,12 @@ internal fun CameraScreen(
 
     fun flipCamera() {
         if (recording) return
+        // In dual mode both cameras are already live — "flip" swaps which one is
+        // large (same as tapping the PiP inset), it doesn't change the bound lens.
+        if (dualOn) {
+            frontIsLarge = !frontIsLarge
+            return
+        }
         lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) {
             CameraSelector.LENS_FACING_FRONT
         } else {
@@ -530,7 +694,16 @@ internal fun CameraScreen(
     }
 
     Box(Modifier.fillMaxSize().background(Ink)) {
-        if (hasPermission) {
+        if (hasPermission && dualOn) {
+            // Dual: TWO live previews in a PiP. No RenderEffect/filter — the gate
+            // scores the raw frames getBitmap() returns. Tap the inset (or flip)
+            // to swap which lens is large.
+            DualPreviewLayout(
+                largePreview = if (frontIsLarge) frontPreviewView else backPreviewView,
+                smallPreview = if (frontIsLarge) backPreviewView else frontPreviewView,
+                onSwap = { frontIsLarge = !frontIsLarge },
+            )
+        } else if (hasPermission) {
             AndroidView(
                 factory = { previewView },
                 modifier = Modifier.fillMaxSize(),
@@ -559,7 +732,8 @@ internal fun CameraScreen(
         // read back; CameraX scores the sensor, not this Canvas). The front camera
         // preview is mirrored, so the boxes are mirrored to track the child. Hidden
         // while a notice/blocked overlay is up so the safety message stays clear.
-        if (hasPermission && !selectedSticker.isNone && notice != Notice.BlockedNsfw &&
+        // AR overlay is single-camera only (no AR in dual mode).
+        if (hasPermission && !dualOn && !selectedSticker.isNone && notice != Notice.BlockedNsfw &&
             !previewFlagged
         ) {
             ArOverlay(
@@ -572,8 +746,10 @@ internal fun CameraScreen(
 
         // Tap the preview to reveal the auto-hidden controls; double-tap flips the
         // camera (no button needed). Sits below the controls in z-order, so taps on
-        // a control still reach the control.
-        if (hasPermission) {
+        // a control still reach the control. SKIPPED in dual mode so the PiP inset
+        // stays tappable (and tap-to-focus targets the single bound previewView,
+        // which isn't the dual surface).
+        if (hasPermission && !dualOn) {
             Box(
                 Modifier
                     .fillMaxSize()
@@ -781,6 +957,24 @@ internal fun CameraScreen(
                                         )
                                     }
                                 }
+                                // Dual (front + back at once) — shown ONLY when the
+                                // device supports concurrent dual-camera and we're in
+                                // a still (photo) mode. Hidden/no-op everywhere else.
+                                if (dualSupported && !mode.isVideo) {
+                                    Spacer(Modifier.width(10.dp))
+                                    DualToggle(
+                                        active = dualOn,
+                                        onToggle = {
+                                            dualOn = !dualOn
+                                            // Dual has no filters/AR — close those panels.
+                                            if (dualOn) {
+                                                filtersOpen = false
+                                                arOpen = false
+                                            }
+                                            controlsVisible = true
+                                        },
+                                    )
+                                }
                             }
                         }
                     }
@@ -792,7 +986,7 @@ internal fun CameraScreen(
                             recording = recording,
                             enabled = shutterEnabled,
                             busy = capturing,
-                            onClick = { takePhoto() },
+                            onClick = { if (dualOn) takeDualPhoto() else takePhoto() },
                         )
                     } else {
                         // The PHOTO/VIDEO switch IS the shutter: PHOTO and VIDEO labels
@@ -806,7 +1000,13 @@ internal fun CameraScreen(
                             shutterEnabled = shutterEnabled,
                             busy = capturing,
                             switchEnabled = !capturing && !recording,
-                            onShutter = { if (mode.isVideo) toggleRecording() else takePhoto() },
+                            onShutter = {
+                                when {
+                                    mode.isVideo -> toggleRecording()
+                                    dualOn -> takeDualPhoto()
+                                    else -> takePhoto()
+                                }
+                            },
                             onSelectMode = { wantVideo ->
                                 mode = if (wantVideo) CameraMode.Video else CameraMode.Photo
                             },
@@ -1067,6 +1267,26 @@ private fun ArToggle(open: Boolean, active: Boolean, onToggle: () -> Unit) {
         contentAlignment = Alignment.Center,
     ) {
         Text("☺", color = if (lit) Sky else Color.White, fontSize = 24.sp)
+    }
+}
+
+/** Toggle (left of the shutter) for Dual front+back mode — shown only when the
+ *  device supports concurrent dual-camera. Lit when dual is active. */
+@Composable
+private fun DualToggle(active: Boolean, onToggle: () -> Unit) {
+    val cd = stringResource(R.string.cd_dual)
+    Box(
+        Modifier
+            .size(56.dp)
+            .clip(CircleShape)
+            .background(if (active) Sky.copy(alpha = 0.25f) else Color.White.copy(alpha = 0.12f))
+            .border(1.dp, if (active) Sky else Color.White.copy(alpha = 0.4f), CircleShape)
+            .clickable(onClick = onToggle)
+            .semantics { contentDescription = cd },
+        contentAlignment = Alignment.Center,
+    ) {
+        // Two overlapping rounded rectangles read as "two cameras / PiP".
+        Text("⧉", color = if (active) Sky else Color.White, fontSize = 22.sp)
     }
 }
 
