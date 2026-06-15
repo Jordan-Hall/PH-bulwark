@@ -719,15 +719,6 @@ internal fun CameraScreen(
                     )
                     Spacer(Modifier.height(12.dp))
                 }
-                // Top-level PHOTO / VIDEO switch (capture-for-result is photo-only).
-                if (!captureForResult) {
-                    PhotoVideoToggle(
-                        isVideo = mode.isVideo,
-                        enabled = !capturing && !recording,
-                        onSelect = { wantVideo -> mode = if (wantVideo) CameraMode.Video else CameraMode.Photo },
-                    )
-                    Spacer(Modifier.height(12.dp))
-                }
                 // Pro exposure (EV) slider — the real manual control that makes Pro
                 // differ from Photo (shown only when the lens reports an EV range).
                 if (mode.isPro) {
@@ -793,13 +784,34 @@ internal fun CameraScreen(
                             }
                         }
                     }
-                    MorphShutter(
-                        mode = mode,
-                        recording = recording,
-                        enabled = shutterEnabled,
-                        busy = capturing,
-                        onClick = { if (mode.isVideo) toggleRecording() else takePhoto() },
-                    )
+                    if (captureForResult) {
+                        // Result mode is photo-only — no PHOTO/VIDEO switch, just the
+                        // bare centred shutter.
+                        MorphShutter(
+                            mode = mode,
+                            recording = recording,
+                            enabled = shutterEnabled,
+                            busy = capturing,
+                            onClick = { takePhoto() },
+                        )
+                    } else {
+                        // The PHOTO/VIDEO switch IS the shutter: PHOTO and VIDEO labels
+                        // flank the dead-centre shutter; the active label's pill fades in
+                        // while the shutter recolors + pops in place.
+                        // Switching is locked mid-capture/record (the mode flip rebinds
+                        // the camera; firing it then would tear down the recording).
+                        ShutterModeSwitch(
+                            mode = mode,
+                            recording = recording,
+                            shutterEnabled = shutterEnabled,
+                            busy = capturing,
+                            switchEnabled = !capturing && !recording,
+                            onShutter = { if (mode.isVideo) toggleRecording() else takePhoto() },
+                            onSelectMode = { wantVideo ->
+                                mode = if (wantVideo) CameraMode.Video else CameraMode.Photo
+                            },
+                        )
+                    }
                     Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
                         FlipButton(enabled = !recording, onClick = { flipCamera() })
                     }
@@ -1004,40 +1016,6 @@ private fun GalleryButton(thumb: Bitmap?, onOpen: () -> Unit) {
         } else {
             Text("▦", color = Color.White, fontSize = 24.sp)
         }
-    }
-}
-
-/** Top-level PHOTO / VIDEO switch — the mode menu is one or the other, not both. */
-@Composable
-private fun PhotoVideoToggle(isVideo: Boolean, enabled: Boolean, onSelect: (Boolean) -> Unit) {
-    Row(
-        Modifier
-            .clip(RoundedCornerShape(50))
-            .background(Color.White.copy(alpha = 0.1f))
-            .padding(4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        PvPill("PHOTO", selected = !isVideo, enabled = enabled) { onSelect(false) }
-        PvPill("VIDEO", selected = isVideo, enabled = enabled) { onSelect(true) }
-    }
-}
-
-@Composable
-private fun PvPill(label: String, selected: Boolean, enabled: Boolean, onClick: () -> Unit) {
-    Box(
-        Modifier
-            .clip(RoundedCornerShape(50))
-            .background(if (selected) Sky.copy(alpha = 0.9f) else Color.Transparent)
-            .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 18.dp, vertical = 8.dp),
-    ) {
-        Text(
-            label,
-            color = Color.White,
-            fontSize = 13.sp,
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-            letterSpacing = 1.sp,
-        )
     }
 }
 
