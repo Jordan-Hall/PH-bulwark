@@ -84,6 +84,7 @@ internal fun TopBar(
     onCycleFlash: () -> Unit,
     zoomRatio: Float,
     showFlash: Boolean,
+    onSafetyClick: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     Row(
@@ -98,14 +99,14 @@ internal fun TopBar(
             Spacer(Modifier.size(44.dp))
         }
         Spacer(Modifier.weight(1f))
-        SafetyChip(gateLoading = gateLoading, gateReady = gateReady)
+        SafetyChip(gateLoading = gateLoading, gateReady = gateReady, onClick = onSafetyClick)
         Spacer(Modifier.weight(1f))
         ZoomReadout(zoomRatio = zoomRatio)
     }
 }
 
 @Composable
-private fun SafetyChip(gateLoading: Boolean, gateReady: Boolean) {
+private fun SafetyChip(gateLoading: Boolean, gateReady: Boolean, onClick: () -> Unit = {}) {
     val label = when {
         gateLoading -> stringResource(R.string.status_check_loading)
         gateReady -> stringResource(R.string.status_check_ready)
@@ -122,6 +123,7 @@ private fun SafetyChip(gateLoading: Boolean, gateReady: Boolean) {
             .clip(RoundedCornerShape(50))
             .background(Cam.Glass)
             .border(1.dp, Cam.Hairline, RoundedCornerShape(50))
+            .clickable(onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

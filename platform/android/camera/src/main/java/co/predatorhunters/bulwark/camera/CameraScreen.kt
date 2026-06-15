@@ -170,6 +170,7 @@ internal fun CameraScreen(
     var showGallery by remember { mutableStateOf(false) }
     var focusPoint by remember { mutableStateOf<Offset?>(null) }
     var focusTick by remember { mutableStateOf(0) }
+    var showPrivacy by remember { mutableStateOf(false) }
     var mode by remember { mutableStateOf(CameraMode.default) }
     var cameraControl by remember { mutableStateOf<CameraControl?>(null) }
     var cameraInfo by remember { mutableStateOf<CameraInfo?>(null) }
@@ -607,6 +608,7 @@ internal fun CameraScreen(
                     zoomRatio = zoomRatio,
                     showFlash = lensFacing == CameraSelector.LENS_FACING_BACK &&
                         cameraInfo?.hasFlashUnit() == true,
+                    onSafetyClick = { showPrivacy = true },
                 )
                 Spacer(Modifier.weight(1f))
                 notice?.let { n -> if (n != Notice.BlockedNsfw) NoticeBanner(n) }
@@ -718,6 +720,18 @@ internal fun CameraScreen(
                     body = stringResource(R.string.blocked_body),
                     buttonLabel = stringResource(R.string.action_ok),
                     onButton = { notice = null },
+                )
+            }
+        }
+
+        // Privacy explainer — shown only when the safety chip is tapped.
+        if (showPrivacy) {
+            Scrim {
+                OverlayCard(
+                    title = stringResource(R.string.status_check_ready),
+                    body = stringResource(R.string.privacy_footnote),
+                    buttonLabel = stringResource(R.string.action_ok),
+                    onButton = { showPrivacy = false },
                 )
             }
         }
