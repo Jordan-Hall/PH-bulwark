@@ -58,7 +58,7 @@ When both are cleared, re-evaluate against the **minimum bar** at the bottom.
 | On-device NSFW capture gate (block + drop, no store/hash/send) | 🧪 | `platform/android/camera/.../NsfwGate.kt` runs the engine's bundled ViT (Apache-2.0) via ONNX Runtime, parity with `bulwark-vision` pre/post-process, fail-closed; threshold 0.7. **On-device accuracy/accelerator path not device-validated.** |
 | No-network guarantee (OS-enforced) | ✅ | `platform/android/camera/AndroidManifest.xml` declares **zero** network permissions; comment + manifest enforce it. |
 | Module builds in CI | ✅ (compiled) | `settings.gradle.kts` includes `:camera`; `android.yml`'s `assembleDebug` compiles it. |
-| **Camera APK shipped on any channel** | ✅ (sideload) | `android.yml` now uploads the camera APK as its own `bulwark-camera-debug-apk` artifact, and `release.yml`'s `camera-android-attach` job stages it as `ph-bulwark-camera-android.apk` (+ SHA256) — attached to tagged releases, artifact on manual dispatch — mirroring the child APK. Debug-signed sideload; Play-store signing is still `store-publish.yml`. |
+| **Camera APK shipped on any channel** | ✅ | **Signed:** `android-release.yml` already builds + attaches `camera-release.apk` (`:camera:assembleRelease`, self-gated signingConfig) to the GitHub Release + the FOSS channels (F-Droid mirror / Accrescent / Obtainium) on `v*` tags. **Debug (quick sideload):** this PR adds `android.yml`'s per-run `bulwark-camera-debug-apk` artifact + `release.yml`'s `camera-android-attach` (`ph-bulwark-camera-android.apk` + SHA256), mirroring the child APK's debug+signed double — so testers can grab a build off any CI run, not just a tag. |
 
 ### C. Manager (guardian console) — `co.predatorhunters.bulwark.manager`
 
