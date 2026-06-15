@@ -146,8 +146,6 @@ pub async fn list_cases(token: String, state_filter: i32) -> anyhow::Result<Safe
 
 /// Drive ONE validated workflow transition (the server refuses invalid edges).
 /// `ncmec_reference` is required only when `new_state` == REPORTED_NCMEC.
-/// Wired into the case-transition controls in the next increment.
-#[allow(dead_code)]
 pub async fn transition_case(
     token: String,
     case_id: String,

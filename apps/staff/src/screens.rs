@@ -331,11 +331,37 @@ pub fn Support() -> Element {
 pub fn Cases() -> Element {
     let state = use_context::<StaffState>();
     let mut filter = use_signal(|| 0i32); // SafetyCaseState UNSPECIFIED = all
+    let ncmec_ref = use_signal(String::new);
+    let action = use_signal(|| Option::<String>::None);
     let cases = use_resource(move || async move {
         crate::api::list_cases(state.token(), filter())
             .await
             .map_err(|e| e.to_string())
     });
+
+    // Drive ONE validated transition, then refresh the list. The server refuses
+    // invalid edges (FAILED_PRECONDITION), surfaced in the action note.
+    let transition = use_callback(move |(case_id, new_state): (String, i32)| {
+        let token = state.token();
+        // The NCMEC reference is required only when moving a case to REPORTED_NCMEC.
+        let reference = if new_state == SafetyCaseState::ReportedNcmec as i32 {
+            ncmec_ref()
+        } else {
+            String::new()
+        };
+        spawn(async move {
+            let mut action = action;
+            let mut cases = cases;
+            let msg = match crate::api::transition_case(token, case_id, new_state, reference).await
+            {
+                Ok(c) => format!("Case {} → {}", c.case_id, case_state_label(c.state).1),
+                Err(e) => format!("Transition refused: {e}"),
+            };
+            action.set(Some(msg));
+            cases.restart();
+        });
+    });
+
     let snap = cases.read().as_ref().cloned();
 
     rsx! {
@@ -355,6 +381,20 @@ pub fn Cases() -> Element {
         p { class: "muted",
             "Hashes + category + region + workflow state only — never media, names, message text, or child/device ids."
         }
+        div { class: "tile", style: "margin-bottom:14px;",
+            label { "NCMEC report reference (required to move a case to Reported)" }
+            input {
+                value: "{ncmec_ref}",
+                placeholder: "opaque NCMEC report id",
+                oninput: move |e| {
+                    let mut ncmec_ref = ncmec_ref;
+                    ncmec_ref.set(e.value());
+                },
+            }
+            if let Some(msg) = action() {
+                div { class: "s", style: "margin-top:10px;", "{msg}" }
+            }
+        }
         {match snap {
             None => rsx! { div { class: "loading", "Loading cases…" } },
             Some(Err(e)) => rsx! { div { class: "err", "Couldn't load cases: {e}" } },
@@ -371,6 +411,7 @@ pub fn Cases() -> Element {
                             th { "sha256" }
                             th { "NCMEC ref" }
                             th { "Opened (unix ms)" }
+                            th { "Workflow" }
                         }
                     }
                     tbody {
@@ -387,12 +428,39 @@ pub fn Cases() -> Element {
                                 td { class: "mono", "{hex_short(&case.sha256)}" }
                                 td { class: "mono", "{case.ncmec_reference}" }
                                 td { class: "mono", "{case.opened_ts}" }
+                                td {
+                                    for (ns , label) in next_states(case.state) {
+                                        button {
+                                            class: "btn ghost",
+                                            style: "margin:2px 4px 2px 0; padding:5px 9px; font-size:12px;",
+                                            onclick: {
+                                                let cid = case.case_id.clone();
+                                                move |_| transition.call((cid.clone(), ns))
+                                            },
+                                            "{label}"
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
             },
         }}
+    }
+}
+
+/// Valid next workflow states for a case (target id + button label), mirroring
+/// the server's state machine. Terminal states (Closed / Rejected) have none.
+fn next_states(state: i32) -> Vec<(i32, &'static str)> {
+    match SafetyCaseState::try_from(state).unwrap_or(SafetyCaseState::Unspecified) {
+        SafetyCaseState::Opened => vec![(2, "Start review"), (6, "Reject")],
+        SafetyCaseState::UnderReview => vec![(3, "Report to NCMEC"), (6, "Reject")],
+        SafetyCaseState::ReportedNcmec => vec![(4, "To law enforcement"), (5, "Close")],
+        SafetyCaseState::LawEnforcement => vec![(5, "Close")],
+        SafetyCaseState::Closed | SafetyCaseState::Rejected | SafetyCaseState::Unspecified => {
+            vec![]
+        }
     }
 }
 
