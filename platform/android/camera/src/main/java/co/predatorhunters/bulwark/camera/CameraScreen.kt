@@ -6,6 +6,10 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.os.Build
 import android.os.SystemClock
 import android.provider.MediaStore
@@ -40,6 +44,7 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -51,6 +56,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -63,6 +69,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -77,16 +85,19 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import java.io.File
 import java.util.concurrent.Executors
+import kotlin.math.abs
+import kotlin.math.atan2
+import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 
 /** Outcome surfaced to the child after an action. Calm, never shaming. */
 private enum class Notice { BlockedNsfw, CheckFailed, SaveFailed, Saved }
 
 /** Min interval between live preview scores (CPU ViT ~100-300 ms on a Pixel 7). */
-private const val PREVIEW_SCORE_INTERVAL_MS = 700L
+private const val PREVIEW_SCORE_INTERVAL_MS = 300L
 
 /** Max long edge of the decode used to score a capture (model input is 384). */
-private const val SCORING_MAX_DIM = 1024
+private const val SCORING_MAX_DIM = 512
 
 /**
  * The camera: PreviewView + shutter, with two protective layers.
@@ -112,36 +123,35 @@ internal fun CameraScreen(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    var hasPermission by remember {
-        mutableStateOf(
-            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
-                PackageManager.PERMISSION_GRANTED,
-        )
-    }
+    fun isGranted(perm: String) =
+        ContextCompat.checkSelfPermission(context, perm) == PackageManager.PERMISSION_GRANTED
+    var hasPermission by remember { mutableStateOf(isGranted(Manifest.permission.CAMERA)) }
+    var hasAudioPermission by remember { mutableStateOf(isGranted(Manifest.permission.RECORD_AUDIO)) }
+    // ONE prompt for both — camera + (optional) mic together, not two annoying
+    // sequential dialogs. Mic denial just yields silent video; camera denial
+    // shows the explainer. Audio never affects safety (the gate scores frames).
     val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted -> hasPermission = granted }
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { result ->
+        result[Manifest.permission.CAMERA]?.let { hasPermission = it }
+        result[Manifest.permission.RECORD_AUDIO]?.let { hasAudioPermission = it }
+    }
     LaunchedEffect(Unit) {
-        if (!hasPermission) permissionLauncher.launch(Manifest.permission.CAMERA)
+        val needed = buildList {
+            if (!hasPermission) add(Manifest.permission.CAMERA)
+            if (!hasAudioPermission) add(Manifest.permission.RECORD_AUDIO)
+        }
+        if (needed.isNotEmpty()) permissionLauncher.launch(needed.toTypedArray())
     }
-
-    // Optional mic permission for video sound — requested lazily when the child
-    // first switches to Video mode (below). Denied -> silent clips, never blocks.
-    var hasAudioPermission by remember {
-        mutableStateOf(
-            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
-                PackageManager.PERMISSION_GRANTED,
-        )
-    }
-    val audioPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted -> hasAudioPermission = granted }
 
     var lensFacing by remember { mutableStateOf(CameraSelector.LENS_FACING_BACK) }
     var previewFlagged by remember { mutableStateOf(false) }
     var capturing by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<Notice?>(null) }
     var selectedFilter by remember { mutableStateOf(CameraFilter.None) }
+    var filtersOpen by remember { mutableStateOf(false) }
+    var exposureIndex by remember { mutableStateOf(0) }
+    var rollDegrees by remember { mutableStateOf(0f) }
     var mode by remember { mutableStateOf(CameraMode.default) }
     var cameraControl by remember { mutableStateOf<CameraControl?>(null) }
     var cameraInfo by remember { mutableStateOf<CameraInfo?>(null) }
@@ -150,7 +160,15 @@ internal fun CameraScreen(
     var recording by remember { mutableStateOf(false) }
     var activeRecording by remember { mutableStateOf<Recording?>(null) }
 
-    val previewView = remember { PreviewView(context) }
+    val previewView = remember {
+        PreviewView(context).apply {
+            // COMPATIBLE (TextureView) — the default PERFORMANCE mode renders the
+            // camera into a separate SurfaceView overlay that setRenderEffect can't
+            // touch, so the live filter preview wouldn't show. TextureView renders
+            // into the view layer, so the filter RenderEffect actually applies.
+            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+        }
+    }
     val imageCapture = remember {
         ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
@@ -172,6 +190,24 @@ internal fun CameraScreen(
     val mainExecutor = remember { ContextCompat.getMainExecutor(context) }
     DisposableEffect(Unit) { onDispose { workerExecutor.shutdown() } }
 
+    // Horizon level: read device roll from the gravity sensor so the on-screen
+    // level line shows when the shot is tilted (and turns green when level).
+    DisposableEffect(Unit) {
+        val sm = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        val sensor = sm.getDefaultSensor(Sensor.TYPE_GRAVITY)
+            ?: sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        val listener = object : SensorEventListener {
+            override fun onSensorChanged(e: SensorEvent) {
+                rollDegrees = Math.toDegrees(
+                    atan2(e.values[0].toDouble(), e.values[1].toDouble()),
+                ).toFloat()
+            }
+            override fun onAccuracyChanged(s: Sensor?, accuracy: Int) {}
+        }
+        if (sensor != null) sm.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_UI)
+        onDispose { sm.unregisterListener(listener) }
+    }
+
     // Bind the camera; re-runs when permission lands, the lens flips, or the
     // gate becomes ready (the preview shield needs the gate).
     DisposableEffect(hasPermission, lensFacing, gate, mode.isVideo) {
@@ -184,7 +220,6 @@ internal fun CameraScreen(
                 if (disposed) return@addListener
                 provider = p
                 val preview = Preview.Builder().build()
-                    .also { it.setSurfaceProvider(previewView.surfaceProvider) }
                 // Video mode binds VideoCapture in place of ImageCapture (CameraX
                 // can't run both alongside analysis); the live preview-shield
                 // analyzer stays bound in BOTH modes so the safety layer holds.
@@ -208,6 +243,11 @@ internal fun CameraScreen(
                         CameraSelector.Builder().requireLensFacing(lensFacing).build(),
                         *useCases.toTypedArray(),
                     )
+                    // Attach the preview surface AFTER unbind+bind. Setting it
+                    // before unbindAll (while the old use case still held the
+                    // surface) left the preview BLACK on the Photo->Video swap
+                    // until a full rebind (the flip-twice workaround).
+                    preview.setSurfaceProvider(previewView.surfaceProvider)
                     cameraControl = camera.cameraControl
                     cameraInfo = camera.cameraInfo
                 }
@@ -238,7 +278,20 @@ internal fun CameraScreen(
     // Flash applies to the still ImageCapture; zoom drives the bound camera's
     // control. Both are capture/display settings only — neither affects the RAW
     // frame the safety gate scores.
-    LaunchedEffect(flashMode) { imageCapture.flashMode = flashMode }
+    // Flash ON drives a continuous TORCH (a real, visible light) via the camera
+    // control, AND sets the capture flash; AUTO/OFF leave the torch off and let
+    // the capture decide. Re-applied on (re)bind since the control changes.
+    LaunchedEffect(flashMode, cameraControl) {
+        imageCapture.flashMode = flashMode
+        cameraControl?.enableTorch(flashMode == ImageCapture.FLASH_MODE_ON)
+    }
+
+    // Pro exposure (EV): apply the slider to the live camera; reset to neutral on
+    // leaving Pro so the other modes stay fully automatic.
+    LaunchedEffect(exposureIndex, cameraControl) {
+        runCatching { cameraControl?.setExposureCompensationIndex(exposureIndex) }
+    }
+    LaunchedEffect(mode.isPro) { if (!mode.isPro) exposureIndex = 0 }
     LaunchedEffect(zoomRatio, cameraControl) { cameraControl?.setZoomRatio(zoomRatio) }
 
     // Live safety layer for video: if the preview scene is flagged WHILE
@@ -246,14 +299,6 @@ internal fun CameraScreen(
     // (being unsafe) discarded — nothing reaches the gallery.
     LaunchedEffect(previewFlagged) {
         if (previewFlagged && recording) activeRecording?.stop()
-    }
-
-    // Ask for the mic only when the child actually picks Video (better than a
-    // startup prompt). Best-effort — a denial just means silent clips.
-    LaunchedEffect(mode.isVideo) {
-        if (mode.isVideo && !hasAudioPermission) {
-            audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-        }
     }
 
     val gateReady = gate != null && !gateLoading
@@ -381,7 +426,11 @@ internal fun CameraScreen(
             )
         } else {
             PermissionExplainer(
-                onGrant = { permissionLauncher.launch(Manifest.permission.CAMERA) },
+                onGrant = {
+                    permissionLauncher.launch(
+                        arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO),
+                    )
+                },
                 onCancel = onCancel,
             )
         }
@@ -394,6 +443,33 @@ internal fun CameraScreen(
                     body = stringResource(R.string.preview_shield_body),
                 )
             }
+        }
+
+        // Visible safety check: while a photo is scored or a clip re-scanned, show
+        // "Checking…" so the gate's work is visible. The shot/clip is saved ONLY
+        // after this clears — never before (this IS the deliberate safety delay).
+        if (hasPermission && capturing) {
+            CheckingOverlay()
+        }
+
+        // Horizon level line — during normal framing only (not while checking,
+        // flagged, or blocked). Turns green when the shot is level.
+        if (hasPermission && !capturing && !previewFlagged && notice != Notice.BlockedNsfw) {
+            LevelIndicator(rollDegrees)
+        }
+
+        // Readable control zone: a soft bottom-up gradient so the controls stay
+        // legible over any scene (Samsung/Pixel-style), without hiding the shot.
+        if (hasPermission) {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(320.dp)
+                    .align(Alignment.BottomCenter)
+                    .background(
+                        Brush.verticalGradient(listOf(Color.Transparent, Ink.copy(alpha = 0.72f))),
+                    ),
+            )
         }
 
         if (hasPermission) {
@@ -413,10 +489,9 @@ internal fun CameraScreen(
                 Spacer(Modifier.weight(1f))
                 notice?.let { n -> if (n != Notice.BlockedNsfw) NoticeBanner(n) }
                 Spacer(Modifier.height(12.dp))
-                // Samsung-style filter strip — only for filter-supporting (still)
-                // modes. The chosen look previews live (above) and bakes into the
-                // saved photo (below).
-                if (mode.supportsFilters) {
+                // Filters live BEHIND a toggle (the ✦ button left of the shutter)
+                // so they stop cluttering the view — revealed only when wanted.
+                if (mode.supportsFilters && filtersOpen) {
                     FilterStrip(selected = selectedFilter, onSelect = { selectedFilter = it })
                     Spacer(Modifier.height(12.dp))
                 }
@@ -434,6 +509,19 @@ internal fun CameraScreen(
                     onSelect = { mode = it },
                 )
                 Spacer(Modifier.height(12.dp))
+                // Pro exposure (EV) slider — the real manual control that makes Pro
+                // differ from Photo (shown only when the lens reports an EV range).
+                if (mode.isPro) {
+                    val evRange = cameraInfo?.exposureState?.exposureCompensationRange
+                    if (evRange != null && evRange.upper > evRange.lower) {
+                        ProExposureSlider(
+                            index = exposureIndex,
+                            range = evRange.lower..evRange.upper,
+                            onChange = { exposureIndex = it },
+                        )
+                        Spacer(Modifier.height(12.dp))
+                    }
+                }
                 // Quick-zoom pills (1x / 2x / 5x, clamped to the lens's range).
                 // ZoomChips renders nothing if the camera offers <2 usable stops.
                 ZoomChips(
@@ -450,8 +538,10 @@ internal fun CameraScreen(
                         TextButton(onClick = onCancel) {
                             Text(stringResource(R.string.action_cancel), color = Color.White)
                         }
+                    } else if (mode.supportsFilters) {
+                        FilterToggle(open = filtersOpen, onToggle = { filtersOpen = !filtersOpen })
                     } else {
-                        Spacer(Modifier.width(64.dp))
+                        Spacer(Modifier.width(56.dp))
                     }
                     Spacer(Modifier.weight(1f))
                     MorphShutter(
@@ -517,6 +607,97 @@ internal fun CameraScreen(
                 )
             }
         }
+    }
+}
+
+/** Horizon level: a center line that tilts with the device, green when level. */
+@Composable
+private fun LevelIndicator(rollDegrees: Float) {
+    val level = abs(rollDegrees) < 1.5f
+    val color = if (level) Good else Color.White.copy(alpha = 0.75f)
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        // Faint fixed reference tick at dead-centre.
+        Box(Modifier.width(34.dp).height(2.dp).background(Color.White.copy(alpha = 0.3f)))
+        // The device horizon — rotates with roll; longer + green when level.
+        Box(
+            Modifier
+                .width(if (level) 150.dp else 96.dp)
+                .height(2.dp)
+                .rotate(rollDegrees)
+                .background(color),
+        )
+    }
+}
+
+/** Pro manual exposure (EV) slider — the control that makes Pro differ from Photo. */
+@Composable
+private fun ProExposureSlider(index: Int, range: IntRange, onChange: (Int) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("EV", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.width(10.dp))
+        Slider(
+            value = index.toFloat(),
+            onValueChange = { onChange(it.roundToInt()) },
+            valueRange = range.first.toFloat()..range.last.toFloat(),
+            steps = (range.last - range.first - 1).coerceAtLeast(0),
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(
+            if (index > 0) "+$index" else "$index",
+            color = Color.White,
+            fontSize = 12.sp,
+            modifier = Modifier.width(30.dp),
+        )
+    }
+}
+
+/** "Checking…" — the visible safety pause while a capture is scored / re-scanned. */
+@Composable
+private fun CheckingOverlay() {
+    Box(
+        Modifier.fillMaxSize().background(Ink.copy(alpha = 0.25f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Row(
+            Modifier
+                .clip(RoundedCornerShape(50))
+                .background(Ink.copy(alpha = 0.88f))
+                .padding(horizontal = 22.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CircularProgressIndicator(
+                color = Sky,
+                strokeWidth = 2.dp,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(Modifier.width(12.dp))
+            Text(
+                stringResource(R.string.checking_safety),
+                color = Color.White,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+            )
+        }
+    }
+}
+
+/** Compact toggle (left of the shutter) that shows/hides the filter strip. */
+@Composable
+private fun FilterToggle(open: Boolean, onToggle: () -> Unit) {
+    Box(
+        Modifier
+            .size(56.dp)
+            .clip(CircleShape)
+            .background(if (open) Sky.copy(alpha = 0.25f) else Color.White.copy(alpha = 0.12f))
+            .border(1.dp, if (open) Sky else Color.White.copy(alpha = 0.4f), CircleShape)
+            .clickable(onClick = onToggle),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text("✦", color = if (open) Sky else Color.White, fontSize = 22.sp)
     }
 }
 

@@ -34,6 +34,13 @@ internal object VideoGate {
     /** Cap on frames scored per video so a long clip can't run unbounded. */
     private const val MAX_RESCAN_FRAMES = 600
 
+    /**
+     * Decode re-scan frames STRAIGHT to the model input size (384) instead of
+     * full-resolution then scaling — a much faster decode for the same scored
+     * pixels, so video saving isn't bottlenecked on full-frame decodes.
+     */
+    private const val RESCAN_DECODE_DIM = 384
+
     sealed interface Result {
         /** Every sampled frame scored safe — OK to publish. */
         object Clean : Result
@@ -63,9 +70,11 @@ internal object VideoGate {
             var timeUs = 0L
             var scored = 0
             while (timeUs <= durationUs && scored < MAX_RESCAN_FRAMES) {
-                val frame = retriever.getFrameAtTime(
+                val frame = retriever.getScaledFrameAtTime(
                     timeUs,
                     MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                    RESCAN_DECODE_DIM,
+                    RESCAN_DECODE_DIM,
                 ) ?: return Result.CheckFailed // a missing frame is unscorable -> fail closed
                 val score = runCatching { gate.score(frame) }.getOrElse { return Result.CheckFailed }
                 frame.recycle()
