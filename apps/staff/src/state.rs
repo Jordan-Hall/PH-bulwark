@@ -21,7 +21,7 @@ impl StaffState {
             Some(StaffSession {
                 token,
                 staff_id: String::new(),
-                role: StaffRole::Unspecified as i32,
+                role: crate::session::staff_role(),
                 issued_ts: 0,
             })
         };
@@ -45,7 +45,12 @@ impl StaffState {
     /// Persist + set a freshly issued session.
     pub fn sign_in(&mut self, session: StaffSession) {
         let _ = crate::session::save_staff_token(&session.token);
+        let _ = crate::session::save_staff_role(session.role);
         self.session.set(Some(session));
+    }
+
+    pub fn role(&self) -> i32 {
+        self.session.read().as_ref().map(|s| s.role).unwrap_or(0)
     }
 
     /// Clear the session token + drop back to the login gate.
@@ -64,4 +69,25 @@ pub fn role_label(role: i32) -> &'static str {
         StaffRole::Admin => "Admin",
         StaffRole::Unspecified => "—",
     }
+}
+
+// Tab-visibility gates (the server is the authority — these only hide tabs the
+// role can't use; an Unspecified rehydrated role hides the gated tabs until the
+// next login refreshes it). Fleet/region read is available to every staff role.
+pub fn can_support(role: i32) -> bool {
+    matches!(
+        StaffRole::try_from(role),
+        Ok(StaffRole::Support | StaffRole::Admin)
+    )
+}
+
+pub fn can_cases(role: i32) -> bool {
+    matches!(
+        StaffRole::try_from(role),
+        Ok(StaffRole::SafetyOfficer | StaffRole::Admin)
+    )
+}
+
+pub fn can_audit(role: i32) -> bool {
+    matches!(StaffRole::try_from(role), Ok(StaffRole::Admin))
 }

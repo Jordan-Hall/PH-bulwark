@@ -6,7 +6,7 @@
 use dioxus::prelude::*;
 
 use crate::screens::{Audit, Cases, Fleet, Login, Support};
-use crate::state::{role_label, StaffState};
+use crate::state::{can_audit, can_cases, can_support, role_label, StaffState};
 use crate::theme::CSS;
 
 #[derive(Routable, Clone, PartialEq)]
@@ -76,12 +76,7 @@ fn ConsoleLayout() -> Element {
         };
     }
 
-    let role = state
-        .session
-        .read()
-        .as_ref()
-        .map(|s| s.role)
-        .unwrap_or_default();
+    let role = state.role();
 
     rsx! {
         style { {CSS} }
@@ -99,9 +94,15 @@ fn ConsoleLayout() -> Element {
                 }
                 nav { class: "tabs", "aria-label": "Sections",
                     Link { class: tab_class(&route, &Route::Fleet {}), to: Route::Fleet {}, "Fleet health" }
-                    Link { class: tab_class(&route, &Route::Support {}), to: Route::Support {}, "Guardian support" }
-                    Link { class: tab_class(&route, &Route::Cases {}), to: Route::Cases {}, "Safety queue" }
-                    Link { class: tab_class(&route, &Route::Audit {}), to: Route::Audit {}, "Audit log" }
+                    if can_support(role) {
+                        Link { class: tab_class(&route, &Route::Support {}), to: Route::Support {}, "Guardian support" }
+                    }
+                    if can_cases(role) {
+                        Link { class: tab_class(&route, &Route::Cases {}), to: Route::Cases {}, "Safety queue" }
+                    }
+                    if can_audit(role) {
+                        Link { class: tab_class(&route, &Route::Audit {}), to: Route::Audit {}, "Audit log" }
+                    }
                 }
                 Outlet::<Route> {}
             }

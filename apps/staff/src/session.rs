@@ -45,11 +45,34 @@ pub fn save_staff_token(token: &str) -> std::io::Result<()> {
 }
 
 pub fn clear_staff_token() -> std::io::Result<()> {
+    let _ = std::fs::remove_file(role_path());
     match std::fs::remove_file(token_path()) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+fn role_path() -> std::path::PathBuf {
+    app_config_dir().join("staff_role.txt")
+}
+
+/// The persisted role (a `StaffRole` i32) so role-gated tabs survive a restart.
+/// NOT a credential — the token is the credential and the server re-validates it
+/// on every call; the role only drives which tabs are offered.
+pub fn staff_role() -> i32 {
+    std::fs::read_to_string(role_path())
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok())
+        .unwrap_or(0)
+}
+
+pub fn save_staff_role(role: i32) -> std::io::Result<()> {
+    let path = role_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, role.to_string())
 }
 
 /// Optional pinned CA for a self-hosted / private-CA gateway (`BULWARK_CLUSTER_CA`).
