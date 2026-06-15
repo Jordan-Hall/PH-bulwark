@@ -163,6 +163,7 @@ internal fun CameraScreen(
     var lastThumb by remember { mutableStateOf<Bitmap?>(null) }
     var controlsVisible by remember { mutableStateOf(true) }
     var tapCount by remember { mutableStateOf(0) }
+    var showGallery by remember { mutableStateOf(false) }
     var mode by remember { mutableStateOf(CameraMode.default) }
     var cameraControl by remember { mutableStateOf<CameraControl?>(null) }
     var cameraInfo by remember { mutableStateOf<CameraInfo?>(null) }
@@ -622,7 +623,7 @@ internal fun CameraScreen(
                         }
                     } else {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            GalleryButton(thumb = lastThumb, onOpen = { openGallery() })
+                            GalleryButton(thumb = lastThumb, onOpen = { showGallery = true })
                             if (mode.supportsFilters) {
                                 Spacer(Modifier.width(10.dp))
                                 FilterToggle(
@@ -677,6 +678,11 @@ internal fun CameraScreen(
                     onButton = { notice = null },
                 )
             }
+        }
+
+        // Built-in gallery overlay (in-app view + hand-off to the device editor).
+        if (showGallery) {
+            GalleryScreen(onClose = { showGallery = false })
         }
     }
 }
