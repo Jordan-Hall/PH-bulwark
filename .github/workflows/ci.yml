@@ -94,6 +94,33 @@ jobs:
       # bulwark-net's Wintun + DPAPI + cert-store FFI only compiles on Windows.
       - run: cargo build -p bulwark-net -p bulwark-client
 
+  staff-console:
+    name: staff console (apps/staff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/staff
+      # apps/staff is a DETACHED cargo workspace (own [workspace]) — NOT covered by
+      # the `--workspace` jobs above. It's a Dioxus 0.8 desktop app, so its desktop
+      # renderer (wry) links WebKitGTK at build time: install the documented apt set
+      # (identical to the apps/parent desktop build in release.yml/prerelease.yml).
+      - name: Install WebKitGTK build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libxdo-dev \
+            libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev
+      - name: fmt
+        run: cargo fmt --manifest-path apps/staff/Cargo.toml --all --check
+      - name: clippy
+        run: cargo clippy --manifest-path apps/staff/Cargo.toml --all-targets
+      - name: test
+        run: cargo test --manifest-path apps/staff/Cargo.toml
+
   deny:
     name: cargo-deny (licenses + advisories + bans)
     runs-on: ubuntu-latest
