@@ -1,4 +1,5 @@
-//! Router: a LOGIN gate (index) and a guarded CONSOLE (fleet health + audit).
+//! Router: a LOGIN gate (index) and a guarded CONSOLE (fleet health, guardian
+//! support, the NCMEC safety queue, and the audit log).
 //! The console layout is itself the auth guard — with no staff session it renders
 //! nothing and redirects to the login screen, so no staff surface paints
 //! pre-auth (mirrors the Manager's gate pattern).

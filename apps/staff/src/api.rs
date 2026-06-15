@@ -14,14 +14,21 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 
 use crate::session::{ca_path, staff_endpoint};
 
+/// True ONLY for an exact loopback http endpoint (host is 127.0.0.1 / localhost /
+/// [::1], with an optional `:port` or trailing `/`). A plain `starts_with` would
+/// also accept `http://127.0.0.1.evil.com` and leak the password + TOTP in clear,
+/// so match the host boundary exactly.
+fn is_loopback_plaintext(ep: &str) -> bool {
+    ["http://127.0.0.1", "http://localhost", "http://[::1]"]
+        .iter()
+        .any(|h| ep == *h || ep.starts_with(&format!("{h}:")) || ep.starts_with(&format!("{h}/")))
+}
+
 /// Build a TLS channel to the staff gateway. Pins `BULWARK_CLUSTER_CA` when set
 /// (self-hosted / private CA), else trusts the public roots for `https://`.
 async fn connect() -> anyhow::Result<Channel> {
     let endpoint = staff_endpoint();
-    if !(endpoint.starts_with("https://")
-        || endpoint.starts_with("http://127.0.0.1")
-        || endpoint.starts_with("http://localhost"))
-    {
+    if !(endpoint.starts_with("https://") || is_loopback_plaintext(&endpoint)) {
         anyhow::bail!(
             "refusing plaintext to {endpoint}: staff passwords + TOTP codes must not cross the \
              network in clear. Use an https:// endpoint (BULWARK_STAFF_ENDPOINT)."

@@ -1,6 +1,7 @@
 //! The console screens: Login (password + mandatory TOTP), Fleet health
-//! (content-free region gauges), and the tamper-evident Audit log. Every value
-//! shown is a count / gauge / id / hash / timestamp — never any child content.
+//! (content-free region + per-node gauges), Guardian support, the NCMEC safety
+//! queue, and the tamper-evident Audit log. Every value shown is a count / gauge /
+//! id / hash / timestamp — never any child content.
 
 use dioxus::prelude::*;
 
@@ -456,8 +457,9 @@ pub fn Support() -> Element {
 }
 
 /// NCMEC safety-report queue — hashes + workflow state ONLY (report-never-store,
-/// so there is no media to review). Read-only this increment; the validated
-/// state-transition controls land in the next one.
+/// so there is no media to review). SAFETY_OFFICER/ADMIN drive each case through
+/// one validated workflow transition per click; the server refuses invalid edges
+/// (FAILED_PRECONDITION).
 #[component]
 pub fn Cases() -> Element {
     let state = use_context::<StaffState>();
