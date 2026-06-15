@@ -5,8 +5,10 @@
 
 use bulwark_proto::v1::staff_admin_client::StaffAdminClient;
 use bulwark_proto::v1::{
-    FleetHealth, FleetHealthRequest, Regions, RegionsRequest, StaffAuditPage, StaffAuditQuery,
-    StaffLoginRequest, StaffSession,
+    FleetHealth, FleetHealthRequest, GuardianMeta, GuardianMetaRequest, ListSafetyCasesRequest,
+    Regions, RegionsRequest, SafetyCase, SafetyCases, StaffAuditPage, StaffAuditQuery,
+    StaffLoginRequest, StaffSession, TransitionSafetyCaseRequest, TriggerGuardianResetAck,
+    TriggerGuardianResetRequest, UnlockGuardianAck, UnlockGuardianRequest,
 };
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 
@@ -89,4 +91,78 @@ pub async fn query_audit(
     })
     .await?
     .into_inner())
+}
+
+// --- Guardian support (SUPPORT / ADMIN) — content-free, by email only ----------
+
+/// Existence + state + counts for a guardian account (never content/names/ids).
+pub async fn guardian_meta(token: String, email: String) -> anyhow::Result<GuardianMeta> {
+    let mut c = client().await?;
+    Ok(c.get_guardian_meta(GuardianMetaRequest {
+        token,
+        guardian_email: email,
+    })
+    .await?
+    .into_inner())
+}
+
+/// Email the guardian a reset code (staff never see it). Anti-enumeration ack.
+pub async fn trigger_reset(
+    token: String,
+    email: String,
+) -> anyhow::Result<TriggerGuardianResetAck> {
+    let mut c = client().await?;
+    Ok(c.trigger_guardian_reset(TriggerGuardianResetRequest {
+        token,
+        guardian_email: email,
+    })
+    .await?
+    .into_inner())
+}
+
+/// Clear a guardian's login lockout (the failed-attempt throttles).
+pub async fn unlock_guardian(token: String, email: String) -> anyhow::Result<UnlockGuardianAck> {
+    let mut c = client().await?;
+    Ok(c.unlock_guardian_account(UnlockGuardianRequest {
+        token,
+        guardian_email: email,
+    })
+    .await?
+    .into_inner())
+}
+
+// --- NCMEC safety-report queue (SAFETY_OFFICER / ADMIN) — hashes + state only ---
+
+/// List cases (newest first). `state_filter` = 0 (UNSPECIFIED) returns all states.
+pub async fn list_cases(token: String, state_filter: i32) -> anyhow::Result<SafetyCases> {
+    let mut c = client().await?;
+    Ok(c.list_safety_cases(ListSafetyCasesRequest {
+        token,
+        state_filter,
+    })
+    .await?
+    .into_inner())
+}
+
+/// Drive ONE validated workflow transition (the server refuses invalid edges).
+/// `ncmec_reference` is required only when `new_state` == REPORTED_NCMEC.
+/// Wired into the case-transition controls in the next increment.
+#[allow(dead_code)]
+pub async fn transition_case(
+    token: String,
+    case_id: String,
+    new_state: i32,
+    ncmec_reference: String,
+) -> anyhow::Result<SafetyCase> {
+    let mut c = client().await?;
+    Ok(c.transition_safety_case(TransitionSafetyCaseRequest {
+        token,
+        case_id,
+        new_state,
+        ncmec_reference,
+    })
+    .await?
+    .into_inner()
+    .safety_case
+    .unwrap_or_default())
 }

@@ -5,7 +5,7 @@
 
 use dioxus::prelude::*;
 
-use crate::screens::{Audit, Fleet, Login};
+use crate::screens::{Audit, Cases, Fleet, Login, Support};
 use crate::state::{role_label, StaffState};
 use crate::theme::CSS;
 
@@ -18,6 +18,10 @@ pub enum Route {
     #[layout(ConsoleLayout)]
     #[route("/console/fleet")]
     Fleet {},
+    #[route("/console/support")]
+    Support {},
+    #[route("/console/cases")]
+    Cases {},
     #[route("/console/audit")]
     Audit {},
 }
@@ -95,6 +99,8 @@ fn ConsoleLayout() -> Element {
                 }
                 nav { class: "tabs", "aria-label": "Sections",
                     Link { class: tab_class(&route, &Route::Fleet {}), to: Route::Fleet {}, "Fleet health" }
+                    Link { class: tab_class(&route, &Route::Support {}), to: Route::Support {}, "Guardian support" }
+                    Link { class: tab_class(&route, &Route::Cases {}), to: Route::Cases {}, "Safety queue" }
                     Link { class: tab_class(&route, &Route::Audit {}), to: Route::Audit {}, "Audit log" }
                 }
                 Outlet::<Route> {}
