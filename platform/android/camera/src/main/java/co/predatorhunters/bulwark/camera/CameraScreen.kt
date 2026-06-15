@@ -84,7 +84,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
@@ -143,6 +145,8 @@ internal fun CameraScreen(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val configuration = LocalConfiguration.current
+    val density = LocalDensity.current
 
     fun isGranted(perm: String) =
         ContextCompat.checkSelfPermission(context, perm) == PackageManager.PERMISSION_GRANTED
@@ -184,8 +188,6 @@ internal fun CameraScreen(
     var levelVisible by remember { mutableStateOf(false) }
     var levelMoveTick by remember { mutableStateOf(0) }
     var lastThumb by remember { mutableStateOf<Bitmap?>(null) }
-    var controlsVisible by remember { mutableStateOf(true) }
-    var tapCount by remember { mutableStateOf(0) }
     var showGallery by remember { mutableStateOf(false) }
     var focusPoint by remember { mutableStateOf<Offset?>(null) }
     var focusTick by remember { mutableStateOf(0) }
@@ -423,19 +425,6 @@ internal fun CameraScreen(
         }
     }
 
-    // Controls auto-hide after idle for a clear view; a tap on the preview or any
-    // control resets the timer, and any notice forces them back so it's seen.
-    LaunchedEffect(
-        controlsVisible, tapCount, mode, selectedFilter, zoomRatio,
-        flashMode, exposureIndex, filtersOpen, capturing,
-    ) {
-        if (controlsVisible) {
-            delay(12000)
-            controlsVisible = false
-        }
-    }
-    LaunchedEffect(notice) { if (notice != null) controlsVisible = true }
-
     // The level guide shows only while moving, then fades after ~1.2s of stillness.
     LaunchedEffect(levelMoveTick) {
         delay(1200)
@@ -446,7 +435,7 @@ internal fun CameraScreen(
     // each brightness drag), then fade.
     LaunchedEffect(focusTick) {
         if (focusPoint != null) {
-            delay(3000)
+            delay(5000)
             focusPoint = null
         }
     }
@@ -756,8 +745,6 @@ internal fun CameraScreen(
                     .pointerInput(Unit) {
                         detectTapGestures(
                             onTap = { offset ->
-                                controlsVisible = true
-                                tapCount++
                                 // Tap-to-focus at the tapped point.
                                 focusPoint = offset
                                 focusTick++
@@ -775,7 +762,12 @@ internal fun CameraScreen(
             )
         }
 
-        // Tap-to-focus ring at the tapped point (fades after ~0.9s).
+        // Tap-to-focus ring + Samsung-style exposure slider, anchored at the tapped
+        // point. The ring marks focus; the slider (a sun thumb that TRAVELS a track)
+        // sits beside it — drag the sun up to brighten, down to darken. It flips to
+        // the other side near the screen edge and clamps vertically so it always
+        // stays fully on-screen. Exposure is a capture/display setting only — it
+        // never changes the RAW frame the safety gate scores.
         focusPoint?.let { fp ->
             Box(
                 Modifier
@@ -788,18 +780,19 @@ internal fun CameraScreen(
                     .size(72.dp)
                     .border(1.5.dp, Color.White, CircleShape),
             )
-        }
-
-        // Samsung-style brightness bar by the focus point — drag up to brighten.
-        focusPoint?.let { fp ->
             val evRange = cameraInfo?.exposureState?.exposureCompensationRange
             if (evRange != null && evRange.upper > evRange.lower) {
+                val screenWpx = with(density) { configuration.screenWidthDp.dp.toPx() }
+                val screenHpx = with(density) { configuration.screenHeightDp.dp.toPx() }
+                val placeLeft = fp.x > screenWpx * 0.62f
                 Box(
                     Modifier.offset {
-                        IntOffset(
-                            (fp.x + 44.dp.toPx()).roundToInt(),
-                            (fp.y - 75.dp.toPx()).roundToInt(),
-                        )
+                        val sliderHpx = 158.dp.toPx()
+                        val dx = if (placeLeft) -(78.dp.toPx()) else 48.dp.toPx()
+                        val minY = 96.dp.toPx()
+                        val maxY = (screenHpx - sliderHpx - 24.dp.toPx()).coerceAtLeast(minY)
+                        val y = (fp.y - sliderHpx / 2f).coerceIn(minY, maxY)
+                        IntOffset((fp.x + dx).roundToInt(), y.roundToInt())
                     },
                 ) {
                     BrightnessBar(
@@ -866,38 +859,27 @@ internal fun CameraScreen(
                     onSafetyClick = { showPrivacy = true },
                 )
                 Spacer(Modifier.weight(1f))
-                // Ambient controls auto-hide for a clean view; the bottom row
-                // (shutter + gallery + filter/AR toggles + flip) stays put.
-                if (controlsVisible) {
-                notice?.let { n -> if (n != Notice.BlockedNsfw) NoticeBanner(n) }
-                Spacer(Modifier.height(12.dp))
-                // Filters live BEHIND a toggle (the ✦ button left of the shutter)
-                // so they stop cluttering the view — revealed only when wanted.
-                if (mode.supportsFilters && filtersOpen) {
+
+                // Transient saved/failed banner (the BLOCKED case is a modal scrim).
+                notice?.let { n ->
+                    if (n != Notice.BlockedNsfw) {
+                        NoticeBanner(n)
+                        Spacer(Modifier.height(12.dp))
+                    }
+                }
+
+                // Effect strips sit directly above their toggles (Samsung pattern):
+                // each is still-mode only and shows only while its toggle is open.
+                if (!captureForResult && mode.supportsFilters && filtersOpen) {
                     FilterStrip(selected = selectedFilter, onSelect = { selectedFilter = it })
                     Spacer(Modifier.height(12.dp))
                 }
-                // AR "funny face" sticker strip — behind its own toggle (the ☺
-                // button), revealed only when wanted. Stills only (it bakes into a
-                // still capture, like the filter strip).
-                if (mode.supportsFilters && arOpen) {
+                if (!captureForResult && mode.supportsFilters && arOpen) {
                     ArStickerStrip(selected = selectedSticker, onSelect = { selectedSticker = it })
                     Spacer(Modifier.height(12.dp))
                 }
-                // Still-mode carousel (Photo / Portrait / Night / Pro) — shown only
-                // in PHOTO mode; video has no sub-modes (the menu is one OR the other).
-                if (!mode.isVideo) {
-                    ModeCarousel(
-                        modes = remember { CameraMode.strip.filter { it.isStill } },
-                        selected = mode,
-                        enabled = !capturing && !recording,
-                        onSelect = { mode = it },
-                    )
-                    Spacer(Modifier.height(12.dp))
-                }
-                // Pro exposure (EV) slider — the real manual control that makes Pro
-                // differ from Photo (shown only when the lens reports an EV range).
-                if (mode.isPro) {
+                // Pro manual exposure (EV) — only in Pro mode, when the lens reports a range.
+                if (!captureForResult && mode.isPro) {
                     val evRange = cameraInfo?.exposureState?.exposureCompensationRange
                     if (evRange != null && evRange.upper > evRange.lower) {
                         ProExposureSlider(
@@ -908,8 +890,7 @@ internal fun CameraScreen(
                         Spacer(Modifier.height(12.dp))
                     }
                 }
-                // Quick-zoom pills (1x / 2x / 5x, clamped to the lens's range).
-                // ZoomChips renders nothing if the camera offers <2 usable stops.
+                // Quick-zoom pills (centred). ZoomChips renders nothing for <2 stops.
                 ZoomChips(
                     stops = remember(cameraInfo) {
                         val maxZoom = cameraInfo?.zoomState?.value?.maxZoomRatio ?: 1f
@@ -918,100 +899,101 @@ internal fun CameraScreen(
                     current = zoomRatio,
                     onSelect = { zoomRatio = it },
                 )
-                Spacer(Modifier.height(12.dp))
-                } // end ambient (auto-hide) controls
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    // Equal-weight side slots keep the shutter dead-centre.
+
+                if (!captureForResult) {
+                    // Effect toggles (filters / AR / dual): a CENTRED row of small
+                    // icons just above the mode strip, each co-located with the strip
+                    // it opens. Filters/AR are still-only; Dual only when supported.
+                    val showFilterToggles = mode.supportsFilters
+                    val showDualToggle = dualSupported && !mode.isVideo
+                    if (showFilterToggles || showDualToggle) {
+                        Spacer(Modifier.height(12.dp))
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            if (showFilterToggles) {
+                                // Filters and AR are mutually-exclusive panels —
+                                // opening one closes the other (keep the view calm).
+                                FilterToggle(
+                                    open = filtersOpen,
+                                    onToggle = {
+                                        filtersOpen = !filtersOpen
+                                        if (filtersOpen) arOpen = false
+                                    },
+                                )
+                                // AR offered only when the face detector loaded
+                                // (best-effort) — never advertise what can't work.
+                                if (faceDetector != null) {
+                                    ArToggle(
+                                        open = arOpen,
+                                        active = !selectedSticker.isNone,
+                                        onToggle = {
+                                            arOpen = !arOpen
+                                            if (arOpen) filtersOpen = false
+                                        },
+                                    )
+                                }
+                            }
+                            if (showDualToggle) {
+                                DualToggle(
+                                    active = dualOn,
+                                    onToggle = {
+                                        dualOn = !dualOn
+                                        // Dual has no filters/AR — close those panels.
+                                        if (dualOn) {
+                                            filtersOpen = false
+                                            arOpen = false
+                                        }
+                                    },
+                                )
+                            }
+                        }
+                    }
+                    // The single, standard mode strip (iOS/Samsung): PHOTO · VIDEO ·
+                    // PORTRAIT · NIGHT · PRO. Tapping VIDEO morphs the shutter red —
+                    // there is no separate flanking PHOTO/VIDEO label any more.
+                    Spacer(Modifier.height(12.dp))
+                    ModeCarousel(
+                        modes = CameraMode.stripOrder,
+                        selected = mode,
+                        enabled = !capturing && !recording,
+                        onSelect = { mode = it },
+                    )
+                }
+
+                Spacer(Modifier.height(16.dp))
+                // Standard capture row: gallery (left) · shutter (centre) · flip (right).
+                // fillMaxWidth + equal-weight side slots keep the shutter dead-centre.
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
                         if (captureForResult) {
                             TextButton(onClick = onCancel) {
                                 Text(stringResource(R.string.action_cancel), color = Color.White)
                             }
                         } else {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                GalleryButton(thumb = lastThumb, onOpen = { showGallery = true })
-                                if (mode.supportsFilters) {
-                                    Spacer(Modifier.width(10.dp))
-                                    // Filters and AR are mutually-exclusive panels —
-                                    // opening one closes the other (keep the view calm).
-                                    FilterToggle(
-                                        open = filtersOpen,
-                                        onToggle = {
-                                            filtersOpen = !filtersOpen
-                                            if (filtersOpen) arOpen = false
-                                            controlsVisible = true
-                                        },
-                                    )
-                                    // AR offered only when the face detector loaded
-                                    // (best-effort) — never advertise what can't work.
-                                    if (faceDetector != null) {
-                                        Spacer(Modifier.width(10.dp))
-                                        ArToggle(
-                                            open = arOpen,
-                                            active = !selectedSticker.isNone,
-                                            onToggle = {
-                                                arOpen = !arOpen
-                                                if (arOpen) filtersOpen = false
-                                                controlsVisible = true
-                                            },
-                                        )
-                                    }
-                                }
-                                // Dual (front + back at once) — shown ONLY when the
-                                // device supports concurrent dual-camera and we're in
-                                // a still (photo) mode. Hidden/no-op everywhere else.
-                                if (dualSupported && !mode.isVideo) {
-                                    Spacer(Modifier.width(10.dp))
-                                    DualToggle(
-                                        active = dualOn,
-                                        onToggle = {
-                                            dualOn = !dualOn
-                                            // Dual has no filters/AR — close those panels.
-                                            if (dualOn) {
-                                                filtersOpen = false
-                                                arOpen = false
-                                            }
-                                            controlsVisible = true
-                                        },
-                                    )
-                                }
-                            }
+                            GalleryButton(thumb = lastThumb, onOpen = { showGallery = true })
                         }
                     }
-                    if (captureForResult) {
-                        // Result mode is photo-only — no PHOTO/VIDEO switch, just the
-                        // bare centred shutter.
-                        MorphShutter(
-                            mode = mode,
-                            recording = recording,
-                            enabled = shutterEnabled,
-                            busy = capturing,
-                            onClick = { if (dualOn) takeDualPhoto() else takePhoto() },
-                        )
-                    } else {
-                        // The PHOTO/VIDEO switch IS the shutter: PHOTO and VIDEO labels
-                        // flank the dead-centre shutter; the active label's pill fades in
-                        // while the shutter recolors + pops in place.
-                        // Switching is locked mid-capture/record (the mode flip rebinds
-                        // the camera; firing it then would tear down the recording).
-                        ShutterModeSwitch(
-                            mode = mode,
-                            recording = recording,
-                            shutterEnabled = shutterEnabled,
-                            busy = capturing,
-                            switchEnabled = !capturing && !recording,
-                            onShutter = {
-                                when {
-                                    mode.isVideo -> toggleRecording()
-                                    dualOn -> takeDualPhoto()
-                                    else -> takePhoto()
-                                }
-                            },
-                            onSelectMode = { wantVideo ->
-                                mode = if (wantVideo) CameraMode.Video else CameraMode.Photo
-                            },
-                        )
-                    }
+                    // The shutter MORPHS to indicate the mode (white = photo, red =
+                    // video, square = recording). Switching is locked mid-capture/
+                    // record (a mode change rebinds the camera).
+                    MorphShutter(
+                        mode = mode,
+                        recording = recording,
+                        enabled = shutterEnabled,
+                        busy = capturing,
+                        onClick = {
+                            when {
+                                !captureForResult && mode.isVideo -> toggleRecording()
+                                dualOn -> takeDualPhoto()
+                                else -> takePhoto()
+                            }
+                        },
+                    )
                     Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
                         FlipButton(enabled = !recording, onClick = { flipCamera() })
                     }
@@ -1104,37 +1086,60 @@ private fun LevelIndicator(rollDegrees: Float) {
     }
 }
 
-/** Vertical brightness (EV) bar shown by the focus point — drag up to brighten. */
+/**
+ * Samsung-style exposure (brightness) slider shown beside the tap-to-focus ring:
+ * a vertical track with a sun thumb that TRAVELS as the value changes — drag the
+ * sun up to brighten, down to darken. Dragging anywhere on the bar adjusts it.
+ * Purely a capture/display setting; it never affects the frame the gate scores.
+ */
 @Composable
 private fun BrightnessBar(index: Int, range: IntRange, onChange: (Int) -> Unit) {
+    val span = (range.last - range.first).coerceAtLeast(1)
+    // frac: 0 = darkest (thumb at bottom), 1 = brightest (thumb at top).
+    val frac = (index - range.first).toFloat() / span
+    val trackHeight = 128.dp
+    val thumb = 30.dp
     var acc by remember { mutableStateOf(0f) }
-    Column(
+    Box(
         Modifier
-            .width(40.dp)
-            .height(150.dp)
+            .width(44.dp)
+            .height(trackHeight + thumb)
             .pointerInput(range) {
                 detectVerticalDragGestures { _, dragAmount ->
+                    // Up (negative drag) brightens. ~20px of travel per EV step.
                     acc += -dragAmount
-                    val step = (acc / 28f).toInt()
+                    val step = (acc / 20f).toInt()
                     if (step != 0) {
                         onChange((index + step).coerceIn(range.first, range.last))
-                        acc -= step * 28f
+                        acc -= step * 20f
                     }
                 }
             },
-        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text("☀", color = if (index > 0) Sky else Color.White, fontSize = 18.sp)
-        Spacer(Modifier.height(4.dp))
+        // The track: a thin rounded line, inset half a thumb top & bottom so the
+        // travelling thumb stays on it at both extremes.
         Box(
             Modifier
-                .width(3.dp)
-                .weight(1f)
+                .align(Alignment.TopCenter)
+                .padding(top = thumb / 2)
+                .width(2.dp)
+                .height(trackHeight)
                 .clip(RoundedCornerShape(50))
                 .background(Color.White.copy(alpha = 0.5f)),
         )
-        Spacer(Modifier.height(4.dp))
-        Text(if (index > 0) "+$index" else "$index", color = Color.White, fontSize = 10.sp)
+        // The sun thumb — its vertical position reflects the current exposure.
+        Box(
+            Modifier
+                .align(Alignment.TopCenter)
+                .offset { IntOffset(0, ((1f - frac) * trackHeight.toPx()).roundToInt()) }
+                .size(thumb)
+                .clip(CircleShape)
+                .background(Ink.copy(alpha = 0.55f))
+                .border(1.5.dp, Color.White, CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("☀", color = Sky, fontSize = 15.sp)
+        }
     }
 }
 

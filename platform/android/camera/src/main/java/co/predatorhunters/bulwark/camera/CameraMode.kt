@@ -43,7 +43,7 @@ internal enum class CameraMode(
     Pro(R.string.mode_pro, isStill = true),
     ;
 
-    /** The strip order shown in the carousel. */
+    /** True only for the dedicated video mode (the shutter morphs to record). */
     val isVideo: Boolean get() = this == Video
 
     /** Whether the live filter strip applies to this mode (stills only). */
@@ -59,7 +59,13 @@ internal enum class CameraMode(
     }
 
     companion object {
-        val strip: List<CameraMode> = entries.toList()
+        /**
+         * Display order for the mode strip — the single, standard photo/video/mode
+         * switch (iOS/Samsung pattern). Photo first (the default) with Video right
+         * beside it, then the specialised still modes. Selecting Video morphs the
+         * shutter to record; there is no separate flanking PHOTO/VIDEO label.
+         */
+        val stripOrder: List<CameraMode> = listOf(Photo, Video, Portrait, Night, Pro)
         val default: CameraMode = Photo
 
         /**

@@ -388,7 +388,7 @@ internal fun MorphShutter(
     // A brief in-place "pop" each time the PHOTO<->VIDEO mode flips — the shutter
     // itself visibly reacts to the switch (scaling up, then springing back) on top
     // of the white<->red morph. NO translation: the shutter stays dead-centre (the
-    // slide belongs to the selector indicator in [ShutterModeSwitch], not the disc).
+    // mode strip is the switch; the shutter only indicates the mode by its colour).
     // Skip the very first composition so the shutter doesn't pop on screen entry.
     var modePop by remember { mutableStateOf(1f) }
     var primed by remember { mutableStateOf(false) }
@@ -437,103 +437,6 @@ internal fun MorphShutter(
                 .size(innerSize)
                 .clip(RoundedCornerShape(innerRadius))
                 .background(crossfadeColor),
-        )
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Shutter-integrated PHOTO / VIDEO switch — the switch reads as part of the
-// shutter, not a separate pill floating above it (iOS/Samsung pattern). The
-// shutter stays DEAD-CENTRE; the active label's pill fades in (a crossfade
-// between the two flanks) to show the mode, and the shutter itself recolors +
-// pops in place. Tapping a label switches the mode.
-//
-// Centring: PHOTO and VIDEO are given EQUAL fixed widths and flank the shutter
-// symmetrically, so the shutter's centre is the row's centre regardless of the
-// selected mode (no horizontal offset is ever applied to the disc).
-// ---------------------------------------------------------------------------
-@Composable
-internal fun ShutterModeSwitch(
-    mode: CameraMode,
-    recording: Boolean,
-    shutterEnabled: Boolean,
-    busy: Boolean,
-    switchEnabled: Boolean,
-    onShutter: () -> Unit,
-    onSelectMode: (isVideo: Boolean) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val isVideo = mode.isVideo
-    Row(
-        modifier,
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center,
-    ) {
-        ModeLabel(
-            label = "PHOTO",
-            selected = !isVideo,
-            enabled = switchEnabled,
-            onClick = { onSelectMode(false) },
-        )
-        Spacer(Modifier.width(16.dp))
-        MorphShutter(
-            mode = mode,
-            recording = recording,
-            enabled = shutterEnabled,
-            busy = busy,
-            onClick = onShutter,
-        )
-        Spacer(Modifier.width(16.dp))
-        ModeLabel(
-            label = "VIDEO",
-            selected = isVideo,
-            enabled = switchEnabled,
-            onClick = { onSelectMode(true) },
-        )
-    }
-}
-
-/**
- * One flanking PHOTO / VIDEO label. The active label brightens to the accent and
- * its pill fades in (a crossfade between the two flanks). Fixed width keeps the
- * two flanks symmetric so the shutter stays centred.
- */
-@Composable
-private fun ModeLabel(
-    label: String,
-    selected: Boolean,
-    enabled: Boolean,
-    onClick: () -> Unit,
-) {
-    val bg by animateFloatAsState(
-        if (selected) 1f else 0f,
-        spring(stiffness = Spring.StiffnessMediumLow),
-        label = "modeLabelBg",
-    )
-    val textColor by animateColorAsState(
-        when {
-            !enabled -> Cam.OnGlassDim.copy(alpha = 0.4f)
-            selected -> Color.White
-            else -> Cam.OnGlassDim
-        },
-        tween(220),
-        label = "modeLabelText",
-    )
-    Box(
-        Modifier
-            .width(62.dp)
-            .clip(RoundedCornerShape(50))
-            .background(Cam.Accent.copy(alpha = bg * 0.9f))
-            .clickable(enabled = enabled, onClick = onClick)
-            .padding(vertical = 8.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            label,
-            color = textColor,
-            fontSize = 12.sp,
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-            letterSpacing = 1.sp,
         )
     }
 }
