@@ -334,7 +334,7 @@ internal fun CameraScreen(
         flashMode, exposureIndex, filtersOpen, capturing,
     ) {
         if (controlsVisible) {
-            delay(5000)
+            delay(12000)
             controlsVisible = false
         }
     }
@@ -662,7 +662,7 @@ internal fun CameraScreen(
 
         // Readable control zone: a soft bottom-up gradient so the controls stay
         // legible over any scene (Samsung/Pixel-style), without hiding the shot.
-        if (hasPermission && controlsVisible) {
+        if (hasPermission) {
             Box(
                 Modifier
                     .fillMaxWidth()
@@ -674,7 +674,7 @@ internal fun CameraScreen(
             )
         }
 
-        if (hasPermission && controlsVisible) {
+        if (hasPermission) {
             Column(
                 Modifier.fillMaxSize().padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -690,6 +690,9 @@ internal fun CameraScreen(
                     onSafetyClick = { showPrivacy = true },
                 )
                 Spacer(Modifier.weight(1f))
+                // Ambient controls auto-hide for a clean view; the bottom row
+                // (shutter + gallery + filter/AR toggles + flip) stays put.
+                if (controlsVisible) {
                 notice?.let { n -> if (n != Notice.BlockedNsfw) NoticeBanner(n) }
                 Spacer(Modifier.height(12.dp))
                 // Filters live BEHIND a toggle (the ✦ button left of the shutter)
@@ -749,6 +752,7 @@ internal fun CameraScreen(
                     onSelect = { zoomRatio = it },
                 )
                 Spacer(Modifier.height(12.dp))
+                } // end ambient (auto-hide) controls
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     // Equal-weight side slots keep the shutter dead-centre.
                     Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
@@ -768,6 +772,7 @@ internal fun CameraScreen(
                                         onToggle = {
                                             filtersOpen = !filtersOpen
                                             if (filtersOpen) arOpen = false
+                                            controlsVisible = true
                                         },
                                     )
                                     // AR offered only when the face detector loaded
@@ -780,6 +785,7 @@ internal fun CameraScreen(
                                             onToggle = {
                                                 arOpen = !arOpen
                                                 if (arOpen) filtersOpen = false
+                                                controlsVisible = true
                                             },
                                         )
                                     }
