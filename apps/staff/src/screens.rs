@@ -205,6 +205,61 @@ fn pct(v: f32) -> String {
     format!("{:.0}%", (v * 100.0).clamp(0.0, 100.0))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{case_state_label, next_states};
+    use bulwark_proto::v1::SafetyCaseState as S;
+
+    fn targets(state: i32) -> Vec<i32> {
+        next_states(state).into_iter().map(|(id, _)| id).collect()
+    }
+
+    #[test]
+    fn workflow_transitions_match_the_server_machine() {
+        // Forward path + REJECTED branch + direct REPORTED_NCMEC->CLOSED edge.
+        assert_eq!(
+            targets(S::Opened as i32),
+            vec![S::UnderReview as i32, S::Rejected as i32]
+        );
+        assert_eq!(
+            targets(S::UnderReview as i32),
+            vec![S::ReportedNcmec as i32, S::Rejected as i32]
+        );
+        assert_eq!(
+            targets(S::ReportedNcmec as i32),
+            vec![S::LawEnforcement as i32, S::Closed as i32]
+        );
+        assert_eq!(targets(S::LawEnforcement as i32), vec![S::Closed as i32]);
+        // Terminal / unset states offer no transitions.
+        assert!(targets(S::Closed as i32).is_empty());
+        assert!(targets(S::Rejected as i32).is_empty());
+        assert!(targets(S::Unspecified as i32).is_empty());
+    }
+
+    #[test]
+    fn pct_is_clamped() {
+        assert_eq!(super::pct(0.0), "0%");
+        assert_eq!(super::pct(0.5), "50%");
+        assert_eq!(super::pct(1.0), "100%");
+        assert_eq!(super::pct(1.5), "100%"); // out-of-range load clamps
+    }
+
+    #[test]
+    fn every_real_state_has_a_label() {
+        for s in [
+            S::Opened,
+            S::UnderReview,
+            S::ReportedNcmec,
+            S::LawEnforcement,
+            S::Closed,
+            S::Rejected,
+        ] {
+            let (_, label) = case_state_label(s as i32);
+            assert!(!label.is_empty() && label != "—");
+        }
+    }
+}
+
 #[component]
 fn RegionTile(region: bulwark_proto::v1::RegionInfo) -> Element {
     let (status_class, status_dot, status_text) = if !region.probed {

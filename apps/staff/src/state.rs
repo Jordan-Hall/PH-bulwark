@@ -91,3 +91,35 @@ pub fn can_cases(role: i32) -> bool {
 pub fn can_audit(role: i32) -> bool {
     matches!(StaffRole::try_from(role), Ok(StaffRole::Admin))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn support_tab_gate() {
+        assert!(can_support(StaffRole::Support as i32));
+        assert!(can_support(StaffRole::Admin as i32));
+        assert!(!can_support(StaffRole::SafetyOfficer as i32));
+        assert!(!can_support(StaffRole::Operator as i32));
+        assert!(!can_support(StaffRole::Unspecified as i32));
+    }
+
+    #[test]
+    fn cases_tab_gate() {
+        assert!(can_cases(StaffRole::SafetyOfficer as i32));
+        assert!(can_cases(StaffRole::Admin as i32));
+        assert!(!can_cases(StaffRole::Support as i32));
+        assert!(!can_cases(StaffRole::Operator as i32));
+        assert!(!can_cases(StaffRole::Unspecified as i32));
+    }
+
+    #[test]
+    fn audit_tab_is_admin_only() {
+        assert!(can_audit(StaffRole::Admin as i32));
+        assert!(!can_audit(StaffRole::Support as i32));
+        assert!(!can_audit(StaffRole::SafetyOfficer as i32));
+        assert!(!can_audit(StaffRole::Operator as i32));
+        assert!(!can_audit(StaffRole::Unspecified as i32));
+    }
+}
