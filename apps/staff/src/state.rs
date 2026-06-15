@@ -12,6 +12,12 @@ pub struct StaffState {
     pub session: Signal<Option<StaffSession>>,
 }
 
+impl Default for StaffState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StaffState {
     pub fn new() -> Self {
         let token = crate::session::staff_token();
