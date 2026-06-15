@@ -39,6 +39,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -75,6 +76,7 @@ import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -156,7 +158,11 @@ internal fun CameraScreen(
     var filtersOpen by remember { mutableStateOf(false) }
     var exposureIndex by remember { mutableStateOf(0) }
     var rollDegrees by remember { mutableStateOf(0f) }
+    var levelVisible by remember { mutableStateOf(false) }
+    var levelMoveTick by remember { mutableStateOf(0) }
     var lastThumb by remember { mutableStateOf<Bitmap?>(null) }
+    var controlsVisible by remember { mutableStateOf(true) }
+    var tapCount by remember { mutableStateOf(0) }
     var mode by remember { mutableStateOf(CameraMode.default) }
     var cameraControl by remember { mutableStateOf<CameraControl?>(null) }
     var cameraInfo by remember { mutableStateOf<CameraInfo?>(null) }
@@ -203,9 +209,15 @@ internal fun CameraScreen(
             ?: sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         val listener = object : SensorEventListener {
             override fun onSensorChanged(e: SensorEvent) {
-                rollDegrees = Math.toDegrees(
+                val newRoll = Math.toDegrees(
                     atan2(e.values[0].toDouble(), e.values[1].toDouble()),
                 ).toFloat()
+                // Only reveal the level guide while the camera is actually moving.
+                if (abs(newRoll - rollDegrees) > 0.4f) {
+                    levelVisible = true
+                    levelMoveTick++
+                }
+                rollDegrees = newRoll
             }
             override fun onAccuracyChanged(s: Sensor?, accuracy: Int) {}
         }
@@ -271,6 +283,25 @@ internal fun CameraScreen(
             delay(3500)
             if (notice == n) notice = null
         }
+    }
+
+    // Controls auto-hide after idle for a clear view; a tap on the preview or any
+    // control resets the timer, and any notice forces them back so it's seen.
+    LaunchedEffect(
+        controlsVisible, tapCount, mode, selectedFilter, zoomRatio,
+        flashMode, exposureIndex, filtersOpen, capturing,
+    ) {
+        if (controlsVisible) {
+            delay(5000)
+            controlsVisible = false
+        }
+    }
+    LaunchedEffect(notice) { if (notice != null) controlsVisible = true }
+
+    // The level guide shows only while moving, then fades after ~1.2s of stillness.
+    LaunchedEffect(levelMoveTick) {
+        delay(1200)
+        levelVisible = false
     }
 
     // Apply the selected mode's Camera2 scene hints (Night / Portrait / Pro)
@@ -430,6 +461,15 @@ internal fun CameraScreen(
         }
     }
 
+    fun flipCamera() {
+        if (recording) return
+        lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) {
+            CameraSelector.LENS_FACING_FRONT
+        } else {
+            CameraSelector.LENS_FACING_BACK
+        }
+    }
+
     Box(Modifier.fillMaxSize().background(Ink)) {
         if (hasPermission) {
             AndroidView(
@@ -456,6 +496,25 @@ internal fun CameraScreen(
             )
         }
 
+        // Tap the preview to reveal the auto-hidden controls; double-tap flips the
+        // camera (no button needed). Sits below the controls in z-order, so taps on
+        // a control still reach the control.
+        if (hasPermission) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) {
+                        detectTapGestures(
+                            onTap = {
+                                controlsVisible = true
+                                tapCount++
+                            },
+                            onDoubleTap = { flipCamera() },
+                        )
+                    },
+            )
+        }
+
         // Preview shield: the live scene looks unsafe -> pause + explain.
         if (hasPermission && previewFlagged && notice != Notice.BlockedNsfw) {
             Scrim {
@@ -473,15 +532,17 @@ internal fun CameraScreen(
             CheckingOverlay()
         }
 
-        // Horizon level line — during normal framing only (not while checking,
-        // flagged, or blocked). Turns green when the shot is level.
-        if (hasPermission && !capturing && !previewFlagged && notice != Notice.BlockedNsfw) {
+        // Horizon level guide — only while actively moving the camera (and not
+        // while checking/flagged/blocked). Shows the tilt angle; green when level.
+        if (hasPermission && levelVisible && !capturing && !previewFlagged &&
+            notice != Notice.BlockedNsfw
+        ) {
             LevelIndicator(rollDegrees)
         }
 
         // Readable control zone: a soft bottom-up gradient so the controls stay
         // legible over any scene (Samsung/Pixel-style), without hiding the shot.
-        if (hasPermission) {
+        if (hasPermission && controlsVisible) {
             Box(
                 Modifier
                     .fillMaxWidth()
@@ -493,7 +554,7 @@ internal fun CameraScreen(
             )
         }
 
-        if (hasPermission) {
+        if (hasPermission && controlsVisible) {
             Column(
                 Modifier.fillMaxSize().padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -580,26 +641,8 @@ internal fun CameraScreen(
                         onClick = { if (mode.isVideo) toggleRecording() else takePhoto() },
                     )
                     Spacer(Modifier.weight(1f))
-                    OutlinedButton(
-                        enabled = !recording,
-                        onClick = {
-                            lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) {
-                                CameraSelector.LENS_FACING_FRONT
-                            } else {
-                                CameraSelector.LENS_FACING_BACK
-                            }
-                        },
-                    ) {
-                        Text(stringResource(R.string.cd_flip), color = Color.White, fontSize = 12.sp)
-                    }
+                    FlipButton(enabled = !recording, onClick = { flipCamera() })
                 }
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    stringResource(R.string.privacy_footnote),
-                    color = Color(0xFFCFE0EC),
-                    fontSize = 12.sp,
-                    textAlign = TextAlign.Center,
-                )
             }
         }
 
@@ -642,18 +685,32 @@ internal fun CameraScreen(
 @Composable
 private fun LevelIndicator(rollDegrees: Float) {
     val level = abs(rollDegrees) < 1.5f
-    val color = if (level) Good else Color.White.copy(alpha = 0.75f)
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        // Faint fixed reference tick at dead-centre.
-        Box(Modifier.width(34.dp).height(2.dp).background(Color.White.copy(alpha = 0.3f)))
-        // The device horizon — rotates with roll; longer + green when level.
-        Box(
-            Modifier
-                .width(if (level) 150.dp else 96.dp)
-                .height(2.dp)
-                .rotate(rollDegrees)
-                .background(color),
+    val color = if (level) Good else Color.White.copy(alpha = 0.85f)
+    Column(
+        Modifier.fillMaxSize(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        // The actual tilt angle (or "Level" when square).
+        Text(
+            if (level) "Level" else "${abs(rollDegrees.roundToInt())}°",
+            color = color,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
         )
+        Spacer(Modifier.height(10.dp))
+        Box(contentAlignment = Alignment.Center) {
+            // Faint fixed reference tick at dead-centre.
+            Box(Modifier.width(34.dp).height(2.dp).background(Color.White.copy(alpha = 0.3f)))
+            // The device horizon — rotates with roll; longer + green when level.
+            Box(
+                Modifier
+                    .width(if (level) 150.dp else 96.dp)
+                    .height(2.dp)
+                    .rotate(rollDegrees)
+                    .background(color),
+            )
+        }
     }
 }
 
@@ -735,6 +792,22 @@ private fun GalleryButton(thumb: Bitmap?, onOpen: () -> Unit) {
         } else {
             Text("▦", color = Color.White, fontSize = 24.sp)
         }
+    }
+}
+
+/** Flip front/back camera — an icon button (double-tap the preview does this too). */
+@Composable
+private fun FlipButton(enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .size(56.dp)
+            .clip(CircleShape)
+            .background(Color.White.copy(alpha = if (enabled) 0.12f else 0.05f))
+            .border(1.dp, Color.White.copy(alpha = if (enabled) 0.4f else 0.15f), CircleShape)
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text("⟲", color = Color.White.copy(alpha = if (enabled) 1f else 0.4f), fontSize = 26.sp)
     }
 }
 
