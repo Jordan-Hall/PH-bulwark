@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- PH Bulwark Manager launcher-icon FOREGROUND: the PH Bulwark shield emblem
+     (white shield with a navy "protected" check), the same logo as the child app
+     (platform/android/app .../ic_shield_foreground.xml). Centred in the 108dp
+     canvas within the adaptive safe zone. Overlaid onto the dx gen project by
+     apps/parent/build-android.ps1 (dx ships its own default icon otherwise). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Shield body -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,28 L80,38 L80,58 C80,72 68,82 54,86 C40,82 28,72 28,58 L28,38 Z" />
+    <!-- Inner check mark, cut in the background navy, to read as 'protected' -->
+    <path
+        android:fillColor="#0F3D5C"
+        android:pathData="M45,57 l6,6 l13,-15 l4,3.5 l-17,19.5 l-10,-10 Z" />
+</vector>

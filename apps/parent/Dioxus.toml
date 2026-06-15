@@ -30,6 +30,16 @@ android_main_activity = "android/MainActivity.kt"
 
 [bundle]
 identifier = "co.predatorhunters.bulwark.manager"
+# PH Bulwark shield icon (apps/parent/assets/icon.png, 1024² navy+shield, matching
+# the child/camera launcher icons). HONEST SCOPE: dx 0.8.0-alpha consumes
+# `[bundle].icon` ONLY in the DESKTOP bundlers (macOS/Linux/Windows) — its Android
+# build (dioxus-cli src/build/android.rs) hardcodes the launcher icon via
+# include_bytes! and reads NO icon config (the `[android].icon` schema field exists
+# but is unwired). So this sets the DESKTOP Manager icon (and future-proofs Android
+# if dx ever wires it); the ANDROID launcher icon is overlaid post-gen by
+# `build-android.ps1` from `android/res/` (the recommended fallback). Keep the two
+# in visual sync.
+icon = ["assets/icon.png"]
 
 [android]
 identifier = "co.predatorhunters.bulwark.manager"
