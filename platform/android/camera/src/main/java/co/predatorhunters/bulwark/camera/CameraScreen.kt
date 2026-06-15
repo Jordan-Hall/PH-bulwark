@@ -107,6 +107,13 @@ private enum class Notice { BlockedNsfw, CheckFailed, SaveFailed, Saved }
 /** Min interval between live preview scores (CPU ViT ~100-300 ms on a Pixel 7). */
 private const val PREVIEW_SCORE_INTERVAL_MS = 300L
 
+/**
+ * Min interval between live AR face detections — faster than the NSFW score so
+ * stickers track smoothly. UltraFace RFB-320 is ~1.2 MB and runs in a few ms, so
+ * the cost is dominated by the (shared) frame decode.
+ */
+private const val FACE_DETECT_INTERVAL_MS = 120L
+
 /** Max long edge of the decode used to score a capture (model input is 384). */
 private const val SCORING_MAX_DIM = 512
 
@@ -126,6 +133,7 @@ private const val SCORING_MAX_DIM = 512
 internal fun CameraScreen(
     gate: NsfwGate?,
     gateLoading: Boolean,
+    faceDetector: FaceDetector?,
     captureForResult: Boolean,
     onSaveToGallery: (ByteArray) -> Boolean,
     onDeliverResult: (ByteArray, Int) -> Unit,
@@ -161,6 +169,14 @@ internal fun CameraScreen(
     var notice by remember { mutableStateOf<Notice?>(null) }
     var selectedFilter by remember { mutableStateOf(CameraFilter.None) }
     var filtersOpen by remember { mutableStateOf(false) }
+    // AR "funny face" stickers (display overlay + baked into a SAFE save only).
+    var selectedSticker by remember { mutableStateOf(ArSticker.None) }
+    var arOpen by remember { mutableStateOf(false) }
+    var detectedFaces by remember { mutableStateOf<List<android.graphics.RectF>>(emptyList()) }
+    // The analyzer (bound once) reads "is a sticker active?" through this stable
+    // holder so toggling a sticker doesn't need a camera rebind. Kept in sync below.
+    val arActiveRef = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
+    arActiveRef.set(selectedSticker != ArSticker.None)
     var exposureIndex by remember { mutableStateOf(0) }
     var rollDegrees by remember { mutableStateOf(0f) }
     var levelVisible by remember { mutableStateOf(false) }
@@ -236,7 +252,7 @@ internal fun CameraScreen(
 
     // Bind the camera; re-runs when permission lands, the lens flips, or the
     // gate becomes ready (the preview shield needs the gate).
-    DisposableEffect(hasPermission, lensFacing, gate, mode.isVideo) {
+    DisposableEffect(hasPermission, lensFacing, gate, faceDetector, mode.isVideo) {
         var disposed = false
         var provider: ProcessCameraProvider? = null
         if (hasPermission) {
@@ -256,9 +272,20 @@ internal fun CameraScreen(
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                         .build()
+                    // ONE analyzer (Preview+Capture+Analysis is the safe CameraX
+                    // combo; a 2nd analysis would fail to bind). The NSFW score is
+                    // UNCHANGED; AR face detection reuses the SAME decoded frame and
+                    // runs only while a sticker is selected (best-effort, off the
+                    // safety path).
                     analysis.setAnalyzer(
                         workerExecutor,
-                        PreviewShieldAnalyzer(gate) { flagged -> previewFlagged = flagged },
+                        PreviewShieldAnalyzer(
+                            gate = gate,
+                            faceDetector = faceDetector,
+                            arActive = { arActiveRef.get() },
+                            onFlagged = { flagged -> previewFlagged = flagged },
+                            onFaces = { faces -> detectedFaces = faces },
+                        ),
                     )
                     useCases += analysis
                 }
@@ -283,6 +310,12 @@ internal fun CameraScreen(
             disposed = true
             provider?.unbindAll()
         }
+    }
+
+    // Drop any stale AR boxes the instant the sticker is cleared (the analyzer
+    // stops emitting faces while AR is off, so clear what was last shown).
+    LaunchedEffect(selectedSticker) {
+        if (selectedSticker == ArSticker.None) detectedFaces = emptyList()
     }
 
     // Transient notices auto-dismiss; the BLOCKED explanation stays until "OK".
@@ -379,12 +412,21 @@ internal fun CameraScreen(
                         verdict.isFailure -> Notice.CheckFailed
                         g.shouldBlock(verdict.getOrThrow()) -> Notice.BlockedNsfw
                         else -> {
-                            // SAFE capture only: bake the selected look into the SAVED
-                            // file so it matches the preview. Applied HERE, after the
-                            // gate scored the RAW frame — a filter can never change what
-                            // the gate sees. None returns the original bytes unchanged.
-                            val outJpeg = applyFilterToJpeg(jpeg, rotation, selectedFilter)
-                            val outRotation = if (selectedFilter == CameraFilter.None) rotation else 0
+                            // SAFE capture only: bake the selected look + AR sticker
+                            // into the SAVED file so it matches the preview. Applied
+                            // HERE, AFTER the gate scored the RAW frame above — neither
+                            // a filter nor a sticker can change what the gate sees (it
+                            // never scores a filtered/stickered frame). No filter AND
+                            // no sticker returns the original bytes unchanged.
+                            val outJpeg = applyLooksToJpeg(
+                                jpeg, rotation, selectedFilter, selectedSticker, faceDetector,
+                            )
+                            val outRotation =
+                                if (selectedFilter == CameraFilter.None && selectedSticker.isNone) {
+                                    rotation
+                                } else {
+                                    0
+                                }
                             when {
                                 captureForResult -> {
                                     onDeliverResult(outJpeg, outRotation) // finishes the activity
@@ -510,6 +552,21 @@ internal fun CameraScreen(
                     )
                 },
                 onCancel = onCancel,
+            )
+        }
+
+        // AR "funny face" overlay — a DISPLAY layer over the preview surface (never
+        // read back; CameraX scores the sensor, not this Canvas). The front camera
+        // preview is mirrored, so the boxes are mirrored to track the child. Hidden
+        // while a notice/blocked overlay is up so the safety message stays clear.
+        if (hasPermission && !selectedSticker.isNone && notice != Notice.BlockedNsfw &&
+            !previewFlagged
+        ) {
+            ArOverlay(
+                sticker = selectedSticker,
+                faces = detectedFaces,
+                mirrored = lensFacing == CameraSelector.LENS_FACING_FRONT,
+                modifier = Modifier.fillMaxSize(),
             )
         }
 
@@ -641,6 +698,13 @@ internal fun CameraScreen(
                     FilterStrip(selected = selectedFilter, onSelect = { selectedFilter = it })
                     Spacer(Modifier.height(12.dp))
                 }
+                // AR "funny face" sticker strip — behind its own toggle (the ☺
+                // button), revealed only when wanted. Stills only (it bakes into a
+                // still capture, like the filter strip).
+                if (mode.supportsFilters && arOpen) {
+                    ArStickerStrip(selected = selectedSticker, onSelect = { selectedSticker = it })
+                    Spacer(Modifier.height(12.dp))
+                }
                 // Still-mode carousel (Photo / Portrait / Night / Pro) — shown only
                 // in PHOTO mode; video has no sub-modes (the menu is one OR the other).
                 if (!mode.isVideo) {
@@ -697,10 +761,28 @@ internal fun CameraScreen(
                                 GalleryButton(thumb = lastThumb, onOpen = { showGallery = true })
                                 if (mode.supportsFilters) {
                                     Spacer(Modifier.width(10.dp))
+                                    // Filters and AR are mutually-exclusive panels —
+                                    // opening one closes the other (keep the view calm).
                                     FilterToggle(
                                         open = filtersOpen,
-                                        onToggle = { filtersOpen = !filtersOpen },
+                                        onToggle = {
+                                            filtersOpen = !filtersOpen
+                                            if (filtersOpen) arOpen = false
+                                        },
                                     )
+                                    // AR offered only when the face detector loaded
+                                    // (best-effort) — never advertise what can't work.
+                                    if (faceDetector != null) {
+                                        Spacer(Modifier.width(10.dp))
+                                        ArToggle(
+                                            open = arOpen,
+                                            active = !selectedSticker.isNone,
+                                            onToggle = {
+                                                arOpen = !arOpen
+                                                if (arOpen) filtersOpen = false
+                                            },
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -985,6 +1067,25 @@ private fun FilterToggle(open: Boolean, onToggle: () -> Unit) {
     }
 }
 
+/** Compact toggle (left of the shutter) that shows/hides the AR sticker strip. */
+@Composable
+private fun ArToggle(open: Boolean, active: Boolean, onToggle: () -> Unit) {
+    // Highlight when the panel is open OR a sticker is currently applied, so the
+    // child can tell at a glance an AR look is on even with the strip collapsed.
+    val lit = open || active
+    Box(
+        Modifier
+            .size(56.dp)
+            .clip(CircleShape)
+            .background(if (lit) Sky.copy(alpha = 0.25f) else Color.White.copy(alpha = 0.12f))
+            .border(1.dp, if (lit) Sky else Color.White.copy(alpha = 0.4f), CircleShape)
+            .clickable(onClick = onToggle),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text("☺", color = if (lit) Sky else Color.White, fontSize = 24.sp)
+    }
+}
+
 /** Honest slice-1 video stub — registered intent entry point, no recording. */
 @Composable
 internal fun VideoStubScreen(onDone: () -> Unit) {
@@ -1023,41 +1124,73 @@ internal fun VideoStubScreen(onDone: () -> Unit) {
  * never sneak a flagged capture through). Enters the flagged state on a single
  * flagged frame (protective), exits after two consecutive safe frames (no
  * flicker at the threshold boundary). A per-frame hiccup keeps the last state.
+ *
+ * The SINGLE bound analyzer (Preview+Capture+Analysis is the safe CameraX combo)
+ * ALSO drives the AR face overlay: from the SAME decoded upright bitmap it runs
+ * the best-effort [FaceDetector] on its own throttle, but ONLY while [arActive]
+ * (a sticker is selected). The NSFW score is unconditional and UNCHANGED — face
+ * detection reads the already-decoded frame and never alters the safety path.
  */
 private class PreviewShieldAnalyzer(
     private val gate: NsfwGate,
+    private val faceDetector: FaceDetector?,
+    private val arActive: () -> Boolean,
     private val onFlagged: (Boolean) -> Unit,
+    private val onFaces: (List<android.graphics.RectF>) -> Unit,
 ) : ImageAnalysis.Analyzer {
     private var lastRunMs = 0L
+    private var lastFaceRunMs = 0L
     private var safeStreak = 0
     private var flagged = false
 
     override fun analyze(image: ImageProxy) {
         val now = SystemClock.elapsedRealtime()
-        if (now - lastRunMs < PREVIEW_SCORE_INTERVAL_MS) {
+        // The face overlay wants a higher cadence than the NSFW score; bail early
+        // only when NEITHER is due so a frame can serve either layer.
+        val scoreDue = now - lastRunMs >= PREVIEW_SCORE_INTERVAL_MS
+        val faceDue = faceDetector != null && arActive() &&
+            now - lastFaceRunMs >= FACE_DETECT_INTERVAL_MS
+        if (!scoreDue && !faceDue) {
             image.close()
             return
         }
-        lastRunMs = now
         val bitmap = runCatching {
             val rotation = image.imageInfo.rotationDegrees
             image.toBitmap().rotatedBy(rotation)
         }.getOrNull()
         image.close()
         if (bitmap == null) return
-        val score = runCatching { gate.score(bitmap) }.getOrNull() ?: return
-        if (gate.shouldBlock(score)) {
-            safeStreak = 0
-            if (!flagged) {
-                flagged = true
-                onFlagged(true)
+        // Both layers consume `bitmap` via createScaledBitmap (which copies), so
+        // recycle our decode at the end — at face cadence this is allocated often.
+        try {
+            // AR face boxes (best-effort): reuse the decoded frame; never touches
+            // the gate. Emit even an empty list so a face leaving the frame clears
+            // stickers.
+            if (faceDue) {
+                lastFaceRunMs = now
+                val faces = runCatching { faceDetector!!.detect(bitmap).map { it.box } }.getOrNull()
+                if (faces != null) onFaces(faces)
             }
-        } else {
-            safeStreak++
-            if (flagged && safeStreak >= 2) {
-                flagged = false
-                onFlagged(false)
+
+            // Authoritative NSFW score — unconditional, unchanged.
+            if (!scoreDue) return
+            lastRunMs = now
+            val score = runCatching { gate.score(bitmap) }.getOrNull() ?: return
+            if (gate.shouldBlock(score)) {
+                safeStreak = 0
+                if (!flagged) {
+                    flagged = true
+                    onFlagged(true)
+                }
+            } else {
+                safeStreak++
+                if (flagged && safeStreak >= 2) {
+                    flagged = false
+                    onFlagged(false)
+                }
             }
+        } finally {
+            bitmap.recycle()
         }
     }
 }
@@ -1086,15 +1219,6 @@ private fun decodeForScoring(jpeg: ByteArray, rotationDegrees: Int): Bitmap {
     return bmp.rotatedBy(rotationDegrees)
 }
 
-/**
- * Bake [filter] into a captured JPEG for SAVE (full-res, upright). A filter is a
- * display COLOR transform applied ONLY to a SAFE capture AFTER the gate scored the
- * RAW frame — it can never push content past the safety check. [CameraFilter.None]
- * returns the original bytes unchanged (EXIF intact). For a real look the bitmap is
- * decoded, rotated upright, color-transformed, and re-encoded (orientation baked in,
- * so callers pass rotation 0). Any decode/encode failure returns the original bytes
- * — a photo is never lost over a filter error.
- */
 /** A small upright thumbnail of a saved capture for the gallery button. */
 private fun decodeThumb(jpeg: ByteArray, rotationDegrees: Int): Bitmap? = runCatching {
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -1112,11 +1236,52 @@ private fun nextFlashMode(current: Int): Int = when (current) {
     else -> ImageCapture.FLASH_MODE_OFF
 }
 
-private fun applyFilterToJpeg(jpeg: ByteArray, rotationDegrees: Int, filter: CameraFilter): ByteArray {
-    if (filter == CameraFilter.None) return jpeg
+/**
+ * Bake the selected colour [filter] AND AR [sticker] into a captured JPEG for SAVE
+ * (full-res, upright). Both are display transforms applied ONLY to a SAFE capture
+ * AFTER the gate scored the RAW frame, so they can never push content past the
+ * safety check (the gate never sees a filtered/stickered frame). When NEITHER a
+ * filter nor a sticker is selected the original bytes are returned unchanged (EXIF
+ * intact). Otherwise the bitmap is decoded ONCE, rotated upright, colour-transformed,
+ * then — for an AR sticker — re-detected at full res and stamped (drawn AFTER the
+ * filter so the sticker isn't tinted). Orientation is baked in (callers pass
+ * rotation 0). Any failure returns the original bytes — a photo is never lost over
+ * a filter/sticker error.
+ */
+private fun applyLooksToJpeg(
+    jpeg: ByteArray,
+    rotationDegrees: Int,
+    filter: CameraFilter,
+    sticker: ArSticker,
+    faceDetector: FaceDetector?,
+): ByteArray {
+    if (filter == CameraFilter.None && sticker.isNone) return jpeg
     return runCatching {
         val decoded = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size) ?: return jpeg
-        val baked = filter.apply(decoded.rotatedBy(rotationDegrees))
+        val upright = decoded.rotatedBy(rotationDegrees)
+        // Filter first (a fresh ARGB_8888 bitmap); None returns `upright` as-is.
+        var baked = filter.apply(upright)
+        if (!sticker.isNone && faceDetector != null) {
+            // Run a FRESH full-res detect (a different instant/resolution than the
+            // preview — preview boxes cannot be reused) and stamp on the SAME
+            // non-mirrored saved bitmap. The saved JPEG is never mirrored
+            // (ImageCapture MIRROR_MODE_OFF), so detect-and-draw on one bitmap is
+            // self-consistent — no front-camera mirror needed here (unlike the
+            // preview overlay, whose display IS mirrored).
+            val faces = faceDetector.detect(upright).map { it.box }
+            if (faces.isNotEmpty()) {
+                // Draw onto a mutable copy so the filtered bitmap stays intact.
+                if (!baked.isMutable) {
+                    baked = baked.copy(Bitmap.Config.ARGB_8888, true)
+                }
+                sticker.drawOn(
+                    android.graphics.Canvas(baked),
+                    faces,
+                    baked.width.toFloat(),
+                    baked.height.toFloat(),
+                )
+            }
+        }
         val out = java.io.ByteArrayOutputStream()
         baked.compress(Bitmap.CompressFormat.JPEG, 95, out)
         out.toByteArray()

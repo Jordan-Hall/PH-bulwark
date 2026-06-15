@@ -75,13 +75,21 @@ class CameraActivity : ComponentActivity() {
                     } else {
                         var gate by remember { mutableStateOf<NsfwGate?>(null) }
                         var gateLoading by remember { mutableStateOf(true) }
+                        // The AR face-box detector is BEST-EFFORT (not a safety
+                        // component): loaded off the safety path, and a null
+                        // detector just means no AR stickers — the camera and the
+                        // NSFW gate are unaffected.
+                        var faceDetector by remember { mutableStateOf<FaceDetector?>(null) }
                         LaunchedEffect(Unit) {
                             gate = withContext(Dispatchers.IO) { NsfwGate.obtain(applicationContext) }
                             gateLoading = false
+                            faceDetector =
+                                withContext(Dispatchers.IO) { FaceDetector.obtain(applicationContext) }
                         }
                         CameraScreen(
                             gate = gate,
                             gateLoading = gateLoading,
+                            faceDetector = faceDetector,
                             captureForResult = captureForResult,
                             onSaveToGallery = ::saveToGallery,
                             onDeliverResult = { jpeg, rotation ->

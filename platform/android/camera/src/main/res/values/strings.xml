@@ -85,6 +85,17 @@
     <string name="filter_fade">Fade</string>
     <string name="filter_noir">Noir</string>
 
+    <!-- AR "funny face" stickers (display overlay; applied AFTER the on-device
+         safety check, never before — the check never sees a stickered frame). -->
+    <string name="cd_ar_stickers">Funny face stickers</string>
+    <string name="ar_none">None</string>
+    <string name="ar_dog">Dog</string>
+    <string name="ar_shades">Shades</string>
+    <string name="ar_moustache">Moustache</string>
+    <string name="ar_crown">Crown</string>
+    <string name="ar_bunny">Bunny</string>
+    <string name="ar_cat">Cat</string>
+
     <!-- Transparency footer (matches the child app's honesty line). -->
     <string name="privacy_footnote">Photos are checked on this phone only. Nothing leaves the device.</string>
 </resources>

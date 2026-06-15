@@ -21,6 +21,10 @@ ph-bulwark-grooming-model*
 # ...except the small bundled models we DO vendor (compiled in via include_bytes!):
 !crates/bulwark-text/models/grooming_detector.onnx
 !crates/bulwark-vision/models/nsfw_detector.onnx
+# ...and the tiny FOSS face-box model the Camera app bundles for AR sticker
+# placement (UltraFace version-RFB-320, MIT, ~1.2 MB — face BOXES only, no
+# identity/recognition; runs on the ONNX Runtime the app already ships).
+!platform/android/camera/src/main/assets/model/face_detector.onnx
 
 # Secrets & local state — NEVER commit
 *.pem
