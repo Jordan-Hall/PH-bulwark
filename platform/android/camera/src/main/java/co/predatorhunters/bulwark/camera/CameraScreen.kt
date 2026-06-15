@@ -41,6 +41,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -312,10 +313,11 @@ internal fun CameraScreen(
         levelVisible = false
     }
 
-    // The tap-to-focus ring fades shortly after the tap.
+    // The tap-to-focus ring + brightness bar stay ~3s after the tap (and reset on
+    // each brightness drag), then fade.
     LaunchedEffect(focusTick) {
         if (focusPoint != null) {
-            delay(900)
+            delay(3000)
             focusPoint = null
         }
     }
@@ -343,7 +345,6 @@ internal fun CameraScreen(
     LaunchedEffect(exposureIndex, cameraControl) {
         runCatching { cameraControl?.setExposureCompensationIndex(exposureIndex) }
     }
-    LaunchedEffect(mode.isPro) { if (!mode.isPro) exposureIndex = 0 }
     LaunchedEffect(zoomRatio, cameraControl) { cameraControl?.setZoomRatio(zoomRatio) }
 
     // Live safety layer for video: if the preview scene is flagged WHILE
@@ -554,6 +555,27 @@ internal fun CameraScreen(
                     .size(72.dp)
                     .border(1.5.dp, Color.White, CircleShape),
             )
+        }
+
+        // Samsung-style brightness bar by the focus point — drag up to brighten.
+        focusPoint?.let { fp ->
+            val evRange = cameraInfo?.exposureState?.exposureCompensationRange
+            if (evRange != null && evRange.upper > evRange.lower) {
+                Box(
+                    Modifier.offset {
+                        IntOffset(
+                            (fp.x + 44.dp.toPx()).roundToInt(),
+                            (fp.y - 75.dp.toPx()).roundToInt(),
+                        )
+                    },
+                ) {
+                    BrightnessBar(
+                        index = exposureIndex,
+                        range = evRange.lower..evRange.upper,
+                        onChange = { exposureIndex = it; focusTick++ },
+                    )
+                }
+            }
         }
 
         // Preview shield: the live scene looks unsafe -> pause + explain.
@@ -773,6 +795,40 @@ private fun LevelIndicator(rollDegrees: Float) {
                     .background(color),
             )
         }
+    }
+}
+
+/** Vertical brightness (EV) bar shown by the focus point — drag up to brighten. */
+@Composable
+private fun BrightnessBar(index: Int, range: IntRange, onChange: (Int) -> Unit) {
+    var acc by remember { mutableStateOf(0f) }
+    Column(
+        Modifier
+            .width(40.dp)
+            .height(150.dp)
+            .pointerInput(range) {
+                detectVerticalDragGestures { _, dragAmount ->
+                    acc += -dragAmount
+                    val step = (acc / 28f).toInt()
+                    if (step != 0) {
+                        onChange((index + step).coerceIn(range.first, range.last))
+                        acc -= step * 28f
+                    }
+                }
+            },
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text("☀", color = if (index > 0) Sky else Color.White, fontSize = 18.sp)
+        Spacer(Modifier.height(4.dp))
+        Box(
+            Modifier
+                .width(3.dp)
+                .weight(1f)
+                .clip(RoundedCornerShape(50))
+                .background(Color.White.copy(alpha = 0.5f)),
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(if (index > 0) "+$index" else "$index", color = Color.White, fontSize = 10.sp)
     }
 }
 
