@@ -4,8 +4,10 @@
   Dioxus.toml `[application].android_manifest` (src/build/android.rs:264-271: when
   set, dx uses this file as-is and skips its handlebars template).
 
-  This is the dx-rendered template (captured from a real `dx build --platform
-  android` under target/dx/…) with EXACTLY two additions for native UnifiedPush:
+  This is the dx-rendered template (captured from a real android `dx build`
+  under target/dx/…) with EXACTLY two additions for native UnifiedPush:
+  (NOTE: never write a literal double-hyphen anywhere in this comment — XML
+  forbids it inside comments and AGP's manifest parser hard-fails on it.)
     1. <uses-permission POST_NOTIFICATIONS> — to post the content-free alert.
     2. the <service> for our PushService (action PUSH_EVENT) inside <application>.
 
