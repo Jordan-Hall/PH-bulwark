@@ -641,20 +641,26 @@ internal fun CameraScreen(
                     FilterStrip(selected = selectedFilter, onSelect = { selectedFilter = it })
                     Spacer(Modifier.height(12.dp))
                 }
-                // Mode carousel. Only the still modes (Photo / Portrait / Night /
-                // Pro) are offered for now — each applies real Camera2 scene hints;
-                // Video recording is a follow-up (VideoGate scaffold is in place).
-                ModeCarousel(
-                    // Video is offered only when saving to the gallery — the
-                    // "return a result" contract (onDeliverResult) is photo-only.
-                    modes = remember(captureForResult) {
-                        if (captureForResult) CameraMode.strip.filter { it.isStill } else CameraMode.strip
-                    },
-                    selected = mode,
-                    enabled = !capturing && !recording,
-                    onSelect = { mode = it },
-                )
-                Spacer(Modifier.height(12.dp))
+                // Still-mode carousel (Photo / Portrait / Night / Pro) — shown only
+                // in PHOTO mode; video has no sub-modes (the menu is one OR the other).
+                if (!mode.isVideo) {
+                    ModeCarousel(
+                        modes = remember { CameraMode.strip.filter { it.isStill } },
+                        selected = mode,
+                        enabled = !capturing && !recording,
+                        onSelect = { mode = it },
+                    )
+                    Spacer(Modifier.height(12.dp))
+                }
+                // Top-level PHOTO / VIDEO switch (capture-for-result is photo-only).
+                if (!captureForResult) {
+                    PhotoVideoToggle(
+                        isVideo = mode.isVideo,
+                        enabled = !capturing && !recording,
+                        onSelect = { wantVideo -> mode = if (wantVideo) CameraMode.Video else CameraMode.Photo },
+                    )
+                    Spacer(Modifier.height(12.dp))
+                }
                 // Pro exposure (EV) slider — the real manual control that makes Pro
                 // differ from Photo (shown only when the lens reports an EV range).
                 if (mode.isPro) {
@@ -910,6 +916,40 @@ private fun GalleryButton(thumb: Bitmap?, onOpen: () -> Unit) {
         } else {
             Text("▦", color = Color.White, fontSize = 24.sp)
         }
+    }
+}
+
+/** Top-level PHOTO / VIDEO switch — the mode menu is one or the other, not both. */
+@Composable
+private fun PhotoVideoToggle(isVideo: Boolean, enabled: Boolean, onSelect: (Boolean) -> Unit) {
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(50))
+            .background(Color.White.copy(alpha = 0.1f))
+            .padding(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        PvPill("PHOTO", selected = !isVideo, enabled = enabled) { onSelect(false) }
+        PvPill("VIDEO", selected = isVideo, enabled = enabled) { onSelect(true) }
+    }
+}
+
+@Composable
+private fun PvPill(label: String, selected: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(50))
+            .background(if (selected) Sky.copy(alpha = 0.9f) else Color.Transparent)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 18.dp, vertical = 8.dp),
+    ) {
+        Text(
+            label,
+            color = Color.White,
+            fontSize = 13.sp,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            letterSpacing = 1.sp,
+        )
     }
 }
 
