@@ -1,0 +1,25 @@
+# 16 KB page-size ELF alignment for the Manager's Android native library.
+#
+# Android 15+ devices that run with a 16 KB memory page size REJECT shared
+# objects whose LOAD segments are aligned to the legacy 4 KB boundary (the
+# "Android app compatibility / not 16 KB-aligned" warning, and a hard load
+# failure on a real 16 KB device). NDK r27+ makes 16 KB the default, but our
+# toolchain is r26, so we pass the linker max-page-size explicitly.
+#
+# dx builds the Manager UI as the `libmain.so` cdylib via cargo; without this
+# its LOAD segments align to 0x1000 (4 KB) and the warning fires. This mirrors
+# the child app's platform/android/rust/bulwark-android/.cargo/config.toml, which
+# already produces 0x4000-aligned segments. The stanzas are target-scoped to the
+# Android triples, so the desktop `cargo build --release` (the console exe) is
+# unaffected.
+[target.aarch64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+[target.armv7-linux-androideabi]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+[target.x86_64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+[target.i686-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
