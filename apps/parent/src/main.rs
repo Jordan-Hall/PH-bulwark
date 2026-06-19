@@ -34,6 +34,7 @@ mod icons;
 mod lock;
 mod media;
 mod process;
+mod provision;
 mod router;
 mod screens;
 mod servers;

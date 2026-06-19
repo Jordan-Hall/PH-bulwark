@@ -14,6 +14,9 @@ use crate::api::{
     login_guardian, register_push_target, request_password_reset, reset_password_with_code,
     submit_decision,
 };
+use crate::provision::{
+    build_provisioning_json, provisioning_qr_svg, ProvisioningParams, CHILD_APK_CERT_CHECKSUM,
+};
 use crate::brand::logo_data_uri;
 use crate::components::{AlertCard, ChildVpnRow, CoverageMatrix};
 use crate::config::{ffmpeg_display, nsfw_model_display};
@@ -1603,6 +1606,126 @@ fn SetupCodePanel(pair: PairCodeUi) -> Element {
     }
 }
 
+/// "Provision a dedicated device" panel — generates the Android **Device-Owner**
+/// enrollment QR for a freshly factory-reset phone you're dedicating to a child.
+/// Scanning it from the Android Setup Wizard ("tap the welcome screen 6 times")
+/// installs PH Bulwark as the device owner and auto-links it to the chosen child,
+/// so protection is on from first boot and the child cannot remove it. The child
+/// id + family id come from the roster above; Wi-Fi is optional (a wiped device
+/// needs a network to download the app before any account exists).
+#[component]
+fn ProvisionDevicePanel() -> Element {
+    let mut child_id = use_signal(String::new);
+    let mut family_id = use_signal(String::new);
+    let mut wifi_ssid = use_signal(String::new);
+    let mut wifi_pw = use_signal(String::new);
+    let mut json = use_signal(|| Option::<String>::None);
+    // The QR only installs if the operator has filled the signed-APK URL + the
+    // signing-certificate checksum in provision.rs — warn until they have.
+    let not_ready = CHILD_APK_CERT_CHECKSUM.starts_with("TODO");
+    rsx! {
+        div { class: "box add-child",
+            h3 { "Provision a dedicated device" }
+            p { class: "sub",
+                "For a NEW or wiped phone you\u{2019}re dedicating to a child: generate a setup QR, factory-reset that device, then on its first welcome screen tap the screen 6 times and scan this. PH Bulwark installs as the managed device-owner \u{2014} protection on from first boot, and the child can\u{2019}t remove it. Never do this on a phone holding data you need."
+            }
+            if not_ready {
+                div { class: "err",
+                    span { dangerous_inner_html: "{svg(\"alert\")}" }
+                    "Not ready to ship: set the signed APK URL + signing-certificate checksum in provision.rs first \u{2014} the QR won\u{2019}t install the app without them."
+                }
+            }
+            label { class: "field",
+                span { "Child id (from the roster above)" }
+                input { r#type: "text", placeholder: "child_\u{2026}", value: "{child_id}", oninput: move |e| child_id.set(e.value()) }
+            }
+            label { class: "field",
+                span { "Family id" }
+                input { r#type: "text", placeholder: "family_\u{2026}", value: "{family_id}", oninput: move |e| family_id.set(e.value()) }
+            }
+            label { class: "field",
+                span { "Wi\u{2011}Fi network (optional \u{2014} a wiped device needs internet)" }
+                input { r#type: "text", placeholder: "SSID", value: "{wifi_ssid}", oninput: move |e| wifi_ssid.set(e.value()) }
+            }
+            label { class: "field",
+                span { "Wi\u{2011}Fi password (optional)" }
+                input { r#type: "password", value: "{wifi_pw}", oninput: move |e| wifi_pw.set(e.value()) }
+            }
+            button {
+                class: "primary",
+                disabled: child_id().trim().is_empty() || family_id().trim().is_empty(),
+                onclick: move |_| {
+                    let cid = child_id();
+                    let fid = family_id();
+                    let ssid = wifi_ssid();
+                    let pw = wifi_pw();
+                    let ssid_t = ssid.trim();
+                    let params = ProvisioningParams {
+                        child_id: cid.trim(),
+                        family_id: fid.trim(),
+                        cluster_endpoint_override: "",
+                        wifi_ssid: if ssid_t.is_empty() { None } else { Some(ssid_t) },
+                        wifi_password: if pw.is_empty() { None } else { Some(pw.as_str()) },
+                        apk_url: "",
+                        cert_checksum: "",
+                    };
+                    json.set(build_provisioning_json(&params));
+                },
+                "Generate provisioning QR"
+            }
+            if let Some(j) = json() {
+                ProvisioningQrPanel { json: j }
+            }
+        }
+    }
+}
+
+/// The provisioning QR + copy fallback, shown once a payload is built.
+#[component]
+fn ProvisioningQrPanel(json: String) -> Element {
+    let mut copied = use_signal(|| false);
+    let qr = provisioning_qr_svg(&json);
+    rsx! {
+        div { class: "pair-code",
+            div { class: "preview-label", "Scan on the wiped device\u{2019}s welcome screen" }
+            if let Some(qr) = qr {
+                div { class: "pair-qr",
+                    div {
+                        class: "pair-qr-img setup-qr-img",
+                        role: "img",
+                        "aria-label": "Device provisioning QR code",
+                        dangerous_inner_html: "{qr}",
+                    }
+                    div { class: "hint",
+                        "Factory-reset the dedicated device, then on its very first welcome screen tap the screen 6 times and scan this. It downloads PH Bulwark and sets it as the managed device-owner, linked to this child."
+                    }
+                }
+            } else {
+                div { class: "err",
+                    span { dangerous_inner_html: "{svg(\"alert\")}" }
+                    "This provisioning payload is too large to encode as a QR \u{2014} use \u{201c}Copy provisioning JSON\u{201d} instead."
+                }
+            }
+            div { class: "setup-row",
+                button {
+                    class: "ghost copy-btn",
+                    "aria-label": "Copy provisioning JSON",
+                    onclick: move |_| {
+                        let _ = crate::media::copy_to_clipboard(&json);
+                        copied.set(true);
+                        spawn(async move {
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            copied.set(false);
+                        });
+                    },
+                    span { dangerous_inner_html: "{svg(\"copy\")}" }
+                    if copied() { "Copied" } else { "Copy provisioning JSON" }
+                }
+            }
+        }
+    }
+}
+
 /// "/alerts" — live alert inbox with approve / keep-blocked decisions.
 #[component]
 pub fn Alerts() -> Element {
@@ -1749,6 +1872,8 @@ pub fn Children() -> Element {
         }
 
         AddChildPanel {}
+
+        ProvisionDevicePanel {}
     }
     }
 }
