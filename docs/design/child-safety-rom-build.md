@@ -45,7 +45,7 @@ relocking the bootloader with `fastboot flashing lock` after flashing.
 
 | Factor | AOSP-vanilla | GrapheneOS |
 |---|---|---|
-| Licence | Apache-2.0 userspace + GPL-2 kernel | Same base + hardening patches (Apache/GPL). GrapheneOS does **not** sanction surveillance-capable forks marketed under its name. |
+| Licence | Apache-2.0 userspace + GPL-2 kernel | Same base + hardening patches (Apache/GPL). GrapheneOS's trademark policy does **not** sanction forks marketed under its name. |
 | `lynx` support | Official AOSP factory images + vendor/driver binaries from Google. Documented and reproducible. | Active and well-maintained — but forking it requires diverging from its signed OTA channel entirely. |
 | Verified boot | Standard AVB2 self-signed with our own keys; relocked bootloader, same as any custom ROM. | GrapheneOS adds its own AVB extension + key-pinning in its updater. Those benefits apply only to GrapheneOS's own signed builds, not to a fork. |
 | OTA | `update_engine` + our own OTA server (or simple adb sideload for a dedicated single device). | Same after a fork. GrapheneOS's update channel is lost. |
