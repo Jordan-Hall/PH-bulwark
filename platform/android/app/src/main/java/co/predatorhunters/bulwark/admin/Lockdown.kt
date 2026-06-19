@@ -64,17 +64,22 @@ object Lockdown {
     }
 
     /**
-     * Turn protection ON with no setup prompts (Device Owner only): permit + enable
-     * the detection AccessibilityService and grant the runtime permissions it
-     * declares, so a freshly-provisioned managed child device protects from first
-     * boot without the guardian toggling anything in Settings.
+     * Permit the detection AccessibilityService under Device-Owner policy and grant the
+     * runtime permissions it declares. Device Owner only; changes NO detection logic;
+     * best-effort + idempotent + a safe no-op when not Device Owner (every step is
+     * runCatching-wrapped).
      *
-     * This only ENABLES the already-installed protection service and grants perms it
-     * already declares — it changes NO detection logic. Best-effort + idempotent: a
-     * safe no-op when the app is not Device Owner, and each step is wrapped so a
-     * platform that refuses one (e.g. a newer Android that blocks silent a11y enable
-     * via setSecureSetting) just falls back to a one-time manual enable. Verify on a
-     * real managed device — silent a11y enable is version-sensitive.
+     * IMPORTANT — what actually happens in Increment 1 (stock-firmware Device Owner):
+     * `DevicePolicyManager.setSecureSetting` is restricted to a small Device-Owner
+     * allowlist (DEFAULT_INPUT_METHOD, SKIP_FIRST_USE_HINTS, …) that does NOT include
+     * ENABLED_ACCESSIBILITY_SERVICES / ACCESSIBILITY_ENABLED, so the silent a11y enable
+     * below is EXPECTED TO BE REJECTED on all supported versions (API 26-34) — and we
+     * fall back to the existing one-time MANUAL enable (MainActivity.openAccessibilitySettings).
+     * `setPermittedAccessibilityServices` and the perm-grant DO take effect as Device Owner.
+     * The genuinely-silent, no-prompt enable lands in the Child Safety ROM's privileged/
+     * system-app rungs (B/C), where the shield is platform-signed and writes
+     * Settings.Secure directly under WRITE_SECURE_SETTINGS. We still attempt it here so a
+     * future Android/OEM that does allow it benefits automatically. Verify on the 7a.
      */
     fun enableProtectionServices(ctx: Context) {
         if (!isDeviceOwner(ctx)) {
@@ -89,9 +94,11 @@ object Lockdown {
         // so our detection service is permitted alongside any the guardian allows).
         runCatching { dpm.setPermittedAccessibilityServices(admin, null) }
 
-        // Enable the detection AccessibilityService via the secure settings a Device
-        // Owner may write. APPEND to any already-enabled services so we never clobber
-        // another enabled service.
+        // Attempt the silent enable (see the doc note: expected to be REJECTED on stock
+        // firmware because these keys aren't on the Device-Owner setSecureSetting
+        // allowlist — the runCatching makes that a clean no-op → manual fallback; the
+        // genuinely-silent path is the privileged ROM rungs). APPEND so a successful
+        // enable never clobbers another already-enabled service.
         runCatching {
             val current = Settings.Secure.getString(
                 ctx.contentResolver,
@@ -108,8 +115,9 @@ object Lockdown {
         }
 
         // Auto-grant the runtime-dangerous permissions the app declares (today only
-        // POST_NOTIFICATIONS, for the always-visible protection-status notice). Add
-        // camera/mic here if the on-device detection path ever needs them.
+        // POST_NOTIFICATIONS — a runtime perm on API 33+, install-time pre-33 — for the
+        // always-visible protection-status notice). Add camera/mic here if the
+        // on-device detection path ever needs them.
         runCatching {
             dpm.setPermissionGrantState(
                 admin,
