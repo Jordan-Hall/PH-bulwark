@@ -73,13 +73,11 @@ pub const CHILD_APK_DOWNLOAD_URL: &str =
 /// This is NOT a secret — it is the *public* certificate hash that Android uses
 /// to verify the download matches the installed signing key. It must be updated
 /// any time the release signing key rotates.
-pub const CHILD_APK_CERT_CHECKSUM: &str =
-    "TODO_base64url_noPad_SHA256_of_signing_cert";
+pub const CHILD_APK_CERT_CHECKSUM: &str = "TODO_base64url_noPad_SHA256_of_signing_cert";
 
 /// Android Device-Admin component name for PH Bulwark.
 /// Must match the `<receiver>` in the child app's AndroidManifest.xml.
-const DEVICE_ADMIN_COMPONENT: &str =
-    "co.predatorhunters.bulwark/.admin.BulwarkDeviceAdminReceiver";
+const DEVICE_ADMIN_COMPONENT: &str = "co.predatorhunters.bulwark/.admin.BulwarkDeviceAdminReceiver";
 
 // Admin-extras bundle keys — must match Enrollment.kt EXTRA_* constants exactly.
 const EXTRA_FAMILY_ID: &str = "co.predatorhunters.bulwark.family_id";
@@ -182,10 +180,7 @@ pub fn build_provisioning_json(p: &ProvisioningParams<'_>) -> Option<String> {
         EXTRA_CHILD_ID.into(),
         serde_json::Value::String(p.child_id.to_string()),
     );
-    extras.insert(
-        EXTRA_CLUSTER.into(),
-        serde_json::Value::String(endpoint),
-    );
+    extras.insert(EXTRA_CLUSTER.into(), serde_json::Value::String(endpoint));
     obj.insert(
         "android.app.extra.PROVISIONING_ADMIN_EXTRAS_BUNDLE".into(),
         serde_json::Value::Object(extras),

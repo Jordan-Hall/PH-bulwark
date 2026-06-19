@@ -14,9 +14,6 @@ use crate::api::{
     login_guardian, register_push_target, request_password_reset, reset_password_with_code,
     submit_decision,
 };
-use crate::provision::{
-    build_provisioning_json, provisioning_qr_svg, ProvisioningParams, CHILD_APK_CERT_CHECKSUM,
-};
 use crate::brand::logo_data_uri;
 use crate::components::{AlertCard, ChildVpnRow, CoverageMatrix};
 use crate::config::{ffmpeg_display, nsfw_model_display};
@@ -29,6 +26,9 @@ use crate::media::{pair_qr_svg, setup_payload_v2};
 use crate::process::{
     ca_present, ca_trust_command, disable_system_proxy, enable_system_proxy, kill_proxy,
     proxy_listening, spawn_proxy, spawn_vpn, Mode, ProxyHandle, PROXY_ADDR,
+};
+use crate::provision::{
+    build_provisioning_json, provisioning_qr_svg, ProvisioningParams, CHILD_APK_CERT_CHECKSUM,
 };
 use crate::router::{phase_route, Route};
 use crate::servers::{
@@ -1653,7 +1653,9 @@ fn ProvisionDevicePanel() -> Element {
             }
             button {
                 class: "primary",
-                disabled: child_id().trim().is_empty() || family_id().trim().is_empty(),
+                disabled: not_ready
+                    || child_id().trim().is_empty()
+                    || family_id().trim().is_empty(),
                 onclick: move |_| {
                     let cid = child_id();
                     let fid = family_id();
