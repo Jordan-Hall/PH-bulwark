@@ -41,12 +41,17 @@ Provision the existing child app as **Device Owner** during a fresh-device QR/NF
 **stock** Pixel 7a. Already ~built: `admin/BulwarkDeviceAdminReceiver` (provisioning callbacks
 + `ACTION_DEVICE_OWNER_CHANGED`), `Lockdown` (`isDeviceOwner`, `enforce()`: lock-task / always-
 on VPN), `CaTrust` (silent system-store CA install via `DevicePolicyManager` when Device Owner).
-- **Delivers:** no per-use prompt, child can't remove the app, always-on VPN, CA baked,
-  lock-task — i.e. *undefeatable + silent + always-on* on stock firmware.
+- **Delivers:** silent/undefeatable *provisioning* — child can't remove the app, always-on VPN,
+  CA baked, lock-task, no per-use prompt, auto-pairing via the QR extras. Built as #217 + #218.
 - **Effort:** weeks (polish provisioning + a clean fresh-device flow). **Needs none of the
   three blocking rulings, no AOSP host.**
-- **Limit:** not "baked into the core" — capture (a11y / MediaProjection) is still app-level
-  (Device Owner can auto-grant + suppress the prompt, so it's silent, but not framework-deep).
+- **Limit — one manual step remains on stock:** the detection **AccessibilityService still needs a
+  one-time MANUAL enable**. A Device Owner CANNOT silently enable an a11y service on stock firmware
+  (`setSecureSetting`'s DO allowlist excludes `ENABLED_ACCESSIBILITY_SERVICES`), so #217 attempts it
+  fail-safe but falls back to the existing guided manual toggle. The genuinely-silent, zero-prompt
+  enable is what the privileged/system-app rungs (**B/C**) add (platform-signed → writes
+  `Settings.Secure` directly). Capture is also still app-level (a11y / MediaProjection), not
+  framework-deep, until B/C.
 
 ### B — Privileged system app on a custom build
 A minimal custom image (AOSP **or** GrapheneOS base for `lynx`) embedding the child app as a
