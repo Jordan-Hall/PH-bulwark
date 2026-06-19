@@ -179,6 +179,16 @@ priv-app move).
 
 ### 3.2 Soong module (`Android.bp` sketch)
 
+**Signing posture for Increment 2:** `certificate: "platform"` (signed with the
+same key as `system_server`). This is the preferred posture for a child-protection
+system app: platform signature match alone grants all `signature|privileged`
+permissions without requiring a per-permission allowlist entry. The
+`ro.control_privapp_permissions=enforce` boot-block risk (§3.3) applies primarily
+to priv-apps signed with a **non-platform** certificate; a platform-signed app is
+granted `signature` perms by key match. The allowlist in §3.3 is added as
+belt-and-suspenders hardening and to document which permissions the app actually
+uses, but it is not the sole grant mechanism here.
+
 Add to `platform/android/app/Android.bp` (create if absent):
 
 ```bp
@@ -189,7 +199,7 @@ android_app {
     manifest: "src/main/AndroidManifest.xml",
     platform_apis: true,          // access to @hide APIs; needed for Inc 3 hooks
     privileged: true,             // installs to /system/priv-app
-    certificate: "platform",      // signed with the platform key (same key as system_server)
+    certificate: "platform",      // signed with the platform key (same as system_server)
     // The NSFW ONNX model asset.
     asset_dirs: ["src/main/assets"],
     jni_libs: ["libbulwark_client"],
@@ -270,21 +280,41 @@ the Do-mode feature set is stable. Add any missed `signature|privileged` perms;
 remove any not declared in the manifest. An allowlist that is too broad is a
 security risk; too narrow blocks boot.
 
-### 3.4 Silent capture without an AccessibilityService prompt
+### 3.4 Silent capture without an AccessibilityService
 
-On a platform-signed priv-app (certificate: "platform"), `READ_FRAME_BUFFER` and
-`CAPTURE_VIDEO_OUTPUT` are granted without a per-user dialog. The existing
-`BulwarkAccessibilityService.takeScreenshot()` path (API 30+, `AccessibilityService`
-method) can be replaced with `SurfaceControl.screenshot()` or the
-`DisplayManager`/`ScreenshotHelper` internal API, which are accessible to
-platform-signed apps and do not require `AccessibilityService` to be the trigger.
+A core goal of Increment 2 is removing the AccessibilityService dependency
+(fragile, defeat-able by toggling a11y off in Settings). Platform-signed priv-apps
+are granted `READ_FRAME_BUFFER` and `CAPTURE_VIDEO_OUTPUT` by signature match with
+no per-use dialog.
 
-Recommendation for Increment 2: retain `BulwarkAccessibilityService` but suppress
-the user-consent prompt for it via Device-Owner's `setPermissionGrantState
-(PERMISSION_GRANT_STATE_GRANTED)` — same mechanism already in `Lockdown.kt`.
-This avoids any framework changes for Increment 2 while removing the user-facing
-prompt entirely. In Increment 3, the service is promoted to a framework system
-service and the AccessibilityService dependency is dropped completely.
+**Increment 2 capture path (no AccessibilityService for screen capture):**
+
+Replace `BulwarkAccessibilityService.takeScreenshot()` with a direct call to
+`SurfaceControl.screenshot()` (or `ScreenshotHelper.takeScreenshot()` from the
+internal API, both accessible to platform-signed apps). This runs in a background
+`HandlerThread` inside the `PHBulwark` app process, triggered by a
+`DisplayEventReceiver` (VSYNC listener) at the chosen cadence (~1 Hz), independent
+of any `AccessibilityService` lifecycle.
+
+```kotlin
+// Simplified sketch — platform-signed priv-app only.
+val result = SurfaceControl.screenshot(
+    SurfaceControl.createDisplay("PHBulwark capture", false),
+    displayBounds
+)
+// result is a Bitmap in hardware buffer; copy to software for ONNX inference.
+```
+
+`BulwarkAccessibilityService` is **retained in Increment 2** only for the
+node-tree TEXT path (extracting chat text from `AccessibilityNodeInfo` — it is
+still the most reliable way to read text from E2E-encrypted apps without a
+framework patch). The screenshot/capture path is fully migrated off it. In
+Increment 3, the node-tree text path is also promoted to a framework hook (§4.3)
+and the AccessibilityService dependency is eliminated entirely.
+
+OPEN QUESTION (Inc 2): confirm `SurfaceControl.screenshot()` call signature for
+Android 16 against `frameworks/base/core/java/android/view/SurfaceControl.java`
+before integrating. The internal API surface changes across major Android versions.
 
 ### 3.5 Non-removability
 
@@ -497,9 +527,16 @@ allow bulwarkd audio_device:chr_file { read write };
 allow bulwarkd audioserver_service:service_manager find;
 allow bulwarkd audioserver:binder call;
 
-# Read model assets from /system/etc/bulwark/ (ONNX models baked in).
+# Read model assets from /system/etc/bulwark/ (NSFW model baked in).
 allow bulwarkd system_file:file { read open getattr };
 allow bulwarkd system_file:dir { read open getattr search };
+
+# Read/write the guardian-provisioned grooming model at /data/misc/bulwark/models/.
+# This path is labelled bulwarkd_data_file (add to file_contexts):
+#   /data/misc/bulwark(/.*)?  u:object_r:bulwarkd_data_file:s0
+type bulwarkd_data_file, file_type, data_file_type;
+allow bulwarkd bulwarkd_data_file:dir { create read write search add_name remove_name };
+allow bulwarkd bulwarkd_data_file:file { create read write open getattr unlink };
 
 # Alert relay: network access to the cluster (mTLS).
 allow bulwarkd self:tcp_socket { create connect read write shutdown };
