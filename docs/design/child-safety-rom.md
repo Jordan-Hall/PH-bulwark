@@ -1,6 +1,9 @@
-# Child Safety ROM — design (DRAFT)
+# Child Safety ROM — design
 
-**Status: DRAFT — pending owner decisions (see "Blocking decisions"). Do NOT implement until resolved.**
+**Status: DECIDED (owner rulings 2026-06-16) — build all three rungs A+B+C.** Increment 1
+(Device-Owner on stock) is **code-complete**: PR #217 (DO auto-enable of detection + perms)
++ PR #218 (Manager provisioning-QR builder), both held for on-device validation once the
+dedicated 7a is flashed. B/C need an AOSP/Graphene build host + the device.
 Date: 2026-06-16. Target device: Pixel 7a (codename `lynx`). Framing: a child-protection
 build ("Child Safety ROM") — never offensive-security.
 
@@ -16,23 +19,20 @@ defeat-able by turning a11y off) plus an optional Device-Owner VPN. Pushing dete
 the OS removes that fragility, gives system-level capture (faster, every surface), and makes
 the protection part of the device rather than an app a child can fight.
 
-## Blocking decisions (these gate everything — owner's explicit call before any build)
+## Owner decisions (RULED 2026-06-16)
 
-1. **Dedicated device, fresh wipe.** Flashing wipes the phone, so this is a NEW/dedicated
-   Pixel 7a — **never** the Pixel 7 holding the irreplaceable family voice-notes
-   ([[no-factory-reset-constraint]]). *Confirm a dedicated 7a exists for this.*
-2. **GPL-2 kernel vs the "no-GPL-shipped" hard constraint.** Every Android build ships the
-   Linux kernel (GPL-2). `CLAUDE.md`'s non-negotiable is "no GPL in anything built, linked,
-   or shipped." A ROM **cannot** avoid the GPL kernel. Reading it as *"the kernel is the
-   platform; our detection code stays permissive on top"* (Apache userspace on a GPL kernel =
-   standard Android) is plausible — but it **relaxes a stated non-negotiable**, so it needs an
-   explicit ruling. **If we won't ship a GPL kernel, the ROM path (B/C) is off and we stop at
-   Increment 1 (stock-firmware Device-Owner).**
-3. **Grooming weights in a distributed image vs "no live model weights in public releases."**
-   Baking `grooming_detector.onnx` into a ROM = shipping weights. Acceptable **only** if the
-   image/OTA is guardian-provisioned and **never a public download** (signed, enrolled-device-
-   only) — or the grooming model is **fetched at provisioning over mTLS**, not baked. *Confirm
-   the distribution model.*
+1. **Dedicated device, fresh wipe — CONFIRMED.** A NEW/dedicated Pixel 7a will be wiped/flashed
+   once the owner sorts backups — **never** the Pixel 7 with the irreplaceable family voice-notes
+   ([[no-factory-reset-constraint]]).
+2. **GPL-2 kernel — ACCEPTED (kernel-as-platform).** The ROM ships the Linux kernel (GPL-2) as the
+   platform; **our detection code + deps stay MIT/Apache permissive on top** (standard Android
+   licensing). This owner ruling relaxes "no-GPL-shipped" **for the kernel only** — nothing of ours
+   links GPL. So the ROM path (B/C) is GO.
+3. **Grooming weights — guardian-provisioned ONLY.** The image/OTA carrying `grooming_detector.onnx`
+   (and the NSFW model) is **signed + enrolled-device-only, never a public download** (or fetched at
+   provisioning over mTLS). The **NSFW model + the child shield app are baked into the ROM** (C).
+4. **Approach — build ALL THREE (A + B + C), staged.** Ship A (stock Device-Owner) now, then B
+   (privileged system app), then C (framework-baked ROM = the end state).
 
 ## Approaches
 
@@ -61,8 +61,13 @@ Promote the scanner to a **system service** in the framework (a `system_server` 
 dedicated native service): hook the screenshot/compositor pipeline at the OS layer, run NSFW /
 OCR / grooming continuously at system priority, enforce block overlays at the WindowManager
 layer, add system-level **audio capture** for grooming-over-voice. OTA update channel.
-- **Effort:** months; deep platform work + sustained AOSP expertise. **Needs all three rulings
-  + build/sign/OTA infra.** This is the stated end-state.
+- **Text path:** read **native text directly** at the framework layer (TextView/EditText strings,
+  web DOM, IME, the system a11y node tree) — **no OCR for selectable text**; OCR (+ the NSFW vision
+  model) stays only for **pixel text** (images/memes/screenshots/Canvas/GPU/game surfaces). The
+  **child shield app + all detection are baked into the ROM** as a system service — no separate
+  installable app, no AccessibilityService fragility.
+- **Effort:** months; deep platform work + sustained AOSP expertise. Build/sign/OTA infra + the
+  device required. This is the stated end-state.
 
 ## Recommendation
 
@@ -96,10 +101,14 @@ the cluster; engine invariants (`#![forbid(unsafe_code)]` except audited FFI) ho
 - **Needs an owner ruling:** GPL kernel; grooming-weights distribution; dedicated-device confirm;
   approach depth.
 
-## Open items / next step
+## Status / next steps
 
-DRAFT pending: **(1)** confirm a dedicated Pixel 7a; **(2)** GPL-kernel ruling; **(3)** grooming-
-weights distribution ruling; **(4)** approach pick — *A now* / *stage B→C (rec)* / *straight to C*.
-On those answers, the next step is the `writing-plans` skill to produce the implementation plan for
-the chosen rung (Increment 1 is the natural first plan regardless, since it's executable now and
-unblocked).
+- **Increment 1 (A) — code-complete:** PR #217 (DO auto-enable of detection + perms) + PR #218
+  (Manager provisioning-QR builder + guardian screen). Both **held for on-device validation** on the
+  flashed 7a + the owner's merge (master = prod deploy). Remaining A polish: fresh-device onboarding
+  UX; device-token-via-extras (needs a small child-app change so the QR can carry the device token).
+- **Increment 2 (B) / 3 (C):** software + image-config + docs are buildable now; the **image build +
+  flashing + OTA + on-device validation are PARKED** until the dedicated 7a is flashed and an
+  AOSP/Graphene build host exists (not possible in the Windows dev env). Next design tasks: base
+  choice (AOSP vs GrapheneOS for `lynx`) + the system-service design (capture hook, framework text
+  path, block-overlay at WindowManager).
