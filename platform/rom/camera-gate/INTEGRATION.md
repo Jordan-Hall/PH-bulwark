@@ -162,6 +162,17 @@ Specifically:
 - `SurfaceTexture` / EGL consumers may have cached the buffer identity (slot number)
   and expect it to contain different pixel data on each frame.
 
+**Scaffold status (important):** the patch currently ships
+`bulwark_substitute_blocked_frame()` as a NO-OP placeholder — the lock-for-write +
+pixel fill is specified in its TODO but not implemented. **Until it is implemented the
+gate DETECTS but does NOT block**: an `NSFW` / `FAIL_CLOSED` verdict is computed and the
+frame is still queued to the app unchanged. Implementing it is REQUIRED for the gate to
+actually block and is part of the Cuttlefish bring-up. Per-format details to get right:
+opaque black is RGBA `(0,0,0,255)` — a plain `memset(0)` yields TRANSPARENT black and can
+reveal the underlying content; YUV (NV21/NV12) black is `Y=16, Cb=128, Cr=128` (BT.601),
+not zero; and the fill must respect the gralloc ROW STRIDE (which can exceed width), not
+`width * bytesPerPixel`.
+
 **Analysis:** Writing into the pixel data of an already-acquired buffer (before
 `queueBuffer()`) is the standard pattern used by SurfaceFlinger's
 `ScreenCaptureListener` and by the AOSP MediaRecorder pipeline; it does not violate
