@@ -12,10 +12,11 @@
  *   - libcameraservice  (camera-gate hook, in-process, camera hot path)
  *   - bulwarkd          (screen/text scan daemon, separate process)
  *
- * Implementation: bulwark_safety.cpp wraps the Rust cdylib
- * (libbulwark_safety_rs), which provides the actual ONNX inference via
- * crates/bulwark-vision (ORT backend, AdamCodd vit-base-nsfw-detector,
- * Apache-2.0, int8-quantised, 384×384 input).
+ * Implementation: the Rust core (platform/rom/libbulwark_safety/rust/) implements
+ * this C ABI DIRECTLY via #[no_mangle] exports — there is no C++ wrapper. It
+ * provides the actual ONNX inference via crates/bulwark-vision (ORT backend,
+ * AdamCodd vit-base-nsfw-detector, Apache-2.0, int8-quantised, 384×384 input) and
+ * the rules-first grooming/adult-text scan via crates/bulwark-text.
  *
  * CONTRACT (mirrors NsfwGate.kt and crates/bulwark-vision/src/lib.rs):
  *   - Input: RGBA pixels, row-major, no padding.
