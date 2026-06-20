@@ -37,7 +37,9 @@ service bulwarkd /system/bin/bulwarkd
     # Restart the daemon on crash/OOM; do NOT restart the whole system.
     # Mirrors the architecture decision in docs/design/child-safety-rom-build.md §4.1:
     # "a crash restarts only the daemon (init restart on_failure), not system_server."
-    restart_on_failure
+    # A non-oneshot service without 'disabled' is restarted by init automatically
+    # on exit. The 'onrestart' directive can be used to add per-event actions if needed.
+    # (No extra keyword needed — init's default restart behaviour applies.)
 
     # Allow graceful shutdown via SIGTERM (bulwarkd should release Binder handles
     # and release any locked gralloc buffers before exiting).

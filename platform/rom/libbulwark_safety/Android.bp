@@ -26,40 +26,38 @@ cc_library_shared {
     name: "libbulwark_safety",
     srcs: ["bulwark_safety.cpp"],
     export_include_dirs: ["include"],
-    shared_libs: [
-        "liblog",
-        "libutils",
-        "libbinder",
-    ],
-    // The Rust cdylib providing the actual ONNX inference.
-    // Provided as a prebuilt (built via cargo-ndk on the Linux host).
-    whole_static_libs: [],
+
+    // libbinder is omitted here — this library does not make Binder calls
+    // itself (scoring is in-process). Binder is used by the callers
+    // (libcameraservice, bulwarkd) for their own IPC needs.
     shared_libs: [
         "liblog",
         "libutils",
     ],
-    // The Rust cdylib must be present as a prebuilt before this target can build.
-    // See cc_prebuilt_library_shared below.
+
+    // The Rust cdylib (libbulwark_safety_rs) must be present as a prebuilt
+    // before this target can build. It provides the extern "C" FFI symbols
+    // that bulwark_safety.cpp calls (bw_rs_init, bw_rs_score_rgba, etc.).
+    // The symbols are NOT yet in shared_libs because the prebuilt .so does
+    // not exist yet (it is a TODO for the Linux host — see file header).
+    // TODO (Linux host): once libbulwark_safety_rs.so is built via cargo-ndk,
+    // move it from required: to shared_libs: so Soong links the symbols at
+    // build time rather than deferring to runtime.
     required: ["libbulwark_safety_rs"],
 
     // Strictly C++17 for compatibility with libcameraservice.
     cppflags: ["-std=c++17", "-Wall", "-Wextra"],
-    // This library links into libcameraservice (a security-sensitive binary).
-    // No unsafe behaviour in the C++ wrapper; unsafe is in the audited Rust FFI.
+
+    // NOTE: address/undefined sanitizer is for development builds only.
+    // Enabling ASan in libcameraservice (which links this library) requires
+    // a sanitizer-instrumented system image. Remove for production (user) builds.
     sanitize: {
         address: true,
         undefined: true,
     },
-    // Install into /system/lib64/ so both libcameraservice and bulwarkd can link it.
+
+    // Install into /system/lib64/ (system partition, not vendor).
     vendor_available: false,
-    // APEX packaging not needed — this is a system partition library.
-    stubs: {
-        // Expose a stable symbol set so libcameraservice can link at build time
-        // and the prebuilt .so can be verified at runtime.
-        // TODO: generate from include/bulwark_safety.h symbol list.
-        symbol_file: "libbulwark_safety.map.txt",
-        versions: ["1"],
-    },
 }
 
 // Prebuilt Rust cdylib — the actual ONNX inference engine.
@@ -76,6 +74,6 @@ cc_prebuilt_library_shared {
     shared_libs: ["liblog"],
 }
 
-// Symbol export map — prevents accidental ABI surface expansion.
-// TODO: populate with the exact symbols from include/bulwark_safety.h.
-// (Currently a placeholder — the build will fail on stubs: until this is filled in.)
+// TODO: add a libbulwark_safety.map.txt symbol export map here if this library
+// is ever published as a stubs target for independent versioning. Not needed for
+// an internal system-partition library linked only by libcameraservice and bulwarkd.
