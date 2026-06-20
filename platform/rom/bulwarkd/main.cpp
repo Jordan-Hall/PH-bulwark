@@ -134,9 +134,15 @@ static ScanResult screen_scan_once() {
         return ScanResult{true, BW_VERDICT_FAIL_CLOSED};
     }
     void* pixels = nullptr;
-    if (gb->lock(GraphicBuffer::USAGE_SW_READ_OFTEN, &pixels) != android::OK ||
-        pixels == nullptr) {
+    if (gb->lock(GraphicBuffer::USAGE_SW_READ_OFTEN, &pixels) != android::OK) {
         BW_LOGW("gralloc lock failed -> fail CLOSED (block)");
+        return ScanResult{true, BW_VERDICT_FAIL_CLOSED};
+    }
+    if (pixels == nullptr) {
+        // Lock succeeded but yielded no pixels — release it (don't leak the lock
+        // every tick) and fail CLOSED.
+        gb->unlock();
+        BW_LOGW("gralloc lock returned null -> fail CLOSED (block)");
         return ScanResult{true, BW_VERDICT_FAIL_CLOSED};
     }
     // In-process score — no Binder hop on the scan path.

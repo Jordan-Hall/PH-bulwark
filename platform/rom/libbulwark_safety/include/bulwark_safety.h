@@ -118,7 +118,7 @@ typedef enum BwPixelFormat {
  * re-loading the model.
  *
  * @param model_path  Filesystem path to the ONNX model, or NULL to use the
- *                    model baked into libbulwark_safety_rs at build time
+ *                    model baked into the libbulwark_safety .so at build time
  *                    (crates/bulwark-vision/models/nsfw_detector.onnx).
  *                    Passing NULL is the expected production path (baked model).
  *                    An operator-supplied model path overrides the baked model
