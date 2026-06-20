@@ -66,6 +66,9 @@ class BulwarkDeviceAdminReceiver : DeviceAdminReceiver() {
     private fun finalizeProvisioning(context: Context, extras: android.os.PersistableBundle?) {
         Log.i(TAG, "finalizing Device Owner provisioning")
         runCatching { Lockdown.enforce(context) }
+        // Turn protection on with no setup prompts — enable the detection service +
+        // grant its runtime perms now that we are Device Owner (no manual a11y toggle).
+        runCatching { Lockdown.enableProtectionServices(context) }
         runCatching {
             val dpm = Lockdown.dpm(context)
             val admin = Lockdown.adminComponent(context)
