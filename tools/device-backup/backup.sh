@@ -51,6 +51,14 @@ adbc shell settings list global     2>/dev/null | nocr > "$OUT/meta/settings-glo
 adbc shell dumpsys account          2>/dev/null | nocr > "$OUT/meta/accounts.txt"
 adbc shell df -h                    2>/dev/null | nocr > "$OUT/meta/storage.txt"
 
+# NOTE on the leading `//` before DEVICE paths below (e.g. //sdcard, "/$apk"):
+# under Git Bash / MSYS on Windows, a bare `/sdcard` argument gets auto-rewritten
+# to a Windows path (e.g. C:/Program Files/Git/sdcard) before reaching adb.exe,
+# which then fails. A doubled leading slash is NOT rewritten by MSYS, and the
+# device side normalises `//sdcard` back to `/sdcard`. On Linux/macOS `//` == `/`,
+# so this is safe everywhere. (LOCAL dest paths must stay single-slash so MSYS
+# DOES convert them to a Windows path adb.exe understands.)
+
 # ---- 2. pull every third-party APK (exact versions, base + splits) -------------
 log "pulling third-party APKs…"
 # packages-thirdparty.txt lines look like: package:/data/app/.../base.apk=com.foo
@@ -61,7 +69,7 @@ while IFS= read -r line; do
     # pm path can return several lines (split APKs).
     adbc shell pm path "$pkg" 2>/dev/null | nocr | sed 's/^package://' | while IFS= read -r apk; do
         [ -z "$apk" ] && continue
-        adbc pull "$apk" "$OUT/apks/$pkg/" >/dev/null 2>&1 \
+        adbc pull "/$apk" "$OUT/apks/$pkg/" >/dev/null 2>&1 \
             && log "  apk: $pkg <- $(basename "$apk")" \
             || log "  WARN: could not pull $apk ($pkg)"
     done
@@ -71,10 +79,10 @@ done < "$OUT/meta/packages-thirdparty.txt"
 # This is the primary copy. Includes DCIM, Pictures, Movies, Music, Download,
 # Documents, Recordings, Android/media/<app>, Ringtones, etc.
 log "pulling /sdcard (this is the big one — may take a while)…"
-adbc pull -a /sdcard "$OUT/sdcard" 2>&1 | tail -3 || log "WARN: /sdcard pull reported errors (review above)"
+adbc pull -a "//sdcard" "$OUT/sdcard" 2>&1 | tail -3 || log "WARN: /sdcard pull reported errors (review above)"
 
 # Some OEMs alias /sdcard; also try the canonical path if it's different content.
-adbc pull -a /storage/emulated/0 "$OUT/sdcard-emulated0" >/dev/null 2>&1 || true
+adbc pull -a "//storage/emulated/0" "$OUT/sdcard-emulated0" >/dev/null 2>&1 || true
 
 # ---- 4. best-effort full adb backup (deprecated; needs on-device confirm) -------
 log "attempting 'adb backup -all' — CONFIRM THE PROMPT ON THE PHONE (don't set a"
