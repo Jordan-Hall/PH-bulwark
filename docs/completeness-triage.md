@@ -1,7 +1,11 @@
 # Completeness triage — stubs / WIP / "not yet" across the codebase
 
-Status as of 2026-06-14 (reconciled 2026-06-15: two bucket-A items below were
-found already shipped and are marked **✅ DONE**). A repo-wide scan found **4 hard markers** (`todo!`/
+Status as of 2026-06-14 (reconciled 2026-06-15: two bucket-A items already
+shipped; **reconciled again 2026-06-20: ALL remaining bucket-A items were found
+already shipped in `platform/android` + the release CI — Bucket A is now
+CODE-COMPLETE.** On-device validation of the Android detection paths remains the
+separate, owner-gated step — see the closing section. Every bucket-A row is now
+marked **✅ DONE**). A repo-wide scan found **4 hard markers** (`todo!`/
 `unimplemented!`/`FIXME`) and ~248 soft markers (`stub`, `for now`, `no-op`,
 `not yet`, `placeholder`, `fail-open`, "honest"). The overwhelming majority of
 the soft hits are **deliberate design** — fail-open/fail-CLOSED fallbacks,
@@ -13,6 +17,12 @@ item into four buckets so "is it done?" has an honest answer.
 > B left intentional (and documented), bucket C tracked as issues, bucket D
 > consciously not-done. It is **not** a diff that touches all 248 marker sites —
 > several of those would be regressions if "completed".
+>
+> **Status (2026-06-20): Bucket A is CODE-COMPLETE.** All five items are shipped
+> in `platform/android` / `apps/parent` / the release CI. The remaining gate to
+> "ready for strangers" is **on-device validation** of the Android detection +
+> pairing paths — owner-gated (a physical managed/Device-Owner run), per the
+> closing section. No code item in bucket A is outstanding.
 
 ---
 
@@ -20,11 +30,11 @@ item into four buckets so "is it done?" has an honest answer.
 
 | Item | Where | Plan |
 |---|---|---|
-| On-device OCR → grooming | `platform/android` accessibility agent; [on-device-agent.md](design/on-device-agent.md) incr. 1 | Tesseract (`tesseract4android`) on a `takeScreenshot()` frame → existing `analyzeText` grooming. Replaces the removed ML Kit (which was never invoked). |
-| On-device NSFW + localized tiled cover-up | same agent; incr. 2–3 | ONNX ViT classifier per-tile → `TYPE_ACCESSIBILITY_OVERLAY` over flagged tiles + margin. |
+| On-device OCR → grooming **✅ DONE** | `platform/android` accessibility agent | Shipped: `ocr/Ocr.kt` runs Tesseract (`tesseract4android`, lazily-init, fail-open) on a `takeScreenshot()` frame; `accessibility/BulwarkAccessibilityService.kt` feeds the recognised text into the SAME `RustBridge.analyzeText` grooming pipeline as network/view-tree chat. In-memory only (no-media), content-free char-count logging. |
+| On-device NSFW + localized tiled cover-up **✅ DONE** | same agent | Shipped: `nsfw/Nsfw.kt::localize()` scores an N×N tile grid and returns the flagged region (bounding box + one-tile margin); `BulwarkAccessibilityService.kt::showLocalizedOverlay()` draws a localized `TYPE_ACCESSIBILITY_OVERLAY` cover over just that region (re-scan suppressed while a cover is up). Fail-open (no model → no image scan); tile crops recycled (no-media). |
 | Manager native push connector **✅ DONE** | `apps/parent` | Shipped: `api::register_push_target` → `Review.RegisterPushTarget`, endpoint persistence (`servers.rs`), the UnifiedPush settings screen (`screens.rs`), and the receive-side `PushService` (MainActivity.kt) + connector dep — with tests. (End-to-end background receive still wants an on-device distributor to validate.) |
-| Manager signed APK on FOSS channels | `apps/parent` + release CI | `dx build --platform android` artifact joins the 3 channels (child + camera already wired in `android-release.yml`). |
-| Child app QR pairing scan (native) | `platform/android` | ZXing dep present; wire the scan→setup-payload path (the Dioxus *preview* still says "scanning coming soon" — preview only, lower priority). |
+| Manager signed APK on FOSS channels **✅ DONE** | `apps/parent` + release CI | Shipped: `android-release.yml`'s `manager-apk` job (dx build) signs + stages `manager-release.apk` and attaches it to the GitHub Release via `action-gh-release`, alongside `app-release.apk`/`camera-release.apk`. Also mirrored on F-Droid (`fdroid/metadata/co.predatorhunters.bulwark.manager.yml` + README) and offered as an Obtainium source (`docs/distribution.md`). All 3 FOSS channels now carry the Manager. |
+| Child app QR pairing scan (native) **✅ DONE** | `platform/android` | Shipped: `Onboarding.kt` uses ZXing (`zxing-android-embedded`, `ScanContract` launcher) to scan the console's setup QR; `parsePairingResult()` decodes it into the enrollment payload → `onEnrollment`. (Only the Dioxus *design preview* still says "scanning coming soon" — preview-only, not shipped, lower priority.) |
 | Staff account id for family-safety broadcast **✅ DONE** | `crates/bulwark-server/src/family_safety.rs` | Shipped: `with_staff_store` wired in `service.rs` (when `BULWARK_STAFF=1`); a `SAFETY_OFFICER`/`ADMIN` staff session authorizes `SendSafetyBroadcast` and stamps the real staff account id into `issued_by`; the shared `BULWARK_STAFF_BROADCAST_TOKEN` is the legacy fallback. Both paths unit-tested. |
 
 ## Bucket B — deliberate, CORRECT stubs/fallbacks → leave (do NOT "fix")
@@ -82,6 +92,7 @@ Per [public-beta-readiness.md](public-beta-readiness.md): **GO for trusted /
 build-from-source testers; NO-GO for strangers** until (1) signed APKs on a real
 channel — **now unblocked**: release keystore + the four `ANDROID_*` Actions
 secrets are set, next `v*` tag push ships signed `app-release.apk` /
-`camera-release.apk`; and (2) **on-device validation** of pairing / transparent
+`camera-release.apk` / `manager-release.apk` (all three FOSS channels); and (2)
+**on-device validation** of pairing / transparent
 filtering / protection-status / SOS — **blocked on the owner** (a physical
 managed/Device-Owner device run). No amount of green CI substitutes for (2).

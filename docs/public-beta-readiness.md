@@ -116,11 +116,17 @@ When both are cleared, re-evaluate against the **minimum bar** at the bottom.
   (`production-readiness.md` P0).
 
 ### In-progress increments (track, not blockers for a *trusted* cohort)
-- **On-device accessibility/screenshot agent** (native Android capture + overlay) —
-  `docs/design/on-device-scanning.md`; the E2E/pinned-app coverage story.
-- **Manager UnifiedPush connector** — background alert push over a FOSS push path.
-- Android **Manager** APK wired into `release.yml` (the camera APK now is — see §B; the dx-built Manager APK still needs its own release wiring).
-- Windows/Linux/macOS desktop transparent VPN path + truststore install.
+- **On-device accessibility/screenshot agent** — ✅ the native Android capture + OCR
+  + localized NSFW overlay shipped (`ocr/Ocr.kt`, `nsfw/Nsfw.kt::localize`,
+  `BulwarkAccessibilityService.kt::showLocalizedOverlay`). The cross-platform
+  `bulwark-agent` (Win/macOS/Linux) capture/overlay is still in progress
+  (`docs/design/on-device-scanning.md`).
+- **Manager UnifiedPush connector** — ✅ shipped (native connector + receive-side
+  `PushService`); background receive still wants an on-device distributor to validate.
+- Android **Manager** APK in `release.yml` — ✅ shipped: the `manager-apk` job (dx)
+  builds + signs + attaches `manager-release.apk` to the Release (now on all 3 FOSS
+  channels alongside `app`/`camera`).
+- Windows/Linux/macOS desktop transparent VPN path + truststore install (Bucket C).
 
 ---
 
