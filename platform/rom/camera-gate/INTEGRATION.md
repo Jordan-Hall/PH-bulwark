@@ -162,6 +162,17 @@ Specifically:
 - `SurfaceTexture` / EGL consumers may have cached the buffer identity (slot number)
   and expect it to contain different pixel data on each frame.
 
+**Scaffold status (important):** the patch currently ships
+`bulwark_substitute_blocked_frame()` as a NO-OP placeholder — the lock-for-write +
+pixel fill is specified in its TODO but not implemented. **Until it is implemented the
+gate DETECTS but does NOT block**: an `NSFW` / `FAIL_CLOSED` verdict is computed and the
+frame is still queued to the app unchanged. Implementing it is REQUIRED for the gate to
+actually block and is part of the Cuttlefish bring-up. Per-format details to get right:
+opaque black is RGBA `(0,0,0,255)` — a plain `memset(0)` yields TRANSPARENT black and can
+reveal the underlying content; YUV (NV21/NV12) black is `Y=16, Cb=128, Cr=128` (BT.601),
+not zero; and the fill must respect the gralloc ROW STRIDE (which can exceed width), not
+`width * bytesPerPixel`.
+
 **Analysis:** Writing into the pixel data of an already-acquired buffer (before
 `queueBuffer()`) is the standard pattern used by SurfaceFlinger's
 `ScreenCaptureListener` and by the AOSP MediaRecorder pipeline; it does not violate
@@ -201,7 +212,7 @@ but adds an IPC round-trip (~1–5 ms typically, but variable under load).
 **Rationale for Option A (in-process):**
 - Still-capture latency budget is tight (≤ 300 ms). A Binder round-trip adds
   variance that is hard to bound under system load.
-- `libbulwark_safety_rs` (the Rust ORT cdylib) is stateless between calls;
+- `libbulwark_safety` (the Rust core .so, ORT baked in) is stateless between calls;
   loading it into `cameraserver` does not create shared mutable state with other
   libraries.
 - `bulwarkd` continues to use `libbulwark_safety` independently for the screen-scan
@@ -211,8 +222,8 @@ but adds an IPC round-trip (~1–5 ms typically, but variable under load).
   (mirrors `NsfwGate.kt`'s `@Synchronized score()`).
 
 **Resolution path:**
-- Confirm that loading `libbulwark_safety_rs` (ORT + ONNX model, ~80 MB resident)
-  into `cameraserver` does not cause unacceptable RSS growth. Monitor with
+- Confirm that loading `libbulwark_safety` (ORT + ONNX model baked in, ~80 MB
+  resident) into `cameraserver` does not cause unacceptable RSS growth. Monitor with
   `adb shell dumpsys meminfo cameraserver` on Cuttlefish.
 - If RSS is a problem: move to Option B (IPC). The `Android.bp` for `libcameraservice`
   would then add a Binder client stub instead of `libbulwark_safety` as a direct

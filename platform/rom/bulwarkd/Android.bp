@@ -45,7 +45,13 @@ cc_binary {
     // This makes it accessible regardless of vendor partition contents.
     // system_ext: false (system partition proper).
 
-    cppflags: ["-std=c++17", "-Wall", "-Wextra"],
+    // -DBULWARK_HAVE_AOSP_CAPTURE ARMS the real scan paths in main.cpp. This is a
+    // device/AOSP build (it links libgui/libui/libbinder above), so the macro MUST
+    // be defined: without it main.cpp compiles the inert fallback and the daemon
+    // runs but ALLOWS everything (fail-OPEN). Keep this flag whenever bulwarkd is
+    // built for a real image; the only builds that omit it are non-AOSP source
+    // inspection (which cannot produce a runnable daemon anyway).
+    cppflags: ["-std=c++17", "-Wall", "-Wextra", "-DBULWARK_HAVE_AOSP_CAPTURE"],
     sanitize: {
         address: true,
         undefined: true,
