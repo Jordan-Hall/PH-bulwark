@@ -201,7 +201,7 @@ but adds an IPC round-trip (~1–5 ms typically, but variable under load).
 **Rationale for Option A (in-process):**
 - Still-capture latency budget is tight (≤ 300 ms). A Binder round-trip adds
   variance that is hard to bound under system load.
-- `libbulwark_safety_rs` (the Rust ORT cdylib) is stateless between calls;
+- `libbulwark_safety` (the Rust core .so, ORT baked in) is stateless between calls;
   loading it into `cameraserver` does not create shared mutable state with other
   libraries.
 - `bulwarkd` continues to use `libbulwark_safety` independently for the screen-scan
@@ -211,8 +211,8 @@ but adds an IPC round-trip (~1–5 ms typically, but variable under load).
   (mirrors `NsfwGate.kt`'s `@Synchronized score()`).
 
 **Resolution path:**
-- Confirm that loading `libbulwark_safety_rs` (ORT + ONNX model, ~80 MB resident)
-  into `cameraserver` does not cause unacceptable RSS growth. Monitor with
+- Confirm that loading `libbulwark_safety` (ORT + ONNX model baked in, ~80 MB
+  resident) into `cameraserver` does not cause unacceptable RSS growth. Monitor with
   `adb shell dumpsys meminfo cameraserver` on Cuttlefish.
 - If RSS is a problem: move to Option B (IPC). The `Android.bp` for `libcameraservice`
   would then add a Binder client stub instead of `libbulwark_safety` as a direct

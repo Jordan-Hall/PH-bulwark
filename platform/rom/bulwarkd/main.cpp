@@ -71,6 +71,13 @@
 #define BW_LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 #define BW_LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #else
+// Building WITHOUT the AOSP framework: the scan paths are INACTIVE (see main()).
+// This compiles the file for source inspection only and can NOT produce a working
+// daemon. A real device build MUST define BULWARK_HAVE_AOSP_CAPTURE (bulwarkd's
+// Android.bp does). Warn loudly so an inert (fail-open) build is never silent — with
+// AOSP's -Werror this becomes a hard build stop, which is the fail-closed default.
+#warning \
+    "bulwarkd built WITHOUT BULWARK_HAVE_AOSP_CAPTURE: scan paths INACTIVE (fail-open). Define it in the device build (bulwarkd/Android.bp)."
 #include <cstdio>
 #define BW_LOGW(...)                          \
     do {                                      \

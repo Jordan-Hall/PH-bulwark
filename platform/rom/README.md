@@ -133,6 +133,14 @@ After applying, run a full AOSP build per `docs/design/child-safety-rom-build.md
 - **Fail-CLOSED everywhere.** No model → block. Score above threshold → block.
   Lock failure → block. Missing daemon → block. This is the primary protection,
   not a belt-and-suspenders layer (§4.4).
+- **`bulwarkd` device build MUST define `-DBULWARK_HAVE_AOSP_CAPTURE`** (set in
+  `bulwarkd/Android.bp` cppflags). It arms the real capture/scan paths in
+  `main.cpp`; without it the daemon compiles an inert fallback that scans nothing
+  (fail-open). The non-AOSP path exists only for source inspection — it emits a
+  compile-time `#warning` so an inert build is never silent, and cannot produce a
+  runnable daemon. The framework glue (display capture, IWindowManager overlay,
+  IAccessibilityManager text source) lives behind that macro and is built only on
+  the AOSP host.
 - **No explicit-media persistence.** Pixels are read from the gralloc buffer in
   memory, scored, and released. No pixel data is stored, hashed for evidence,
   or transmitted. Only the NSFW verdict (boolean + score) is used. Engine
