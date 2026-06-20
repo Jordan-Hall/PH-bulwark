@@ -1,0 +1,7 @@
+# PH Staff operators console — Dioxus 0.8 config. Separate identifier from the
+# guardian Manager (co.predatorhunters.bulwark.manager) and the child app.
+[application]
+name = "PH Staff Console"
+
+[bundle]
+identifier = "co.predatorhunters.bulwark.staff"

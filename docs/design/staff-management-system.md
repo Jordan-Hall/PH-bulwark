@@ -14,8 +14,13 @@ enforced in [`bulwark.proto`](../../crates/bulwark-proto/proto/bulwark.proto)
 
 Status: **Increments 1–4 SHIPPED** (#133 2026-06-13, #184/#188/#189 2026-06-14):
 proto `StaffAdmin` + `crates/bulwark-server/src/staff.rs` + `safety_cases.rs` + live
-fleet data + opt-in mount behind `BULWARK_STAFF=1`. Increment 5 (the `apps/staff`
-Dioxus console) is DESIGN.
+fleet data + opt-in mount behind `BULWARK_STAFF=1`. **Increment 5 (the `apps/staff`
+console) BUILT 2026-06-15** as a **desktop** Dioxus app (branch `feat/staff-console`):
+login + TOTP, fleet/region health with per-node `HealthStatus`, guardian support,
+the NCMEC safety queue with validated transitions, the audit log, and role-gated
+tabs — all over the shipped `StaffAdmin` gRPC, `cargo check` clean. Built desktop
+(mirrors `apps/parent`/tonic) rather than web because a wasm/grpc-web build needs a
+server `tonic-web` layer not specced here; a web variant + E2E tests are follow-ups.
 
 ---
 
@@ -130,8 +135,15 @@ every family's binary), different release train, and cheap code-sharing (copy th
    stays honestly `probed=false` rather than faking a green light. No proto change
    (the fields already existed). Region accept/drain is deferred to a follow-up
    (it proxies `ClusterControl.Drain`, a mutating capacity action).
-5. **Increment 5 — `apps/staff` Dioxus web console** + Midscene tests; follow-ups:
-   TOTP-secret encryption at rest, mTLS-bound staff sessions, audit-file sealing.
+5. **Increment 5 — `apps/staff` Dioxus console (BUILT 2026-06-15, `feat/staff-console`).**
+   Desktop (Win/macOS/Linux) Dioxus + tonic, mirroring `apps/parent`: login + TOTP →
+   short-TTL session; fleet/region health + per-node `HealthStatus`; guardian support
+   (lookup/reset/unlock by email); the NCMEC safety queue with the validated
+   transition controls; the tamper-evident audit log; role-gated tabs (persisted
+   role). `cargo check` clean, content-free throughout. **Remaining/follow-ups:**
+   a web/grpc-web variant (needs a server `tonic-web` layer) + Midscene/E2E tests;
+   token-expiry → auto sign-out; TOTP-secret encryption at rest; mTLS-bound staff
+   sessions; audit-file sealing; CI packaging for the FOSS channels.
 
 ## 6. Risks (honest)
 

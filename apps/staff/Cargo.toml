@@ -1,0 +1,32 @@
+[package]
+name = "bulwark-staff"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "PH Staff operators console — all-Rust Dioxus UI over the StaffAdmin gRPC service."
+
+# Mirrors apps/parent: the RENDERER comes from the platform feature, not hard-enabled
+# here. This is an INTERNAL operators console (desktop-first: Win/macOS/Linux). It is
+# deliberately a SEPARATE binary from PH Bulwark Manager (the guardian console) so no
+# staff RPC client or role gate ever ships inside a family's phone app.
+[features]
+default = ["desktop"]
+desktop = ["dioxus/desktop"]
+mobile = ["dioxus/mobile"]
+
+[dependencies]
+# All-Rust UI on the Dioxus 0.8 line (shared with apps/parent + apps/labeling).
+dioxus = { version = "0.8.0-alpha.0", features = ["router"] }
+
+# The console is just another gRPC client of the cluster — it speaks the SAME
+# contract the server serves, using ONLY the StaffAdmin service (content-free by
+# construction: see docs/design/staff-management-system.md §2 + §7).
+bulwark-proto = { path = "../../crates/bulwark-proto" }
+tonic = { version = "0.14", features = ["tls-ring", "tls-webpki-roots"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+anyhow = "1"
+
+# Detached from the core cargo workspace (like apps/parent) so the verified
+# engine `cargo build --workspace` doesn't pull the Dioxus UI tree.
+# Build/run on its own: `cd apps/staff && cargo run`.
+[workspace]
