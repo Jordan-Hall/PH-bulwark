@@ -1,5 +1,7 @@
 /*
- * SCAFFOLD — not built here.
+ * SCAFFOLD — C ABI surface. The .so is the Rust core built out-of-tree via
+ * cargo-ndk and vendored as a prebuilt (see Android.bp); this header is not
+ * compiled into anything on the dev host.
  * See platform/rom/README.md for integration instructions.
  *
  * Licence: Apache-2.0
