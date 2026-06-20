@@ -22,6 +22,10 @@ crate-type = ["staticlib", "cdylib"]
 # Only pulled in (with its onnx scorer) under the `onnx` feature; the default host
 # build is self-contained (fails closed) so it compiles without onnxruntime.
 bulwark-vision = { path = "../../../../crates/bulwark-vision", default-features = false, optional = true }
+# Text/grooming path: the rules-first detector (no ONNX) — builds on any host, so the
+# text ABI is verified locally. proto for TextSpan / Action.
+bulwark-text = { path = "../../../../crates/bulwark-text" }
+bulwark-proto = { path = "../../../../crates/bulwark-proto" }
 image = "0.25"
 log = "0.4"
 

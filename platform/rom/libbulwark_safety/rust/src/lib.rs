@@ -174,6 +174,62 @@ pub extern "C" fn bw_score_nsfw(
     .unwrap_or(BW_VERDICT_FAIL_CLOSED)
 }
 
+mod text {
+    use bulwark_proto::{Action, TextSpan};
+    use bulwark_text::{NoClassifier, TextAnalyzer};
+    use std::sync::OnceLock;
+
+    // Rules-first grooming/adult-text detector (no ML classifier → no model file,
+    // matches the engine's "rules-first minimal AI" invariant). Built once.
+    static ANALYZER: OnceLock<Option<TextAnalyzer<NoClassifier>>> = OnceLock::new();
+
+    fn analyzer() -> Option<&'static TextAnalyzer<NoClassifier>> {
+        ANALYZER.get_or_init(|| TextAnalyzer::new().ok()).as_ref()
+    }
+
+    /// Score one snapshot of on-screen text → BwVerdict. Stateless per call
+    /// (a fixed thread id); cross-message thread escalation is a future enhancement
+    /// once the ROM supplies a stable per-conversation id.
+    pub fn score(s: &str) -> i32 {
+        let Some(a) = analyzer() else {
+            return super::BW_VERDICT_FAIL_CLOSED;
+        };
+        let span = TextSpan {
+            text: s.to_string(),
+            thread_id: "rom-screen".to_string(),
+            ..Default::default()
+        };
+        let verdict = a.analyze_span("rom-scan", &span, 0);
+        match verdict.action {
+            x if x == Action::Unspecified as i32 => super::BW_VERDICT_FAIL_CLOSED,
+            x if x == Action::Allow as i32 => super::BW_VERDICT_SAFE,
+            _ => super::BW_VERDICT_NSFW, // BLOCK / BLUR / MUTE / WARN / LOG → flagged
+        }
+    }
+}
+
+/// `bw_score_text` — score a snapshot of on-screen text for grooming / adult content
+/// (bulwarkd's screen path). Here `BW_VERDICT_NSFW` means "flagged"; fail-CLOSED on any
+/// error. Uses the exact shipping `bulwark-text` detector (no drift).
+///
+/// # Safety
+/// `utf8` must be NULL or point to `len` bytes of UTF-8 text.
+#[no_mangle]
+pub extern "C" fn bw_score_text(utf8: *const c_uchar, len: usize) -> c_int {
+    catch_unwind(|| {
+        if utf8.is_null() || len == 0 {
+            return BW_VERDICT_FAIL_CLOSED;
+        }
+        // SAFETY: caller contract — `utf8` points to `len` bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(utf8, len) };
+        let Ok(s) = std::str::from_utf8(bytes) else {
+            return BW_VERDICT_FAIL_CLOSED;
+        };
+        text::score(s)
+    })
+    .unwrap_or(BW_VERDICT_FAIL_CLOSED)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +253,18 @@ mod tests {
             bw_score_nsfw(px.as_ptr(), 4, 4, 1 /* NV21 */, std::ptr::null_mut()),
             BW_VERDICT_FAIL_CLOSED,
         );
+    }
+
+    #[test]
+    fn text_path_flags_adult_passes_benign() {
+        // Null / empty → fail closed.
+        assert_eq!(bw_score_text(std::ptr::null(), 4), BW_VERDICT_FAIL_CLOSED);
+        assert_eq!(bw_score_text(b"x".as_ptr(), 0), BW_VERDICT_FAIL_CLOSED);
+        // Plainly benign → safe.
+        let benign = b"hello, how was school today?";
+        assert_eq!(bw_score_text(benign.as_ptr(), benign.len()), BW_VERDICT_SAFE);
+        // Plainly adult → flagged (the rules engine detects it, never SAFE).
+        let flagged = "wanna watch some porn together".as_bytes();
+        assert_eq!(bw_score_text(flagged.as_ptr(), flagged.len()), BW_VERDICT_NSFW);
     }
 }

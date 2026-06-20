@@ -35,6 +35,7 @@
 
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -177,6 +178,33 @@ BwVerdict bw_score_nsfw(
     int            height,
     BwPixelFormat  fmt,
     float*         score_out);
+
+/* ------------------------------------------------------------------ */
+/* Text path — on-screen text grooming / adult-content scan           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * bw_score_text() — score one snapshot of on-screen text (bulwarkd's screen
+ * path) for grooming / adult content using the SHIPPING `bulwark-text`
+ * rules-first detector, so detection never drifts from the engine. No ONNX
+ * model is needed (rules-first), so this path is active even when the NSFW
+ * model is absent.
+ *
+ * @param utf8  Pointer to `len` bytes of UTF-8 text (does NOT need to be
+ *              NUL-terminated). NULL or len == 0 → BW_VERDICT_FAIL_CLOSED.
+ * @param len   Number of bytes at `utf8`.
+ *
+ * @return BwVerdict:
+ *   BW_VERDICT_SAFE        — the detector allowed the text.
+ *   BW_VERDICT_NSFW        — flagged (rules engine returned block/blur/mute/
+ *                            warn/log). Here "NSFW" means "flagged content".
+ *   BW_VERDICT_FAIL_CLOSED — NULL/empty input, invalid UTF-8, analyzer
+ *                            unavailable, or a panic. Treat as "flagged".
+ *
+ * PRIVACY: nothing about the text is logged, hashed, or persisted; scoring
+ * is in-memory only (same content-free contract as bw_score_nsfw()).
+ */
+int bw_score_text(const uint8_t* utf8, size_t len);
 
 /* ------------------------------------------------------------------ */
 /* Diagnostics (content-free — safe to log)                           */
