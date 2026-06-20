@@ -1,0 +1,22 @@
+# SCAFFOLD — not built here.
+# See platform/rom/README.md for integration instructions.
+#
+# file_contexts additions for bulwarkd.
+#
+# APPEND these lines to device/google/lynx/sepolicy/file_contexts.
+# Do not replace the existing file — lynx's file_contexts already labels
+# many paths; appending is the correct merge approach.
+#
+# Design reference: docs/design/child-safety-rom-build.md §4.6
+
+# The bulwarkd executable.
+/system/bin/bulwarkd           u:object_r:bulwarkd_exec:s0
+
+# The bulwarkd data directory — guardian-provisioned model weights.
+# Only bulwarkd may read/write this path (per bulwarkd.te allow rules).
+/data/misc/bulwark(/.*)?       u:object_r:bulwarkd_data_file:s0
+
+# The baked-in model and config assets on the system partition.
+# Readable by bulwarkd (system_file label with specific allow rules in .te).
+# These files are installed by Android.bp PRODUCT_COPY_FILES at build time.
+/system/etc/bulwark(/.*)?      u:object_r:system_file:s0

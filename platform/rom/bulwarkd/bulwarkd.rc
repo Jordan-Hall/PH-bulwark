@@ -1,0 +1,53 @@
+# SCAFFOLD — not built here.
+# See platform/rom/README.md for integration instructions.
+#
+# bulwarkd.rc — init service declaration for the PH Bulwark native daemon.
+#
+# Install location (via Android.bp init_rc):
+#   /system/etc/init/bulwarkd.rc
+#
+# Design reference: docs/design/child-safety-rom-build.md §4.7
+#
+# IMPORTANT: validate the seclabel domain name against sepolicy/bulwarkd.te
+# before first boot. A mismatched label causes a boot-time SELinux denial
+# that prevents the service from starting.
+
+service bulwarkd /system/bin/bulwarkd
+    # late_start: start after SurfaceFlinger, WindowManager, and AMS are ready.
+    # This avoids race conditions on early-boot captures.
+    class late_start
+
+    # Run as system user (not root). The SELinux domain (bulwarkd) grants
+    # only the specific Binder calls needed — running as 'system' avoids
+    # needing CAP_SYS_ADMIN or root.
+    user system
+    group system audio inet
+
+    # NET_BIND_SERVICE: needed to bind the local Binder socket that the
+    # camera-gate hook connects to (if the in-process path is not used).
+    # TODO: re-evaluate whether this capability is needed once the in-process
+    # camera scoring path is confirmed (the Binder socket is only needed for
+    # the IPC variant of the camera gate — see camera-gate/INTEGRATION.md risk D6).
+    capabilities NET_BIND_SERVICE
+
+    # SELinux label for this service. Must match the type defined in
+    # sepolicy/bulwarkd.te (type bulwarkd, domain).
+    seclabel u:r:bulwarkd:s0
+
+    # Restart the daemon on crash/OOM; do NOT restart the whole system.
+    # Mirrors the architecture decision in docs/design/child-safety-rom-build.md §4.1:
+    # "a crash restarts only the daemon (init restart on_failure), not system_server."
+    # A non-oneshot service without 'disabled' is restarted by init automatically
+    # on exit. The 'onrestart' directive can be used to add per-event actions if needed.
+    # (No extra keyword needed — init's default restart behaviour applies.)
+
+    # Allow graceful shutdown via SIGTERM (bulwarkd should release Binder handles
+    # and release any locked gralloc buffers before exiting).
+    shutdown SIGTERM
+
+    # Do NOT use 'oneshot' — bulwarkd is a persistent daemon that must remain
+    # running for the lifetime of the device session.
+    # Do NOT use 'disabled' — it must start automatically on boot.
+
+    # Writepid to cgroup for memory management.
+    writepid /dev/cpuset/system/tasks

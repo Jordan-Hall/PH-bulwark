@@ -1,0 +1,200 @@
+ILLUSTRATIVE PATCH — NOT VALIDATED AGAINST android-16.0.0_r3 SOURCE.
+=======================================================================
+This is a design sketch of the camera-gate hook insertion point.
+Line numbers and surrounding code are APPROXIMATE and must be verified
+against the actual android-16.0.0_r3 source before applying.
+
+Steps before applying:
+  1. Repo sync android-16.0.0_r3.
+  2. Open frameworks/av/services/camera/libcameraservice/device3/Camera3OutputStream.cpp
+     and locate Camera3OutputStream::returnBufferLocked() (exact signature
+     may differ — verify against the Android 16 tree).
+  3. Verify that the surrounding context lines below match the actual file.
+  4. Run: patch -p1 --dry-run -i this-file
+     Fix any rejects before applying for real.
+  5. See camera-gate/INTEGRATION.md for the 6 open risks before proceeding.
+
+Apply from the AOSP root:
+  patch -p1 -i /path/to/platform/rom/camera-gate/Camera3OutputStream.returnBufferLocked.patch
+
+=======================================================================
+
+diff --git a/services/camera/libcameraservice/device3/Camera3OutputStream.cpp b/services/camera/libcameraservice/device3/Camera3OutputStream.cpp
+--- a/services/camera/libcameraservice/device3/Camera3OutputStream.cpp
++++ b/services/camera/libcameraservice/device3/Camera3OutputStream.cpp
+@@ -XXX,7 +XXX,12 @@
+ // NOTE: Line numbers are APPROXIMATE. Locate returnBufferLocked() by symbol,
+ // not by line number, in the android-16.0.0_r3 tree.
+ //
+ // Add the following include at the top of Camera3OutputStream.cpp,
+ // alongside the existing system includes:
++// --- PH BULWARK: content-safety gate include ---
++#include "bulwark_safety.h"  // libbulwark_safety C API
++// Initialise the gate once per process (called from CameraService startup).
++// See camera-gate/INTEGRATION.md for the init call site.
++// --- end PH BULWARK includes ---
+
+@@ -XXX,6 +XXX,67 @@
+ // Locate the body of Camera3OutputStream::returnBufferLocked().
+ // The exact signature to find (verify in android-16.0.0_r3):
+ //
+ //   status_t Camera3OutputStream::returnBufferLocked(
+ //       const camera_stream_buffer_t& buffer,
+ //       nsecs_t timestamp,
+ //       int32_t transform,
+ //       const std::vector<size_t>& surface_ids)
+ //
+ // Insert the block below AFTER the release-fence is signalled but BEFORE
+ // queueBufferToConsumer() (or equivalent) hands the buffer to the app Surface.
+ // The exact insertion point is where the buffer is marked ACQUIRED→QUEUED;
+ // search for "queueBuffer" or "queueBufferToConsumer" in the method body.
+
+-    // [existing code that queues the buffer to the consumer Surface]
+-    // return queueBufferToConsumer(/*...*/);
++    // --- PH BULWARK: on-device content-safety gate ---
++    //
++    // Gate applies to pixel-bearing streams only (still, preview, video).
++    // Metadata-only streams (CAMERA_METADATA / HAL_PIXEL_FORMAT_BLOB for metadata)
++    // are skipped. See risk D4 in INTEGRATION.md.
++    //
++    // Throttle: inspect 1 frame per second for preview/video streams;
++    // inspect every frame for still-capture (JPEG) streams.
++    // See docs/design/child-safety-rom-build.md §7.5.
++    if (bulwark_should_inspect_stream(mFormat, mStreamType)) {
++        if (bulwark_frame_counter_tick(mId)) {  // throttle: true on inspect frames
++            // Wait for the release fence to fire (pixel data is ready for CPU read).
++            // kBulwarkFenceTimeoutMs: 50 ms. If the fence does not fire in time,
++            // fail-CLOSED (block the frame) rather than reading stale pixels.
++            static constexpr int kBulwarkFenceTimeoutMs = 50;
++            sp<Fence> releaseFence = new Fence(buffer.release_fence);
++            status_t fenceStatus = releaseFence->wait(kBulwarkFenceTimeoutMs);
++            if (fenceStatus != OK) {
++                // Fence timed out or errored — fail-CLOSED.
++                ALOGW("[bulwark] fence wait failed (stream %d, err=%d); blocking frame",
++                      mId, fenceStatus);
++                bulwark_substitute_blocked_frame(buffer.buffer, mWidth, mHeight, mFormat);
++            } else {
++                // Lock the gralloc buffer for CPU read (read-only).
++                // GRALLOC_USAGE_SW_READ_OFTEN: hint to the allocator that we will
++                // CPU-read frequently (allows cache-friendly mapping).
++                sp<GraphicBuffer> gb = GraphicBuffer::from(buffer.buffer);
++                void* pixels = nullptr;
++                status_t lockStatus = gb->lock(GRALLOC_USAGE_SW_READ_OFTEN, &pixels);
++
++                BwVerdict verdict = BW_VERDICT_FAIL_CLOSED;
++                if (lockStatus == OK && pixels != nullptr) {
++                    // Score in-process via libbulwark_safety (no Binder IPC on
++                    // the camera hot path — see INTEGRATION.md risk D6).
++                    // bw_score_nsfw() is thread-safe; no lock needed here.
++                    verdict = bw_score_nsfw(
++                        static_cast<const uint8_t*>(pixels),
++                        mWidth, mHeight,
++                        BW_FMT_RGBA8888,
++                        nullptr /* score_out: not logged here; content-free */);
++                    gb->unlock();
++                } else {
++                    ALOGW("[bulwark] gralloc lock failed (stream %d); blocking frame",
++                          mId);
++                    // verdict stays BW_VERDICT_FAIL_CLOSED
++                }
++
++                if (verdict != BW_VERDICT_SAFE) {
++                    // Fail-CLOSED: replace with a solid opaque frame.
++                    // Do NOT drop the buffer — dropping breaks the BufferQueue
++                    // lifecycle (consumer waits forever). Substitution preserves
++                    // BufferQueue sequence numbers and timestamps.
++                    // See INTEGRATION.md risk D5.
++                    bulwark_substitute_blocked_frame(buffer.buffer,
++                                                     mWidth, mHeight, mFormat);
++                }
++            }
++        }
++    }
++    // --- end PH BULWARK ---
++
++    // [existing code that queues the buffer to the consumer Surface — unchanged]
+     return queueBufferToConsumer(/*...*/);
+
+@@ -XXX,0 +XXX,80 @@
++// --- PH BULWARK: helper function definitions ---
++// Add these near the top of Camera3OutputStream.cpp or in a new companion
++// file Camera3BulwarkGate.cpp (recommended to keep the patch minimal).
++
++/**
++ * bulwark_should_inspect_stream() — true if this stream format carries pixel
++ * content that should be scanned by the NSFW gate.
++ *
++ * Returns false for:
++ *   - HAL_PIXEL_FORMAT_BLOB (JPEG / metadata-only) — TODO: confirm whether
++ *     still-capture JPEG blobs reach returnBufferLocked() with BLOB format or
++ *     with a decoded pixel format. On most HALs, JPEG is delivered as BLOB
++ *     (compressed); it cannot be CPU-scored directly and must be decoded first.
++ *     OPEN: determine the correct inspection strategy for JPEG streams
++ *     (decode to RGBA, score, re-encode, or inspect the thumbnail).
++ *     See INTEGRATION.md risk D4.
++ *   - Any stream marked GRALLOC_USAGE_PROTECTED (DRM — should never apply to
++ *     camera output, but check defensively; see INTEGRATION.md risk D3).
++ *
++ * TODO: validate format constants against android-16.0.0_r3 HAL headers
++ * (hardware/interfaces/camera/common/aidl/android/hardware/camera/common/Status.aidl
++ *  and platform/hardware/libhardware/include/hardware/gralloc.h).
++ */
++static bool bulwark_should_inspect_stream(int format, int /*streamType*/) {
++    // Metadata-only: skip.
++    // HAL_PIXEL_FORMAT_BLOB = 33 (compressed JPEG or raw metadata).
++    // TODO: re-examine once the JPEG decode path is designed.
++    if (format == 0x21 /* HAL_PIXEL_FORMAT_BLOB */) return false;
++    // TODO: add GRALLOC_USAGE_PROTECTED check on the buffer handle.
++    return true;
++}
++
++/**
++ * bulwark_frame_counter_tick() — throttle per-stream inspection.
++ *
++ * Returns true on the frames that should be inspected (1/s for preview/video,
++ * every frame for still capture). Called once per returnBufferLocked() invocation.
++ *
++ * SCAFFOLD: real implementation tracks per-stream frame counters in a
++ * thread-local or Camera3OutputStream member variable and uses the system
++ * clock to enforce the 1 Hz cadence.
++ *
++ * TODO: implement using a per-stream atomic frame counter and clock_gettime().
++ */
++static bool bulwark_frame_counter_tick(int /*streamId*/) {
++    // Stub: always return true (inspect every frame).
++    // Replace with proper 1 Hz throttle for preview/video streams.
++    return true;
++}
++
++/**
++ * bulwark_substitute_blocked_frame() — overwrite the gralloc buffer with a
++ * solid opaque colour (the "blocked" frame substitute).
++ *
++ * This replaces the NSFW content with a solid frame before the buffer is
++ * queued to the app's Surface. The BufferQueue sequence number and timestamp
++ * are UNCHANGED — only the pixel content is replaced.
++ *
++ * SCAFFOLD: real implementation locks the buffer for CPU write
++ * (GRALLOC_USAGE_SW_WRITE_OFTEN) and memsets the pixel data.
++ * The substitute colour is solid black (0x00, 0x00, 0x00, 0xFF in RGBA).
++ *
++ * TODO: validate that this substitution does not confuse the app's
++ * consumer (particularly SurfaceTexture / EGL consumers that may track
++ * fence state). See INTEGRATION.md risk D5.
++ *
++ * TODO: for HAL_PIXEL_FORMAT_YCbCr_420_888 (NV21/NV12), a YUV black
++ * frame has different byte values (Y=16, Cb=128, Cr=128 for BT.601).
++ * Implement per-format substitution.
++ */
++static void bulwark_substitute_blocked_frame(
++        buffer_handle_t handle, int width, int height, int format) {
++    // SCAFFOLD: no-op placeholder.
++    (void)handle; (void)width; (void)height; (void)format;
++    // TODO:
++    //   sp<GraphicBuffer> gb = GraphicBuffer::from(handle);
++    //   void* pixels = nullptr;
++    //   gb->lock(GRALLOC_USAGE_SW_WRITE_OFTEN, &pixels);
++    //   if (pixels) memset(pixels, 0, gb->getPixelStride() * height * /* bpp */ 4);
++    //   gb->unlock();
++}
++// --- end PH BULWARK helpers ---
