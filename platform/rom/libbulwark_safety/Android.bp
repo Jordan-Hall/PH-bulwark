@@ -1,0 +1,81 @@
+// SCAFFOLD — not built here.
+// This Android.bp is illustrative and must be validated against the
+// android-16.0.0_r3 Soong build system on a Linux AOSP host before use.
+// See platform/rom/README.md for integration instructions.
+//
+// Licence: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+
+// Shared scoring library: thin C shim over the Rust bulwark-vision ONNX scorer.
+// Linked by:
+//   - libcameraservice (camera-gate hook, in-process on the camera hot path)
+//   - bulwarkd          (screen/text scan daemon, separate process)
+//
+// The C API is declared in include/bulwark_safety.h and implemented in
+// bulwark_safety.cpp (which calls through to the Rust cdylib via FFI).
+// The Rust cdylib (libbulwark_safety_rs) is built via cargo-ndk and provided
+// here as a prebuilt. The cbindgen-generated FFI header must be produced from
+// crates/bulwark-vision before building this target.
+//
+// TODO (Linux host): run cbindgen from crates/bulwark-vision to generate
+// include/bulwark_safety_ffi.h, then build the Rust cdylib with:
+//   cargo ndk -t arm64-v8a -o ./jniLibs build --release -p bulwark-vision-ffi
+// Copy the resulting .so to prebuilt/arm64-v8a/libbulwark_safety_rs.so.
+
+cc_library_shared {
+    name: "libbulwark_safety",
+    srcs: ["bulwark_safety.cpp"],
+    export_include_dirs: ["include"],
+    shared_libs: [
+        "liblog",
+        "libutils",
+        "libbinder",
+    ],
+    // The Rust cdylib providing the actual ONNX inference.
+    // Provided as a prebuilt (built via cargo-ndk on the Linux host).
+    whole_static_libs: [],
+    shared_libs: [
+        "liblog",
+        "libutils",
+    ],
+    // The Rust cdylib must be present as a prebuilt before this target can build.
+    // See cc_prebuilt_library_shared below.
+    required: ["libbulwark_safety_rs"],
+
+    // Strictly C++17 for compatibility with libcameraservice.
+    cppflags: ["-std=c++17", "-Wall", "-Wextra"],
+    // This library links into libcameraservice (a security-sensitive binary).
+    // No unsafe behaviour in the C++ wrapper; unsafe is in the audited Rust FFI.
+    sanitize: {
+        address: true,
+        undefined: true,
+    },
+    // Install into /system/lib64/ so both libcameraservice and bulwarkd can link it.
+    vendor_available: false,
+    // APEX packaging not needed — this is a system partition library.
+    stubs: {
+        // Expose a stable symbol set so libcameraservice can link at build time
+        // and the prebuilt .so can be verified at runtime.
+        // TODO: generate from include/bulwark_safety.h symbol list.
+        symbol_file: "libbulwark_safety.map.txt",
+        versions: ["1"],
+    },
+}
+
+// Prebuilt Rust cdylib — the actual ONNX inference engine.
+// Built from crates/bulwark-vision on the Linux host via cargo-ndk.
+// See build instructions in platform/rom/README.md.
+cc_prebuilt_library_shared {
+    name: "libbulwark_safety_rs",
+    // TODO: populate after cargo-ndk build on the Linux host.
+    srcs: ["prebuilt/arm64-v8a/libbulwark_safety_rs.so"],
+    compile_multilib: "64",  // arm64-v8a only for Pixel 7a (lynx).
+    strip: {
+        none: true,  // Rust cdylib exports symbols by name; stripping would break FFI.
+    },
+    shared_libs: ["liblog"],
+}
+
+// Symbol export map — prevents accidental ABI surface expansion.
+// TODO: populate with the exact symbols from include/bulwark_safety.h.
+// (Currently a placeholder — the build will fail on stubs: until this is filled in.)

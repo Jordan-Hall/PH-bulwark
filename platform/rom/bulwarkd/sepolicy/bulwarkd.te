@@ -1,0 +1,111 @@
+# SCAFFOLD — not built here.
+# See platform/rom/README.md for integration instructions.
+#
+# bulwarkd.te — SELinux type-enforcement policy for the PH Bulwark native daemon.
+#
+# Install location: device/google/lynx/sepolicy/bulwarkd.te
+#
+# Design reference: docs/design/child-safety-rom-build.md §4.6
+#
+# IMPORTANT: this is a starting sketch. The exact set of allow rules MUST be
+# determined by observing 'avc: denied' messages in logcat during Cuttlefish
+# and lynx on-device validation, then applying 'audit2allow' selectively.
+# Do NOT use 'permissive bulwarkd;' in production. Review each rule before
+# adding; the principle of least privilege applies.
+#
+# VALIDATION APPROACH (Linux host):
+#   1. Boot Cuttlefish with this policy in enforcing mode.
+#   2. Run: adb logcat -d | grep "avc: denied" | grep bulwarkd
+#   3. Pipe to: audit2allow -p out/target/product/vsoc_x86_64/root/sepolicy
+#   4. Review each generated rule; add only those that are justified by the
+#      daemon's documented responsibilities.
+
+# ---- Type declarations -------------------------------------------------------
+
+# The domain type for the bulwarkd process.
+type bulwarkd, domain;
+
+# The file type for the bulwarkd executable (/system/bin/bulwarkd).
+type bulwarkd_exec, exec_type, file_type, system_file_type;
+
+# The file type for bulwarkd's mutable data directory (/data/misc/bulwark/).
+# Used to store guardian-provisioned model weights (grooming_detector.onnx).
+# See file_contexts for the label mapping.
+type bulwarkd_data_file, file_type, data_file_type;
+
+# ---- Domain transition -------------------------------------------------------
+
+# Allow init to launch bulwarkd from its executable and transition to the
+# bulwarkd domain. This is the standard AOSP pattern for native daemons.
+init_daemon_domain(bulwarkd)
+
+# ---- SurfaceFlinger (screen capture) -----------------------------------------
+
+# Frame capture via ScreenCapture::captureDisplay().
+# Required for the 1 Hz screen-scan path (§4.2 of the design doc).
+allow bulwarkd surfaceflinger_service:service_manager find;
+allow bulwarkd surfaceflinger:binder call;
+binder_use(bulwarkd)
+
+# ---- WindowManager (block overlay) ------------------------------------------
+
+# Add TYPE_APPLICATION_OVERLAY block window when verdict is BLOCK (§4.4).
+allow bulwarkd windowmanager_service:service_manager find;
+allow bulwarkd windowmanager:binder call;
+
+# ---- AccessibilityManagerService (node-tree text path) ----------------------
+
+# Receive AccessibilityEvent objects as a trusted AMS client (§4.3).
+# This grants text events without requiring a user-space AccessibilityService.
+allow bulwarkd accessibility_service:service_manager find;
+
+# ---- Audio capture (voice-call grooming detection path) ---------------------
+
+# CAPTURE_AUDIO_OUTPUT — record the device speaker mix (incoming call audio).
+# Gated on guardian policy; disabled by default (§4.8).
+# OPEN QUESTION: confirm with counsel that this is within the guardian's
+# consent scope before enabling (see §5.3 open question 4).
+allow bulwarkd audio_device:chr_file { read write };
+allow bulwarkd audioserver_service:service_manager find;
+allow bulwarkd audioserver:binder call;
+
+# ---- Model asset access (system partition) ----------------------------------
+
+# Read the baked-in NSFW model from /system/etc/bulwark/.
+# The model is installed at build time (not world-readable, but bulwarkd can read it).
+allow bulwarkd system_file:file { read open getattr };
+allow bulwarkd system_file:dir  { read open getattr search };
+
+# ---- Guardian-provisioned model weights (data partition) --------------------
+
+# Read/write /data/misc/bulwark/ for the grooming model delivered over mTLS.
+# Only bulwarkd may read/write this path (per file_contexts label bulwarkd_data_file).
+allow bulwarkd bulwarkd_data_file:dir  { create read write search add_name remove_name };
+allow bulwarkd bulwarkd_data_file:file { create read write open getattr unlink };
+
+# ---- Network (guardian alert dispatch) --------------------------------------
+
+# mTLS connection to the PH Bulwark cluster (:8443) for alert relay.
+# Same gRPC+TLS path as today's AlertNotifier.kt / AlertRelay gRPC service.
+allow bulwarkd self:tcp_socket { create connect read write shutdown };
+# Allow connecting to privileged ports (8443 is in the privileged range on some configs).
+# TODO: confirm the exact SELinux port type for 8443 on android-16.0.0_r3.
+allow bulwarkd port:tcp_socket name_connect;
+
+# ---- Logging -----------------------------------------------------------------
+
+# Write to the Android log daemon (logd).
+allow bulwarkd logd:unix_stream_socket connectto;
+allow bulwarkd log_device:chr_file { read write open };
+
+# ---- TODO (validation phase) -------------------------------------------------
+
+# The following are expected to generate 'avc: denied' during Cuttlefish
+# validation and will need targeted allow rules once confirmed:
+#
+#  - GraphicBuffer / gralloc handle access (for frame pixel read)
+#  - IPC to libbulwark_client (if alert dispatch goes through a separate process)
+#  - Binder calls to the camera service (if the camera gate uses IPC variant)
+#  - /proc access (if libbulwark_safety reads /proc/cpuinfo for NNAPI detection)
+#
+# Add rules here after audit2allow review — not before.

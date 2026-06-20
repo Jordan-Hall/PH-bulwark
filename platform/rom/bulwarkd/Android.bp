@@ -1,0 +1,56 @@
+// SCAFFOLD — not built here.
+// See platform/rom/README.md for integration instructions.
+//
+// Licence: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+
+// bulwarkd — PH Bulwark native content-safety daemon.
+//
+// Runs as /system/bin/bulwarkd, started by init via bulwarkd.rc.
+// Own SELinux domain (bulwarkd — see sepolicy/bulwarkd.te).
+//
+// Responsibilities:
+//   - Screen/frame capture at ~1 Hz via SurfaceControl / ScreenCapture
+//     (ScreenCapture::captureDisplay(), the same API used by
+//     SurfaceControl.screenshot() at the Java layer).
+//   - NSFW scoring via libbulwark_safety (same model + threshold as
+//     platform/android camera gate and NsfwGate.kt).
+//   - Text scan: register as a trusted AMS client to receive
+//     AccessibilityEvent node-tree text without a user-space AccessibilityService
+//     (§4.3 of docs/design/child-safety-rom-build.md).
+//   - Block overlay: call WindowManager via Binder to add a TYPE_APPLICATION_OVERLAY
+//     window at max Z-order when verdict is BLOCK.
+//   - Guardian alert: call libbulwark_client (the existing Rust JNI cdylib) over
+//     its native interface to dispatch a redacted alert to the cluster (mTLS, gRPC).
+//
+// Design reference: docs/design/child-safety-rom-build.md §4.
+
+cc_binary {
+    name: "bulwarkd",
+    srcs: ["main.cpp"],
+    shared_libs: [
+        "libbulwark_safety",   // NSFW scoring (in-process, no Binder hop)
+        "libbinder",           // Binder IPC to WindowManager / AMS / SurfaceFlinger
+        "libutils",
+        "liblog",
+        "libgui",              // SurfaceComposerClient / ScreenCapture
+        "libui",               // GraphicBuffer
+    ],
+    // static_libs: [] — avoid GPL static libs per hard constraint in CLAUDE.md.
+
+    // init_rc: declare the service to init; installed to /system/etc/init/.
+    init_rc: ["bulwarkd.rc"],
+
+    // The binary lives in /system/bin/ (system partition, not vendor).
+    // This makes it accessible regardless of vendor partition contents.
+    // system_ext: false (system partition proper).
+
+    cppflags: ["-std=c++17", "-Wall", "-Wextra"],
+    sanitize: {
+        address: true,
+        undefined: true,
+    },
+
+    // Required companion library (must be on the same partition).
+    required: ["libbulwark_safety"],
+}
