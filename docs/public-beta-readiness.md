@@ -58,7 +58,7 @@ When both are cleared, re-evaluate against the **minimum bar** at the bottom.
 | On-device NSFW capture gate (block + drop, no store/hash/send) | 🧪 | `platform/android/camera/.../NsfwGate.kt` runs the engine's bundled ViT (Apache-2.0) via ONNX Runtime, parity with `bulwark-vision` pre/post-process, fail-closed; threshold 0.7. **On-device accuracy/accelerator path not device-validated.** |
 | No-network guarantee (OS-enforced) | ✅ | `platform/android/camera/AndroidManifest.xml` declares **zero** network permissions; comment + manifest enforce it. |
 | Module builds in CI | ✅ (compiled) | `settings.gradle.kts` includes `:camera`; `android.yml`'s `assembleDebug` compiles it. |
-| **Camera APK shipped on any channel** | ❌ distribution gap | `android.yml` upload step globs only `app/build/outputs/**/*-debug.apk` — the camera APK is built but **not uploaded/released**. `release.md` §1 lists only the child APK. Testers must build it locally today. |
+| **Camera APK shipped on any channel** | ✅ | **Signed:** `android-release.yml` already builds + attaches `camera-release.apk` (`:camera:assembleRelease`, self-gated signingConfig) to the GitHub Release + the FOSS channels (F-Droid mirror / Accrescent / Obtainium) on `v*` tags. **Debug (quick sideload):** this PR adds `android.yml`'s per-run `bulwark-camera-debug-apk` artifact + `release.yml`'s `camera-android-attach` (`ph-bulwark-camera-android.apk` + SHA256), mirroring the child APK's debug+signed double — so testers can grab a build off any CI run, not just a tag. |
 
 ### C. Manager (guardian console) — `co.predatorhunters.bulwark.manager`
 
@@ -119,7 +119,7 @@ When both are cleared, re-evaluate against the **minimum bar** at the bottom.
 - **On-device accessibility/screenshot agent** (native Android capture + overlay) —
   `docs/design/on-device-scanning.md`; the E2E/pinned-app coverage story.
 - **Manager UnifiedPush connector** — background alert push over a FOSS push path.
-- Camera APK + Android Manager wired into `release.yml` (distribution gap above).
+- Android **Manager** APK wired into `release.yml` (the camera APK now is — see §B; the dx-built Manager APK still needs its own release wiring).
 - Windows/Linux/macOS desktop transparent VPN path + truststore install.
 
 ---

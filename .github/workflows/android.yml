@@ -114,3 +114,15 @@ jobs:
           name: bulwark-child-debug-apk
           path: platform/android/app/build/outputs/apk/**/*-debug.apk
           if-no-files-found: error
+
+      - name: Upload camera debug APK
+        # `gradle assembleDebug` (above) also assembles the :camera module (the
+        # standalone child-safety camera). Ship its APK as its own artifact so
+        # sideloading testers don't have to build it locally (beta-readiness gap).
+        # The pinned NSFW model is copied into the APK by the module's build
+        # (copyNsfwModel), so this artifact is the full, functional camera.
+        uses: actions/upload-artifact@v6
+        with:
+          name: bulwark-camera-debug-apk
+          path: platform/android/camera/build/outputs/apk/**/*-debug.apk
+          if-no-files-found: error
