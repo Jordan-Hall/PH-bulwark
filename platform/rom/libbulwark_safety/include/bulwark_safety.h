@@ -185,10 +185,17 @@ BwVerdict bw_score_nsfw(
 
 /**
  * bw_score_text() — score one snapshot of on-screen text (bulwarkd's screen
- * path) for grooming / adult content using the SHIPPING `bulwark-text`
- * rules-first detector, so detection never drifts from the engine. No ONNX
- * model is needed (rules-first), so this path is active even when the NSFW
- * model is absent.
+ * path) for adult / explicit content using the SHIPPING `bulwark-text`
+ * rules engine, so the per-snapshot rule logic never drifts from the engine.
+ * No ONNX model is needed (rules-first), so this path is active even when the
+ * NSFW model is absent.
+ *
+ * SCOPE (important): this is a SINGLE-SHOT call — it scores one text snapshot
+ * with a fixed thread id and ts=0, so the engine's cross-message grooming
+ * ESCALATION (the multi-turn signal that actually detects grooming) is NOT
+ * exercised here. It reliably catches explicit / adult text in one frame; it
+ * does NOT detect conversational grooming across messages. Wiring a stable
+ * per-conversation thread id + timestamps from bulwarkd is a follow-up.
  *
  * @param utf8  Pointer to `len` bytes of UTF-8 text (does NOT need to be
  *              NUL-terminated). NULL or len == 0 → BW_VERDICT_FAIL_CLOSED.
