@@ -90,13 +90,19 @@ It captures:
 
 ## Step 2 — VERIFY before you trust it (do not skip)
 
+One command — it must print **`VERIFY: PASS`** (re-checks every SHA256, lists the
+captured audio so you can confirm the voice notes, and flags a zero-audio result):
+
+```sh
+bash tools/device-backup/verify.sh ./device-backup-<timestamp>
+```
+
+(Equivalent manual checks, if you prefer:)
+
 ```sh
 B=./device-backup-<timestamp>
-# 1) The voice notes specifically — eyeball the list; confirm the count looks right.
-cat "$B/meta/audio-files.txt"; wc -l "$B/meta/audio-files.txt"
-# 2) Nothing truncated — re-verify checksums.
+cat "$B/meta/audio-files.txt"; wc -l "$B/meta/audio-files.txt"   # the voice notes
 (cd "$B" && sha256sum -c meta/SHA256SUMS.txt | grep -v ': OK$' || echo "all OK")
-# 3) Size sanity.
 du -sh "$B"
 ```
 
