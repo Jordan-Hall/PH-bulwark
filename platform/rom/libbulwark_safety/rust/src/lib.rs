@@ -1,0 +1,201 @@
+//! C ABI for the Child Safety ROM NSFW safety gate — see `../include/bulwark_safety.h`.
+//!
+//! `bulwarkd` (screen path) and the `Camera3OutputStream` hook (camera path) link this
+//! and call [`bw_score_nsfw`]. The scorer is `crates/bulwark-vision`'s, so detection
+//! NEVER drifts from the shipping engine (same model, 384x384, [-1,1] norm, softmax,
+//! threshold 0.7).
+//!
+//! **Fail-CLOSED:** any error — no model, bad pointer, decode/score failure, panic —
+//! returns `BW_VERDICT_FAIL_CLOSED`, which the caller MUST treat as "block the frame".
+//! Never fails open. Scoring is in-memory only; the frame is never persisted.
+//!
+//! The real `ort` scorer is behind the `onnx` feature (CI / Android via cargo-ndk,
+//! linking libonnxruntime.so). Without `onnx` (dev-host default), every score fails
+//! closed — so the ABI compiles + verifies on any host while the model path is CI/Android.
+//!
+//! NOT built here against AOSP; the Rust core builds via cargo / cargo-ndk.
+
+use std::os::raw::{c_char, c_int, c_uchar};
+use std::panic::catch_unwind;
+
+// --- ABI constants — MUST match include/bulwark_safety.h ---
+#[allow(dead_code)] // referenced only in the `onnx` build (engine::init)
+const BW_OK: c_int = 0;
+const BW_ERR_NO_MODEL: c_int = 1;
+#[allow(dead_code)] // referenced only in the `onnx` build (engine::init)
+const BW_ALREADY_INIT: c_int = 2;
+
+const BW_VERDICT_SAFE: c_int = 0;
+const BW_VERDICT_NSFW: c_int = 1;
+const BW_VERDICT_FAIL_CLOSED: c_int = 2;
+
+const BW_FMT_RGBA8888: c_int = 0;
+// BW_FMT_NV21 = 1, BW_FMT_NV12 = 2 — YUV->RGB conversion is a TODO; until then those
+// formats fail CLOSED (block) rather than pass an unscored frame.
+
+#[allow(dead_code)] // referenced only in the `onnx` build (OnnxScorer::load)
+const INPUT_SIZE: u32 = 384;
+const NSFW_THRESHOLD: f32 = 0.7;
+
+#[cfg(feature = "onnx")]
+mod engine {
+    use bulwark_vision::onnx::OnnxScorer;
+    use bulwark_vision::Scorer;
+    use std::sync::{Mutex, OnceLock};
+
+    static SCORER: OnceLock<Mutex<Option<OnnxScorer>>> = OnceLock::new();
+
+    pub fn init(model_path: &str) -> i32 {
+        let cell = SCORER.get_or_init(|| Mutex::new(None));
+        let Ok(mut guard) = cell.lock() else {
+            return super::BW_ERR_NO_MODEL;
+        };
+        if guard.is_some() {
+            return super::BW_ALREADY_INIT;
+        }
+        match OnnxScorer::load(model_path, super::INPUT_SIZE) {
+            Ok(s) => {
+                *guard = Some(s);
+                log::info!("bulwark-safety: NSFW model loaded ({model_path})");
+                super::BW_OK
+            }
+            Err(e) => {
+                log::error!("bulwark-safety: NSFW model load failed: {e}");
+                super::BW_ERR_NO_MODEL
+            }
+        }
+    }
+
+    /// Score already-encoded image bytes via the engine's exact scorer. `None` when no
+    /// model is loaded -> caller fails CLOSED.
+    pub fn score_encoded(bytes: &[u8]) -> Option<f32> {
+        let cell = SCORER.get()?;
+        let guard = cell.lock().ok()?;
+        let scorer = guard.as_ref()?;
+        Some(scorer.score(bytes))
+    }
+}
+
+#[cfg(not(feature = "onnx"))]
+mod engine {
+    // No ONNX in this build (dev host) -> no scorer -> everything fails CLOSED. This is
+    // what lets the crate + ABI compile + verify on any host without onnxruntime.
+    pub fn init(_model_path: &str) -> i32 {
+        super::BW_ERR_NO_MODEL
+    }
+    pub fn score_encoded(_bytes: &[u8]) -> Option<f32> {
+        None
+    }
+}
+
+/// Encode raw RGBA8888 into PNG in memory so the engine's `Scorer` (which takes encoded
+/// bytes) decodes + preprocesses it exactly as everywhere else — no detection drift.
+/// Per-frame encode is a known cost; a raw-pixel scoring entry on bulwark-vision is the
+/// planned optimisation, and the hot path throttles/samples (see camera-gate INTEGRATION).
+fn rgba_to_png(rgba: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
+    let expected = (w as usize).checked_mul(h as usize)?.checked_mul(4)?;
+    if rgba.len() < expected {
+        return None;
+    }
+    let buf = image::RgbaImage::from_raw(w, h, rgba[..expected].to_vec())?;
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(buf)
+        .write_to(&mut out, image::ImageFormat::Png)
+        .ok()?;
+    Some(out.into_inner())
+}
+
+/// `bw_init_once` — load + warm the NSFW model. Idempotent. See the header.
+///
+/// # Safety
+/// `model_path` must be NULL or a NUL-terminated C string valid for the call.
+#[no_mangle]
+pub extern "C" fn bw_init_once(model_path: *const c_char) -> c_int {
+    catch_unwind(|| {
+        if model_path.is_null() {
+            return BW_ERR_NO_MODEL;
+        }
+        // SAFETY: caller contract — NUL-terminated C string.
+        let cstr = unsafe { std::ffi::CStr::from_ptr(model_path) };
+        let Ok(path) = cstr.to_str() else {
+            return BW_ERR_NO_MODEL;
+        };
+        engine::init(path)
+    })
+    .unwrap_or(BW_ERR_NO_MODEL)
+}
+
+/// `bw_score_nsfw` — score one frame; FAILS CLOSED on any error. See the header.
+///
+/// # Safety
+/// `pixels` must be NULL or point to at least `width*height*4` bytes (RGBA8888).
+/// `score_out` must be NULL or point to a writable `f32`.
+#[no_mangle]
+pub extern "C" fn bw_score_nsfw(
+    pixels: *const c_uchar,
+    width: c_int,
+    height: c_int,
+    format: c_int,
+    score_out: *mut f32,
+) -> c_int {
+    catch_unwind(|| {
+        if pixels.is_null() || width < 1 || height < 1 {
+            return BW_VERDICT_FAIL_CLOSED;
+        }
+        if format != BW_FMT_RGBA8888 {
+            // YUV (NV21/NV12) not yet supported -> fail CLOSED (block), never pass.
+            return BW_VERDICT_FAIL_CLOSED;
+        }
+        let (w, h) = (width as u32, height as u32);
+        let Some(len) = (w as usize).checked_mul(h as usize).and_then(|n| n.checked_mul(4)) else {
+            return BW_VERDICT_FAIL_CLOSED;
+        };
+        // SAFETY: caller contract — `pixels` points to width*height*4 bytes (RGBA8888).
+        let rgba = unsafe { std::slice::from_raw_parts(pixels, len) };
+        let Some(png) = rgba_to_png(rgba, w, h) else {
+            return BW_VERDICT_FAIL_CLOSED;
+        };
+        let Some(score) = engine::score_encoded(&png) else {
+            return BW_VERDICT_FAIL_CLOSED;
+        };
+        if !score.is_finite() {
+            return BW_VERDICT_FAIL_CLOSED;
+        }
+        if !score_out.is_null() {
+            // SAFETY: caller contract — non-NULL `score_out` is a writable f32.
+            unsafe { *score_out = score };
+        }
+        if score >= NSFW_THRESHOLD {
+            BW_VERDICT_NSFW
+        } else {
+            BW_VERDICT_SAFE
+        }
+    })
+    .unwrap_or(BW_VERDICT_FAIL_CLOSED)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn null_and_bad_inputs_fail_closed() {
+        // No model loaded + NULL/short inputs must all block, never pass.
+        assert_eq!(bw_init_once(std::ptr::null()), BW_ERR_NO_MODEL);
+        assert_eq!(
+            bw_score_nsfw(std::ptr::null(), 8, 8, BW_FMT_RGBA8888, std::ptr::null_mut()),
+            BW_VERDICT_FAIL_CLOSED,
+        );
+        // Valid RGBA buffer but no model loaded (or non-onnx build) -> fail closed.
+        let px = vec![0u8; 4 * 4 * 4];
+        assert_eq!(
+            bw_score_nsfw(px.as_ptr(), 4, 4, BW_FMT_RGBA8888, std::ptr::null_mut()),
+            BW_VERDICT_FAIL_CLOSED,
+        );
+        // Unsupported pixel format fails closed.
+        assert_eq!(
+            bw_score_nsfw(px.as_ptr(), 4, 4, 1 /* NV21 */, std::ptr::null_mut()),
+            BW_VERDICT_FAIL_CLOSED,
+        );
+    }
+}

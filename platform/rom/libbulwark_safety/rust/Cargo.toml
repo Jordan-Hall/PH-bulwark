@@ -1,0 +1,33 @@
+# Rust core for the Child Safety ROM's NSFW safety gate, exposed as the C ABI in
+# ../include/bulwark_safety.h (cbindgen-compatible) that bulwarkd + the camera-gate
+# hook link. DETACHED workspace (mirrors platform/android/rust/bulwark-android, which
+# already cross-compiles Rust to Android via cargo-ndk).
+#
+# Reuses crates/bulwark-vision's scorer so detection NEVER drifts from the shipping
+# engine. The `onnx` feature pulls the real `ort` scorer (built on CI / for Android via
+# cargo-ndk, linking the same libonnxruntime.so the camera app ships via its AAR).
+# WITHOUT `onnx` (the default — what builds on the dev host), every score FAILS CLOSED,
+# so the crate + its ABI compile + verify here while the real model path is CI/Android.
+[package]
+name = "bulwark-rom-safety"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "bulwark_safety"
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+# Only pulled in (with its onnx scorer) under the `onnx` feature; the default host
+# build is self-contained (fails closed) so it compiles without onnxruntime.
+bulwark-vision = { path = "../../../../crates/bulwark-vision", default-features = false, optional = true }
+image = "0.25"
+log = "0.4"
+
+[features]
+default = []
+onnx = ["dep:bulwark-vision", "bulwark-vision/onnx"]
+
+# Detached from the engine workspace, like platform/android/rust/bulwark-android.
+[workspace]
