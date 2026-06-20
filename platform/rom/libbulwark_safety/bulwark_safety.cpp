@@ -5,6 +5,25 @@
  * Licence: Apache-2.0
  * SPDX-License-Identifier: Apache-2.0
  *
+ * ============================ SUPERSEDED ============================
+ * As of PR #223 the Rust core in `libbulwark_safety/rust/` implements the
+ * PUBLIC ABI (`include/bulwark_safety.h`) DIRECTLY — exporting
+ * `bw_init_once`, `bw_score_nsfw`, `bw_score_text` AND `bw_model_id`. It is
+ * the SOLE implementation of that ABI.
+ *
+ * DO NOT compile this .cpp into the same library as the Rust cdylib/staticlib:
+ * both define `bw_init_once`/`bw_score_nsfw`/`bw_model_id`, so co-linking them
+ * is a DUPLICATE-SYMBOL error. This file also predates `bw_score_text` (it has
+ * no counterpart here) and calls `bw_rs_*` symbols the Rust core does not export.
+ *
+ * Integration (on the Linux/AOSP host): link the Rust staticlib
+ * (`libbulwark_safety.a`) into `bulwarkd` and `libcameraservice` and DELETE this
+ * wrapper, OR — if a C++ shim is still wanted for the NV21/NV12→RGBA conversion —
+ * rename its exports so they do not collide with the ABI and have it forward to
+ * the Rust symbols. Kept only as a reference for the YUV-conversion shim until
+ * that wiring lands. See `docs/design/child-safety-rom-build.md` §5.1.
+ * ===================================================================
+ *
  * bulwark_safety.cpp — thin C++ wrapper over the Rust bulwark-vision FFI.
  *
  * This file provides the implementation of the public C API declared in

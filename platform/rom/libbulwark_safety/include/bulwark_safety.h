@@ -35,6 +35,7 @@
 
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -179,20 +180,56 @@ BwVerdict bw_score_nsfw(
     float*         score_out);
 
 /* ------------------------------------------------------------------ */
+/* Text path — on-screen text grooming / adult-content scan           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * bw_score_text() — score one snapshot of on-screen text (bulwarkd's screen
+ * path) for adult / explicit content using the SHIPPING `bulwark-text`
+ * rules engine, so the per-snapshot rule logic never drifts from the engine.
+ * No ONNX model is needed (rules-first), so this path is active even when the
+ * NSFW model is absent.
+ *
+ * SCOPE (important): this is a SINGLE-SHOT call — it scores one text snapshot
+ * with a fixed thread id and ts=0, so the engine's cross-message grooming
+ * ESCALATION (the multi-turn signal that actually detects grooming) is NOT
+ * exercised here. It reliably catches explicit / adult text in one frame; it
+ * does NOT detect conversational grooming across messages. Wiring a stable
+ * per-conversation thread id + timestamps from bulwarkd is a follow-up.
+ *
+ * @param utf8  Pointer to `len` bytes of UTF-8 text (does NOT need to be
+ *              NUL-terminated). NULL or len == 0 → BW_VERDICT_FAIL_CLOSED.
+ * @param len   Number of bytes at `utf8`.
+ *
+ * @return BwVerdict:
+ *   BW_VERDICT_SAFE        — the detector allowed the text.
+ *   BW_VERDICT_NSFW        — flagged (rules engine returned block/blur/mute/
+ *                            warn/log). Here "NSFW" means "flagged content".
+ *   BW_VERDICT_FAIL_CLOSED — NULL/empty input, invalid UTF-8, analyzer
+ *                            unavailable, or a panic. Treat as "flagged".
+ *
+ * PRIVACY: nothing about the text is logged, hashed, or persisted; scoring
+ * is in-memory only (same content-free contract as bw_score_nsfw()).
+ */
+int bw_score_text(const uint8_t* utf8, size_t len);
+
+/* ------------------------------------------------------------------ */
 /* Diagnostics (content-free — safe to log)                           */
 /* ------------------------------------------------------------------ */
 
 /**
- * bw_model_id() — returns a short string identifying the loaded model.
+ * bw_model_id() — returns a short string identifying the active scorer build.
  *
- * Content-free: the string identifies the model build (e.g.
- * "nsfw-vit-384-bundled-int8" or "stub-noop"). It never contains frame
- * content, scores, or paths that could leak PII.
+ * Content-free: it never contains frame content, scores, or paths that could
+ * leak PII. Provided by the Rust core (`libbulwark_safety/rust`), which is the
+ * sole implementation of this ABI.
  *
- * Returns "not-initialised" if bw_init_once() has not been called.
- * Returns "stub-noop" if the model failed to load (BW_ERR_NO_MODEL state).
+ * Returns "nsfw-onnx" once an NSFW model is loaded (after bw_init_once() →
+ * BW_OK). Returns "stub-noop" otherwise — before init, after a load failure
+ * (BW_ERR_NO_MODEL), or in a build compiled without the `onnx` feature.
  *
- * The returned pointer is valid for the lifetime of the process.
+ * The returned pointer is a static NUL-terminated C string, valid for the
+ * lifetime of the process.
  */
 const char* bw_model_id(void);
 

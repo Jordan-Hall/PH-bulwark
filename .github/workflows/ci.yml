@@ -121,6 +121,31 @@ jobs:
       - name: test
         run: cargo test --manifest-path apps/staff/Cargo.toml
 
+  rom-safety:
+    name: ROM safety FFI core (platform/rom/libbulwark_safety/rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: platform/rom/libbulwark_safety/rust
+      # platform/rom/libbulwark_safety/rust is a DETACHED cargo workspace (own
+      # [workspace]) — NOT covered by the `--workspace` jobs above. It's a non-GUI
+      # staticlib/cdylib (the Child Safety ROM's C-ABI scoring core), so no WebKitGTK
+      # deps are needed. This is the DEFAULT (no-onnx) build: every score fails CLOSED,
+      # which is exactly what we want CI to verify (the ABI + fail-closed structure
+      # compile + test on any host). The real `onnx` scorer path is proven separately
+      # by cross-compiling to aarch64-linux-android via cargo-ndk (see PR #223).
+      - name: fmt
+        run: cargo fmt --manifest-path platform/rom/libbulwark_safety/rust/Cargo.toml --all --check
+      - name: clippy
+        run: cargo clippy --manifest-path platform/rom/libbulwark_safety/rust/Cargo.toml --all-targets -- -D warnings
+      - name: test
+        run: cargo test --manifest-path platform/rom/libbulwark_safety/rust/Cargo.toml
+
   deny:
     name: cargo-deny (licenses + advisories + bans)
     runs-on: ubuntu-latest
