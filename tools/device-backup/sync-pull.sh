@@ -37,8 +37,10 @@ mkdir -p "$DEST"
 list="$(mktemp)"; trap 'rm -f "$list"' EXIT
 
 echo "[sync] enumerating device files under $SRC (size + path)…"
-# toybox stat on Android supports -c; find -exec batches it. size<TAB>path
-adbc shell "find '$SRC' -type f -exec stat -c '%s	%n' {} + 2>/dev/null" | tr -d '\r' > "$list"
+# toybox stat on Android supports -c; find -exec batches it. size<TAB>path.
+# -L FOLLOWS SYMLINKS: /sdcard is a symlink (→ /storage/emulated/0), so a plain
+# `find /sdcard` descends nothing and returns 0 files. -L is mandatory here.
+adbc shell "find -L '$SRC' -type f -exec stat -c '%s	%n' {} + 2>/dev/null" | tr -d '\r' > "$list"
 total=$(wc -l < "$list" | tr -d ' ')
 echo "[sync] $total file(s) on device. Pulling missing / size-mismatched only…"
 
