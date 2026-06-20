@@ -181,9 +181,49 @@ The engine (§2) is built; the next phases turn it into the **product** the fami
 uses: a maintainable Dioxus app suite, a parent who remotely governs the child's
 filtering VPN, the fastest+secure real-time AI filtering with rich attribution, and
 a longer-term reach into SMS/calls. Each workflow has a dedicated design doc and is
-shippable in reviewable increments. Status as of **2026-06-14**.
+shippable in reviewable increments. Status as of **2026-06-20**.
 
 ### Just shipped (foundation for these workflows)
+- **Child Safety ROM — design DECIDED, Increment 1 code-complete, B/C scaffold +
+  Rust-core-via-FFI landed (2026-06-16 → 2026-06-20)** — a guardian-provisioned
+  custom Android build for a dedicated, freshly-wiped Pixel 7a (`lynx`) that runs the
+  PH Bulwark detection stack at the system layer. Owner rulings (2026-06-16): build
+  all three rungs **A + B + C**; GPL-2 kernel accepted as platform (nothing of ours
+  links GPL); grooming weights guardian-provisioned-only; NSFW model + shield app
+  baked into the ROM; OCR = pixel-text FALLBACK, framework native-text primary.
+  - **Increment 1 (A — Device-Owner on stock) — code-complete (#217/#218):** DO
+    auto-enable of detection + perm-grant (#217) and the Manager provisioning-QR
+    builder (#218). **Honest limit:** on STOCK firmware a Device Owner CANNOT silently
+    enable the detection AccessibilityService (the DO `setSecureSetting` allowlist
+    excludes `ENABLED_ACCESSIBILITY_SERVICES`), so #217 attempts it fail-safe and
+    falls back to a one-time guided MANUAL toggle — the genuinely-silent enable is
+    what B/C (platform-signed) add. Both held for on-device validation on the flashed 7a.
+  - **Increment 2/3 (B/C) runbook — DECIDED (#219/#221):** all 8 open decisions
+    resolved (2026-06-20) — hardware-backed AVB keys; Android 16 (`android-16.0.0_r3`)
+    + track upstream; Cuttlefish EMULATOR first, physical `lynx` later; audio capture
+    default-ON with a guardian OPT-OUT toggle; privapp allowlist as drafted; 1 Hz scan
+    → event-driven once proven; dedicated `bulwarkd` daemon (not `system_server`);
+    `SurfaceControl.screenshot()` confirmed. Added §7 = the system-wide camera NSFW
+    gate (hook `Camera3OutputStream::returnBufferLocked` in `libcameraservice` so
+    Snapchat/IG in-app cameras are gated too) — still **DRAFT, owner/architect review
+    pending**, unvalidated.
+  - **`platform/rom/` scaffold — landed (#222):** `bulwarkd/` (Android.bp, .rc,
+    main.cpp, sepolicy), `libbulwark_safety/` (C ABI header + C++ wrapper), and the
+    `camera-gate/` returnBufferLocked `.patch` + INTEGRATION.md. **SCAFFOLD — not
+    built here** (AOSP needs a Linux host); illustrative until validated on Cuttlefish.
+  - **Rust core via FFI — IN PROGRESS (#223, branch `feat/rom-rust-ffi`, NOT merged):**
+    the architecture pivot — instead of re-implementing detection in C++, a Rust FFI
+    core (`platform/rom/libbulwark_safety/rust/`) reuses `crates/bulwark-vision` (NSFW,
+    `onnx`-gated) + `crates/bulwark-text` (rules-first grooming/adult text) and exports
+    `bw_init_once` / `bw_score_nsfw` / `bw_score_text` over the C ABI, so ROM detection
+    NEVER drifts from the shipping engine. Fail-CLOSED throughout (no model / bad input
+    / panic → block). Host-verified no-onnx (unit tests: fail-closed + text path green);
+    `ort`-on-Android cross-compile confirmed (`ort` + `bulwark-vision` build for
+    `aarch64-linux-android`); the C++ wrapper + camera-gate/`bulwarkd` wiring to call
+    this ABI is the remaining integration step.
+  → **[`docs/design/child-safety-rom.md`](docs/design/child-safety-rom.md)**,
+  **[`docs/design/child-safety-rom-build.md`](docs/design/child-safety-rom-build.md)**,
+  `platform/rom/`.
 - **Layered no-Device-Owner protection — in-app safe browser + DNS/SNI host
   filter (2026-06-14)** — the existing consumer phone (no Device Owner, no factory
   reset) is now protected by THREE complementary layers, none needing a trust

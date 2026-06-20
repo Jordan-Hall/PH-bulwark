@@ -732,8 +732,30 @@ is present from first boot. The grooming model is guardian-gated.
   build host.
 - The `bulwarkd` native daemon design (§4): architecture and Rust API surface can
   be designed and prototyped now against the existing `libbulwark_client` cdylib.
+  ✅ DONE (2026-06-20, PR #222): `platform/rom/` scaffold landed — `bulwarkd/`
+  (Android.bp, .rc, main.cpp, sepolicy), `libbulwark_safety/` (C ABI header + C++
+  wrapper), `camera-gate/` (the returnBufferLocked `.patch` + INTEGRATION.md).
+  SCAFFOLD only — compiles against AOSP on a Linux host, not built/validated here.
+- **Rust core via FFI** ✅ DONE host-side (2026-06-20, PR #223, branch
+  `feat/rom-rust-ffi`, NOT merged): `platform/rom/libbulwark_safety/rust/` reuses
+  `crates/bulwark-vision` (NSFW, `onnx`-gated) + `crates/bulwark-text` (rules-first
+  grooming/adult text) and exports `bw_init_once` / `bw_score_nsfw` / `bw_score_text` /
+  `bw_model_id` over the C ABI — so ROM detection NEVER drifts from the shipping engine
+  and detection is NOT re-implemented in C++. Fail-CLOSED throughout. `ort`-on-Android
+  cross-compile confirmed (self-contained `.so`, onnxruntime linked `static`); the NSFW
+  path is **host runtime-verified** (loads the bundled model, scores a real frame → SAFE).
+- **Integration wiring** ✅ DONE host-side (2026-06-20, PR #225, depends on #223): the
+  old C++ wrapper `bulwark_safety.cpp` is DELETED; `libbulwark_safety/Android.bp` vendors
+  the cargo-ndk Rust `.so` directly (`cc_prebuilt_library_shared`); `bulwarkd/main.cpp`
+  calls the real ABI and the prior fail-OPEN stub is fixed (unscanned → no verdict,
+  unscorable → block), with the AOSP capture/overlay/AMS glue behind
+  `-DBULWARK_HAVE_AOSP_CAPTURE` (armed in `bulwarkd/Android.bp`; a `#warning` hard-stops
+  an inert build under `-Werror`). Remaining = the on-host AOSP build (below): vendor the
+  prebuilt `.so`, confirm the `captureDisplay`/IWindowManager signatures on Cuttlefish.
 - The camera hook design (§7): design and prototype work now; build validation
-  needs the Cuttlefish emulator on a Linux host.
+  needs the Cuttlefish emulator on a Linux host. The scaffold patch landed (#222,
+  §7.3 `Camera3OutputStream::returnBufferLocked`) — still DRAFT, pending owner/architect
+  sign-off, unvalidated.
 - This design document.
 
 ### 5.2 PARKED — needs a Linux build host + Cuttlefish (emulator-first, then physical `lynx`)

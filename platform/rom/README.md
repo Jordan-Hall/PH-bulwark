@@ -164,10 +164,22 @@ camera-gate patch. See `CLAUDE.md` hard constraints.
 - A full ONNX model build. The model (`nsfw_detector.onnx`) is sourced from
   `crates/bulwark-vision/models/` and embedded at build time (see
   `libbulwark_safety/Android.bp`).
-- The Rust FFI bridge (`cbindgen` output / `bulwark_safety_ffi.h`). The header in
-  `libbulwark_safety/include/bulwark_safety.h` declares the C API; the actual
-  cbindgen-generated binding must be produced from `crates/bulwark-vision` on the
-  Linux host and placed at `libbulwark_safety/include/` before building.
+
+> **Update (2026-06-20, PR #223):** the Rust FFI core now EXISTS, in
+> `libbulwark_safety/rust/`. Rather than a `cbindgen` binding over a separate
+> `crates/bulwark-vision-ffi` crate, the Rust core implements the PUBLIC ABI from
+> `include/bulwark_safety.h` DIRECTLY — exporting `bw_init_once` / `bw_score_nsfw`
+> (NSFW via `crates/bulwark-vision`, `onnx`-gated) and `bw_score_text` (rules-first
+> grooming/adult text via `crates/bulwark-text`). Detection is reused from the
+> shipping engine, never re-implemented. **Integration (PR #225):** the old C++
+> wrapper (`bulwark_safety.cpp` + its `bw_rs_*` TODOs) has been DELETED;
+> `libbulwark_safety/Android.bp` now vendors the cargo-ndk-built Rust `.so` directly
+> (a `cc_prebuilt_library_shared`, onnxruntime baked in), and `bulwarkd/main.cpp`
+> calls the real ABI (`bw_init_once`/`bw_score_nsfw`/`bw_score_text`/`bw_model_id`)
+> with the AOSP framework glue behind `-DBULWARK_HAVE_AOSP_CAPTURE`. The NSFW path is
+> host runtime-verified (loads the bundled model, scores a frame); the remaining gate
+> is the on-host AOSP/Cuttlefish build (vendor the prebuilt `.so`, confirm the
+> `captureDisplay`/IWindowManager signatures) — see #225.
 - SELinux policy for `bulwarkd`'s Binder clients in `libcameraservice`. Add
   targeted `allow` rules after observing `avc: denied` in `logcat` during
   Cuttlefish validation.

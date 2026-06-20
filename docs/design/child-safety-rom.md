@@ -3,9 +3,17 @@
 **Status: DECIDED (owner rulings 2026-06-16) — build all three rungs A+B+C.** Increment 1
 (Device-Owner on stock) is **code-complete**: PR #217 (DO auto-enable of detection + perms)
 + PR #218 (Manager provisioning-QR builder), both held for on-device validation once the
-dedicated 7a is flashed. B/C need an AOSP/Graphene build host + the device.
-Date: 2026-06-16. Target device: Pixel 7a (codename `lynx`). Framing: a child-protection
-build ("Child Safety ROM") — never offensive-security.
+dedicated 7a is flashed. **Increment 2/3 (B/C):** all 8 open build decisions are RESOLVED
+(2026-06-20; PR #219 runbook + PR #221 + the system-wide camera gate §7) and the
+`platform/rom/` scaffold has landed (PR #222: `bulwarkd` + `libbulwark_safety` + the
+camera-gate patch). **Architecture pivot — Rust core via FFI (PR #223, IN PROGRESS, not
+merged):** ROM detection reuses `crates/bulwark-vision` + `crates/bulwark-text` through a
+C ABI (`bw_init_once`/`bw_score_nsfw`/`bw_score_text`) instead of a C++ re-implementation,
+so detection never drifts from the shipping engine. The remaining blocker for B/C is an
+AOSP/Cuttlefish **Linux build host** — the image build cannot run on the Windows dev host.
+B/C still need that host + the device.
+Date: 2026-06-16 (decided); updated 2026-06-20. Target device: Pixel 7a (codename `lynx`).
+Framing: a child-protection build ("Child Safety ROM") — never offensive-security.
 
 ## Goal
 
@@ -112,8 +120,18 @@ the cluster; engine invariants (`#![forbid(unsafe_code)]` except audited FFI) ho
   (Manager provisioning-QR builder + guardian screen). Both **held for on-device validation** on the
   flashed 7a + the owner's merge (master = prod deploy). Remaining A polish: fresh-device onboarding
   UX; device-token-via-extras (needs a small child-app change so the QR can carry the device token).
-- **Increment 2 (B) / 3 (C):** software + image-config + docs are buildable now; the **image build +
-  flashing + OTA + on-device validation are PARKED** until the dedicated 7a is flashed and an
-  AOSP/Graphene build host exists (not possible in the Windows dev env). Next design tasks: base
-  choice (AOSP vs GrapheneOS for `lynx`) + the system-service design (capture hook, framework text
-  path, block-overlay at WindowManager).
+- **Increment 2 (B) / 3 (C):** design + decisions are DONE — base choice (AOSP-vanilla
+  `android-16.0.0_r3`), the system-service design (capture hook, framework text path,
+  block-overlay at WindowManager), and all 8 open decisions are RESOLVED in
+  [`docs/design/child-safety-rom-build.md`](child-safety-rom-build.md) (PR #219/#221,
+  2026-06-20). The **`platform/rom/` scaffold has landed** (PR #222): `bulwarkd` daemon,
+  the shared `libbulwark_safety` scoring library, and the `Camera3OutputStream` camera-gate
+  patch (the system-wide camera NSFW gate, §7 of the build runbook — still DRAFT, pending
+  owner/architect sign-off, unvalidated). **Rust core via FFI is IN PROGRESS** (PR #223,
+  branch `feat/rom-rust-ffi`, not merged): `platform/rom/libbulwark_safety/rust/` reuses
+  `crates/bulwark-vision` (`onnx`-gated NSFW) + `crates/bulwark-text` (rules-first text)
+  behind the `bw_init_once`/`bw_score_nsfw`/`bw_score_text` C ABI, fail-CLOSED throughout —
+  host-verified no-onnx (unit tests green), `ort`-on-Android cross-compile confirmed, C++/
+  camera-gate wiring to the ABI still to do. The **image build + flashing + OTA + on-device
+  validation remain PARKED** on an AOSP/Cuttlefish **Linux build host** (not possible in the
+  Windows dev env) + the dedicated 7a.
