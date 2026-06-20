@@ -218,16 +218,18 @@ int bw_score_text(const uint8_t* utf8, size_t len);
 /* ------------------------------------------------------------------ */
 
 /**
- * bw_model_id() — returns a short string identifying the loaded model.
+ * bw_model_id() — returns a short string identifying the active scorer build.
  *
- * Content-free: the string identifies the model build (e.g.
- * "nsfw-vit-384-bundled-int8" or "stub-noop"). It never contains frame
- * content, scores, or paths that could leak PII.
+ * Content-free: it never contains frame content, scores, or paths that could
+ * leak PII. Provided by the Rust core (`libbulwark_safety/rust`), which is the
+ * sole implementation of this ABI.
  *
- * Returns "not-initialised" if bw_init_once() has not been called.
- * Returns "stub-noop" if the model failed to load (BW_ERR_NO_MODEL state).
+ * Returns "nsfw-onnx" once an NSFW model is loaded (after bw_init_once() →
+ * BW_OK). Returns "stub-noop" otherwise — before init, after a load failure
+ * (BW_ERR_NO_MODEL), or in a build compiled without the `onnx` feature.
  *
- * The returned pointer is valid for the lifetime of the process.
+ * The returned pointer is a static NUL-terminated C string, valid for the
+ * lifetime of the process.
  */
 const char* bw_model_id(void);
 

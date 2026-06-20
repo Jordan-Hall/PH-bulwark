@@ -40,7 +40,7 @@ const NSFW_THRESHOLD: f32 = 0.7;
 #[cfg(feature = "onnx")]
 mod engine {
     use bulwark_vision::onnx::OnnxScorer;
-    use bulwark_vision::Scorer;
+    use std::os::raw::c_char;
     use std::sync::{Mutex, OnceLock};
 
     static SCORER: OnceLock<Mutex<Option<OnnxScorer>>> = OnceLock::new();
@@ -67,12 +67,28 @@ mod engine {
     }
 
     /// Score already-encoded image bytes via the engine's exact scorer. `None` when no
-    /// model is loaded -> caller fails CLOSED.
+    /// model is loaded OR inference errors -> caller fails CLOSED. We use
+    /// `OnnxScorer::try_score` (NOT `Scorer::score`, which fails OPEN → 0.0 for the
+    /// streaming path): an unscorable frame here must BLOCK, never pass as "safe".
     pub fn score_encoded(bytes: &[u8]) -> Option<f32> {
         let cell = SCORER.get()?;
         let guard = cell.lock().ok()?;
         let scorer = guard.as_ref()?;
-        Some(scorer.score(bytes))
+        scorer.try_score(bytes).ok()
+    }
+
+    /// Content-free build identifier (safe to log) — reflects whether a model is
+    /// loaded, never a path or score. `'static` C string.
+    pub fn model_id_cstr() -> *const c_char {
+        let loaded = SCORER
+            .get()
+            .and_then(|c| c.lock().ok().map(|g| g.is_some()))
+            .unwrap_or(false);
+        if loaded {
+            c"nsfw-onnx".as_ptr()
+        } else {
+            c"stub-noop".as_ptr()
+        }
     }
 }
 
@@ -85,6 +101,10 @@ mod engine {
     }
     pub fn score_encoded(_bytes: &[u8]) -> Option<f32> {
         None
+    }
+    /// No scorer in this build -> always the stub id. `'static` C string.
+    pub fn model_id_cstr() -> *const std::os::raw::c_char {
+        c"stub-noop".as_ptr()
     }
 }
 
@@ -110,7 +130,7 @@ fn rgba_to_png(rgba: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
 /// # Safety
 /// `model_path` must be NULL or a NUL-terminated C string valid for the call.
 #[no_mangle]
-pub extern "C" fn bw_init_once(model_path: *const c_char) -> c_int {
+pub unsafe extern "C" fn bw_init_once(model_path: *const c_char) -> c_int {
     catch_unwind(|| {
         if model_path.is_null() {
             return BW_ERR_NO_MODEL;
@@ -131,7 +151,7 @@ pub extern "C" fn bw_init_once(model_path: *const c_char) -> c_int {
 /// `pixels` must be NULL or point to at least `width*height*4` bytes (RGBA8888).
 /// `score_out` must be NULL or point to a writable `f32`.
 #[no_mangle]
-pub extern "C" fn bw_score_nsfw(
+pub unsafe extern "C" fn bw_score_nsfw(
     pixels: *const c_uchar,
     width: c_int,
     height: c_int,
@@ -147,7 +167,10 @@ pub extern "C" fn bw_score_nsfw(
             return BW_VERDICT_FAIL_CLOSED;
         }
         let (w, h) = (width as u32, height as u32);
-        let Some(len) = (w as usize).checked_mul(h as usize).and_then(|n| n.checked_mul(4)) else {
+        let Some(len) = (w as usize)
+            .checked_mul(h as usize)
+            .and_then(|n| n.checked_mul(4))
+        else {
             return BW_VERDICT_FAIL_CLOSED;
         };
         // SAFETY: caller contract — `pixels` points to width*height*4 bytes (RGBA8888).
@@ -215,7 +238,7 @@ mod text {
 /// # Safety
 /// `utf8` must be NULL or point to `len` bytes of UTF-8 text.
 #[no_mangle]
-pub extern "C" fn bw_score_text(utf8: *const c_uchar, len: usize) -> c_int {
+pub unsafe extern "C" fn bw_score_text(utf8: *const c_uchar, len: usize) -> c_int {
     catch_unwind(|| {
         if utf8.is_null() || len == 0 {
             return BW_VERDICT_FAIL_CLOSED;
@@ -230,6 +253,14 @@ pub extern "C" fn bw_score_text(utf8: *const c_uchar, len: usize) -> c_int {
     .unwrap_or(BW_VERDICT_FAIL_CLOSED)
 }
 
+/// `bw_model_id` — content-free identifier of the active scorer build (safe to log):
+/// "nsfw-onnx" once a model is loaded, else "stub-noop". The returned pointer is a
+/// `'static` NUL-terminated C string, valid for the process lifetime. See the header.
+#[no_mangle]
+pub extern "C" fn bw_model_id() -> *const c_char {
+    engine::model_id_cstr()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,34 +268,62 @@ mod tests {
     #[test]
     fn null_and_bad_inputs_fail_closed() {
         // No model loaded + NULL/short inputs must all block, never pass.
-        assert_eq!(bw_init_once(std::ptr::null()), BW_ERR_NO_MODEL);
-        assert_eq!(
-            bw_score_nsfw(std::ptr::null(), 8, 8, BW_FMT_RGBA8888, std::ptr::null_mut()),
-            BW_VERDICT_FAIL_CLOSED,
-        );
-        // Valid RGBA buffer but no model loaded (or non-onnx build) -> fail closed.
-        let px = vec![0u8; 4 * 4 * 4];
-        assert_eq!(
-            bw_score_nsfw(px.as_ptr(), 4, 4, BW_FMT_RGBA8888, std::ptr::null_mut()),
-            BW_VERDICT_FAIL_CLOSED,
-        );
-        // Unsupported pixel format fails closed.
-        assert_eq!(
-            bw_score_nsfw(px.as_ptr(), 4, 4, 1 /* NV21 */, std::ptr::null_mut()),
-            BW_VERDICT_FAIL_CLOSED,
-        );
+        // SAFETY: NULL pointers and a correctly-sized buffer per each fn's contract.
+        unsafe {
+            assert_eq!(bw_init_once(std::ptr::null()), BW_ERR_NO_MODEL);
+            assert_eq!(
+                bw_score_nsfw(
+                    std::ptr::null(),
+                    8,
+                    8,
+                    BW_FMT_RGBA8888,
+                    std::ptr::null_mut()
+                ),
+                BW_VERDICT_FAIL_CLOSED,
+            );
+            // Valid RGBA buffer but no model loaded (or non-onnx build) -> fail closed.
+            let px = [0u8; 4 * 4 * 4];
+            assert_eq!(
+                bw_score_nsfw(px.as_ptr(), 4, 4, BW_FMT_RGBA8888, std::ptr::null_mut()),
+                BW_VERDICT_FAIL_CLOSED,
+            );
+            // Unsupported pixel format fails closed.
+            assert_eq!(
+                bw_score_nsfw(px.as_ptr(), 4, 4, 1 /* NV21 */, std::ptr::null_mut()),
+                BW_VERDICT_FAIL_CLOSED,
+            );
+        }
     }
 
     #[test]
     fn text_path_flags_adult_passes_benign() {
-        // Null / empty → fail closed.
-        assert_eq!(bw_score_text(std::ptr::null(), 4), BW_VERDICT_FAIL_CLOSED);
-        assert_eq!(bw_score_text(b"x".as_ptr(), 0), BW_VERDICT_FAIL_CLOSED);
-        // Plainly benign → safe.
-        let benign = b"hello, how was school today?";
-        assert_eq!(bw_score_text(benign.as_ptr(), benign.len()), BW_VERDICT_SAFE);
-        // Plainly adult → flagged (the rules engine detects it, never SAFE).
-        let flagged = "wanna watch some porn together".as_bytes();
-        assert_eq!(bw_score_text(flagged.as_ptr(), flagged.len()), BW_VERDICT_NSFW);
+        // SAFETY: each pointer/len is valid (or deliberately NULL/0 to test fail-closed).
+        unsafe {
+            // Null / empty → fail closed.
+            assert_eq!(bw_score_text(std::ptr::null(), 4), BW_VERDICT_FAIL_CLOSED);
+            assert_eq!(bw_score_text(b"x".as_ptr(), 0), BW_VERDICT_FAIL_CLOSED);
+            // Plainly benign → safe.
+            let benign = b"hello, how was school today?";
+            assert_eq!(
+                bw_score_text(benign.as_ptr(), benign.len()),
+                BW_VERDICT_SAFE
+            );
+            // Plainly adult → flagged (the rules engine detects it, never SAFE).
+            let flagged = "wanna watch some porn together".as_bytes();
+            assert_eq!(
+                bw_score_text(flagged.as_ptr(), flagged.len()),
+                BW_VERDICT_NSFW
+            );
+        }
+    }
+
+    #[test]
+    fn model_id_is_content_free() {
+        // Safe fn (no pointer args). Before init / in the no-onnx build it's the stub.
+        let p = bw_model_id();
+        assert!(!p.is_null());
+        // SAFETY: the returned pointer is a 'static NUL-terminated C string.
+        let s = unsafe { std::ffi::CStr::from_ptr(p) }.to_str().unwrap();
+        assert!(s == "stub-noop" || s == "nsfw-onnx", "unexpected id: {s}");
     }
 }

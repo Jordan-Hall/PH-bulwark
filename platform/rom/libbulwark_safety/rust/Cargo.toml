@@ -4,10 +4,14 @@
 # already cross-compiles Rust to Android via cargo-ndk).
 #
 # Reuses crates/bulwark-vision's scorer so detection NEVER drifts from the shipping
-# engine. The `onnx` feature pulls the real `ort` scorer (built on CI / for Android via
-# cargo-ndk, linking the same libonnxruntime.so the camera app ships via its AAR).
-# WITHOUT `onnx` (the default — what builds on the dev host), every score FAILS CLOSED,
-# so the crate + its ABI compile + verify here while the real model path is CI/Android.
+# engine. The `onnx` feature pulls the real `ort` scorer. VERIFIED building for
+# aarch64-linux-android via cargo-ndk (2026-06-20): `ort`'s `download-binaries` fetches
+# pyke's prebuilt onnxruntime (ms@1.24.2, aarch64-linux-android) and links it
+# `static=onnxruntime` — so it is STATICALLY baked into libbulwark_safety (NOT a separate
+# libonnxruntime.so, and NOT the camera app's AAR-bundled runtime). The only external
+# shared dep is `libc++_shared`, which AOSP provides system-wide. WITHOUT `onnx` (the
+# default — what builds on the dev host), every score FAILS CLOSED, so the crate + its
+# ABI compile + verify here while the real model path is CI/Android.
 [package]
 name = "bulwark-rom-safety"
 version = "0.0.0"

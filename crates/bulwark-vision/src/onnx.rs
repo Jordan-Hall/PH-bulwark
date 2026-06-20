@@ -157,6 +157,15 @@ impl OnnxScorer {
         Self::load_with_ep(model_path, input_size, norm, mode)
     }
 
+    /// Score `image_bytes`, propagating decode/inference errors as `Err` so a
+    /// **fail-CLOSED** caller (e.g. the Child Safety ROM FFI gate) can block an
+    /// unscorable frame instead of treating it as safe. This is the error-aware
+    /// counterpart to the [`Scorer::score`] impl, which fails OPEN (→ 0.0) on
+    /// purpose for the streaming/video path. Same model/preprocessing — no drift.
+    pub fn try_score(&self, image_bytes: &[u8]) -> anyhow::Result<f32> {
+        self.infer(image_bytes)
+    }
+
     /// Run inference and return the NSFW probability in `[0, 1]`.
     /// Returns an error on decode/inference failure so the caller can decide
     /// (the public [`Scorer::score`] impl fails OPEN → 0.0).
