@@ -326,4 +326,55 @@ mod tests {
         let s = unsafe { std::ffi::CStr::from_ptr(p) }.to_str().unwrap();
         assert!(s == "stub-noop" || s == "nsfw-onnx", "unexpected id: {s}");
     }
+
+    /// RUNTIME smoke for the REAL onnx scorer — only with `--features onnx` and the
+    /// bundled Apache-2.0 NSFW model present. This actually EXECUTES the full path the
+    /// build-only check never does: load the model, decode+preprocess+infer a real
+    /// frame, threshold it. A benign solid frame must score finite and below 0.7 → SAFE,
+    /// and `bw_model_id` must report the loaded model. Self-skips if the model is absent
+    /// (e.g. CI's no-onnx job) so it never blocks a build.
+    #[cfg(feature = "onnx")]
+    #[test]
+    fn onnx_runtime_smoke_benign_passes() {
+        use std::ffi::{CStr, CString};
+        let model = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../../crates/bulwark-vision/models/nsfw_detector.onnx"
+        );
+        if !std::path::Path::new(model).exists() {
+            eprintln!("onnx_runtime_smoke: bundled model absent — skipping");
+            return;
+        }
+        let c = CString::new(model).unwrap();
+        // SAFETY: `c` is a valid NUL-terminated path for the call.
+        let rc = unsafe { bw_init_once(c.as_ptr()) };
+        assert_eq!(rc, BW_OK, "bundled NSFW model must load (rc={rc})");
+
+        // Benign solid-grey 384x384 RGBA frame → real inference → finite score < 0.7 → SAFE.
+        let (w, h) = (384u32, 384u32);
+        let rgba = vec![128u8; (w * h * 4) as usize];
+        let mut score = -1.0f32;
+        // SAFETY: `rgba` is exactly w*h*4 bytes; `score` is a writable f32.
+        let v = unsafe {
+            bw_score_nsfw(
+                rgba.as_ptr(),
+                w as c_int,
+                h as c_int,
+                BW_FMT_RGBA8888,
+                &mut score,
+            )
+        };
+        assert_eq!(
+            v, BW_VERDICT_SAFE,
+            "benign grey frame must pass (score={score})"
+        );
+        assert!(
+            score.is_finite() && (0.0..NSFW_THRESHOLD).contains(&score),
+            "score must be a real probability below threshold: {score}"
+        );
+        // Model is loaded now → content-free id reflects it.
+        // SAFETY: 'static NUL-terminated C string.
+        let id = unsafe { CStr::from_ptr(bw_model_id()) }.to_str().unwrap();
+        assert_eq!(id, "nsfw-onnx");
+    }
 }
