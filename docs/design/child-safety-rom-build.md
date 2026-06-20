@@ -732,8 +732,24 @@ is present from first boot. The grooming model is guardian-gated.
   build host.
 - The `bulwarkd` native daemon design (§4): architecture and Rust API surface can
   be designed and prototyped now against the existing `libbulwark_client` cdylib.
+  ✅ DONE (2026-06-20, PR #222): `platform/rom/` scaffold landed — `bulwarkd/`
+  (Android.bp, .rc, main.cpp, sepolicy), `libbulwark_safety/` (C ABI header + C++
+  wrapper), `camera-gate/` (the returnBufferLocked `.patch` + INTEGRATION.md).
+  SCAFFOLD only — compiles against AOSP on a Linux host, not built/validated here.
+- **Rust core via FFI** ✅ DONE host-side / IN PROGRESS on Android (2026-06-20,
+  PR #223, branch `feat/rom-rust-ffi`, NOT merged): `platform/rom/libbulwark_safety/rust/`
+  reuses `crates/bulwark-vision` (NSFW, `onnx`-gated) + `crates/bulwark-text`
+  (rules-first grooming/adult text) and exports `bw_init_once` / `bw_score_nsfw` /
+  `bw_score_text` over the C ABI — so ROM detection NEVER drifts from the shipping
+  engine and detection is NOT re-implemented in C++. Fail-CLOSED throughout.
+  Host-verified no-onnx (unit tests green); `ort`-on-Android cross-compile confirmed
+  (`ort` + `bulwark-vision` build for `aarch64-linux-android`); the C++ wrapper
+  (`bulwark_safety.cpp`) + camera-gate/`bulwarkd` wiring to call this ABI is the
+  remaining integration step (currently the C++ side is a fail-closed stub).
 - The camera hook design (§7): design and prototype work now; build validation
-  needs the Cuttlefish emulator on a Linux host.
+  needs the Cuttlefish emulator on a Linux host. The scaffold patch landed (#222,
+  §7.3 `Camera3OutputStream::returnBufferLocked`) — still DRAFT, pending owner/architect
+  sign-off, unvalidated.
 - This design document.
 
 ### 5.2 PARKED — needs a Linux build host + Cuttlefish (emulator-first, then physical `lynx`)
