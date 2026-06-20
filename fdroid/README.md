@@ -7,12 +7,13 @@ into `repo/`, regenerates the signed index, and rsyncs `repo/` to the dist host.
 We do **not** build apps from source here (no `Builds:` blocks) — the APKs are
 built and signed by `.github/workflows/android-release.yml`.
 
-Two apps are mirrored:
+Three apps are mirrored:
 
 | Package | APK asset | Metadata |
 |---|---|---|
 | `co.predatorhunters.bulwark` (child filter) | `app-release.apk` | `metadata/co.predatorhunters.bulwark.yml` |
 | `co.predatorhunters.bulwark.camera` (safe camera) | `camera-release.apk` | `metadata/co.predatorhunters.bulwark.camera.yml` |
+| `co.predatorhunters.bulwark.manager` (guardian console) | `manager-release.apk` | `metadata/co.predatorhunters.bulwark.manager.yml` |
 
 ## What is and is NOT in git
 
@@ -52,6 +53,7 @@ Two apps are mirrored:
    mkdir -p repo
    cp /path/to/app-release.apk repo/
    cp /path/to/camera-release.apk repo/
+   cp /path/to/manager-release.apk repo/
    ```
 3. Regenerate and sign the index (reads `config.yml` + `metadata/`):
 
@@ -65,7 +67,7 @@ Two apps are mirrored:
 4. Sanity-check the metadata before publishing:
 
    ```sh
-   fdroid lint co.predatorhunters.bulwark co.predatorhunters.bulwark.camera
+   fdroid lint co.predatorhunters.bulwark co.predatorhunters.bulwark.camera co.predatorhunters.bulwark.manager
    ```
 5. Rsync the signed output to the dist host (only `repo/`, and `archive/` if you
    serve it):
