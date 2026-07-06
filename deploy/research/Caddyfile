@@ -11,6 +11,13 @@
 	email admin@predatorhunters.co.uk
 }
 
+# Drop-in site blocks: any *.caddy file mounted into /etc/caddy/conf.d is imported
+# here, so extra sites (e.g. tradingfieldguide.co.uk) are added by dropping a file
+# on the box — with NO further change to this repo. Imported blocks run inside THIS
+# container, so they inherit CF_API_TOKEN for their own DNS-01 certs. An empty or
+# absent directory is a harmless no-op.
+import /etc/caddy/conf.d/*.caddy
+
 research.predatorhunters.co.uk {
 	encode zstd gzip
 
