@@ -108,7 +108,7 @@ jobs:
             "set -eu",
             "echo '${GHCR_TOKEN}' | docker login ghcr.io -u '${GHCR_USER}' --password-stdin",
             "docker pull '${REF}'",
-            "mkdir -p /var/lib/research-caddy /var/lib/caddy-conf.d && chmod 700 /var/lib/research-caddy",
+            "mkdir -p /var/lib/research-caddy /var/lib/caddy-conf.d && chmod 700 /var/lib/research-caddy && touch /var/lib/caddy-conf.d/00-placeholder.caddy",
             "printf '%s' '${CF_B64}' | base64 -d > /etc/research-cf.env && chmod 600 /etc/research-cf.env",
             "docker network create ph-net 2>/dev/null || true",
             "docker rm -f research-site || true",
