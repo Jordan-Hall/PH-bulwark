@@ -1,19 +1,26 @@
-//! Application-principal authentication shared by device-facing gRPC services.
+//! Application-principal authentication for device-facing gRPC services.
 //!
-//! Transport mTLS protects the connection; this module binds each request to the
-//! pairing-minted enrollment credential so a caller cannot choose another
-//! `device_id` in its protobuf body.
+//! Server TLS protects the public connection. Pairing-minted device credentials
+//! bind each request to an enrolled installation so callers cannot substitute a
+//! different `device_id` in the protobuf body. Deployments may additionally use
+//! mTLS, but application authorization does not depend on a client certificate.
 
 use crate::accounts::AccountStore;
 use tonic::{metadata::MetadataMap, Request, Status};
 
+/// gRPC metadata key carrying the enrolled device id.
 pub const DEVICE_ID_HEADER: &str = "x-bulwark-device-id";
+/// gRPC metadata key carrying the pairing-minted device credential.
 pub const DEVICE_TOKEN_HEADER: &str = "x-bulwark-device-token";
 
+/// Authenticated child-device principal derived from server-side enrollment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DevicePrincipal {
+    /// Authenticated supervised-device id.
     pub device_id: String,
+    /// Server-resolved child id.
     pub child_id: String,
+    /// Server-resolved family id.
     pub family_id: String,
 }
 
@@ -25,28 +32,28 @@ fn metadata_str<'a>(metadata: &'a MetadataMap, key: &'static str) -> Result<&'a 
         .map_err(|_| Status::unauthenticated(format!("invalid {key}")))
 }
 
-/// Strict verification deliberately rejects AccountStore's historical
-/// tokenless-enrollment grace. A legacy record accepts every candidate token;
-/// probing it with an impossible non-hex sentinel lets production callers detect
-/// that state without exposing AccountStore internals. Pair-minted tokens are
-/// lowercase hex, so the sentinel can never be a legitimate token.
+/// Strictly verify a paired device token.
+///
+/// `AccountStore` still contains a legacy tokenless-enrollment compatibility
+/// branch. A legacy row accepts every candidate token, so probing it with an
+/// impossible non-hex sentinel lets the hardened public boundary reject that
+/// state without broadening the account-store API. Real pair-minted tokens are
+/// lowercase hexadecimal and can never equal the sentinel.
 pub fn verify_device_token_strict(accounts: &AccountStore, device_id: &str, token: &str) -> bool {
     const LEGACY_GRACE_PROBE: &str = "!bulwark-production-requires-pairing!";
     !accounts.verify_device_token(device_id, LEGACY_GRACE_PROBE)
         && accounts.verify_device_token(device_id, token)
 }
 
-/// Authenticate an enrolled child device and bind an optional payload identity
-/// to that principal. Authentication happens before request bodies are handed to
-/// analyzers, storage, fan-out, or other expensive work.
+/// Authenticate an enrolled child device and optionally bind a body identity to
+/// that principal before analysis/storage/fan-out work is allowed.
 pub fn authenticate_device<T>(
     request: &Request<T>,
     accounts: &AccountStore,
     claimed_device_id: Option<&str>,
 ) -> Result<DevicePrincipal, Status> {
-    let metadata = request.metadata();
-    let device_id = metadata_str(metadata, DEVICE_ID_HEADER)?.trim();
-    let token = metadata_str(metadata, DEVICE_TOKEN_HEADER)?.trim();
+    let device_id = metadata_str(request.metadata(), DEVICE_ID_HEADER)?.trim();
+    let token = metadata_str(request.metadata(), DEVICE_TOKEN_HEADER)?.trim();
     if device_id.is_empty() || token.is_empty() {
         return Err(Status::unauthenticated("device credentials are required"));
     }
@@ -73,6 +80,7 @@ pub fn authenticate_device<T>(
     })
 }
 
+/// Authenticate only from request metadata when no body device id exists.
 pub fn authenticate_device_metadata<T>(
     request: &Request<T>,
     accounts: &AccountStore,
@@ -88,7 +96,7 @@ mod tests {
     fn missing_metadata_is_rejected_before_work() {
         let store = AccountStore::new();
         let request = Request::new(());
-        let err = authenticate_device_metadata(&request, &store).unwrap_err();
-        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+        let error = authenticate_device_metadata(&request, &store).unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unauthenticated);
     }
 }
