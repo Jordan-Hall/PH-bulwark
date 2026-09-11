@@ -7,8 +7,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bulwark_core::{Analyzer, Result as CoreResult};
 use bulwark_proto::v1::{
-    analysis_request::Media, AnalysisRequest, DeviceProfile, ExecutionProvider, MediaKind,
-    OffloadPolicy, Verdict,
+    analysis_request::Media, Action, AnalysisRequest, Category, DeviceProfile, ExecutionProvider,
+    MediaKind, OffloadPolicy, Severity, Verdict,
 };
 
 pub mod accounts;
@@ -224,7 +224,32 @@ impl Analyzer for TextAnalyzerAdapter {
     }
 
     async fn analyze(&self, req: AnalysisRequest) -> CoreResult<Verdict> {
-        let span = req.text_span.clone().unwrap_or_default();
+        let Some(mut span) = req.text_span.clone() else {
+            return Ok(Verdict {
+                request_id: req.request_id,
+                category: Category::Unspecified as i32,
+                action: Action::Block as i32,
+                severity: Severity::Medium as i32,
+                rationale: "text analysis request did not contain a TextSpan".into(),
+                ..Default::default()
+            });
+        };
+        let device = if req.device_id.trim().is_empty() {
+            "__unbound_dev__"
+        } else {
+            req.device_id.trim()
+        };
+        let app = if span.app.trim().is_empty() {
+            "__unknown_app__"
+        } else {
+            span.app.trim()
+        };
+        let conversation = if span.thread_id.trim().is_empty() {
+            &req.request_id
+        } else {
+            span.thread_id.trim()
+        };
+        span.thread_id = format!("{device}\u{1f}{app}\u{1f}{conversation}");
         Ok(self.inner.analyze_span(&req.request_id, &span, req.ts))
     }
 }
