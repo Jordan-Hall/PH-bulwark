@@ -27,8 +27,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Remote VPN uses a separate short-lived signed lease after device pairing.
     // When an operator does not inject a secret, generate it once into the
-    // durable server state directory and reuse it across restarts. Raw lease
-    // tokens themselves are never persisted server-side.
+    // durable server state directory and reuse it across restarts. The region
+    // filtering runtime below owns inspection-CA generation/consistency checks,
+    // so there is no circular "CA must exist before the CA runtime starts" gate.
     if env_flag("BULWARK_WG_FILTER_ACTIVE") {
         configure_remote_vpn_auth(state_dir.as_deref())?;
     }
@@ -173,7 +174,7 @@ fn configure_remote_vpn_auth(state_dir: Option<&std::path::Path>) -> anyhow::Res
     use ring::rand::{SecureRandom, SystemRandom};
     use std::io::Write;
 
-    let server_key = std::env::var("BULWARK_WG_SERVER_PUBLIC_KEY")
+    std::env::var("BULWARK_WG_SERVER_PUBLIC_KEY")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| {
@@ -181,21 +182,10 @@ fn configure_remote_vpn_auth(state_dir: Option<&std::path::Path>) -> anyhow::Res
                 "BULWARK_WG_FILTER_ACTIVE requires BULWARK_WG_SERVER_PUBLIC_KEY"
             )
         })?;
-    let _ = server_key;
 
     let state_dir = state_dir.ok_or_else(|| {
         anyhow::anyhow!("Remote VPN authentication requires durable BULWARK_STATE_DIR")
     })?;
-    let inspection_ca = std::env::var_os("BULWARK_WG_INSPECTION_CA_PEM")
-        .filter(|value| !value.is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| state_dir.join("wg_inspection_ca.pem"));
-    if !inspection_ca.is_file() {
-        anyhow::bail!(
-            "BULWARK_WG_FILTER_ACTIVE requires a readable Remote VPN inspection CA: {}",
-            inspection_ca.display()
-        );
-    }
 
     if std::env::var("BULWARK_REMOTE_VPN_SESSION_SECRET")
         .ok()
