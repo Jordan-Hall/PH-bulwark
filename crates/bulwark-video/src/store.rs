@@ -1,115 +1,250 @@
-//! Local, content-addressed store for blocked/borderline video segments so a
-//! guardian can review the exact clip behind a decision.
+//! Owner-scoped local review-segment storage.
 //!
-//! ## Hard safety boundary
-//! Suspected **CSAM is NEVER written** — [`SegmentStore::store_if_safe`] rejects
-//! [`Category::CsamSuspected`] **before any hashing or I/O**. This is the single
-//! most important invariant in this module.
-//!
-//! ## Privacy
-//! Everything here stays **local to the guardian's node**. The proto [`Evidence`]
-//! keeps its no-raw-media invariant — raw clips NEVER ride the alert channel.
-//! Segments are content-addressed by SHA-256 (`blob://<hex>`) and expire on a TTL
-//! (a confirmed block is kept longer than a borderline warn/log). Only segments
-//! tied to an actual decision are kept; benign `ALLOW` traffic is not stored.
-//!
-//! [`Evidence`]: bulwark_proto::v1::Evidence
+//! Production defaults to **no raw-media retention**. Operators must explicitly
+//! opt in with `BULWARK_RETAIN_REVIEW_CLIPS=1`; when enabled every retained clip
+//! is bound to the originating device/family metadata and is expiry-checked on
+//! every read. Suspected CSAM is never written under any mode.
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
+use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bulwark_proto::v1::{Action, Category};
 
-/// Retention for a confirmed blocking action (BLOCK/BLUR/MUTE) — guardians need
-/// time to review and approve/deny.
-const BLOCK_TTL_SECS: u64 = 7 * 24 * 3600;
-/// Retention for a borderline-but-forwarded segment (WARN/LOG) — shorter.
-const REVIEW_TTL_SECS: u64 = 2 * 24 * 3600;
+const BLOCK_TTL_SECS: u64 = 24 * 3600;
+const REVIEW_TTL_SECS: u64 = 6 * 3600;
+const LEGACY_OWNER: &str = "__legacy_dev_only__";
 
-/// A content-addressed local segment store rooted at a directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetentionMode {
+    Disabled,
+    Scoped,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SegmentOwner {
+    pub device_id: String,
+    pub child_id: String,
+    pub family_id: String,
+    pub alert_id: String,
+}
+
+impl SegmentOwner {
+    pub fn for_device(device_id: impl Into<String>) -> Self {
+        Self {
+            device_id: device_id.into(),
+            ..Self::default()
+        }
+    }
+
+    fn validate(&self) -> io::Result<()> {
+        if self.device_id.trim().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "retained segment requires device ownership",
+            ));
+        }
+        for value in [
+            self.device_id.as_str(),
+            self.child_id.as_str(),
+            self.family_id.as_str(),
+            self.alert_id.as_str(),
+        ] {
+            if value.contains(['\n', '\r']) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "segment ownership metadata contains a newline",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub struct SegmentStore {
     base: PathBuf,
+    retention: RetentionMode,
 }
 
-/// A successfully stored segment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredSegment {
-    /// `blob://<sha256-hex>` — the reference the guardian app resolves locally.
     pub uri: String,
-    /// The lowercase hex SHA-256 of the segment bytes.
     pub sha256_hex: String,
+    pub device_id: String,
+    pub expires_at: u64,
+}
+
+#[derive(Debug, Clone)]
+struct SegmentMeta {
+    created_at: u64,
+    ttl_secs: u64,
+    device_id: String,
+    child_id: String,
+    family_id: String,
+    alert_id: String,
+}
+
+impl SegmentMeta {
+    fn expires_at(&self) -> u64 {
+        self.created_at.saturating_add(self.ttl_secs)
+    }
+
+    fn expired(&self, now: u64) -> bool {
+        now >= self.expires_at()
+    }
 }
 
 impl SegmentStore {
-    /// Open/create a store rooted at `base`.
+    /// Explicit/dev constructor. Retention is enabled because the caller chose a
+    /// concrete path. Production composition should use [`Self::default_location`].
     pub fn new(base: impl Into<PathBuf>) -> io::Result<Self> {
+        Self::new_with_mode(base, RetentionMode::Scoped)
+    }
+
+    pub fn new_with_mode(base: impl Into<PathBuf>, retention: RetentionMode) -> io::Result<Self> {
         let base = base.into();
         std::fs::create_dir_all(&base)?;
-        Ok(Self { base })
+        harden_dir_permissions(&base)?;
+        Ok(Self { base, retention })
     }
 
-    /// Open the per-user default location
-    /// (`%LOCALAPPDATA%/Bulwark/segments`, `$XDG_DATA_HOME/bulwark/segments`, …).
+    /// Production constructor: raw review clips are disabled unless the operator
+    /// explicitly opts in. This makes privacy-safe, content-free alerts the
+    /// default deployment behavior.
     pub fn default_location() -> io::Result<Self> {
-        Self::new(default_segments_dir())
+        let enabled = matches!(
+            std::env::var("BULWARK_RETAIN_REVIEW_CLIPS").ok().as_deref(),
+            Some("1") | Some("true") | Some("yes")
+        );
+        Self::new_with_mode(
+            default_segments_dir(),
+            if enabled {
+                RetentionMode::Scoped
+            } else {
+                RetentionMode::Disabled
+            },
+        )
     }
 
-    /// Store `segment` **iff it is safe + worth reviewing**. Returns `None` (no
-    /// write) when `category == CsamSuspected` (the HARD BOUNDARY, checked before
-    /// any I/O), when the `action` is benign (`ALLOW`/unspecified — nothing to
-    /// review), or when `segment` is empty. BLOCK/BLUR/MUTE are kept for
-    /// [`BLOCK_TTL_SECS`]; WARN/LOG for [`REVIEW_TTL_SECS`].
+    pub fn retention_mode(&self) -> RetentionMode {
+        self.retention
+    }
+
+    /// Compatibility helper for local tests/tools. Product code should call
+    /// [`Self::store_scoped_if_allowed`] so an authenticated device owns the clip.
     pub fn store_if_safe(
         &self,
         category: Category,
         action: Action,
         segment: &[u8],
     ) -> io::Result<Option<StoredSegment>> {
-        // HARD BOUNDARY: suspected CSAM is never persisted — block + hash only.
-        if category == Category::CsamSuspected {
+        self.store_scoped_if_allowed(
+            &SegmentOwner::for_device(LEGACY_OWNER),
+            category,
+            action,
+            segment,
+        )
+    }
+
+    pub fn store_scoped_if_allowed(
+        &self,
+        owner: &SegmentOwner,
+        category: Category,
+        action: Action,
+        segment: &[u8],
+    ) -> io::Result<Option<StoredSegment>> {
+        if category == Category::CsamSuspected || self.retention == RetentionMode::Disabled {
             return Ok(None);
         }
-        let ttl = match action {
+        let ttl_secs = match action {
             Action::Block | Action::Blur | Action::Mute => BLOCK_TTL_SECS,
             Action::Warn | Action::Log => REVIEW_TTL_SECS,
-            // ALLOW / UNSPECIFIED: benign, not retained (don't archive the stream).
             _ => return Ok(None),
         };
         if segment.is_empty() {
             return Ok(None);
         }
+        owner.validate()?;
 
         let sha = sha256_hex(segment);
         let blob = self.base.join(format!("{sha}.blob"));
         let meta = self.base.join(format!("{sha}.meta"));
-        if !blob.exists() {
-            std::fs::write(&blob, segment)?;
-        }
-        // meta: creation-ts + ttl (seconds), one per line — enough for purge.
-        std::fs::write(&meta, format!("{}\n{}\n", now_secs(), ttl))?;
+        let created_at = now_secs();
+        let metadata = SegmentMeta {
+            created_at,
+            ttl_secs,
+            device_id: owner.device_id.trim().to_string(),
+            child_id: owner.child_id.trim().to_string(),
+            family_id: owner.family_id.trim().to_string(),
+            alert_id: owner.alert_id.trim().to_string(),
+        };
+
+        // Never overwrite an existing object through a symlink. Content-addressed
+        // duplicates reuse the existing regular file; metadata is owner-specific,
+        // so a cross-owner duplicate gets a distinct opaque handle below.
+        let opaque = opaque_id(&sha, &metadata);
+        let blob = self.base.join(format!("{opaque}.blob"));
+        let meta = self.base.join(format!("{opaque}.meta"));
+        write_new_private(&blob, segment)?;
+        write_new_private(&meta, render_meta(&metadata).as_bytes())?;
+
         Ok(Some(StoredSegment {
-            uri: format!("blob://{sha}"),
+            uri: format!("blob://{opaque}"),
             sha256_hex: sha,
+            device_id: metadata.device_id,
+            expires_at: metadata.expires_at(),
         }))
     }
 
-    /// Load a stored segment by `blob://<sha256-hex>`. `None` if absent/purged or
-    /// the URI is malformed.
+    /// Legacy/dev full read. Production Review must use [`Self::open_authorized`].
     pub fn load(&self, uri: &str) -> io::Result<Option<Vec<u8>>> {
-        let Some(sha) = parse_blob_uri(uri) else {
+        let Some(id) = parse_blob_uri(uri) else {
             return Ok(None);
         };
-        match std::fs::read(self.base.join(format!("{sha}.blob"))) {
-            Ok(b) => Ok(Some(b)),
+        let Some(meta) = self.read_live_meta(&id)? else {
+            return Ok(None);
+        };
+        if meta.device_id != LEGACY_OWNER {
+            return Ok(None);
+        }
+        match std::fs::read(self.base.join(format!("{id}.blob"))) {
+            Ok(bytes) => Ok(Some(bytes)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
     }
 
-    /// Delete segments whose TTL has elapsed. Returns the number purged.
+    /// Authorize before opening bytes. `allowed_device_ids` comes from the live
+    /// guardian session scope; ownership is checked from server-written metadata,
+    /// never from a request-supplied device id.
+    pub fn open_authorized(
+        &self,
+        uri: &str,
+        allowed_device_ids: &HashSet<String>,
+    ) -> io::Result<Option<File>> {
+        if self.retention == RetentionMode::Disabled {
+            return Ok(None);
+        }
+        let Some(id) = parse_blob_uri(uri) else {
+            return Ok(None);
+        };
+        let Some(meta) = self.read_live_meta(&id)? else {
+            return Ok(None);
+        };
+        if meta.device_id == LEGACY_OWNER || !allowed_device_ids.contains(&meta.device_id) {
+            return Ok(None);
+        }
+        match File::open(self.base.join(format!("{id}.blob"))) {
+            Ok(file) => Ok(Some(file)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn purge_expired(&self) -> io::Result<usize> {
         let now = now_secs();
         let mut purged = 0;
@@ -118,30 +253,108 @@ impl SegmentStore {
             if path.extension().and_then(|e| e.to_str()) != Some("meta") {
                 continue;
             }
-            if let Some((ts, ttl)) = read_meta(&path) {
-                if now > ts.saturating_add(ttl) {
-                    let _ = std::fs::remove_file(path.with_extension("blob"));
-                    let _ = std::fs::remove_file(&path);
-                    purged += 1;
-                }
+            let expired = read_meta(&path).map(|m| m.expired(now)).unwrap_or(true);
+            if expired {
+                let _ = std::fs::remove_file(path.with_extension("blob"));
+                let _ = std::fs::remove_file(&path);
+                purged += 1;
             }
         }
         Ok(purged)
     }
+
+    fn read_live_meta(&self, id: &str) -> io::Result<Option<SegmentMeta>> {
+        let path = self.base.join(format!("{id}.meta"));
+        let meta = match read_meta(&path) {
+            Some(meta) => meta,
+            None => return Ok(None),
+        };
+        if meta.expired(now_secs()) {
+            let _ = std::fs::remove_file(self.base.join(format!("{id}.blob")));
+            let _ = std::fs::remove_file(path);
+            return Ok(None);
+        }
+        Ok(Some(meta))
+    }
 }
 
-/// Validate + extract the hex from a `blob://<sha256-hex>` URI.
+fn opaque_id(sha: &str, meta: &SegmentMeta) -> String {
+    let mut material = Vec::new();
+    material.extend_from_slice(sha.as_bytes());
+    material.extend_from_slice(meta.device_id.as_bytes());
+    material.extend_from_slice(meta.child_id.as_bytes());
+    material.extend_from_slice(meta.family_id.as_bytes());
+    material.extend_from_slice(meta.alert_id.as_bytes());
+    material.extend_from_slice(&meta.created_at.to_le_bytes());
+    sha256_hex(&material)
+}
+
+fn render_meta(meta: &SegmentMeta) -> String {
+    format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n",
+        meta.created_at,
+        meta.ttl_secs,
+        meta.device_id,
+        meta.child_id,
+        meta.family_id,
+        meta.alert_id
+    )
+}
+
 fn parse_blob_uri(uri: &str) -> Option<String> {
-    let sha = uri.strip_prefix("blob://")?;
-    (sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit())).then(|| sha.to_string())
+    let id = uri.strip_prefix("blob://")?;
+    (id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit())).then(|| id.to_ascii_lowercase())
 }
 
-fn read_meta(path: &Path) -> Option<(u64, u64)> {
+fn read_meta(path: &Path) -> Option<SegmentMeta> {
     let s = std::fs::read_to_string(path).ok()?;
     let mut lines = s.lines();
-    let ts = lines.next()?.trim().parse().ok()?;
-    let ttl = lines.next()?.trim().parse().ok()?;
-    Some((ts, ttl))
+    Some(SegmentMeta {
+        created_at: lines.next()?.trim().parse().ok()?,
+        ttl_secs: lines.next()?.trim().parse().ok()?,
+        device_id: lines.next()?.to_string(),
+        child_id: lines.next().unwrap_or_default().to_string(),
+        family_id: lines.next().unwrap_or_default().to_string(),
+        alert_id: lines.next().unwrap_or_default().to_string(),
+    })
+}
+
+fn write_new_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(path) {
+        Ok(mut file) => {
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            Ok(())
+        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            let meta = std::fs::symlink_metadata(path)?;
+            if !meta.file_type().is_file() || meta.file_type().is_symlink() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "refusing non-regular retained-media path",
+                ));
+            }
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn harden_dir_permissions(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }
 
 fn now_secs() -> u64 {
@@ -193,61 +406,48 @@ mod tests {
         let out = s
             .store_if_safe(Category::CsamSuspected, Action::Block, b"explicit-bytes")
             .unwrap();
-        assert!(out.is_none(), "CSAM must never be persisted");
+        assert!(out.is_none());
     }
 
     #[test]
-    fn blocked_segment_round_trips() {
+    fn legacy_dev_round_trip_is_explicit() {
         let s = tmp_store("block");
         let bytes = b"a blocked adult clip";
         let stored = s
             .store_if_safe(Category::AdultImage, Action::Block, bytes)
             .unwrap()
-            .expect("non-CSAM block is stored");
-        assert!(stored.uri.starts_with("blob://"));
-        let loaded = s.load(&stored.uri).unwrap().expect("loads back");
-        assert_eq!(loaded, bytes);
+            .expect("dev store retains");
+        assert_eq!(s.load(&stored.uri).unwrap().unwrap(), bytes);
     }
 
     #[test]
-    fn benign_allow_is_not_stored() {
-        let s = tmp_store("allow");
-        let out = s
-            .store_if_safe(Category::Safe, Action::Allow, b"benign")
+    fn scoped_clip_rejects_wrong_guardian_device_scope() {
+        let s = tmp_store("scope");
+        let owner = SegmentOwner::for_device("child-device-a");
+        let stored = s
+            .store_scoped_if_allowed(&owner, Category::AdultImage, Action::Block, b"clip")
+            .unwrap()
             .unwrap();
-        assert!(out.is_none(), "benign ALLOW traffic is not archived");
+        let mut wrong = HashSet::new();
+        wrong.insert("child-device-b".to_string());
+        assert!(s.open_authorized(&stored.uri, &wrong).unwrap().is_none());
+        let mut right = HashSet::new();
+        right.insert("child-device-a".to_string());
+        assert!(s.open_authorized(&stored.uri, &right).unwrap().is_some());
     }
 
     #[test]
-    fn empty_segment_is_not_stored() {
-        let s = tmp_store("empty");
+    fn disabled_store_never_writes() {
+        let dir = std::env::temp_dir().join(format!("bulwark-disabled-{}", std::process::id()));
+        let s = SegmentStore::new_with_mode(dir, RetentionMode::Disabled).unwrap();
         assert!(s
-            .store_if_safe(Category::AdultImage, Action::Block, b"")
+            .store_scoped_if_allowed(
+                &SegmentOwner::for_device("d"),
+                Category::AdultImage,
+                Action::Block,
+                b"clip"
+            )
             .unwrap()
             .is_none());
-    }
-
-    #[test]
-    fn purge_removes_expired() {
-        let s = tmp_store("purge");
-        let stored = s
-            .store_if_safe(Category::AdultImage, Action::Block, b"clip")
-            .unwrap()
-            .unwrap();
-        // Backdate the meta so it's already expired.
-        let meta = s.base.join(format!("{}.meta", stored.sha256_hex));
-        std::fs::write(&meta, "0\n1\n").unwrap();
-        assert_eq!(s.purge_expired().unwrap(), 1);
-        assert!(
-            s.load(&stored.uri).unwrap().is_none(),
-            "purged blob is gone"
-        );
-    }
-
-    #[test]
-    fn malformed_uri_loads_none() {
-        let s = tmp_store("bad");
-        assert!(s.load("blob://not-hex").unwrap().is_none());
-        assert!(s.load("http://x").unwrap().is_none());
     }
 }
