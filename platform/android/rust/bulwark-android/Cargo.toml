@@ -1,31 +1,15 @@
-# bulwark-android — the JNI bridge that backs `co.predatorhunters.bulwark.core.RustBridge`.
+# bulwark-android — JNI bridge for `co.predatorhunters.bulwark.core.RustBridge`.
 #
-# This crate is the C-ABI shared library the Android app loads with
-# `System.loadLibrary("bulwark_client")` (see RustBridge.kt). It exposes the
-# `Java_co_predatorhunters_bulwark_core_RustBridge_*` symbols and forwards the
-# on-device-captured text into the LEGITIMATE, deterministic content analyzers:
-#
-#   * bulwark-text   — the rules-first grooming / adult-text detector (TextAnalyzer)
-#   * bulwark-policy — the Verdict -> Action policy engine (Policy)
-#
-# It is a TRANSPARENT content-safety + tamper-EVIDENCE bridge: it analyses
-# on-device text and relays redacted PROTECTION_DISABLED events (uninstall attempt
-# / protection turned off) to the guardian. Anti-removal ENFORCEMENT (device admin
-# / Device Owner / always-on-VPN lockdown) lives in the consented Android policy
-# layer (co.predatorhunters.bulwark.admin), applied openly on a managed child device —
-# never covertly. No screen mirroring, no remote wipe, no hidden location, no
-# reading other apps beyond the transparent on-device safety check.
-#
-# DETACHED from the root cargo workspace (own empty `[workspace]` table, like
-# apps/parent/Cargo.toml) so it never perturbs `cargo build --workspace` for the
-# engine crates and is free to pull the `jni` cdylib toolchain on its own.
+# The Android build supports two explicit VPN modes:
+#   * Local VPN  — TLS inspection + policy on the device.
+#   * Remote VPN — transport-only WireGuard on the device; the region filters.
 
 [package]
 name = "bulwark-android"
 version = "0.0.0"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
-description = "JNI bridge: Android app -> Bulwark deterministic content analyzers."
+description = "JNI bridge: Android app -> Bulwark content-safety core."
 
 [lib]
 name = "bulwark_client"
@@ -33,17 +17,11 @@ crate-type = ["cdylib"]
 
 [dependencies]
 jni = "0.21"
-
 bulwark-text = { path = "../../../../crates/bulwark-text" }
 bulwark-policy = { path = "../../../../crates/bulwark-policy" }
 bulwark-core = { path = "../../../../crates/bulwark-core" }
 bulwark-proto = { path = "../../../../crates/bulwark-proto" }
-
-# Host tests/default builds keep the existing interception dependency lean. The
-# Android target below enables `wg-client`; server-filter mode then runs ONLY the
-# transport pump on the phone while inspection/inference stays in the region.
 bulwark-net = { path = "../../../../crates/bulwark-net" }
-
 serde_json = "1"
 tracing = { version = "0.1", features = ["log"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
@@ -53,11 +31,10 @@ tonic = { version = "0.14", features = ["transport", "tls-ring", "tls-webpki-roo
 android_logger = "0.13"
 log = "0.4"
 bulwark-net = { path = "../../../../crates/bulwark-net", features = ["wg-client"] }
-# `WgClientConfig` accepts boringtun's X25519 public-key type. Keeping the direct
-# dependency Android-only avoids widening the host JNI test graph.
 boringtun = "0.7"
 data-encoding = "2"
 libc = "0.2"
+rand_core = { version = "0.6.4", features = ["getrandom"] }
 
 [dev-dependencies]
 async-trait = "0.1"
