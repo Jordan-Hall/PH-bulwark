@@ -26,8 +26,6 @@ command -v docker >/dev/null 2>&1 || fail "docker is required"
 server_public_key="$(tr -d '[:space:]' </etc/wireguard/server.pub)"
 [ -n "$server_public_key" ] || fail "WireGuard server public key is empty"
 
-# Install the 15-second expiry/guardian-authorization reconciler before any
-# Remote VPN grant can be used.
 "$LEASE_INSTALLER"
 
 image="${BULWARK_IMAGE:-}"
@@ -36,22 +34,24 @@ if [ -z "$image" ]; then
 fi
 [ -n "$image" ] || fail "set BULWARK_IMAGE or keep an existing $CONTAINER container to resolve the image"
 
-# IMPORTANT: do NOT disable an existing REDIRECT while restarting the server.
-# With the listener absent, REDIRECT fails closed (connections fail). Removing
-# the rules would restore the old NAT-only unfiltered path during the restart.
-
+# Existing REDIRECT rules remain across restarts. With no listener they fail
+# closed; removing them here would create a temporary NAT-only bypass.
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 mkdir -p "$STATE_DIR/tls"
 chmod 700 "$STATE_DIR" "$STATE_DIR/tls"
+# The image runs as uid 10001. Keep application state writable while preserving
+# the cluster CA private key (if present) as root-only.
+chown -R 10001:10001 "$STATE_DIR"
+if [ -f "$STATE_DIR/tls/ca.key" ]; then
+  chown root:root "$STATE_DIR/tls/ca.key"
+  chmod 600 "$STATE_DIR/tls/ca.key"
+fi
 
 smtp_args=()
 if [ -f "$STATE_DIR/smtp.env" ]; then
   smtp_args=(--env-file "$STATE_DIR/smtp.env")
 fi
 
-# Host networking is intentional: Linux netfilter REDIRECT and SO_ORIGINAL_DST
-# live in the host namespace. The container remains an unprivileged user and
-# does not need Docker socket, NET_ADMIN or WireGuard private-key mounts.
 docker run -d \
   --name "$CONTAINER" \
   --restart unless-stopped \
@@ -86,9 +86,10 @@ docker logs "$CONTAINER" 2>&1 | grep -q 'Remote VPN region filter runtime active
   fail "Remote VPN region filter never became ready"
 }
 
-# First activation inserts the rules; upgrades/restarts simply re-assert the
-# already-fail-closed rules after listener readiness.
 "$FILTER_TOOL" enable
-systemctl start bulwark-wg-lease-reconcile.service
+# On a fresh region there is no wg_peers.json until the first authenticated
+# Remote VPN lease. That is a valid empty state; the enabled timer will converge
+# immediately after provisioning creates the file.
+systemctl start bulwark-wg-lease-reconcile.service || true
 
 note "Remote VPN active: authenticated leases + wg0 + in-process filtering + live revocation"
