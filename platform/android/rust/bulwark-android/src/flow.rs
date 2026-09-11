@@ -1,14 +1,9 @@
 //! Android VPN flow consumer.
 //!
-//! Text is analysed locally by the deterministic rules engine. Full still-image
-//! bodies and bounded video segments surfaced by `bulwark-net` are scored through
-//! the enrolled cluster Analysis service over the reused HTTP/2 channel in
-//! `relay`. A media analysis failure is never reported as SAFE: the live gate is
-//! resolved fail-closed and a content-free protection-status alert is raised.
-//!
-//! Only responses explicitly surfaced as scorable media are delayed. Structural
-//! resources, tiny icons, oversized progressive downloads, JSON/SSE and ordinary
-//! request traffic are still forwarded immediately by the proxy.
+//! Text is judged locally. Complete image/video units surfaced by `bulwark-net`
+//! are sent through authenticated cluster Analysis over the shared HTTP/2 channel.
+//! Unknown/late media is blocked, never mislabeled SAFE. Work is bounded-concurrent
+//! so one slow video segment does not head-of-line block unrelated response gates.
 
 use std::sync::Arc;
 
@@ -19,12 +14,14 @@ use bulwark_proto::v1::{
 };
 use bulwark_proto::DeviceId;
 
+const MAX_INFLIGHT_FLOWS: usize = 4;
+
 /// A resolved policy result for one captured flow.
 pub struct FlowOutcome {
     pub decision: InterceptDecision,
     pub alert: Option<AlertEvent>,
-    /// True when protection coverage degraded and the media was blocked rather
-    /// than falsely declared safe.
+    /// True when protection coverage degraded and media was blocked rather than
+    /// falsely reported safe.
     pub media_gap: bool,
 }
 
@@ -86,10 +83,8 @@ fn media_deadline(source: SourceChannel, kind: MediaKind) -> u32 {
     }
 }
 
-/// Extract only complete media objects. `bulwark-net::interceptor` replaces the
-/// HTTP body's bounded peek with the full bytes only when the proxy explicitly
-/// captured a scorable image/video body, so this does not accidentally offload
-/// arbitrary HTML prefixes.
+/// Extract only complete media objects. The interceptor substitutes the full body
+/// into `body_peek` only for media explicitly admitted by its size/MIME gates.
 fn media_work(flow: &CapturedFlow) -> Option<MediaWork> {
     match &flow.payload {
         FlowPayload::StreamChunk {
@@ -97,7 +92,9 @@ fn media_work(flow: &CapturedFlow) -> Option<MediaWork> {
             mime_type,
             ..
         } => {
-            let mime = mime_type.clone().unwrap_or_else(|| "video/mp4".to_string());
+            let mime = mime_type
+                .clone()
+                .unwrap_or_else(|| "video/mp4".to_string());
             let kind = media_kind(&mime).unwrap_or(MediaKind::Video);
             Some(MediaWork {
                 kind,
@@ -256,15 +253,16 @@ fn decide_text(flow: &CapturedFlow) -> FlowOutcome {
         from_minor: false,
         prior_excerpts: Vec::new(),
     };
-    let verdict = engine
-        .text
-        .analyze_span(&format!("net-{}", flow.flow_id), &span, crate::relay::now_ms());
+    let verdict = engine.text.analyze_span(
+        &format!("net-{}", flow.flow_id),
+        &span,
+        crate::relay::now_ms(),
+    );
     outcome_from_verdict(flow, verdict)
 }
 
-/// Pure/local decision helper used by host tests. Media is deliberately returned
-/// as a coverage block here because remote RPCs are exercised in integration
-/// tests; production `run_flow_consumer` uses `decide_flow_async`.
+/// Pure/local decision helper for host tests. Production media decisions use the
+/// async cluster path; here media conservatively resolves to Drop.
 pub fn decide_flow(flow: &CapturedFlow) -> FlowOutcome {
     if media_work(flow).is_some() {
         FlowOutcome::coverage_block()
@@ -287,7 +285,7 @@ fn note_media_gap_once(flow: &CapturedFlow) {
     tracing::warn!(
         flow_id = flow.flow_id,
         host = %flow.app_or_host,
-        "media was blocked because protected analysis was unavailable or inconclusive"
+        "media blocked because protected analysis was unavailable or inconclusive"
     );
     if !NOTICED.swap(true, Ordering::Relaxed) {
         crate::enqueue_protection_alert(
@@ -307,26 +305,42 @@ fn local_alert_json(event: &AlertEvent) -> String {
     .to_string()
 }
 
-/// Drain captured flows and resolve every live response gate. Expensive media
-/// analysis is asynchronous and uses the shared channel, so no handshake is paid
-/// per flow. The proxy itself bounds how much media can enter this path.
+async fn process_flow(interceptor: Arc<dyn Interceptor>, flow: CapturedFlow) {
+    let flow_id = flow.flow_id;
+    let outcome = decide_flow_async(&flow).await;
+    if let Err(error) = interceptor.apply(flow_id, outcome.decision).await {
+        tracing::warn!(%error, flow_id, "failed to apply flow decision");
+    }
+    if outcome.media_gap {
+        note_media_gap_once(&flow);
+    }
+    if let Some(event) = outcome.alert {
+        crate::enqueue_alert_json(local_alert_json(&event));
+        crate::relay::relay_alert_best_effort(event);
+    }
+}
+
+/// Drain captured flows with at most four analysis decisions in flight. This
+/// removes head-of-line blocking while bounding memory, network work and model
+/// pressure on a child device.
 pub async fn run_flow_consumer(interceptor: Arc<dyn Interceptor>) {
-    tracing::info!("flow consumer started; protected media gate active");
+    tracing::info!(
+        max_inflight = MAX_INFLIGHT_FLOWS,
+        "flow consumer started; protected media gate active"
+    );
+    let mut tasks = tokio::task::JoinSet::new();
+
     loop {
+        while tasks.len() >= MAX_INFLIGHT_FLOWS {
+            let _ = tasks.join_next().await;
+        }
+
         match interceptor.next_flow().await {
             Ok(Some(flow)) => {
-                let flow_id = flow.flow_id;
-                let outcome = decide_flow_async(&flow).await;
-                if let Err(error) = interceptor.apply(flow_id, outcome.decision).await {
-                    tracing::warn!(%error, flow_id, "failed to apply flow decision");
-                }
-                if outcome.media_gap {
-                    note_media_gap_once(&flow);
-                }
-                if let Some(event) = outcome.alert {
-                    crate::enqueue_alert_json(local_alert_json(&event));
-                    crate::relay::relay_alert_best_effort(event);
-                }
+                let interceptor = interceptor.clone();
+                tasks.spawn(async move {
+                    process_flow(interceptor, flow).await;
+                });
             }
             Ok(None) => break,
             Err(error) => {
@@ -335,6 +349,8 @@ pub async fn run_flow_consumer(interceptor: Arc<dyn Interceptor>) {
             }
         }
     }
+
+    while tasks.join_next().await.is_some() {}
     tracing::info!("flow consumer ended");
 }
 
@@ -381,7 +397,10 @@ mod tests {
             Some("image/jpeg"),
             &[0xff; 32 * 1024],
         );
-        assert!(matches!(decide_flow(&image).decision, InterceptDecision::Drop));
+        assert!(matches!(
+            decide_flow(&image).decision,
+            InterceptDecision::Drop
+        ));
         assert!(media_work(&image).is_some());
 
         let video = http_flow(
@@ -417,7 +436,10 @@ mod tests {
             b"are you coming to football practice tonight?",
         );
         let outcome = decide_flow(&flow);
-        assert!(matches!(outcome.decision, InterceptDecision::Forward));
+        assert!(matches!(
+            outcome.decision,
+            InterceptDecision::Forward
+        ));
         assert!(outcome.alert.is_none());
     }
 
@@ -437,5 +459,10 @@ mod tests {
         let work = media_work(&flow).expect("stream media is scored");
         assert_eq!(work.kind, MediaKind::Video);
         assert_eq!(work.mime_type, "video/mp4");
+    }
+
+    #[test]
+    fn concurrency_bound_is_small() {
+        assert_eq!(MAX_INFLIGHT_FLOWS, 4);
     }
 }
