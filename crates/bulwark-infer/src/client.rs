@@ -1,8 +1,8 @@
-//! The cluster-offload gRPC client (tonic, over **mTLS**).
+//! Authenticated cluster-offload gRPC client.
 //!
-//! Every device call is authenticated twice: the TLS client certificate proves
-//! transport identity and the pairing-minted device token proves enrollment.
-//! The token is carried only in gRPC metadata and is never written to logs.
+//! Every device call is authenticated twice: mTLS proves transport identity and
+//! the pairing-minted device credential proves current enrollment. The enrollment
+//! token is carried only in gRPC metadata and is Debug-redacted.
 
 use std::time::Duration;
 
@@ -24,11 +24,16 @@ use crate::error::{InferError, Result};
 const DEVICE_ID_HEADER: &str = "x-bulwark-device-id";
 const DEVICE_TOKEN_HEADER: &str = "x-bulwark-device-token";
 
+/// PEM material for the mutually authenticated device→cluster TLS connection.
 #[derive(Clone)]
 pub struct ClientTlsIdentity {
+    /// PEM client certificate chain issued to the installation.
     pub client_cert_pem: Vec<u8>,
+    /// PEM private key corresponding to `client_cert_pem`.
     pub client_key_pem: Vec<u8>,
+    /// PEM CA certificate used to authenticate the cluster.
     pub ca_cert_pem: Vec<u8>,
+    /// Expected TLS server name/SNI.
     pub server_domain: String,
 }
 
@@ -55,8 +60,7 @@ impl ClientTlsIdentity {
     }
 }
 
-/// Enrollment credential attached to device-facing RPCs. The raw token is
-/// intentionally private and Debug-redacted.
+/// Pairing-minted enrollment credential attached to every device-facing RPC.
 #[derive(Clone)]
 pub struct DeviceAuth {
     device_id: String,
@@ -73,19 +77,22 @@ impl std::fmt::Debug for DeviceAuth {
 }
 
 impl DeviceAuth {
+    /// Validate and construct an enrollment identity.
     pub fn new(device_id: impl Into<String>, device_token: impl Into<String>) -> Result<Self> {
         let device_id = device_id.into().trim().to_string();
         let device_token = device_token.into().trim().to_string();
         if device_id.is_empty() {
-            return Err(InferError::Tls("device_id is required for authenticated offload".into()).into());
+            return Err(
+                InferError::Tls("device_id is required for authenticated offload".into()).into(),
+            );
         }
         if device_token.len() < 32 {
             return Err(InferError::Tls(
-                "device token is missing or too short; pair this installation before offload".into(),
+                "device token is missing or too short; pair this installation before offload"
+                    .into(),
             )
             .into());
         }
-        // Validate once here so every request can insert metadata infallibly.
         MetadataValue::try_from(device_id.as_str()).map_err(|_| {
             bulwark_core::Error::from(InferError::Tls(
                 "device_id contains characters invalid in gRPC metadata".into(),
@@ -102,32 +109,37 @@ impl DeviceAuth {
         })
     }
 
-    /// Load the enrollment credential supplied by the desktop/mobile composition
-    /// root. Production device offload refuses to operate without it.
+    /// Load `BULWARK_DEVICE_ID` and `BULWARK_DEVICE_TOKEN`.
     pub fn from_env() -> Result<Self> {
-        let device_id = std::env::var("BULWARK_DEVICE_ID")
-            .map_err(|_| InferError::Tls("BULWARK_DEVICE_ID is not set; device is not enrolled".into()))?;
-        let device_token = std::env::var("BULWARK_DEVICE_TOKEN")
-            .map_err(|_| InferError::Tls("BULWARK_DEVICE_TOKEN is not set; device is not enrolled".into()))?;
+        let device_id = std::env::var("BULWARK_DEVICE_ID").map_err(|_| {
+            InferError::Tls("BULWARK_DEVICE_ID is not set; device is not enrolled".into())
+        })?;
+        let device_token = std::env::var("BULWARK_DEVICE_TOKEN").map_err(|_| {
+            InferError::Tls("BULWARK_DEVICE_TOKEN is not set; device is not enrolled".into())
+        })?;
         Self::new(device_id, device_token)
     }
 
     fn request<T>(&self, body: T) -> Result<Request<T>> {
-        let mut req = Request::new(body);
+        let mut request = Request::new(body);
         let device_id = MetadataValue::try_from(self.device_id.as_str())
             .map_err(|_| InferError::Tls("invalid device id metadata".into()))?;
         let device_token = MetadataValue::try_from(self.device_token.as_str())
             .map_err(|_| InferError::Tls("invalid device token metadata".into()))?;
-        req.metadata_mut().insert(DEVICE_ID_HEADER, device_id);
-        req.metadata_mut().insert(DEVICE_TOKEN_HEADER, device_token);
-        Ok(req)
+        request.metadata_mut().insert(DEVICE_ID_HEADER, device_id);
+        request
+            .metadata_mut()
+            .insert(DEVICE_TOKEN_HEADER, device_token);
+        Ok(request)
     }
 
+    /// Authenticated supervised-device identifier.
     pub fn device_id(&self) -> &str {
         &self.device_id
     }
 }
 
+/// Shared mTLS gRPC client for Offload and Analysis services.
 #[derive(Clone, Debug)]
 pub struct OffloadClient {
     offload: ProtoOffloadClient<Channel>,
@@ -136,32 +148,34 @@ pub struct OffloadClient {
 }
 
 impl OffloadClient {
-    /// Connect using mTLS and the pairing-minted device enrollment credential
-    /// loaded from `BULWARK_DEVICE_ID` / `BULWARK_DEVICE_TOKEN`.
+    /// Connect with mTLS and enrollment credentials loaded from the environment.
     pub async fn connect(endpoint: &str, tls: &ClientTlsIdentity) -> Result<Self> {
         let auth = DeviceAuth::from_env()?;
         Self::connect_authenticated(endpoint, tls, auth).await
     }
 
+    /// Connect with an explicit enrollment identity.
     pub async fn connect_authenticated(
         endpoint: &str,
         tls: &ClientTlsIdentity,
         auth: DeviceAuth,
     ) -> Result<Self> {
         let endpoint = Endpoint::from_shared(endpoint.to_owned())
-            .map_err(|e| InferError::Transport(format!("bad endpoint {endpoint:?}: {e}")))?
+            .map_err(|error| InferError::Transport(format!("bad endpoint {endpoint:?}: {error}")))?
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(20))
             .tcp_keepalive(Some(Duration::from_secs(30)))
+            .tcp_nodelay(true)
             .tls_config(tls.to_tls_config())
-            .map_err(|e| InferError::Tls(format!("mTLS config: {e}")))?;
+            .map_err(|error| InferError::Tls(format!("mTLS config: {error}")))?;
         let channel = endpoint
             .connect()
             .await
-            .map_err(|e| InferError::Transport(format!("connect failed: {e}")))?;
+            .map_err(|error| InferError::Transport(format!("connect failed: {error}")))?;
         Ok(Self::from_channel_authenticated(channel, auth))
     }
 
+    /// Build service clients over an already authenticated shared channel.
     pub fn from_channel_authenticated(channel: Channel, auth: DeviceAuth) -> Self {
         Self {
             offload: ProtoOffloadClient::new(channel.clone()),
@@ -170,95 +184,111 @@ impl OffloadClient {
         }
     }
 
+    /// Negotiate the local-vs-cluster execution policy for this enrolled device.
     pub async fn negotiate_offload(&self, mut profile: DeviceProfile) -> Result<OffloadPolicy> {
         if profile.device_id.trim().is_empty() {
             profile.device_id = self.auth.device_id().to_string();
         } else if profile.device_id.trim() != self.auth.device_id() {
-            return Err(InferError::Rpc("device profile identity does not match enrolled credential".into()).into());
+            return Err(InferError::Rpc(
+                "device profile identity does not match enrolled credential".into(),
+            )
+            .into());
         }
-        let resp = self
-            .offload
+        self.offload
             .clone()
             .negotiate_offload(self.auth.request(profile)?)
             .await
-            .map_err(|s| InferError::Rpc(format!("NegotiateOffload: {s}")))?;
-        Ok(resp.into_inner())
+            .map(|response| response.into_inner())
+            .map_err(|status| InferError::Rpc(format!("NegotiateOffload: {status}")).into())
     }
 
+    /// Refresh a negotiated policy with current RTT/battery observations.
     pub async fn refresh_offload(
         &self,
-        mut req: RefreshOffloadRequest,
+        mut request: RefreshOffloadRequest,
     ) -> Result<OffloadPolicy> {
-        if req.device_id.trim().is_empty() {
-            req.device_id = self.auth.device_id().to_string();
-        } else if req.device_id.trim() != self.auth.device_id() {
-            return Err(InferError::Rpc("refresh identity does not match enrolled credential".into()).into());
+        if request.device_id.trim().is_empty() {
+            request.device_id = self.auth.device_id().to_string();
+        } else if request.device_id.trim() != self.auth.device_id() {
+            return Err(InferError::Rpc(
+                "refresh identity does not match enrolled credential".into(),
+            )
+            .into());
         }
-        let resp = self
-            .offload
+        self.offload
             .clone()
-            .refresh_offload(self.auth.request(req)?)
+            .refresh_offload(self.auth.request(request)?)
             .await
-            .map_err(|s| InferError::Rpc(format!("RefreshOffload: {s}")))?;
-        Ok(resp.into_inner())
+            .map(|response| response.into_inner())
+            .map_err(|status| InferError::Rpc(format!("RefreshOffload: {status}")).into())
     }
 
-    pub async fn analyze(&self, mut req: AnalysisRequest) -> Result<Verdict> {
-        if req.device_id.trim().is_empty() {
-            req.device_id = self.auth.device_id().to_string();
-        } else if req.device_id.trim() != self.auth.device_id() {
-            return Err(InferError::Rpc("analysis identity does not match enrolled credential".into()).into());
+    /// Analyze one media/text unit after binding its body identity to enrollment.
+    pub async fn analyze(&self, mut request: AnalysisRequest) -> Result<Verdict> {
+        if request.device_id.trim().is_empty() {
+            request.device_id = self.auth.device_id().to_string();
+        } else if request.device_id.trim() != self.auth.device_id() {
+            return Err(InferError::Rpc(
+                "analysis identity does not match enrolled credential".into(),
+            )
+            .into());
         }
-        let resp = self
-            .analysis
+        self.analysis
             .clone()
-            .analyze(self.auth.request(req)?)
+            .analyze(self.auth.request(request)?)
             .await
-            .map_err(|s| InferError::Rpc(format!("Analyze: {s}")))?;
-        Ok(resp.into_inner())
+            .map(|response| response.into_inner())
+            .map_err(|status| InferError::Rpc(format!("Analyze: {status}")).into())
     }
 
+    /// Analyze a batch; every item must belong to this enrolled device.
     pub async fn analyze_batch(&self, mut batch: AnalysisBatch) -> Result<VerdictBatch> {
-        for req in &mut batch.requests {
-            if req.device_id.trim().is_empty() {
-                req.device_id = self.auth.device_id().to_string();
-            } else if req.device_id.trim() != self.auth.device_id() {
-                return Err(InferError::Rpc("batch contains a request for another device".into()).into());
+        for request in &mut batch.requests {
+            if request.device_id.trim().is_empty() {
+                request.device_id = self.auth.device_id().to_string();
+            } else if request.device_id.trim() != self.auth.device_id() {
+                return Err(
+                    InferError::Rpc("batch contains a request for another device".into()).into(),
+                );
             }
         }
-        let resp = self
-            .analysis
+        self.analysis
             .clone()
             .analyze_batch(self.auth.request(batch)?)
             .await
-            .map_err(|s| InferError::Rpc(format!("AnalyzeBatch: {s}")))?;
-        Ok(resp.into_inner())
+            .map(|response| response.into_inner())
+            .map_err(|status| InferError::Rpc(format!("AnalyzeBatch: {status}")).into())
     }
 
+    /// Open a bidirectional live-analysis stream authenticated as this device.
     pub async fn analyze_stream(
         &self,
         requests: BoxStream<'static, AnalysisRequest>,
     ) -> Result<BoxStream<'static, Result<Verdict>>> {
         let expected = self.auth.device_id().to_string();
-        let requests = requests.map(move |mut req| {
-            if req.device_id.trim().is_empty() {
-                req.device_id = expected.clone();
+        let requests = requests.map(move |mut request| {
+            if request.device_id.trim().is_empty() {
+                request.device_id = expected.clone();
             }
-            req
+            request
         });
-        let resp = self
+        let response = self
             .analysis
             .clone()
             .analyze_stream(self.auth.request(requests.boxed())?)
             .await
-            .map_err(|s| InferError::Rpc(format!("AnalyzeStream: {s}")))?;
+            .map_err(|status| InferError::Rpc(format!("AnalyzeStream: {status}")))?;
 
-        let stream = resp.into_inner().map(|item| {
-            item.map_err(|s| {
-                bulwark_core::Error::from(InferError::Rpc(format!("AnalyzeStream item: {s}")))
+        Ok(response
+            .into_inner()
+            .map(|item| {
+                item.map_err(|status| {
+                    bulwark_core::Error::from(InferError::Rpc(format!(
+                        "AnalyzeStream item: {status}"
+                    )))
+                })
             })
-        });
-        Ok(stream.boxed())
+            .boxed())
     }
 }
 
@@ -295,11 +325,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_rejects_a_malformed_endpoint() {
+    async fn malformed_endpoint_is_rejected_before_dial() {
         let auth = DeviceAuth::new("dev-1", "b".repeat(64)).unwrap();
-        let err = OffloadClient::connect_authenticated("not a url", &dummy_identity(), auth)
-            .await
-            .unwrap_err();
-        assert!(matches!(err, bulwark_core::Error::Other(_)));
+        let error =
+            OffloadClient::connect_authenticated("not a url", &dummy_identity(), auth)
+                .await
+                .unwrap_err();
+        assert!(matches!(error, bulwark_core::Error::Other(_)));
     }
 }
