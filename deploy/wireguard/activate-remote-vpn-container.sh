@@ -36,10 +36,9 @@ if [ -z "$image" ]; then
 fi
 [ -n "$image" ] || fail "set BULWARK_IMAGE or keep an existing $CONTAINER container to resolve the image"
 
-# Stop the REDIRECT first. During the restart, traffic cannot be sent to a dead
-# inspection listener. We enable it only after the new server proves the Remote
-# VPN listener is live.
-"$FILTER_TOOL" disable >/dev/null 2>&1 || true
+# IMPORTANT: do NOT disable an existing REDIRECT while restarting the server.
+# With the listener absent, REDIRECT fails closed (connections fail). Removing
+# the rules would restore the old NAT-only unfiltered path during the restart.
 
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 mkdir -p "$STATE_DIR/tls"
@@ -76,7 +75,6 @@ for _ in $(seq 1 40); do
     docker logs --tail 100 "$CONTAINER" >&2 || true
     fail "Remote VPN server container exited during startup"
   fi
-  # The region runtime logs this only after CA bootstrap + bind probe succeeds.
   if docker logs "$CONTAINER" 2>&1 | grep -q 'Remote VPN region filter runtime active'; then
     break
   fi
@@ -88,7 +86,8 @@ docker logs "$CONTAINER" 2>&1 | grep -q 'Remote VPN region filter runtime active
   fail "Remote VPN region filter never became ready"
 }
 
-# wg-filter.sh performs its own listener preflight before inserting REDIRECT.
+# First activation inserts the rules; upgrades/restarts simply re-assert the
+# already-fail-closed rules after listener readiness.
 "$FILTER_TOOL" enable
 systemctl start bulwark-wg-lease-reconcile.service
 
