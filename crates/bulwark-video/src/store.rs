@@ -1,9 +1,9 @@
 //! Owner-scoped local review-segment storage.
 //!
-//! Production defaults to **no raw-media retention**. Operators must explicitly
-//! opt in with `BULWARK_RETAIN_REVIEW_CLIPS=1`; when enabled every retained clip
-//! is bound to the originating device/family metadata and is expiry-checked on
-//! every read. Suspected CSAM is never written under any mode.
+//! Production defaults to no raw-media retention. Operators explicitly opt in
+//! with `BULWARK_RETAIN_REVIEW_CLIPS=1`. Every retained object is bound to its
+//! originating supervised device, expiry is enforced at read time, files are
+//! private, and suspected CSAM is never persisted.
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -14,25 +14,34 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bulwark_proto::v1::{Action, Category};
 
-const BLOCK_TTL_SECS: u64 = 24 * 3600;
-const REVIEW_TTL_SECS: u64 = 6 * 3600;
+const BLOCK_TTL_SECS: u64 = 24 * 60 * 60;
+const REVIEW_TTL_SECS: u64 = 6 * 60 * 60;
 const LEGACY_OWNER: &str = "__legacy_dev_only__";
 
+/// Whether local raw review clips may be retained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetentionMode {
+    /// Never write raw media.
     Disabled,
+    /// Retain only review-worthy media with an owner + TTL.
     Scoped,
 }
 
+/// Server-written ownership facts for one retained segment.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SegmentOwner {
+    /// Authenticated supervised-device id.
     pub device_id: String,
+    /// Child id, when known.
     pub child_id: String,
+    /// Family id, when known.
     pub family_id: String,
+    /// Alert/request id that caused retention.
     pub alert_id: String,
 }
 
 impl SegmentOwner {
+    /// Build the minimum scoped owner for a device.
     pub fn for_device(device_id: impl Into<String>) -> Self {
         Self {
             device_id: device_id.into(),
@@ -53,7 +62,7 @@ impl SegmentOwner {
             self.family_id.as_str(),
             self.alert_id.as_str(),
         ] {
-            if value.chars().any(|c| c == '\n' || c == '\r') {
+            if value.chars().any(|c| matches!(c, '\r' | '\n')) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "segment ownership metadata contains a newline",
@@ -64,17 +73,23 @@ impl SegmentOwner {
     }
 }
 
+/// Local content-addressed review store.
 #[derive(Clone)]
 pub struct SegmentStore {
     base: PathBuf,
     retention: RetentionMode,
 }
 
+/// Reference returned after a successful retained-media write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredSegment {
+    /// Opaque `blob://` handle; not the content hash.
     pub uri: String,
+    /// SHA-256 of the original bytes for audit/dedup.
     pub sha256_hex: String,
+    /// Authenticated owning supervised device.
     pub device_id: String,
+    /// Absolute unix-seconds expiry.
     pub expires_at: u64,
 }
 
@@ -99,12 +114,12 @@ impl SegmentMeta {
 }
 
 impl SegmentStore {
-    /// Explicit/dev constructor. Retention is enabled because the caller chose a
-    /// concrete path. Production composition should use [`Self::default_location`].
+    /// Explicit/dev constructor. Choosing a path opts into scoped retention.
     pub fn new(base: impl Into<PathBuf>) -> io::Result<Self> {
         Self::new_with_mode(base, RetentionMode::Scoped)
     }
 
+    /// Construct at `base` with an explicit retention mode.
     pub fn new_with_mode(base: impl Into<PathBuf>, retention: RetentionMode) -> io::Result<Self> {
         let base = base.into();
         std::fs::create_dir_all(&base)?;
@@ -112,9 +127,8 @@ impl SegmentStore {
         Ok(Self { base, retention })
     }
 
-    /// Production constructor: raw review clips are disabled unless the operator
-    /// explicitly opts in. This makes privacy-safe, content-free alerts the
-    /// default deployment behavior.
+    /// Per-user production location. Raw retention is disabled unless explicitly
+    /// enabled by `BULWARK_RETAIN_REVIEW_CLIPS=1`.
     pub fn default_location() -> io::Result<Self> {
         let enabled = matches!(
             std::env::var("BULWARK_RETAIN_REVIEW_CLIPS").ok().as_deref(),
@@ -130,12 +144,12 @@ impl SegmentStore {
         )
     }
 
+    /// Current retention mode.
     pub fn retention_mode(&self) -> RetentionMode {
         self.retention
     }
 
-    /// Compatibility helper for local tests/tools. Product code should call
-    /// [`Self::store_scoped_if_allowed`] so an authenticated device owns the clip.
+    /// Legacy/dev helper. Product code should use `store_scoped_if_allowed`.
     pub fn store_if_safe(
         &self,
         category: Category,
@@ -150,6 +164,7 @@ impl SegmentStore {
         )
     }
 
+    /// Retain a non-CSAM segment only when the policy action makes it reviewable.
     pub fn store_scoped_if_allowed(
         &self,
         owner: &SegmentOwner,
@@ -157,7 +172,7 @@ impl SegmentStore {
         action: Action,
         segment: &[u8],
     ) -> io::Result<Option<StoredSegment>> {
-        if category == Category::CsamSuspected || self.retention == RetentionMode::Disabled {
+        if self.retention == RetentionMode::Disabled || category == Category::CsamSuspected {
             return Ok(None);
         }
         let ttl_secs = match action {
@@ -170,55 +185,49 @@ impl SegmentStore {
         }
         owner.validate()?;
 
-        let sha = sha256_hex(segment);
-        let created_at = now_secs();
+        let sha256_hex = sha256_hex(segment);
         let metadata = SegmentMeta {
-            created_at,
+            created_at: now_secs(),
             ttl_secs,
-            device_id: owner.device_id.trim().to_string(),
-            child_id: owner.child_id.trim().to_string(),
-            family_id: owner.family_id.trim().to_string(),
-            alert_id: owner.alert_id.trim().to_string(),
+            device_id: owner.device_id.trim().to_owned(),
+            child_id: owner.child_id.trim().to_owned(),
+            family_id: owner.family_id.trim().to_owned(),
+            alert_id: owner.alert_id.trim().to_owned(),
         };
-
-        // Never overwrite an existing object through a symlink. Metadata is
-        // owner-specific, so identical bytes belonging to different devices do
-        // not share an authorization handle.
-        let opaque = opaque_id(&sha, &metadata);
-        let blob = self.base.join(format!("{opaque}.blob"));
-        let meta = self.base.join(format!("{opaque}.meta"));
-        write_new_private(&blob, segment)?;
-        write_new_private(&meta, render_meta(&metadata).as_bytes())?;
+        let expires_at = metadata.expires_at();
+        let device_id = metadata.device_id.clone();
+        let opaque = opaque_id(&sha256_hex, &metadata);
+        write_new_private(&self.base.join(format!("{opaque}.blob")), segment)?;
+        write_new_private(
+            &self.base.join(format!("{opaque}.meta")),
+            render_meta(&metadata).as_bytes(),
+        )?;
 
         Ok(Some(StoredSegment {
             uri: format!("blob://{opaque}"),
-            sha256_hex: sha,
-            device_id: metadata.device_id,
-            expires_at: metadata.expires_at(),
+            sha256_hex,
+            device_id,
+            expires_at,
         }))
     }
 
-    /// Legacy/dev full read. Production Review must use [`Self::open_authorized`].
+    /// Legacy/dev read. Scoped product media deliberately cannot be read through
+    /// this method.
     pub fn load(&self, uri: &str) -> io::Result<Option<Vec<u8>>> {
         let Some(id) = parse_blob_uri(uri) else {
             return Ok(None);
         };
-        let Some(meta) = self.read_live_meta(&id)? else {
+        let Some(metadata) = self.read_live_meta(&id)? else {
             return Ok(None);
         };
-        if meta.device_id != LEGACY_OWNER {
+        if metadata.device_id != LEGACY_OWNER {
             return Ok(None);
         }
-        match std::fs::read(self.base.join(format!("{id}.blob"))) {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e),
-        }
+        read_optional(self.base.join(format!("{id}.blob")))
     }
 
-    /// Authorize before opening bytes. `allowed_device_ids` comes from the live
-    /// guardian session scope; ownership is checked from server-written metadata,
-    /// never from a request-supplied device id.
+    /// Open a retained clip only after checking server-written ownership against
+    /// the authenticated guardian's live device scope.
     pub fn open_authorized(
         &self,
         uri: &str,
@@ -230,29 +239,31 @@ impl SegmentStore {
         let Some(id) = parse_blob_uri(uri) else {
             return Ok(None);
         };
-        let Some(meta) = self.read_live_meta(&id)? else {
+        let Some(metadata) = self.read_live_meta(&id)? else {
             return Ok(None);
         };
-        if meta.device_id == LEGACY_OWNER || !allowed_device_ids.contains(&meta.device_id) {
+        if metadata.device_id == LEGACY_OWNER
+            || !allowed_device_ids.contains(metadata.device_id.as_str())
+        {
             return Ok(None);
         }
         match File::open(self.base.join(format!("{id}.blob"))) {
             Ok(file) => Ok(Some(file)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
         }
     }
 
+    /// Purge expired or malformed retained objects.
     pub fn purge_expired(&self) -> io::Result<usize> {
         let now = now_secs();
         let mut purged = 0;
         for entry in std::fs::read_dir(&self.base)? {
             let path = entry?.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("meta") {
+            if path.extension().and_then(|ext| ext.to_str()) != Some("meta") {
                 continue;
             }
-            let expired = read_meta(&path).map(|m| m.expired(now)).unwrap_or(true);
-            if expired {
+            if read_meta(&path).map(|m| m.expired(now)).unwrap_or(true) {
                 let _ = std::fs::remove_file(path.with_extension("blob"));
                 let _ = std::fs::remove_file(&path);
                 purged += 1;
@@ -263,62 +274,71 @@ impl SegmentStore {
 
     fn read_live_meta(&self, id: &str) -> io::Result<Option<SegmentMeta>> {
         let path = self.base.join(format!("{id}.meta"));
-        let meta = match read_meta(&path) {
-            Some(meta) => meta,
-            None => return Ok(None),
+        let Some(metadata) = read_meta(&path) else {
+            return Ok(None);
         };
-        if meta.expired(now_secs()) {
+        if metadata.expired(now_secs()) {
             let _ = std::fs::remove_file(self.base.join(format!("{id}.blob")));
             let _ = std::fs::remove_file(path);
             return Ok(None);
         }
-        Ok(Some(meta))
+        Ok(Some(metadata))
     }
 }
 
-fn opaque_id(sha: &str, meta: &SegmentMeta) -> String {
-    let mut material = Vec::new();
+fn read_optional(path: PathBuf) -> io::Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn opaque_id(sha: &str, metadata: &SegmentMeta) -> String {
+    let mut material = Vec::with_capacity(sha.len() + 128);
     material.extend_from_slice(sha.as_bytes());
-    material.extend_from_slice(meta.device_id.as_bytes());
-    material.extend_from_slice(meta.child_id.as_bytes());
-    material.extend_from_slice(meta.family_id.as_bytes());
-    material.extend_from_slice(meta.alert_id.as_bytes());
-    material.extend_from_slice(&meta.created_at.to_le_bytes());
+    material.extend_from_slice(metadata.device_id.as_bytes());
+    material.extend_from_slice(metadata.child_id.as_bytes());
+    material.extend_from_slice(metadata.family_id.as_bytes());
+    material.extend_from_slice(metadata.alert_id.as_bytes());
+    material.extend_from_slice(&metadata.created_at.to_le_bytes());
     sha256_hex(&material)
 }
 
-fn render_meta(meta: &SegmentMeta) -> String {
+fn render_meta(metadata: &SegmentMeta) -> String {
     format!(
         "{}\n{}\n{}\n{}\n{}\n{}\n",
-        meta.created_at,
-        meta.ttl_secs,
-        meta.device_id,
-        meta.child_id,
-        meta.family_id,
-        meta.alert_id
+        metadata.created_at,
+        metadata.ttl_secs,
+        metadata.device_id,
+        metadata.child_id,
+        metadata.family_id,
+        metadata.alert_id
     )
 }
 
 fn parse_blob_uri(uri: &str) -> Option<String> {
     let id = uri.strip_prefix("blob://")?;
-    (id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit())).then(|| id.to_ascii_lowercase())
+    (id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| id.to_ascii_lowercase())
 }
 
 fn read_meta(path: &Path) -> Option<SegmentMeta> {
-    let s = std::fs::read_to_string(path).ok()?;
-    let mut lines = s.lines();
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut lines = text.lines();
     Some(SegmentMeta {
         created_at: lines.next()?.trim().parse().ok()?,
         ttl_secs: lines.next()?.trim().parse().ok()?,
-        device_id: lines.next()?.to_string(),
-        child_id: lines.next().unwrap_or_default().to_string(),
-        family_id: lines.next().unwrap_or_default().to_string(),
-        alert_id: lines.next().unwrap_or_default().to_string(),
+        device_id: lines.next()?.to_owned(),
+        child_id: lines.next().unwrap_or_default().to_owned(),
+        family_id: lines.next().unwrap_or_default().to_owned(),
+        alert_id: lines.next().unwrap_or_default().to_owned(),
     })
 }
 
 fn write_new_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write;
+
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -329,12 +349,11 @@ fn write_new_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     match options.open(path) {
         Ok(mut file) => {
             file.write_all(bytes)?;
-            file.sync_all()?;
-            Ok(())
+            file.sync_all()
         }
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            let meta = std::fs::symlink_metadata(path)?;
-            if !meta.file_type().is_file() || meta.file_type().is_symlink() {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let metadata = std::fs::symlink_metadata(path)?;
+            if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     "refusing non-regular retained-media path",
@@ -342,7 +361,7 @@ fn write_new_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
             }
             Ok(())
         }
-        Err(e) => Err(e),
+        Err(error) => Err(error),
     }
 }
 
@@ -352,33 +371,35 @@ fn harden_dir_permissions(path: &Path) -> io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|duration| duration.as_secs())
         .unwrap_or(0)
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    let d = ring::digest::digest(&ring::digest::SHA256, bytes);
-    let mut s = String::with_capacity(64);
-    for b in d.as_ref() {
-        let _ = write!(s, "{b:02x}");
+    let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
+    let mut encoded = String::with_capacity(64);
+    for byte in digest.as_ref() {
+        let _ = write!(encoded, "{byte:02x}");
     }
-    s
+    encoded
 }
 
 fn default_segments_dir() -> PathBuf {
-    if let Some(local) = std::env::var_os("LOCALAPPDATA").filter(|s| !s.is_empty()) {
+    if let Some(local) = std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()) {
         return PathBuf::from(local).join("Bulwark").join("segments");
     }
-    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME").filter(|s| !s.is_empty()) {
+    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
         return PathBuf::from(xdg).join("bulwark").join("segments");
     }
-    if let Some(home) = std::env::var_os("HOME").filter(|s| !s.is_empty()) {
+    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
         return PathBuf::from(home).join(".local/share/bulwark/segments");
     }
     std::env::temp_dir().join("bulwark-segments")
@@ -388,62 +409,63 @@ fn default_segments_dir() -> PathBuf {
 mod tests {
     use super::*;
 
-    fn tmp_store(tag: &str) -> SegmentStore {
-        let dir = std::env::temp_dir().join(format!(
-            "bulwark-seg-test-{}-{}-{}",
-            tag,
+    fn store(tag: &str) -> SegmentStore {
+        SegmentStore::new(std::env::temp_dir().join(format!(
+            "bulwark-segment-{tag}-{}-{}",
             std::process::id(),
             now_secs()
-        ));
-        SegmentStore::new(dir).expect("create store")
+        )))
+        .unwrap()
     }
 
     #[test]
     fn csam_is_never_stored() {
-        let s = tmp_store("csam");
-        let out = s
-            .store_if_safe(Category::CsamSuspected, Action::Block, b"explicit-bytes")
-            .unwrap();
-        assert!(out.is_none());
-    }
-
-    #[test]
-    fn legacy_dev_round_trip_is_explicit() {
-        let s = tmp_store("block");
-        let bytes = b"a blocked adult clip";
-        let stored = s
-            .store_if_safe(Category::AdultImage, Action::Block, bytes)
+        assert!(store("csam")
+            .store_if_safe(Category::CsamSuspected, Action::Block, b"bytes")
             .unwrap()
-            .expect("dev store retains");
-        assert_eq!(s.load(&stored.uri).unwrap().unwrap(), bytes);
+            .is_none());
     }
 
     #[test]
-    fn scoped_clip_rejects_wrong_guardian_device_scope() {
-        let s = tmp_store("scope");
-        let owner = SegmentOwner::for_device("child-device-a");
-        let stored = s
-            .store_scoped_if_allowed(&owner, Category::AdultImage, Action::Block, b"clip")
+    fn explicit_dev_store_round_trips() {
+        let store = store("legacy");
+        let stored = store
+            .store_if_safe(Category::AdultImage, Action::Block, b"clip")
             .unwrap()
             .unwrap();
-        let mut wrong = HashSet::new();
-        wrong.insert("child-device-b".to_string());
-        assert!(s.open_authorized(&stored.uri, &wrong).unwrap().is_none());
-        let mut right = HashSet::new();
-        right.insert("child-device-a".to_string());
-        assert!(s.open_authorized(&stored.uri, &right).unwrap().is_some());
+        assert_eq!(store.load(&stored.uri).unwrap().unwrap(), b"clip");
     }
 
     #[test]
-    fn disabled_store_never_writes() {
-        let dir = std::env::temp_dir().join(format!("bulwark-disabled-{}", std::process::id()));
-        let s = SegmentStore::new_with_mode(dir, RetentionMode::Disabled).unwrap();
-        assert!(s
+    fn scoped_read_checks_guardian_device_scope() {
+        let store = store("scope");
+        let stored = store
             .store_scoped_if_allowed(
-                &SegmentOwner::for_device("d"),
+                &SegmentOwner::for_device("device-a"),
                 Category::AdultImage,
                 Action::Block,
-                b"clip"
+                b"clip",
+            )
+            .unwrap()
+            .unwrap();
+
+        let wrong = HashSet::from(["device-b".to_string()]);
+        assert!(store.open_authorized(&stored.uri, &wrong).unwrap().is_none());
+
+        let right = HashSet::from(["device-a".to_string()]);
+        assert!(store.open_authorized(&stored.uri, &right).unwrap().is_some());
+    }
+
+    #[test]
+    fn disabled_store_never_writes_media() {
+        let dir = std::env::temp_dir().join(format!("bulwark-disabled-{}", std::process::id()));
+        let store = SegmentStore::new_with_mode(dir, RetentionMode::Disabled).unwrap();
+        assert!(store
+            .store_scoped_if_allowed(
+                &SegmentOwner::for_device("device"),
+                Category::AdultImage,
+                Action::Block,
+                b"clip",
             )
             .unwrap()
             .is_none());
