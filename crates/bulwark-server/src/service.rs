@@ -22,10 +22,11 @@ use futures_util::{stream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::accounts::{AccountStore, AccountsService};
-use crate::auth::{authenticate_device, authenticate_device_metadata, DevicePrincipal};
+use crate::auth::{authenticate_device_metadata, DevicePrincipal};
 use crate::child_control::{ChildConfigStore, ChildControlService};
 use crate::family_safety::{FamilySafetyService, SafetyBroadcastStore};
 use crate::relay::{AlertHub, ReviewService};
+use crate::review_security::{ReviewLedger, SecureReviewService};
 use crate::staff::{StaffAdminService, StaffStore};
 use crate::tamper::{self, TamperService};
 use crate::wg_provision::{WgPeerStore, WgProvisionService};
@@ -37,8 +38,6 @@ fn to_status(error: bulwark_core::Error) -> Status {
     Status::internal(error.to_string())
 }
 
-/// Coverage failure is never represented as SAFE. The action is conservative so
-/// even a caller that bypasses policy cannot accidentally forward unanalysed media.
 fn inconclusive(request_id: String, rationale: impl Into<String>) -> Verdict {
     Verdict {
         request_id,
@@ -129,8 +128,6 @@ impl Analysis for AnalysisService {
             }
         }
 
-        // Independent media in a batch can run concurrently while `buffered`
-        // preserves the caller-visible ordering of verdicts.
         let this = self.clone();
         let results: Vec<Result<Verdict, Status>> = stream::iter(requests)
             .map(move |request| {
@@ -154,8 +151,6 @@ impl Analysis for AnalysisService {
         let principal = self.principal(&req)?;
         let this = self.clone();
         let inbound = req.into_inner();
-        // Preserve stream order. Conversation-state analyzers depend on temporal
-        // ordering and must not be made concurrent merely for throughput.
         let out = inbound.then(move |item| {
             let this = this.clone();
             let principal = principal.clone();
@@ -258,6 +253,7 @@ pub struct AlertRelayService {
     hub: AlertHub,
     sink: Option<Arc<dyn bulwark_alert::AlertSink>>,
     accounts: Option<AccountStore>,
+    review_ledger: Option<ReviewLedger>,
 }
 
 impl AlertRelayService {
@@ -266,11 +262,17 @@ impl AlertRelayService {
             hub,
             sink,
             accounts: None,
+            review_ledger: None,
         }
     }
 
     pub fn with_accounts(mut self, accounts: AccountStore) -> Self {
         self.accounts = Some(accounts);
+        self
+    }
+
+    pub fn with_review_ledger(mut self, review_ledger: ReviewLedger) -> Self {
+        self.review_ledger = Some(review_ledger);
         self
     }
 
@@ -304,6 +306,14 @@ impl AlertRelayService {
     }
 
     async fn deliver(&self, event: AlertEvent) -> Result<AlertAck, Status> {
+        // Persist immutable alert ownership BEFORE fan-out/acknowledgement. If the
+        // durable review ledger cannot commit, production must not claim the alert
+        // is safely reviewable.
+        if let Some(ledger) = &self.review_ledger {
+            ledger
+                .record(&event)
+                .map_err(|error| Status::unavailable(format!("durable alert ledger: {error}")))?;
+        }
         let reached = self.hub.publish(event.clone());
         match &self.sink {
             Some(sink) => {
@@ -324,7 +334,7 @@ impl AlertRelayService {
                 alert_id: event.alert_id,
                 delivered: reached > 0,
                 deduped: false,
-                detail: format!("fanned out to {reached} guardian stream(s)"),
+                detail: format!("durably recorded; fanned out to {reached} guardian stream(s)"),
             }),
         }
     }
@@ -391,8 +401,6 @@ pub async fn run(
         _ => tracing::warn!("serving without TLS; local development only"),
     }
 
-    // Build the tenant/device authority once and share that exact store across
-    // every service. No service gets an independent view of enrollment.
     let accounts = if cfg.accounts_enabled {
         Some(match &cfg.state_dir {
             Some(dir) => AccountStore::with_state_dir(dir)?,
@@ -430,7 +438,12 @@ pub async fn run(
             hub.attach_accounts(accounts.clone());
         }
 
-        let mut relay = AlertRelayService::new(hub.clone(), alert_sink.clone());
+        let review_ledger = match &cfg.state_dir {
+            Some(dir) => ReviewLedger::with_state_dir(dir)?,
+            None => ReviewLedger::new(),
+        };
+        let mut relay = AlertRelayService::new(hub.clone(), alert_sink.clone())
+            .with_review_ledger(review_ledger.clone());
         if let Some(accounts) = &accounts {
             relay = relay.with_accounts(accounts.clone());
         }
@@ -527,10 +540,15 @@ pub async fn run(
             .map(Arc::new);
 
         if let Some(accounts) = accounts.clone() {
-            router = router.add_service(ReviewServer::new(
-                ReviewService::with_accounts(hub.clone(), accounts.clone())
-                    .with_segment_store(review_store.clone()),
-            ));
+            let legacy_review = ReviewService::with_accounts(hub.clone(), accounts.clone());
+            let secure_review = SecureReviewService::new(
+                legacy_review,
+                accounts.clone(),
+                review_ledger.clone(),
+            )
+            .with_segment_store(review_store.clone());
+            router = router.add_service(ReviewServer::new(secure_review));
+
             let child_config = match &cfg.state_dir {
                 Some(dir) => ChildConfigStore::with_state_dir(dir)?,
                 None => ChildConfigStore::new(),
@@ -555,9 +573,6 @@ pub async fn run(
         }
 
         if cluster.is_some() {
-            // Do NOT mount ClusterControl on the guardian/device listener. The
-            // cluster object may still feed local staff telemetry, but membership
-            // and queue mutation need a separate internal authenticated listener.
             tracing::info!("ClusterControl public mount disabled; internal control plane is isolated");
         }
     }
