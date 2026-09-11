@@ -1,21 +1,25 @@
-//! Authenticated WireGuard peer provisioning for `FILTER_ON_SERVER`.
+//! Authenticated WireGuard provisioning for guardian-authorized Remote VPN mode.
 //!
-//! The device sends only its public WireGuard key. The region returns a stable
-//! tunnel address and public endpoint material. When `filter_active` is true the
-//! response also carries the region's public TLS-inspection root in gRPC binary
-//! metadata. A region is never allowed to advertise active filtering without
-//! that CA being present and readable.
+//! Remote VPN has two authentication layers. The pairing-minted device credential
+//! bootstraps a short-lived VPN lease; subsequent renewals use the rotating lease
+//! token instead of repeatedly sending the long-lived device credential. Every
+//! lease is signed by the region, bound to the exact device id and WireGuard
+//! public key, expires quickly, and is only minted while the guardian's durable
+//! child config explicitly enables `FILTER_ON_SERVER`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use data_encoding::{BASE64, BASE64URL_NOPAD};
+use ring::{digest, hmac};
+use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 
 use crate::accounts::AccountStore;
 use crate::persist::JsonFile;
 use bulwark_proto::v1::wg_provision_server::WgProvision;
-use bulwark_proto::v1::{RegisterWgPeerRequest, WgPeerGrant};
+use bulwark_proto::v1::{FilterLocation, RegisterWgPeerRequest, WgPeerGrant};
 use tonic::{Request, Response, Status};
 
 const WG_SUBNET_PREFIX: &str = "10.8.0";
@@ -23,13 +27,27 @@ const WG_FIRST_HOST: u8 = 2;
 const WG_LAST_HOST: u8 = 254;
 const DEFAULT_WG_ENDPOINT: &str = "vpn.predatorhunters.co.uk:51820";
 const DEFAULT_WG_KEEPALIVE_SECS: u32 = 25;
+const DEFAULT_SESSION_TTL_SECS: u64 = 30 * 60;
+const MIN_SESSION_TTL_SECS: u64 = 5 * 60;
+const MAX_SESSION_TTL_SECS: u64 = 24 * 60 * 60;
+
 const INSPECTION_CA_BIN_HEADER: &str = "x-bulwark-inspection-ca-bin";
 const INSPECTION_CA_SHA256_HEADER: &str = "x-bulwark-inspection-ca-sha256";
+const VPN_SESSION_HEADER: &str = "x-bulwark-vpn-session";
+const VPN_SESSION_EXPIRES_HEADER: &str = "x-bulwark-vpn-session-expires-ms";
+const VPN_SESSION_RENEW_HEADER: &str = "x-bulwark-vpn-renew-after-ms";
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 fn valid_wg_public_key(key: &str) -> bool {
     key.len() == 44
         && key.ends_with('=')
-        && data_encoding::BASE64
+        && BASE64
             .decode(key.as_bytes())
             .map(|bytes| bytes.len() == 32)
             .unwrap_or(false)
@@ -58,7 +76,10 @@ fn reserved_octets_from_env_str(raw: &str) -> HashSet<u8> {
             if token.is_empty() {
                 return None;
             }
-            token.rsplit('.').next().and_then(|part| part.parse::<u8>().ok())
+            token
+                .rsplit('.')
+                .next()
+                .and_then(|part| part.parse::<u8>().ok())
         })
         .filter(|octet| (WG_FIRST_HOST..=WG_LAST_HOST).contains(octet))
         .collect()
@@ -70,6 +91,8 @@ struct PeerRow {
     address: String,
     public_key: String,
     updated_ts: i64,
+    #[serde(default)]
+    expires_ts: i64,
 }
 
 #[derive(Default)]
@@ -77,6 +100,7 @@ struct Inner {
     by_device: HashMap<String, PeerRow>,
 }
 
+/// Durable desired WireGuard peer state consumed by the privileged reconciler.
 #[derive(Clone)]
 pub struct WgPeerStore {
     inner: Arc<Mutex<Inner>>,
@@ -118,26 +142,30 @@ impl WgPeerStore {
         self
     }
 
-    fn now_ms() -> i64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_millis() as i64)
-            .unwrap_or(0)
-    }
-
     fn persist_locked(&self, inner: &Inner) -> Result<(), Status> {
         if let Some(file) = &self.persist {
-            if let Err(error) = file.store(&inner.snapshot()) {
+            file.store(&inner.snapshot()).map_err(|error| {
                 tracing::error!(%error, "failed to persist WireGuard peer state");
-                return Err(Status::unavailable(
-                    "could not durably record the WireGuard peer enrollment",
-                ));
-            }
+                Status::unavailable("could not durably record the WireGuard peer lease")
+            })?;
         }
         Ok(())
     }
 
+    /// Compatibility helper for non-production tests/tools. Production grants
+    /// use [`Self::register_peer_with_expiry`].
     pub fn register_peer(&self, device_id: &str, public_key: &str) -> Result<String, Status> {
+        self.register_peer_with_expiry(device_id, public_key, i64::MAX)
+    }
+
+    /// Register, rotate, or renew a peer while retaining its stable tunnel IP.
+    /// The persisted expiry is authoritative for the on-box lease reconciler.
+    pub fn register_peer_with_expiry(
+        &self,
+        device_id: &str,
+        public_key: &str,
+        expires_ts: i64,
+    ) -> Result<String, Status> {
         let device_id = device_id.trim().to_string();
         if device_id.is_empty() {
             return Err(Status::invalid_argument("device_id is required"));
@@ -145,8 +173,11 @@ impl WgPeerStore {
         let public_key = public_key.trim().to_string();
         if !valid_wg_public_key(&public_key) {
             return Err(Status::invalid_argument(
-                "wg_public_key must be a valid WireGuard public key (44-char base64 of 32 bytes)",
+                "wg_public_key must be a valid WireGuard public key",
             ));
+        }
+        if expires_ts <= now_ms() {
+            return Err(Status::invalid_argument("WireGuard lease expiry must be in the future"));
         }
 
         let mut inner = self.inner.lock().expect("wg-peer mutex poisoned");
@@ -160,24 +191,23 @@ impl WgPeerStore {
             ));
         }
 
-        let rotated = match inner.by_device.get_mut(&device_id) {
-            Some(existing) if existing.public_key == public_key => {
-                return Ok(existing.address.clone());
+        if let Some(existing) = inner.by_device.get(&device_id).cloned() {
+            if existing.public_key == public_key && existing.expires_ts == expires_ts {
+                return Ok(existing.address);
             }
-            Some(existing) => {
-                let previous_key = std::mem::replace(&mut existing.public_key, public_key.clone());
-                let previous_ts = std::mem::replace(&mut existing.updated_ts, Self::now_ms());
-                Some((existing.address.clone(), previous_key, previous_ts))
-            }
-            None => None,
-        };
-
-        if let Some((address, previous_key, previous_ts)) = rotated {
+            let address = existing.address.clone();
+            inner.by_device.insert(
+                device_id.clone(),
+                PeerRow {
+                    device_id,
+                    address: address.clone(),
+                    public_key,
+                    updated_ts: now_ms(),
+                    expires_ts,
+                },
+            );
             if let Err(error) = self.persist_locked(&inner) {
-                if let Some(existing) = inner.by_device.get_mut(&device_id) {
-                    existing.public_key = previous_key;
-                    existing.updated_ts = previous_ts;
-                }
+                inner.by_device.insert(existing.device_id.clone(), existing);
                 return Err(error);
             }
             return Ok(address);
@@ -192,7 +222,7 @@ impl WgPeerStore {
         }));
         let octet = lowest_free_octet(&used).ok_or_else(|| {
             Status::resource_exhausted(
-                "tunnel subnet 10.8.0.0/24 is exhausted (253 peers); grow the subnet first",
+                "tunnel subnet 10.8.0.0/24 is exhausted; grow the subnet first",
             )
         })?;
         let address = format!("{WG_SUBNET_PREFIX}.{octet}");
@@ -202,7 +232,8 @@ impl WgPeerStore {
                 device_id: device_id.clone(),
                 address: address.clone(),
                 public_key,
-                updated_ts: Self::now_ms(),
+                updated_ts: now_ms(),
+                expires_ts,
             },
         );
         if let Err(error) = self.persist_locked(&inner) {
@@ -212,24 +243,51 @@ impl WgPeerStore {
         Ok(address)
     }
 
+    /// Remove expired desired peers. The privileged reconciler also checks the
+    /// persisted expiry, so revocation does not rely on this method being called.
+    pub fn prune_expired(&self, at_ms: i64) -> Result<usize, Status> {
+        let mut inner = self.inner.lock().expect("wg-peer mutex poisoned");
+        let before = inner.by_device.len();
+        let previous: Vec<PeerRow> = inner.by_device.values().cloned().collect();
+        inner
+            .by_device
+            .retain(|_, peer| peer.expires_ts > at_ms || peer.expires_ts == i64::MAX);
+        let removed = before.saturating_sub(inner.by_device.len());
+        if removed > 0 {
+            if let Err(error) = self.persist_locked(&inner) {
+                inner.by_device.clear();
+                for peer in previous {
+                    inner.by_device.insert(peer.device_id.clone(), peer);
+                }
+                return Err(error);
+            }
+        }
+        Ok(removed)
+    }
+
     pub fn peer_count(&self) -> u32 {
+        let at = now_ms();
         self.inner
             .lock()
             .expect("wg peer mutex poisoned")
             .by_device
-            .len() as u32
+            .values()
+            .filter(|peer| peer.expires_ts > at || peer.expires_ts == i64::MAX)
+            .count() as u32
     }
 
-    /// Resolve a WireGuard inner source address to its authenticated enrollment.
-    /// Region filter attribution uses this rather than trusting a device-supplied id.
+    /// Resolve an active WireGuard inner address back to the enrolled device.
     pub fn device_id_for_address(&self, address: &str) -> Option<String> {
         let address = address.trim();
+        let at = now_ms();
         self.inner
             .lock()
             .ok()?
             .by_device
             .values()
-            .find(|peer| peer.address == address)
+            .find(|peer| {
+                peer.address == address && (peer.expires_ts > at || peer.expires_ts == i64::MAX)
+            })
             .map(|peer| peer.device_id.clone())
     }
 }
@@ -278,7 +336,7 @@ impl WgRegionConfig {
             .map(|value| value.trim().to_string())
             .unwrap_or_default();
         if !server_public_key.is_empty() && !valid_wg_public_key(&server_public_key) {
-            tracing::warn!("invalid BULWARK_WG_SERVER_PUBLIC_KEY; disabling provisioning");
+            tracing::warn!("invalid BULWARK_WG_SERVER_PUBLIC_KEY; disabling Remote VPN");
             server_public_key.clear();
         }
         let server_endpoint = std::env::var("BULWARK_WG_ENDPOINT")
@@ -294,7 +352,7 @@ impl WgRegionConfig {
         let filter_active = std::env::var("BULWARK_WG_FILTER_ACTIVE")
             .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
             .unwrap_or(false);
-        tracing::info!(filter_active, endpoint = %server_endpoint, "WireGuard region config loaded");
+        tracing::info!(filter_active, endpoint = %server_endpoint, "Remote VPN region config loaded");
         Self {
             server_public_key,
             server_endpoint,
@@ -304,27 +362,191 @@ impl WgRegionConfig {
     }
 }
 
-fn inspection_ca_path() -> Option<PathBuf> {
+#[derive(Clone)]
+struct SessionAuth {
+    key: Option<Arc<hmac::Key>>,
+    ttl_ms: i64,
+    renew_after_ms: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SessionClaims {
+    version: u8,
+    device_id: String,
+    wg_key_sha256: String,
+    exp_ms: i64,
+    nonce: String,
+}
+
+struct MintedSession {
+    token: String,
+    expires_ts: i64,
+    renew_after_ms: i64,
+}
+
+impl SessionAuth {
+    fn from_env() -> Self {
+        let key = std::env::var("BULWARK_REMOTE_VPN_SESSION_SECRET")
+            .ok()
+            .map(|value| value.into_bytes())
+            .filter(|value| value.len() >= 32)
+            .map(|value| Arc::new(hmac::Key::new(hmac::HMAC_SHA256, &value)));
+        if key.is_none() {
+            tracing::warn!(
+                "BULWARK_REMOTE_VPN_SESSION_SECRET is missing/short; Remote VPN grants are disabled"
+            );
+        }
+        let ttl_secs = std::env::var("BULWARK_REMOTE_VPN_SESSION_TTL_SECS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or(DEFAULT_SESSION_TTL_SECS)
+            .clamp(MIN_SESSION_TTL_SECS, MAX_SESSION_TTL_SECS);
+        let ttl_ms = (ttl_secs.saturating_mul(1000)).min(i64::MAX as u64) as i64;
+        Self {
+            key,
+            ttl_ms,
+            renew_after_ms: (ttl_ms / 2).max(60_000),
+        }
+    }
+
+    #[cfg(test)]
+    fn from_secret(secret: &[u8], ttl_ms: i64) -> Self {
+        Self {
+            key: Some(Arc::new(hmac::Key::new(hmac::HMAC_SHA256, secret))),
+            ttl_ms,
+            renew_after_ms: (ttl_ms / 2).max(1),
+        }
+    }
+
+    fn key(&self) -> Result<&hmac::Key, Status> {
+        self.key.as_deref().ok_or_else(|| {
+            Status::failed_precondition(
+                "Remote VPN authentication is not configured on this region",
+            )
+        })
+    }
+
+    fn wg_key_hash(public_key: &str) -> String {
+        digest::digest(&digest::SHA256, public_key.as_bytes())
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    fn mint(&self, device_id: &str, public_key: &str) -> Result<MintedSession, Status> {
+        let key = self.key()?;
+        let expires_ts = now_ms().saturating_add(self.ttl_ms);
+        let mut nonce = [0u8; 16];
+        SystemRandom::new()
+            .fill(&mut nonce)
+            .map_err(|_| Status::internal("could not generate Remote VPN session nonce"))?;
+        let claims = SessionClaims {
+            version: 1,
+            device_id: device_id.to_string(),
+            wg_key_sha256: Self::wg_key_hash(public_key),
+            exp_ms: expires_ts,
+            nonce: BASE64URL_NOPAD.encode(&nonce),
+        };
+        let payload = serde_json::to_vec(&claims)
+            .map_err(|_| Status::internal("could not serialize Remote VPN session"))?;
+        let payload = BASE64URL_NOPAD.encode(&payload);
+        let signature = hmac::sign(key, payload.as_bytes());
+        Ok(MintedSession {
+            token: format!("{}.{}", payload, BASE64URL_NOPAD.encode(signature.as_ref())),
+            expires_ts,
+            renew_after_ms: self.renew_after_ms,
+        })
+    }
+
+    fn verify(&self, token: &str, device_id: &str, public_key: &str) -> Result<(), Status> {
+        let key = self.key()?;
+        let (payload, signature) = token
+            .trim()
+            .split_once('.')
+            .ok_or_else(|| Status::unauthenticated("invalid Remote VPN session"))?;
+        let signature = BASE64URL_NOPAD
+            .decode(signature.as_bytes())
+            .map_err(|_| Status::unauthenticated("invalid Remote VPN session"))?;
+        hmac::verify(key, payload.as_bytes(), &signature)
+            .map_err(|_| Status::unauthenticated("invalid Remote VPN session"))?;
+        let claims_bytes = BASE64URL_NOPAD
+            .decode(payload.as_bytes())
+            .map_err(|_| Status::unauthenticated("invalid Remote VPN session"))?;
+        let claims: SessionClaims = serde_json::from_slice(&claims_bytes)
+            .map_err(|_| Status::unauthenticated("invalid Remote VPN session"))?;
+        if claims.version != 1
+            || claims.device_id != device_id.trim()
+            || claims.wg_key_sha256 != Self::wg_key_hash(public_key.trim())
+            || claims.exp_ms <= now_ms()
+        {
+            return Err(Status::unauthenticated("expired or mismatched Remote VPN session"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct ConfigAuthorizationSnapshot {
+    #[serde(default)]
+    configs: Vec<ConfigAuthorizationRow>,
+}
+
+#[derive(Deserialize)]
+struct ConfigAuthorizationRow {
+    device_id: String,
+    filtering_enabled: bool,
+    #[serde(default)]
+    filter_location: i32,
+}
+
+fn state_dir_from_env() -> Option<PathBuf> {
+    std::env::var_os("BULWARK_STATE_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn authorize_remote_mode(state_dir: Option<&Path>, device_id: &str) -> Result<(), Status> {
+    let state_dir = state_dir.ok_or_else(|| {
+        Status::failed_precondition(
+            "Remote VPN requires durable server state and a guardian-applied child config",
+        )
+    })?;
+    let path = state_dir.join("child_config.json");
+    let bytes = std::fs::read(&path).map_err(|_| {
+        Status::failed_precondition(
+            "guardian has not authorized Remote VPN for this device",
+        )
+    })?;
+    let snapshot: ConfigAuthorizationSnapshot = serde_json::from_slice(&bytes)
+        .map_err(|_| Status::unavailable("child configuration state is unreadable"))?;
+    let authorized = snapshot.configs.iter().any(|config| {
+        config.device_id.trim() == device_id.trim()
+            && config.filtering_enabled
+            && config.filter_location == FilterLocation::FilterOnServer as i32
+    });
+    if !authorized {
+        return Err(Status::permission_denied(
+            "guardian has not authorized Remote VPN for this device",
+        ));
+    }
+    Ok(())
+}
+
+fn inspection_ca_path(state_dir: Option<&Path>) -> Option<PathBuf> {
     std::env::var_os("BULWARK_WG_INSPECTION_CA_PEM")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("BULWARK_STATE_DIR")
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-                .map(|dir| dir.join("wg_inspection_ca.pem"))
-        })
+        .or_else(|| state_dir.map(|dir| dir.join("wg_inspection_ca.pem")))
 }
 
-fn inspection_ca_material() -> Result<(Vec<u8>, String), Status> {
-    let path = inspection_ca_path().ok_or_else(|| {
-        Status::failed_precondition(
-            "server filtering is active but BULWARK_WG_INSPECTION_CA_PEM/BULWARK_STATE_DIR is not configured",
-        )
+fn inspection_ca_material(state_dir: Option<&Path>) -> Result<(Vec<u8>, String), Status> {
+    let path = inspection_ca_path(state_dir).ok_or_else(|| {
+        Status::failed_precondition("Remote VPN inspection CA is not configured")
     })?;
     let pem = std::fs::read(&path).map_err(|error| {
         Status::failed_precondition(format!(
-            "server filtering is active but inspection CA {} is unavailable: {error}",
+            "Remote VPN inspection CA {} is unavailable: {error}",
             path.display()
         ))
     })?;
@@ -333,11 +555,10 @@ fn inspection_ca_material() -> Result<(Vec<u8>, String), Status> {
         .any(|window| window == b"-----BEGIN CERTIFICATE-----")
     {
         return Err(Status::failed_precondition(
-            "configured server inspection CA is not PEM certificate material",
+            "configured Remote VPN inspection CA is not PEM certificate material",
         ));
     }
-    let digest = ring::digest::digest(&ring::digest::SHA256, &pem);
-    let fingerprint = digest
+    let fingerprint = digest::digest(&digest::SHA256, &pem)
         .as_ref()
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -345,11 +566,14 @@ fn inspection_ca_material() -> Result<(Vec<u8>, String), Status> {
     Ok((pem, fingerprint))
 }
 
+/// Device-authenticated Remote VPN provisioning service.
 #[derive(Clone)]
 pub struct WgProvisionService {
     store: WgPeerStore,
     accounts: AccountStore,
     region: WgRegionConfig,
+    sessions: SessionAuth,
+    state_dir: Option<PathBuf>,
 }
 
 impl WgProvisionService {
@@ -358,6 +582,8 @@ impl WgProvisionService {
             store,
             accounts,
             region,
+            sessions: SessionAuth::from_env(),
+            state_dir: state_dir_from_env(),
         }
     }
 
@@ -365,7 +591,7 @@ impl WgProvisionService {
         Self::new(store, accounts, WgRegionConfig::from_env())
     }
 
-    fn verify_device(&self, device_id: &str, device_token: &str) -> Result<(), Status> {
+    fn verify_bootstrap_device(&self, device_id: &str, device_token: &str) -> Result<(), Status> {
         if crate::auth::verify_device_token_strict(&self.accounts, device_id, device_token) {
             Ok(())
         } else {
@@ -373,6 +599,34 @@ impl WgProvisionService {
                 "unknown, legacy-unpaired, or invalid device credential",
             ))
         }
+    }
+
+    fn authenticate_request(
+        &self,
+        session_token: Option<&str>,
+        request: &RegisterWgPeerRequest,
+    ) -> Result<(), Status> {
+        match session_token.filter(|token| !token.trim().is_empty()) {
+            Some(token) => self
+                .sessions
+                .verify(token, &request.device_id, &request.wg_public_key),
+            None => self.verify_bootstrap_device(&request.device_id, &request.device_token),
+        }
+    }
+
+    fn remote_ready(&self) -> Result<(Vec<u8>, String), Status> {
+        if self.region.server_public_key.is_empty() {
+            return Err(Status::failed_precondition(
+                "this region has no WireGuard server identity",
+            ));
+        }
+        if !self.region.filter_active {
+            return Err(Status::failed_precondition(
+                "Remote VPN is unavailable because server-side filtering is not active",
+            ));
+        }
+        self.sessions.key()?;
+        inspection_ca_material(self.state_dir.as_deref())
     }
 }
 
@@ -382,48 +636,68 @@ impl WgProvision for WgProvisionService {
         &self,
         req: Request<RegisterWgPeerRequest>,
     ) -> Result<Response<WgPeerGrant>, Status> {
+        let session_token = req
+            .metadata()
+            .get(VPN_SESSION_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         let request = req.into_inner();
         if request.device_id.trim().is_empty() {
             return Err(Status::invalid_argument("device_id is required"));
         }
-        self.verify_device(&request.device_id, &request.device_token)?;
-        if self.region.server_public_key.is_empty() {
-            return Err(Status::failed_precondition(
-                "this region is not configured for WireGuard provisioning",
-            ));
+        if !valid_wg_public_key(request.wg_public_key.trim()) {
+            return Err(Status::invalid_argument("wg_public_key is invalid"));
         }
 
-        // Resolve the CA BEFORE allocating/persisting a peer. An active-filter
-        // grant without this certificate would route a child into an HTTPS
-        // blackhole and could not satisfy the server-filter contract.
-        let inspection_ca = if self.region.filter_active {
-            Some(inspection_ca_material()?)
-        } else {
-            None
-        };
+        // Authenticate before revealing region readiness or guardian policy.
+        self.authenticate_request(session_token.as_deref(), &request)?;
+        authorize_remote_mode(self.state_dir.as_deref(), &request.device_id)?;
+        let (inspection_ca, inspection_ca_sha256) = self.remote_ready()?;
 
-        let address = self
-            .store
-            .register_peer(&request.device_id, &request.wg_public_key)?;
+        let session = self
+            .sessions
+            .mint(&request.device_id, &request.wg_public_key)?;
+        let _ = self.store.prune_expired(now_ms());
+        let assigned_address = self.store.register_peer_with_expiry(
+            &request.device_id,
+            &request.wg_public_key,
+            session.expires_ts,
+        )?;
+
         let mut response = Response::new(WgPeerGrant {
-            assigned_address: address,
+            assigned_address,
             server_public_key: self.region.server_public_key.clone(),
             server_endpoint: self.region.server_endpoint.clone(),
             keepalive_secs: self.region.keepalive_secs,
-            filter_active: self.region.filter_active,
+            filter_active: true,
         });
 
-        if let Some((pem, fingerprint)) = inspection_ca {
-            response.metadata_mut().insert_bin(
-                INSPECTION_CA_BIN_HEADER,
-                tonic::metadata::MetadataValue::from_bytes(&pem),
-            );
-            let fingerprint = tonic::metadata::MetadataValue::try_from(fingerprint.as_str())
-                .map_err(|_| Status::internal("inspection CA fingerprint metadata encoding failed"))?;
-            response
-                .metadata_mut()
-                .insert(INSPECTION_CA_SHA256_HEADER, fingerprint);
-        }
+        response.metadata_mut().insert_bin(
+            INSPECTION_CA_BIN_HEADER,
+            tonic::metadata::MetadataValue::from_bytes(&inspection_ca),
+        );
+        let ca_hash = tonic::metadata::MetadataValue::try_from(inspection_ca_sha256.as_str())
+            .map_err(|_| Status::internal("inspection CA metadata encoding failed"))?;
+        response
+            .metadata_mut()
+            .insert(INSPECTION_CA_SHA256_HEADER, ca_hash);
+
+        let session_value = tonic::metadata::MetadataValue::try_from(session.token.as_str())
+            .map_err(|_| Status::internal("VPN session metadata encoding failed"))?;
+        response
+            .metadata_mut()
+            .insert(VPN_SESSION_HEADER, session_value);
+        let expires = tonic::metadata::MetadataValue::try_from(session.expires_ts.to_string())
+            .map_err(|_| Status::internal("VPN expiry metadata encoding failed"))?;
+        response
+            .metadata_mut()
+            .insert(VPN_SESSION_EXPIRES_HEADER, expires);
+        let renew = tonic::metadata::MetadataValue::try_from(session.renew_after_ms.to_string())
+            .map_err(|_| Status::internal("VPN renew metadata encoding failed"))?;
+        response
+            .metadata_mut()
+            .insert(VPN_SESSION_RENEW_HEADER, renew);
+
         Ok(response)
     }
 }
@@ -433,253 +707,198 @@ mod tests {
     use super::*;
 
     fn test_key(seed: u8) -> String {
-        data_encoding::BASE64.encode(&[seed; 32])
+        BASE64.encode(&[seed; 32])
     }
 
     fn accounts_with_paired_device(device_id: &str) -> (AccountStore, String) {
         let accounts = AccountStore::new();
         accounts
-            .create_account("p@x.com", "password123", "P")
+            .create_account("parent@example.test", "password123", "Parent")
             .unwrap();
-        let (token, _account_id, _) = accounts.login("p@x.com", "password123").unwrap();
-        let (code, _expires) = accounts.create_pair_code(&token, "Kid").unwrap();
-        let (_child_id, _family_id, device_token) =
-            accounts.redeem_pair_code(&code, device_id).unwrap();
+        let (token, _, _) = accounts
+            .login("parent@example.test", "password123")
+            .unwrap();
+        let (code, _) = accounts.create_pair_code(&token, "Kid").unwrap();
+        let (_, _, device_token) = accounts.redeem_pair_code(&code, device_id).unwrap();
         (accounts, device_token)
     }
 
-    fn region(configured: bool) -> WgRegionConfig {
-        WgRegionConfig {
-            server_public_key: if configured {
-                test_key(200)
-            } else {
-                String::new()
-            },
-            server_endpoint: "vpn.predatorhunters.co.uk:51820".to_string(),
-            keepalive_secs: 25,
-            filter_active: false,
-        }
+    fn temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "bulwark-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_remote_config(dir: &Path, device_id: &str, enabled: bool, remote: bool) {
+        let value = serde_json::json!({
+            "configs": [{
+                "child_id": "child-1",
+                "device_id": device_id,
+                "filtering_enabled": enabled,
+                "server_region": "uk",
+                "server_endpoint": "https://region.example.test:8443",
+                "profile": 3,
+                "require_always_on": true,
+                "config_version": 1,
+                "updated_ts": 1,
+                "updated_by": "guardian-1",
+                "filter_location": if remote { 1 } else { 0 }
+            }],
+            "applied": []
+        });
+        std::fs::write(
+            dir.join("child_config.json"),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
     }
 
     #[test]
-    fn allocates_lowest_free_and_reregister_is_idempotent() {
+    fn allocates_stable_addresses_and_key_rotation_keeps_ip() {
         let store = WgPeerStore::new();
-        assert_eq!(store.register_peer("dev-1", &test_key(1)).unwrap(), "10.8.0.2");
-        assert_eq!(store.register_peer("dev-2", &test_key(2)).unwrap(), "10.8.0.3");
-        assert_eq!(store.register_peer("dev-1", &test_key(1)).unwrap(), "10.8.0.2");
-        assert_eq!(store.register_peer("dev-3", &test_key(3)).unwrap(), "10.8.0.4");
-    }
-
-    #[test]
-    fn key_rotation_keeps_the_stable_address_and_frees_the_old_key() {
-        let store = WgPeerStore::new();
-        assert_eq!(store.register_peer("dev-1", &test_key(1)).unwrap(), "10.8.0.2");
-        assert_eq!(store.register_peer("dev-1", &test_key(9)).unwrap(), "10.8.0.2");
-        assert_eq!(store.register_peer("dev-2", &test_key(1)).unwrap(), "10.8.0.3");
-    }
-
-    #[test]
-    fn one_key_one_device() {
-        let store = WgPeerStore::new();
-        store.register_peer("dev-1", &test_key(1)).unwrap();
-        let error = store.register_peer("dev-2", &test_key(1)).unwrap_err();
-        assert_eq!(error.code(), tonic::Code::AlreadyExists);
-    }
-
-    #[test]
-    fn malformed_inputs_are_rejected() {
-        let store = WgPeerStore::new();
+        let exp = now_ms() + 60_000;
         assert_eq!(
-            store.register_peer("", &test_key(1)).unwrap_err().code(),
-            tonic::Code::InvalidArgument
+            store
+                .register_peer_with_expiry("dev-1", &test_key(1), exp)
+                .unwrap(),
+            "10.8.0.2"
         );
         assert_eq!(
-            store.register_peer("dev-1", "not-a-key").unwrap_err().code(),
-            tonic::Code::InvalidArgument
-        );
-        let junk = format!("{}{}", "!".repeat(43), "=");
-        assert_eq!(
-            store.register_peer("dev-1", &junk).unwrap_err().code(),
-            tonic::Code::InvalidArgument
+            store
+                .register_peer_with_expiry("dev-2", &test_key(2), exp)
+                .unwrap(),
+            "10.8.0.3"
         );
         assert_eq!(
-            store.register_peer("dev-1", &"a".repeat(64)).unwrap_err().code(),
-            tonic::Code::InvalidArgument
+            store
+                .register_peer_with_expiry("dev-1", &test_key(9), exp + 1)
+                .unwrap(),
+            "10.8.0.2"
+        );
+        assert_eq!(store.device_id_for_address("10.8.0.2").as_deref(), Some("dev-1"));
+    }
+
+    #[test]
+    fn duplicate_wireguard_key_cannot_cross_devices() {
+        let store = WgPeerStore::new();
+        let exp = now_ms() + 60_000;
+        store
+            .register_peer_with_expiry("dev-1", &test_key(1), exp)
+            .unwrap();
+        assert_eq!(
+            store
+                .register_peer_with_expiry("dev-2", &test_key(1), exp)
+                .unwrap_err()
+                .code(),
+            tonic::Code::AlreadyExists
         );
     }
 
     #[test]
-    fn allocation_helper_finds_gaps_and_reports_exhaustion() {
-        let full: HashSet<u8> = (2..=254).collect();
-        assert_eq!(lowest_free_octet(&full), None);
-        let used: HashSet<u8> = [2u8, 3, 5].into_iter().collect();
-        assert_eq!(lowest_free_octet(&used), Some(4));
-        assert_eq!(lowest_free_octet(&HashSet::new()), Some(2));
+    fn expired_peers_are_pruned_and_no_longer_attributed() {
+        let store = WgPeerStore::new();
+        store
+            .register_peer_with_expiry("dev-1", &test_key(1), now_ms() + 2)
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        assert!(store.device_id_for_address("10.8.0.2").is_none());
+        assert_eq!(store.prune_expired(now_ms()).unwrap(), 1);
+        assert_eq!(store.peer_count(), 0);
     }
 
     #[test]
-    fn reserved_octets_are_skipped_by_the_allocator() {
+    fn session_is_bound_to_device_key_and_expiry() {
+        let auth = SessionAuth::from_secret(&[7u8; 32], 50);
+        let minted = auth.mint("dev-1", &test_key(1)).unwrap();
+        assert!(auth.verify(&minted.token, "dev-1", &test_key(1)).is_ok());
+        assert!(auth.verify(&minted.token, "dev-2", &test_key(1)).is_err());
+        assert!(auth.verify(&minted.token, "dev-1", &test_key(2)).is_err());
+        std::thread::sleep(std::time::Duration::from_millis(55));
+        assert!(auth.verify(&minted.token, "dev-1", &test_key(1)).is_err());
+    }
+
+    #[test]
+    fn guardian_config_is_authoritative_for_remote_access() {
+        let dir = temp_dir("remote-vpn-authz");
+        write_remote_config(&dir, "dev-1", true, true);
+        assert!(authorize_remote_mode(Some(&dir), "dev-1").is_ok());
+        write_remote_config(&dir, "dev-1", true, false);
+        assert_eq!(
+            authorize_remote_mode(Some(&dir), "dev-1").unwrap_err().code(),
+            tonic::Code::PermissionDenied
+        );
+        write_remote_config(&dir, "dev-1", false, true);
+        assert_eq!(
+            authorize_remote_mode(Some(&dir), "dev-1").unwrap_err().code(),
+            tonic::Code::PermissionDenied
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn corrupt_peer_file_is_fatal_not_silently_empty() {
+        let dir = temp_dir("wg-corrupt");
+        std::fs::write(dir.join("wg_peers.json"), b"{not-json").unwrap();
+        assert!(WgPeerStore::with_state_dir(&dir).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn peer_expiry_persists_across_restart() {
+        let dir = temp_dir("wg-persist");
+        let exp = now_ms() + 120_000;
+        let first = WgPeerStore::with_state_dir(&dir).unwrap();
+        first
+            .register_peer_with_expiry("dev-1", &test_key(1), exp)
+            .unwrap();
+        drop(first);
+        let second = WgPeerStore::with_state_dir(&dir).unwrap();
+        assert_eq!(second.device_id_for_address("10.8.0.2").as_deref(), Some("dev-1"));
+        let json = std::fs::read_to_string(dir.join("wg_peers.json")).unwrap();
+        assert!(json.contains("expires_ts"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_requires_real_pairing_credential_before_policy_checks() {
+        let (accounts, _) = accounts_with_paired_device("dev-1");
+        let service = WgProvisionService {
+            store: WgPeerStore::new(),
+            accounts,
+            region: WgRegionConfig::default(),
+            sessions: SessionAuth::from_secret(&[9u8; 32], 60_000),
+            state_dir: None,
+        };
+        let error = service
+            .register_wg_peer(Request::new(RegisterWgPeerRequest {
+                device_id: "dev-1".into(),
+                device_token: "wrong".into(),
+                wg_public_key: test_key(1),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[test]
+    fn reserved_addresses_are_skipped() {
         let store = WgPeerStore {
             inner: Arc::new(Mutex::new(Inner::default())),
             persist: None,
             reserved: Arc::new([2u8].into_iter().collect()),
         };
-        assert_eq!(store.register_peer("dev-1", &test_key(1)).unwrap(), "10.8.0.3");
-        assert_eq!(store.register_peer("dev-2", &test_key(2)).unwrap(), "10.8.0.4");
-    }
-
-    #[test]
-    fn reserved_addrs_env_parses_full_ips_and_bare_octets() {
-        let reserved = reserved_octets_from_env_str("10.8.0.2, 5 , bad, 999, ");
-        assert!(reserved.contains(&2) && reserved.contains(&5));
-        assert_eq!(reserved.len(), 2);
-    }
-
-    #[test]
-    fn address_can_be_resolved_back_to_device() {
-        let store = WgPeerStore::new();
-        store.register_peer("dev-1", &test_key(1)).unwrap();
-        assert_eq!(store.device_id_for_address("10.8.0.2").as_deref(), Some("dev-1"));
-        assert!(store.device_id_for_address("10.8.0.99").is_none());
-    }
-
-    #[test]
-    fn corrupt_peer_file_is_fatal_not_silently_empty() {
-        let dir = std::env::temp_dir().join(format!(
-            "bulwark-wgpeers-corrupt-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("wg_peers.json"), b"{ this is not json").unwrap();
-        assert!(WgPeerStore::with_state_dir(&dir).is_err());
-
-        let fresh = std::env::temp_dir().join(format!(
-            "bulwark-wgpeers-fresh-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&fresh).unwrap();
-        let store = WgPeerStore::with_state_dir(&fresh).unwrap();
-        assert_eq!(store.register_peer("dev-1", &test_key(1)).unwrap(), "10.8.0.2");
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&fresh);
-    }
-
-    #[test]
-    fn peers_persist_and_reload_across_restart() {
-        let dir = std::env::temp_dir().join(format!(
-            "bulwark-wgpeers-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let first = WgPeerStore::with_state_dir(&dir).unwrap();
-        assert_eq!(first.register_peer("dev-1", &test_key(1)).unwrap(), "10.8.0.2");
-        assert_eq!(first.register_peer("dev-2", &test_key(2)).unwrap(), "10.8.0.3");
-        assert_eq!(first.register_peer("dev-1", &test_key(9)).unwrap(), "10.8.0.2");
-        drop(first);
-
-        let second = WgPeerStore::with_state_dir(&dir).unwrap();
-        assert_eq!(second.register_peer("dev-1", &test_key(9)).unwrap(), "10.8.0.2");
-        assert_eq!(second.register_peer("dev-3", &test_key(3)).unwrap(), "10.8.0.4");
-        let json = std::fs::read_to_string(dir.join("wg_peers.json")).unwrap();
-        assert!(json.contains(&test_key(9)));
-        assert!(!json.contains(&test_key(1)));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn persist_failure_fails_the_grant_and_rolls_back() {
-        let dir = std::env::temp_dir().join(format!(
-            "bulwark-wgpeers-rofail-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = JsonFile::new(&dir, "wg_peers.json").unwrap();
-        std::fs::create_dir_all(dir.join("wg_peers.json")).unwrap();
-        let store = WgPeerStore {
-            inner: Arc::new(Mutex::new(Inner::default())),
-            persist: Some(file),
-            reserved: Arc::new(HashSet::new()),
-        };
         assert_eq!(
-            store.register_peer("dev-1", &test_key(1)).unwrap_err().code(),
-            tonic::Code::Unavailable
+            store
+                .register_peer_with_expiry("dev-1", &test_key(1), now_ms() + 60_000)
+                .unwrap(),
+            "10.8.0.3"
         );
-        assert_eq!(
-            store.register_peer("dev-1", &test_key(1)).unwrap_err().code(),
-            tonic::Code::Unavailable
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn register_requires_a_valid_device_token() {
-        let (accounts, device_token) = accounts_with_paired_device("dev-1");
-        let service = WgProvisionService::new(WgPeerStore::new(), accounts, region(true));
-
-        let error = service
-            .register_wg_peer(Request::new(RegisterWgPeerRequest {
-                device_id: "dev-1".into(),
-                device_token: "wrong-token".into(),
-                wg_public_key: test_key(1),
-            }))
-            .await
-            .unwrap_err();
-        assert_eq!(error.code(), tonic::Code::Unauthenticated);
-
-        let error = service
-            .register_wg_peer(Request::new(RegisterWgPeerRequest {
-                device_id: "ghost-device".into(),
-                device_token: device_token.clone(),
-                wg_public_key: test_key(1),
-            }))
-            .await
-            .unwrap_err();
-        assert_eq!(error.code(), tonic::Code::Unauthenticated);
-
-        let grant = service
-            .register_wg_peer(Request::new(RegisterWgPeerRequest {
-                device_id: "dev-1".into(),
-                device_token,
-                wg_public_key: test_key(1),
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(grant.assigned_address, "10.8.0.2");
-        assert_eq!(grant.server_public_key, test_key(200));
-        assert_eq!(grant.server_endpoint, "vpn.predatorhunters.co.uk:51820");
-        assert_eq!(grant.keepalive_secs, 25);
-        assert!(!grant.filter_active);
-    }
-
-    #[tokio::test]
-    async fn unconfigured_region_refuses_to_mint_grants() {
-        let (accounts, device_token) = accounts_with_paired_device("dev-1");
-        let service = WgProvisionService::new(WgPeerStore::new(), accounts, region(false));
-        let error = service
-            .register_wg_peer(Request::new(RegisterWgPeerRequest {
-                device_id: "dev-1".into(),
-                device_token,
-                wg_public_key: test_key(1),
-            }))
-            .await
-            .unwrap_err();
-        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
     }
 }
