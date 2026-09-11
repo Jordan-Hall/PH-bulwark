@@ -15,9 +15,10 @@ import org.json.JSONObject
 import java.io.File
 
 /**
- * Bulwark's Android VPN shell. In `on_device` mode Rust owns local inspection.
- * In `on_server` mode the phone only captures raw IP and WireGuard-encrypts it
- * to a region that owns inspection, inference, policy and remediation.
+ * Bulwark VPN shell with two explicit modes:
+ * - Local VPN: inspection, analysis and enforcement run on this device.
+ * - Remote VPN: this device only captures/encrypts packets; the authenticated
+ *   Bulwark region performs inspection, analysis and enforcement.
  */
 class BulwarkVpnService : VpnService() {
 
@@ -51,16 +52,16 @@ class BulwarkVpnService : VpnService() {
         activeFilterLocation = mode
 
         val startup = when (mode) {
-            ChildConfigSync.FILTER_ON_SERVER -> prepareServerMode() ?: return
+            ChildConfigSync.FILTER_ON_SERVER -> prepareRemoteMode() ?: return
             ChildConfigSync.FILTER_ON_DEVICE -> prepareLocalMode() ?: return
             else -> {
-                failStart("unknown filter mode '$mode'")
+                failStart("unknown VPN mode '$mode'")
                 return
             }
         }
 
         val builder = Builder()
-            .setSession("PH Bulwark")
+            .setSession(if (mode == ChildConfigSync.FILTER_ON_SERVER) "PH Bulwark Remote VPN" else "PH Bulwark Local VPN")
             .setMtu(startup.mtu)
             .addAddress(startup.address, 32)
             .addDnsServer(startup.dnsServer)
@@ -69,7 +70,7 @@ class BulwarkVpnService : VpnService() {
 
         runCatching { builder.addDisallowedApplication(packageName) }
             .onFailure {
-                failStart("could not exclude Bulwark's transport socket from its own VPN")
+                failStart("could not exclude Bulwark transport from its own VPN")
                 return
             }
 
@@ -92,23 +93,23 @@ class BulwarkVpnService : VpnService() {
         }.getOrDefault(0L)
 
         if (rustHandle == 0L || runCatching { RustBridge.isDataPathDown() }.getOrDefault(true)) {
-            failStart("$mode data path did not become ready")
+            failStart("${modeLabel(mode)} data path did not become ready")
             return
         }
 
         ready = true
         lastFailure = ""
-        Log.i(TAG, "Bulwark VPN ready ($mode, rustHandle=$rustHandle)")
+        Log.i(TAG, "${modeLabel(mode)} ready (rustHandle=$rustHandle)")
         startAlertPoller()
         startConfigPoller()
     }
 
     private fun prepareLocalMode(): StartupConfig? {
         val caResult = CaTrust.ensureInstalled(this)
-        Log.i(TAG, "local inspection CA trust: $caResult")
+        Log.i(TAG, "Local VPN inspection CA trust: $caResult")
         if (!caResult.isTrusted()) {
             notifyProvisioningRequired()
-            failStart("local inspection CA is not system-trusted ($caResult)")
+            failStart("Local VPN inspection CA is not system-trusted ($caResult)")
             return null
         }
         return StartupConfig(
@@ -118,10 +119,10 @@ class BulwarkVpnService : VpnService() {
         )
     }
 
-    private fun prepareServerMode(): StartupConfig? {
+    private fun prepareRemoteMode(): StartupConfig? {
         val enrollment = Enrollment.record(this)
         if (enrollment == null || enrollment.deviceToken.isBlank()) {
-            failStart("server VPN requires a paired device credential")
+            failStart("Remote VPN requires a paired device credential")
             return null
         }
 
@@ -131,39 +132,43 @@ class BulwarkVpnService : VpnService() {
                 enrollment.deviceId,
                 RustBridge.clusterCaPath(this),
                 enrollment.deviceToken,
+                RustBridge.remoteVpnDir(this),
             )
         }.onFailure {
-            Log.e(TAG, "server VPN provisioning call failed", it)
+            Log.e(TAG, "Remote VPN authentication/provisioning call failed", it)
         }.getOrNull()
         val result = raw?.let { runCatching { JSONObject(it) }.getOrNull() }
         if (result == null || !result.optBoolean("ok", false)) {
-            failStart(result?.optString("error", "server VPN provisioning failed") ?: "server VPN provisioning failed")
+            failStart(
+                result?.optString("error", "Remote VPN authentication failed")
+                    ?: "Remote VPN authentication failed",
+            )
             return null
         }
         if (!result.optBoolean("filter_active", false)) {
-            failStart("region did not confirm an active server-side filter")
+            failStart("region did not confirm an active Remote VPN filter")
             return null
         }
 
         val assignedAddress = result.optString("assigned_address", "").trim()
         val inspectionCaPem = result.optString("inspection_ca_pem", "")
-        if (assignedAddress.isBlank() || inspectionCaPem.isBlank()) {
-            failStart("region returned an incomplete server VPN grant")
+        val sessionExpiresTs = result.optLong("session_expires_ts", 0L)
+        if (assignedAddress.isBlank() || inspectionCaPem.isBlank() || sessionExpiresTs <= 0L) {
+            failStart("region returned an incomplete authenticated Remote VPN grant")
             return null
         }
 
-        val caResult = CaTrust.ensurePemInstalled(this, inspectionCaPem, "region inspection CA")
-        Log.i(TAG, "region inspection CA trust: $caResult")
+        val caResult = CaTrust.ensurePemInstalled(this, inspectionCaPem, "Remote VPN inspection CA")
+        Log.i(TAG, "Remote VPN region CA trust: $caResult")
         if (!caResult.isTrusted()) {
             notifyProvisioningRequired()
-            failStart("region inspection CA is not system-trusted ($caResult)")
+            failStart("Remote VPN inspection CA is not system-trusted ($caResult)")
             return null
         }
 
+        Log.i(TAG, "Remote VPN authenticated with rotating device-bound lease")
         return StartupConfig(
             address = assignedAddress,
-            // DNS is itself routed through WireGuard, so it exits from the region
-            // rather than leaking directly from the child network.
             dnsServer = "1.1.1.1",
             mtu = 1420,
         )
@@ -179,6 +184,7 @@ class BulwarkVpnService : VpnService() {
             .put("profile", ChildConfigSync.desiredProfile(this))
             .put("filter_location", ChildConfigSync.desiredFilterLocation(this))
             .put("ca_dir", File(filesDir, "ca").absolutePath)
+            .put("remote_vpn_dir", RustBridge.remoteVpnDir(this))
             .put("cluster_ca", File(filesDir, "cluster_ca.pem").absolutePath)
         if (enrollment != null) {
             json.put("cluster_endpoint", enrollment.clusterEndpoint)
@@ -195,9 +201,9 @@ class BulwarkVpnService : VpnService() {
         Thread({
             while (polling) {
                 if (runCatching { RustBridge.isDataPathDown() }.getOrDefault(true)) {
-                    Log.e(TAG, "data path down — tearing down TUN to restore connectivity")
+                    Log.e(TAG, "VPN data path/authentication down — releasing TUN")
                     ready = false
-                    lastFailure = "VPN data path stopped unexpectedly"
+                    lastFailure = "VPN protection stopped or Remote VPN authentication expired"
                     stopSelf()
                     return@Thread
                 }
@@ -252,11 +258,12 @@ class BulwarkVpnService : VpnService() {
     private fun buildNotification(): Notification {
         val mgr = getSystemService(NotificationManager::class.java)
         mgr.createNotificationChannel(
-            NotificationChannel(CHANNEL, "PH Bulwark filtering", NotificationManager.IMPORTANCE_LOW),
+            NotificationChannel(CHANNEL, "PH Bulwark VPN", NotificationManager.IMPORTANCE_LOW),
         )
+        val mode = modeLabel(ChildConfigSync.desiredFilterLocation(this))
         return Notification.Builder(this, CHANNEL)
-            .setContentTitle("PH Bulwark is protecting this device")
-            .setContentText("Protected networking is starting. Applied status is reported only after enforcement is ready.")
+            .setContentTitle("PH Bulwark $mode is protecting this device")
+            .setContentText("Protection is reported as applied only after the requested VPN mode is authenticated and ready.")
             .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
             .setOngoing(true)
             .build()
@@ -273,9 +280,9 @@ class BulwarkVpnService : VpnService() {
                 ),
             )
             val notification = Notification.Builder(this, STATUS_CHANNEL)
-                .setContentTitle("PH Bulwark — setup needed")
+                .setContentTitle("PH Bulwark — managed-device setup needed")
                 .setContentText(
-                    "Web filtering needs this device set up as a managed (Device Owner) device. Open PH Bulwark to finish setup.",
+                    "HTTPS filtering needs this device provisioned as Device Owner so the selected Local or Remote VPN inspection CA can be trusted.",
                 )
                 .setSmallIcon(android.R.drawable.stat_sys_warning)
                 .setAutoCancel(true)
@@ -283,6 +290,9 @@ class BulwarkVpnService : VpnService() {
             mgr.notify(STATUS_NOTIF_ID, notification)
         }
     }
+
+    private fun modeLabel(mode: String): String =
+        if (mode == ChildConfigSync.FILTER_ON_SERVER) "Remote VPN" else "Local VPN"
 
     private data class StartupConfig(
         val address: String,
