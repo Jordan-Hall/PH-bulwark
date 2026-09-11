@@ -2,6 +2,7 @@
 set -euo pipefail
 
 STATE_FILE="${1:-${BULWARK_WG_PEERS_FILE:-/var/lib/bulwark/wg_peers.json}}"
+CONFIG_FILE="${BULWARK_CHILD_CONFIG_FILE:-/var/lib/bulwark/child_config.json}"
 PEER_TOOL="${BULWARK_WG_PEER_TOOL:-/usr/local/sbin/bulwark-wg-peers}"
 LOCK="${BULWARK_WG_LEASE_LOCK:-/run/bulwark-wg-lease-reconcile.lock}"
 
@@ -20,20 +21,44 @@ fi
 
 now_ms="$(( $(date +%s) * 1000 ))"
 tmp="$(mktemp)"
-trap 'rm -f "$tmp"' EXIT
+config_tmp="$(mktemp)"
+trap 'rm -f "$tmp" "$config_tmp"' EXIT
 
-jq -er --argjson now "$now_ms" '
-  (.peers // [])
+# Missing/corrupt guardian authorization must never preserve tunnel access. A
+# missing file becomes an empty authority set; malformed JSON fails the run
+# before any desired peers are applied. Existing peers are removed below when
+# the authority set is empty.
+if [ -f "$CONFIG_FILE" ]; then
+  cp "$CONFIG_FILE" "$config_tmp"
+else
+  printf '%s\n' '{"configs":[]}' >"$config_tmp"
+fi
+
+jq -ner \
+  --slurpfile peers "$STATE_FILE" \
+  --slurpfile configs "$config_tmp" \
+  --argjson now "$now_ms" '
+  ($configs[0].configs // []
+    | map(select(
+        (.device_id | type == "string" and length > 0)
+        and (.filtering_enabled == true)
+        and ((.filter_location // 0) == 1)
+      ))
+    | map(.device_id)
+    | unique) as $authorized
+  | ($peers[0].peers // [])
   | map(select(
-      (.device_id | type == "string" and length > 0)
-      and (.public_key | type == "string" and length > 0)
-      and (.address | type == "string" and length > 0)
-      and (((.expires_ts // 0) > $now) or ((.expires_ts // 0) == 9223372036854775807))
+      . as $peer
+      | ($peer.device_id | type == "string" and length > 0)
+        and ($peer.public_key | type == "string" and length > 0)
+        and ($peer.address | type == "string" and length > 0)
+        and ((($peer.expires_ts // 0) > $now) or (($peer.expires_ts // 0) == 9223372036854775807))
+        and (($authorized | index($peer.device_id)) != null)
     ))
   | sort_by(.address | split(".")[-1] | tonumber)
   | .[]
   | [.device_id, .public_key, .address] | @tsv
-' "$STATE_FILE" >"$tmp" || fail "invalid desired peer state"
+' >"$tmp" || fail "invalid peer/config authorization state"
 
 declare -A desired_key
 declare -A desired_ip
@@ -53,7 +78,7 @@ done < <("$PEER_TOOL" list-peers 2>/dev/null || true)
 
 for device in "${!current_ip[@]}"; do
   if [ -z "${desired_key[$device]+x}" ]; then
-    note "revoking expired/unauthorized peer: $device"
+    note "revoking expired or guardian-unauthorized Remote VPN peer: $device"
     "$PEER_TOOL" remove-peer "$device"
   fi
 done
@@ -70,4 +95,4 @@ while IFS=$'\t' read -r device key address; do
   [ "$current" = "$address" ] || fail "address reconciliation failed for $device: wanted $address got ${current:-none}"
 done <"$tmp"
 
-note "active authenticated Remote VPN peers: ${#desired_key[@]}"
+note "active authenticated + guardian-authorized Remote VPN peers: ${#desired_key[@]}"
