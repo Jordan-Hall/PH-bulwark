@@ -53,7 +53,7 @@ impl SegmentOwner {
             self.family_id.as_str(),
             self.alert_id.as_str(),
         ] {
-            if value.contains(['\n', '\r']) {
+            if value.chars().any(|c| c == '\n' || c == '\r') {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "segment ownership metadata contains a newline",
@@ -171,8 +171,6 @@ impl SegmentStore {
         owner.validate()?;
 
         let sha = sha256_hex(segment);
-        let blob = self.base.join(format!("{sha}.blob"));
-        let meta = self.base.join(format!("{sha}.meta"));
         let created_at = now_secs();
         let metadata = SegmentMeta {
             created_at,
@@ -183,9 +181,9 @@ impl SegmentStore {
             alert_id: owner.alert_id.trim().to_string(),
         };
 
-        // Never overwrite an existing object through a symlink. Content-addressed
-        // duplicates reuse the existing regular file; metadata is owner-specific,
-        // so a cross-owner duplicate gets a distinct opaque handle below.
+        // Never overwrite an existing object through a symlink. Metadata is
+        // owner-specific, so identical bytes belonging to different devices do
+        // not share an authorization handle.
         let opaque = opaque_id(&sha, &metadata);
         let blob = self.base.join(format!("{opaque}.blob"));
         let meta = self.base.join(format!("{opaque}.meta"));
