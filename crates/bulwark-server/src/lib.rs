@@ -18,6 +18,7 @@ pub mod family_safety;
 pub mod persist;
 pub mod relay;
 pub mod reset_mailer;
+pub mod review_security;
 pub mod safety_cases;
 pub mod service;
 pub mod staff;
@@ -30,6 +31,7 @@ pub use child_control::{ChildConfigStore, ChildControlService};
 pub use family_safety::{FamilySafetyService, SafetyBroadcastStore};
 pub use relay::{AlertHub, ReviewService};
 pub use reset_mailer::ResetMailer;
+pub use review_security::{ReviewLedger, SecureReviewService};
 pub use safety_cases::SafetyCaseStore;
 pub use staff::{StaffAdminService, StaffStore};
 pub use tamper::TamperService;
@@ -63,9 +65,6 @@ pub struct ServerConfig {
     pub accounts_enabled: bool,
     pub state_dir: Option<std::path::PathBuf>,
     pub staff_enabled: bool,
-    /// Production is intentionally stricter than dev: enrolled identities,
-    /// mTLS, durable state, no legacy unscoped review path, and no public
-    /// ClusterControl surface are mandatory.
     pub production_mode: bool,
 }
 
@@ -112,9 +111,6 @@ impl AnalyzerRegistry {
         registry
     }
 
-    /// Production video retention is wrapped OUTSIDE VideoAnalyzer so ownership
-    /// comes from AnalysisRequest.device_id and never from a process-global store
-    /// assumption. SegmentStore itself defaults to retention-disabled.
     pub fn with_text_and_video(store: Option<bulwark_video::SegmentStore>) -> Self {
         let mut registry = Self::with_text();
 
