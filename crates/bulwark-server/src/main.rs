@@ -15,7 +15,8 @@ async fn main() -> anyhow::Result<()> {
         .or_else(|| std::env::var("BULWARK_ROLE").ok())
         .and_then(|value| ServerRole::parse(&value))
         .unwrap_or(ServerRole::AllInOne);
-    let bind = std::env::var("BULWARK_BIND").unwrap_or_else(|_| "127.0.0.1:8443".to_string());
+    let bind = std::env::var("BULWARK_BIND")
+        .unwrap_or_else(|_| "127.0.0.1:8443".to_string());
     let production_mode = env_flag("BULWARK_PRODUCTION");
     let accounts_enabled = env_flag("BULWARK_ACCOUNTS");
     let staff_enabled = env_flag("BULWARK_STAFF");
@@ -38,30 +39,14 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if production_mode {
-        if allow_plaintext {
-            anyhow::bail!("BULWARK_ALLOW_PLAINTEXT is forbidden when BULWARK_PRODUCTION=1");
-        }
-        if role != ServerRole::AllInOne {
-            anyhow::bail!(
-                "production currently requires --role all-in-one; distributed ClusterControl is intentionally disabled until internal-node identity and replicated durable state are proven"
-            );
-        }
-        if !accounts_enabled {
-            anyhow::bail!("BULWARK_PRODUCTION=1 requires BULWARK_ACCOUNTS=1");
-        }
-        if state_dir.is_none() {
-            anyhow::bail!("BULWARK_PRODUCTION=1 requires durable BULWARK_STATE_DIR");
-        }
-        if tls_cert_pem.is_none() || tls_key_pem.is_none() || client_ca_pem.is_none() {
-            anyhow::bail!(
-                "BULWARK_PRODUCTION=1 requires server TLS plus BULWARK_TLS_CLIENT_CA (mTLS)"
-            );
-        }
-        if staff_enabled {
-            anyhow::bail!(
-                "BULWARK_STAFF must run on a dedicated internal listener; the guardian-facing production listener refuses the staff RPC surface"
-            );
-        }
+        validate_production(
+            role,
+            accounts_enabled,
+            staff_enabled,
+            allow_plaintext,
+            state_dir.as_deref(),
+            tls_cert_pem.as_deref(),
+        )?;
     }
 
     let cfg = ServerConfig {
@@ -71,20 +56,20 @@ async fn main() -> anyhow::Result<()> {
         state_dir,
         tls_cert_pem,
         tls_key_pem,
+        // Optional defence-in-depth for deployments where every public client
+        // actually has a certificate. Product identity does not depend on it:
+        // device RPCs use pairing credentials and guardian RPCs use sessions.
         client_ca_pem,
         staff_enabled,
         production_mode,
     };
 
-    // SegmentStore::default_location is retention-disabled unless the operator
-    // explicitly sets BULWARK_RETAIN_REVIEW_CLIPS=1. Alerts/evidence remain
-    // hash/redaction-only by default.
     let segment_store = matches!(role, ServerRole::AllInOne)
         .then(bulwark_video::SegmentStore::default_location)
         .and_then(|result| {
             result
                 .map_err(|error| {
-                    tracing::warn!(%error, "review clip store unavailable; raw review retention disabled")
+                    tracing::warn!(%error, "review clip store unavailable; raw retention disabled")
                 })
                 .ok()
         });
@@ -98,16 +83,10 @@ async fn main() -> anyhow::Result<()> {
 
     let email_sink: Option<Arc<dyn bulwark_alert::AlertSink>> =
         match bulwark_alert::AlertConfig::from_env().map_err(anyhow::Error::msg)? {
-            Some(alert_cfg) => {
-                let sink = bulwark_alert::EmailAlertSink::new(alert_cfg)
-                    .map_err(anyhow::Error::msg)?;
-                tracing::info!("guardian email alert sink configured");
-                Some(Arc::new(sink))
-            }
-            None => {
-                tracing::info!("guardian email alert sink not configured");
-                None
-            }
+            Some(alert_cfg) => Some(Arc::new(
+                bulwark_alert::EmailAlertSink::new(alert_cfg).map_err(anyhow::Error::msg)?,
+            )),
+            None => None,
         };
 
     #[cfg(not(feature = "push"))]
@@ -116,8 +95,9 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "push")]
     let (alert_sink, hub) = {
         let hub = match &cfg.state_dir {
-            Some(dir) => bulwark_server::AlertHub::with_state_dir(dir)
-                .map_err(anyhow::Error::from)?,
+            Some(dir) => {
+                bulwark_server::AlertHub::with_state_dir(dir).map_err(anyhow::Error::from)?
+            }
             None => bulwark_server::AlertHub::new(),
         };
         let registry = Arc::new(bulwark_server::relay::HubTokenRegistry::new(hub.clone()));
@@ -135,6 +115,91 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(?role, production_mode, "starting bulwark-server");
     service::run(cfg, registry, alert_sink, cluster, hub).await
+}
+
+fn validate_production(
+    role: ServerRole,
+    accounts_enabled: bool,
+    staff_enabled: bool,
+    allow_plaintext: bool,
+    state_dir: Option<&std::path::Path>,
+    tls_cert: Option<&[u8]>,
+) -> anyhow::Result<()> {
+    if allow_plaintext {
+        anyhow::bail!("BULWARK_ALLOW_PLAINTEXT is forbidden when BULWARK_PRODUCTION=1");
+    }
+    if role != ServerRole::AllInOne {
+        anyhow::bail!(
+            "production currently requires --role all-in-one; cluster control is not exposed on the family listener"
+        );
+    }
+    if !accounts_enabled {
+        anyhow::bail!("BULWARK_PRODUCTION=1 requires BULWARK_ACCOUNTS=1");
+    }
+    if state_dir.is_none() {
+        anyhow::bail!("BULWARK_PRODUCTION=1 requires durable BULWARK_STATE_DIR");
+    }
+    if tls_cert.is_none() {
+        anyhow::bail!("BULWARK_PRODUCTION=1 requires server TLS");
+    }
+    if staff_enabled {
+        anyhow::bail!(
+            "BULWARK_STAFF must run on a dedicated internal listener, not the family listener"
+        );
+    }
+
+    #[cfg(not(feature = "onnx"))]
+    anyhow::bail!(
+        "production image/video coverage requires bulwark-server built with feature `onnx`"
+    );
+    #[cfg(not(feature = "ffmpeg"))]
+    anyhow::bail!(
+        "production video coverage requires bulwark-server built with feature `ffmpeg`"
+    );
+    #[cfg(not(feature = "whisper"))]
+    anyhow::bail!(
+        "production audio/video-speech coverage requires bulwark-server built with feature `whisper`"
+    );
+
+    #[cfg(all(feature = "onnx", feature = "ffmpeg", feature = "whisper"))]
+    {
+        require_file_env("BULWARK_NSFW_MODEL")?;
+        require_file_env("BULWARK_WHISPER_MODEL")?;
+        require_ffmpeg()?;
+    }
+
+    Ok(())
+}
+
+#[cfg(all(feature = "onnx", feature = "ffmpeg", feature = "whisper"))]
+fn require_file_env(name: &str) -> anyhow::Result<()> {
+    let path = std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("production coverage requires {name}"))?;
+    if !path.is_file() {
+        anyhow::bail!("{name} does not point to a readable model file: {}", path.display());
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "onnx", feature = "ffmpeg", feature = "whisper"))]
+fn require_ffmpeg() -> anyhow::Result<()> {
+    let binary = std::env::var_os("BULWARK_FFMPEG_BINARY")
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var_os("FFMPEG_BINARY").filter(|value| !value.is_empty()))
+        .unwrap_or_else(|| "ffmpeg".into());
+    let status = std::process::Command::new(&binary)
+        .arg("-version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|error| anyhow::anyhow!("cannot execute ffmpeg {:?}: {error}", binary))?;
+    if !status.success() {
+        anyhow::bail!("ffmpeg runtime check failed for {:?}", binary);
+    }
+    Ok(())
 }
 
 fn env_flag(name: &str) -> bool {
