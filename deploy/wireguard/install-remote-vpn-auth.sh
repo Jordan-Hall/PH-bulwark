@@ -16,6 +16,7 @@ install -m 0700 "$ROOT/wg-peers.sh" "$SBIN_DIR/bulwark-wg-peers"
 install -m 0700 "$ROOT/wg-filter.sh" "$SBIN_DIR/bulwark-wg-filter"
 install -m 0700 "$ROOT/wg-lease-reconcile.sh" "$SBIN_DIR/bulwark-wg-lease-reconcile"
 install -m 0700 "$ROOT/activate-remote-vpn-container.sh" "$SBIN_DIR/bulwark-activate-remote-vpn"
+install -m 0700 "$ROOT/install-remote-vpn-auth.sh" "$SBIN_DIR/bulwark-install-remote-vpn-auth"
 install -m 0644 "$ROOT/bulwark-wg-lease-reconcile.service" \
   "$SYSTEMD_DIR/bulwark-wg-lease-reconcile.service"
 install -m 0644 "$ROOT/bulwark-wg-lease-reconcile.timer" \
