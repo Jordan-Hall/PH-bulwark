@@ -25,6 +25,14 @@ async fn main() -> anyhow::Result<()> {
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from);
 
+    // Remote VPN uses a separate short-lived signed lease after device pairing.
+    // When an operator does not inject a secret, generate it once into the
+    // durable server state directory and reuse it across restarts. Raw lease
+    // tokens themselves are never persisted server-side.
+    if env_flag("BULWARK_WG_FILTER_ACTIVE") {
+        configure_remote_vpn_auth(state_dir.as_deref())?;
+    }
+
     let tls_cert_pem = read_pem_env("BULWARK_TLS_CERT")?;
     let tls_key_pem = read_pem_env("BULWARK_TLS_KEY")?;
     let client_ca_pem = read_pem_env("BULWARK_TLS_CLIENT_CA")?;
@@ -56,9 +64,6 @@ async fn main() -> anyhow::Result<()> {
         state_dir,
         tls_cert_pem,
         tls_key_pem,
-        // Optional defence-in-depth for deployments where every public client
-        // actually has a certificate. Product identity does not depend on it:
-        // device RPCs use pairing credentials and guardian RPCs use sessions.
         client_ca_pem,
         staff_enabled,
         production_mode,
@@ -162,6 +167,84 @@ fn validate_production(
         require_ffmpeg()?;
         Ok(())
     }
+}
+
+fn configure_remote_vpn_auth(state_dir: Option<&std::path::Path>) -> anyhow::Result<()> {
+    use ring::rand::{SecureRandom, SystemRandom};
+    use std::io::Write;
+
+    let server_key = std::env::var("BULWARK_WG_SERVER_PUBLIC_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "BULWARK_WG_FILTER_ACTIVE requires BULWARK_WG_SERVER_PUBLIC_KEY"
+            )
+        })?;
+    let _ = server_key;
+
+    let state_dir = state_dir.ok_or_else(|| {
+        anyhow::anyhow!("Remote VPN authentication requires durable BULWARK_STATE_DIR")
+    })?;
+    let inspection_ca = std::env::var_os("BULWARK_WG_INSPECTION_CA_PEM")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| state_dir.join("wg_inspection_ca.pem"));
+    if !inspection_ca.is_file() {
+        anyhow::bail!(
+            "BULWARK_WG_FILTER_ACTIVE requires a readable Remote VPN inspection CA: {}",
+            inspection_ca.display()
+        );
+    }
+
+    if std::env::var("BULWARK_REMOTE_VPN_SESSION_SECRET")
+        .ok()
+        .is_some_and(|value| value.len() >= 32)
+    {
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(state_dir)?;
+    let secret_path = state_dir.join("remote_vpn_session.key");
+    let secret = match std::fs::read(&secret_path) {
+        Ok(bytes) if bytes.len() >= 32 => bytes,
+        Ok(_) => anyhow::bail!(
+            "Remote VPN signing key is corrupt/too short: {}",
+            secret_path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut bytes = [0u8; 32];
+            SystemRandom::new()
+                .fill(&mut bytes)
+                .map_err(|_| anyhow::anyhow!("could not generate Remote VPN signing key"))?;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&secret_path)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(
+                    &secret_path,
+                    std::fs::Permissions::from_mode(0o600),
+                )?;
+            }
+            bytes.to_vec()
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    // Hex is only an in-process environment representation of the persisted
+    // random secret; it is never logged or exposed over an RPC.
+    let secret_hex = secret
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    std::env::set_var("BULWARK_REMOTE_VPN_SESSION_SECRET", secret_hex);
+    tracing::info!("Remote VPN lease signing key loaded from durable server state");
+    Ok(())
 }
 
 #[cfg(all(feature = "onnx", feature = "ffmpeg", feature = "whisper"))]
