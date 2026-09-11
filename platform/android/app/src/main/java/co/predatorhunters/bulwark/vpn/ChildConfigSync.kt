@@ -16,11 +16,13 @@ object ChildConfigSync {
     private const val KEY_APPLIED_VERSION = "applied_config_version"
     private const val KEY_APPLIED_PROFILE = "applied_profile"
     private const val KEY_APPLIED_FILTER_LOCATION = "applied_filter_location"
+    private const val KEY_DESIRED_PROFILE = "desired_profile"
+    private const val KEY_DESIRED_FILTER_LOCATION = "desired_filter_location"
     private const val KEY_SYNC_STATE = "sync_state"
     private const val KEY_SYNC_DETAIL = "sync_detail"
 
-    private const val FILTER_ON_DEVICE = "on_device"
-    private const val FILTER_ON_SERVER = "on_server"
+    const val FILTER_ON_DEVICE = "on_device"
+    const val FILTER_ON_SERVER = "on_server"
 
     enum class SyncState {
         DESIRED,
@@ -36,11 +38,18 @@ object ChildConfigSync {
     fun appliedProfile(ctx: Context): String =
         prefs(ctx).getString(KEY_APPLIED_PROFILE, "") ?: ""
 
+    fun desiredProfile(ctx: Context): String =
+        prefs(ctx).getString(KEY_DESIRED_PROFILE, appliedProfile(ctx)) ?: appliedProfile(ctx)
+
     fun appliedFilterLocation(ctx: Context): String =
         prefs(ctx).getString(KEY_APPLIED_FILTER_LOCATION, FILTER_ON_DEVICE) ?: FILTER_ON_DEVICE
 
+    fun desiredFilterLocation(ctx: Context): String =
+        prefs(ctx).getString(KEY_DESIRED_FILTER_LOCATION, appliedFilterLocation(ctx))
+            ?: appliedFilterLocation(ctx)
+
     fun cloudFilteringRequested(ctx: Context): Boolean =
-        appliedFilterLocation(ctx) == FILTER_ON_SERVER
+        desiredFilterLocation(ctx) == FILTER_ON_SERVER
 
     fun syncState(ctx: Context): SyncState = runCatching {
         SyncState.valueOf(prefs(ctx).getString(KEY_SYNC_STATE, SyncState.DESIRED.name)!!)
@@ -51,8 +60,8 @@ object ChildConfigSync {
 
     /**
      * Fetch desired config and reconcile it. `have_version` is always the last
-     * successfully applied version; unsupported/degraded/applying attempts never
-     * advance it, so the guardian console cannot receive a false applied ack.
+     * successfully enforced version. A local↔server mode transition restarts the
+     * VPN and does not advance the version until the new data path reports ready.
      */
     fun fetchAndReconcile(ctx: Context) {
         val enrollment = Enrollment.record(ctx) ?: return
@@ -89,36 +98,46 @@ object ChildConfigSync {
             transition(ctx, SyncState.DEGRADED, "stale desired config refused")
             return
         }
-        transition(ctx, if (version == applied) SyncState.APPLIED else SyncState.DESIRED, "desired v$version")
 
         val profile = obj.optString("profile", "")
-        val filterLocation =
-            obj.optString("filter_location", FILTER_ON_DEVICE).ifBlank { FILTER_ON_DEVICE }
-
-        // Server-side filtering is not implemented by this Android data path yet.
-        // Keep existing on-device protection running, but never claim the desired
-        // cloud mode was applied and never advance have_version.
-        if (filterLocation == FILTER_ON_SERVER) {
-            prefs(ctx).edit()
-                .putString(KEY_APPLIED_FILTER_LOCATION, FILTER_ON_SERVER)
-                .apply()
-            ensureOnDeviceProtectionBestEffort(ctx)
-            transition(
-                ctx,
-                SyncState.UNSUPPORTED,
-                "cloud filtering requested but this build only has on-device enforcement",
-            )
+        val requestedLocation = obj.optString("filter_location", FILTER_ON_DEVICE)
+            .ifBlank { FILTER_ON_DEVICE }
+        if (requestedLocation != FILTER_ON_DEVICE && requestedLocation != FILTER_ON_SERVER) {
+            transition(ctx, SyncState.UNSUPPORTED, "unknown filter location '$requestedLocation'")
             return
         }
-
         val filteringEnabled = obj.optBoolean("filtering_enabled", true)
+
+        prefs(ctx).edit()
+            .putString(KEY_DESIRED_PROFILE, profile)
+            .putString(KEY_DESIRED_FILTER_LOCATION, requestedLocation)
+            .apply()
+        transition(
+            ctx,
+            if (version == applied) SyncState.APPLIED else SyncState.DESIRED,
+            "desired v$version ($requestedLocation)",
+        )
+
         if (filteringEnabled) {
             if (VpnService.prepare(ctx) != null) {
                 transition(ctx, SyncState.DEGRADED, "VPN consent missing")
                 return
             }
+
+            if (BulwarkVpnService.running &&
+                BulwarkVpnService.activeFilterLocation != requestedLocation
+            ) {
+                transition(
+                    ctx,
+                    SyncState.APPLYING,
+                    "switching VPN from ${BulwarkVpnService.activeFilterLocation} to $requestedLocation",
+                )
+                ctx.stopService(Intent(ctx, BulwarkVpnService::class.java))
+                return
+            }
+
             if (!BulwarkVpnService.running) {
-                transition(ctx, SyncState.APPLYING, "starting filtering service")
+                transition(ctx, SyncState.APPLYING, "starting $requestedLocation filtering service")
                 ContextCompat.startForegroundService(
                     ctx,
                     Intent(ctx, BulwarkVpnService::class.java),
@@ -126,37 +145,33 @@ object ChildConfigSync {
                 return
             }
             if (!BulwarkVpnService.ready) {
-                transition(ctx, SyncState.APPLYING, "filtering service is not ready yet")
+                val detail = BulwarkVpnService.lastFailure.ifBlank {
+                    "$requestedLocation filtering service is not ready yet"
+                }
+                transition(ctx, SyncState.APPLYING, detail)
                 return
             }
-        } else {
-            if (BulwarkVpnService.running) {
-                transition(ctx, SyncState.APPLYING, "stopping filtering service")
-                ctx.stopService(Intent(ctx, BulwarkVpnService::class.java))
+            if (BulwarkVpnService.activeFilterLocation != requestedLocation) {
+                transition(ctx, SyncState.DEGRADED, "VPN ready in the wrong filtering mode")
                 return
             }
+        } else if (BulwarkVpnService.running) {
+            transition(ctx, SyncState.APPLYING, "stopping filtering service")
+            ctx.stopService(Intent(ctx, BulwarkVpnService::class.java))
+            return
         }
 
-        // Only now is desired state actually enforced. Persist policy fields and
-        // advance the version atomically in one SharedPreferences transaction.
         prefs(ctx).edit()
             .putString(KEY_APPLIED_PROFILE, profile)
-            .putString(KEY_APPLIED_FILTER_LOCATION, FILTER_ON_DEVICE)
+            .putString(KEY_APPLIED_FILTER_LOCATION, requestedLocation)
             .putLong(KEY_APPLIED_VERSION, version)
             .putString(KEY_SYNC_STATE, SyncState.APPLIED.name)
             .putString(
                 KEY_SYNC_DETAIL,
-                "applied v$version (filtering ${if (filteringEnabled) "on" else "off"})",
+                "applied v$version ($requestedLocation, filtering ${if (filteringEnabled) "on" else "off"})",
             )
             .apply()
         Log.i(TAG, "applied guardian config v$version after enforcement readiness")
-    }
-
-    private fun ensureOnDeviceProtectionBestEffort(ctx: Context) {
-        if (BulwarkVpnService.running || VpnService.prepare(ctx) != null) return
-        runCatching {
-            ContextCompat.startForegroundService(ctx, Intent(ctx, BulwarkVpnService::class.java))
-        }
     }
 
     private fun transition(ctx: Context, state: SyncState, detail: String) {
