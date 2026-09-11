@@ -42,6 +42,7 @@ thiserror.workspace = true
 async-trait.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
+bytes.workspace = true
 # Password hashing for parent accounts. ring (PBKDF2-HMAC-SHA256) is the LEGACY
 # path, kept for transparent on-login migration of existing accounts; new/rotated
 # passwords use Argon2id. ring is already in the build graph (tonic tls-ring).
