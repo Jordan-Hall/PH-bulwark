@@ -55,16 +55,16 @@ fn inconclusive(request_id: String, rationale: impl Into<String>) -> Verdict {
 }
 
 fn bind_analysis_identity(
-    req: &mut AnalysisRequest,
+    request: &mut AnalysisRequest,
     principal: &DevicePrincipal,
 ) -> Result<(), Status> {
-    let claimed = req.device_id.trim();
+    let claimed = request.device_id.trim();
     if !claimed.is_empty() && claimed != principal.device_id {
         return Err(Status::permission_denied(
             "analysis request device_id does not match authenticated device",
         ));
     }
-    req.device_id = principal.device_id.clone();
+    request.device_id = principal.device_id.clone();
     Ok(())
 }
 
@@ -94,11 +94,11 @@ impl AnalysisService {
             .transpose()
     }
 
-    async fn dispatch(&self, req: AnalysisRequest) -> Result<Verdict, Status> {
-        match self.registry.analyzer_for(req.media_kind) {
-            Some(analyzer) => analyzer.analyze(req).await.map_err(to_status),
+    async fn dispatch(&self, request: AnalysisRequest) -> Result<Verdict, Status> {
+        match self.registry.analyzer_for(request.media_kind) {
+            Some(analyzer) => analyzer.analyze(request).await.map_err(to_status),
             None => Ok(inconclusive(
-                req.request_id,
+                request.request_id,
                 "no analyzer is registered for this media kind",
             )),
         }
@@ -107,21 +107,21 @@ impl AnalysisService {
 
 #[tonic::async_trait]
 impl Analysis for AnalysisService {
-    async fn analyze(&self, req: Request<AnalysisRequest>) -> Result<Response<Verdict>, Status> {
-        let principal = self.principal(&req)?;
-        let mut req = req.into_inner();
+    async fn analyze(&self, request: Request<AnalysisRequest>) -> Result<Response<Verdict>, Status> {
+        let principal = self.principal(&request)?;
+        let mut request = request.into_inner();
         if let Some(principal) = &principal {
-            bind_analysis_identity(&mut req, principal)?;
+            bind_analysis_identity(&mut request, principal)?;
         }
-        self.dispatch(req).await.map(Response::new)
+        self.dispatch(request).await.map(Response::new)
     }
 
     async fn analyze_batch(
         &self,
-        req: Request<AnalysisBatch>,
+        request: Request<AnalysisBatch>,
     ) -> Result<Response<VerdictBatch>, Status> {
-        let principal = self.principal(&req)?;
-        let mut requests = req.into_inner().requests;
+        let principal = self.principal(&request)?;
+        let mut requests = request.into_inner().requests;
         if let Some(principal) = &principal {
             for request in &mut requests {
                 bind_analysis_identity(request, principal)?;
@@ -146,12 +146,12 @@ impl Analysis for AnalysisService {
 
     async fn analyze_stream(
         &self,
-        req: Request<Streaming<AnalysisRequest>>,
+        request: Request<Streaming<AnalysisRequest>>,
     ) -> Result<Response<Self::AnalyzeStreamStream>, Status> {
-        let principal = self.principal(&req)?;
+        let principal = self.principal(&request)?;
         let this = self.clone();
-        let inbound = req.into_inner();
-        let out = inbound.then(move |item| {
+        let inbound = request.into_inner();
+        let output = inbound.then(move |item| {
             let this = this.clone();
             let principal = principal.clone();
             async move {
@@ -162,7 +162,7 @@ impl Analysis for AnalysisService {
                 this.dispatch(request).await
             }
         });
-        Ok(Response::new(Box::pin(out)))
+        Ok(Response::new(Box::pin(output)))
     }
 }
 
@@ -190,12 +190,13 @@ impl OffloadService {
 impl Offload for OffloadService {
     async fn negotiate_offload(
         &self,
-        req: Request<DeviceProfile>,
+        request: Request<DeviceProfile>,
     ) -> Result<Response<OffloadPolicy>, Status> {
-        let principal = self.principal(&req)?;
-        let mut profile = req.into_inner();
+        let principal = self.principal(&request)?;
+        let mut profile = request.into_inner();
         if let Some(principal) = &principal {
-            if !profile.device_id.trim().is_empty() && profile.device_id.trim() != principal.device_id
+            if !profile.device_id.trim().is_empty()
+                && profile.device_id.trim() != principal.device_id
             {
                 return Err(Status::permission_denied(
                     "profile device_id does not match authenticated device",
@@ -211,12 +212,13 @@ impl Offload for OffloadService {
 
     async fn refresh_offload(
         &self,
-        req: Request<RefreshOffloadRequest>,
+        request: Request<RefreshOffloadRequest>,
     ) -> Result<Response<OffloadPolicy>, Status> {
-        let principal = self.principal(&req)?;
-        let mut refresh = req.into_inner();
+        let principal = self.principal(&request)?;
+        let mut refresh = request.into_inner();
         if let Some(principal) = &principal {
-            if !refresh.device_id.trim().is_empty() && refresh.device_id.trim() != principal.device_id
+            if !refresh.device_id.trim().is_empty()
+                && refresh.device_id.trim() != principal.device_id
             {
                 return Err(Status::permission_denied(
                     "refresh device_id does not match authenticated device",
@@ -306,9 +308,6 @@ impl AlertRelayService {
     }
 
     async fn deliver(&self, event: AlertEvent) -> Result<AlertAck, Status> {
-        // Persist immutable alert ownership BEFORE fan-out/acknowledgement. If the
-        // durable review ledger cannot commit, production must not claim the alert
-        // is safely reviewable.
         if let Some(ledger) = &self.review_ledger {
             ledger
                 .record(&event)
@@ -342,18 +341,18 @@ impl AlertRelayService {
 
 #[tonic::async_trait]
 impl AlertRelay for AlertRelayService {
-    async fn raise_alert(&self, req: Request<AlertEvent>) -> Result<Response<AlertAck>, Status> {
-        let principal = self.principal(&req)?;
-        let event = Self::bind_alert(req.into_inner(), principal.as_ref())?;
+    async fn raise_alert(&self, request: Request<AlertEvent>) -> Result<Response<AlertAck>, Status> {
+        let principal = self.principal(&request)?;
+        let event = Self::bind_alert(request.into_inner(), principal.as_ref())?;
         self.deliver(event).await.map(Response::new)
     }
 
     async fn raise_alerts(
         &self,
-        req: Request<AlertBatch>,
+        request: Request<AlertBatch>,
     ) -> Result<Response<AlertAckBatch>, Status> {
-        let principal = self.principal(&req)?;
-        let batch = req.into_inner();
+        let principal = self.principal(&request)?;
+        let batch = request.into_inner();
         let mut acks = Vec::with_capacity(batch.events.len());
         for event in batch.events {
             let event = Self::bind_alert(event, principal.as_ref())?;
@@ -376,11 +375,13 @@ pub async fn run(
         if !cfg.accounts_enabled || cfg.state_dir.is_none() {
             anyhow::bail!("production server requires accounts + durable state");
         }
-        if cfg.tls_cert_pem.is_none() || cfg.tls_key_pem.is_none() || cfg.client_ca_pem.is_none() {
-            anyhow::bail!("production server requires mutual TLS");
+        if cfg.tls_cert_pem.is_none() || cfg.tls_key_pem.is_none() {
+            anyhow::bail!("production server requires server-authenticated TLS");
         }
         if cfg.role != ServerRole::AllInOne {
-            anyhow::bail!("production distributed roles are disabled until internal-node auth is complete");
+            anyhow::bail!(
+                "production distributed roles are disabled until internal-node auth is complete"
+            );
         }
     }
 
@@ -392,9 +393,11 @@ pub async fn run(
             let mut tls = ServerTlsConfig::new().identity(Identity::from_pem(cert, key));
             if let Some(ca) = &cfg.client_ca_pem {
                 tls = tls.client_ca_root(Certificate::from_pem(ca));
-                tracing::info!("mTLS enabled; client certificates required");
+                tracing::info!("server TLS + optional client-certificate authentication enabled");
             } else {
-                tracing::warn!("server TLS enabled without client certificate authentication");
+                tracing::info!(
+                    "server TLS enabled; device/guardian authorization uses application credentials"
+                );
             }
             builder = builder.tls_config(tls)?;
         }
@@ -557,6 +560,7 @@ pub async fn run(
                 child_config,
                 accounts.clone(),
             )));
+
             let wg_peers = wg_peers.unwrap_or_else(WgPeerStore::new);
             router = router.add_service(WgProvisionServer::new(WgProvisionService::from_env(
                 wg_peers,
@@ -573,7 +577,9 @@ pub async fn run(
         }
 
         if cluster.is_some() {
-            tracing::info!("ClusterControl public mount disabled; internal control plane is isolated");
+            tracing::info!(
+                "ClusterControl public mount disabled; internal control plane is isolated"
+            );
         }
     }
 
