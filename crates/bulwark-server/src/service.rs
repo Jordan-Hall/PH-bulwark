@@ -32,6 +32,9 @@ use crate::tamper::{self, TamperService};
 use crate::wg_provision::{WgPeerStore, WgProvisionService};
 use crate::{default_offload_policy, AnalyzerRegistry, ServerConfig, ServerRole};
 
+#[path = "remote_vpn.rs"]
+mod remote_vpn;
+
 const ANALYSIS_BATCH_CONCURRENCY: usize = 8;
 
 fn to_status(error: bulwark_core::Error) -> Status {
@@ -413,7 +416,9 @@ pub async fn run(
         None
     };
 
-    let mut analysis = AnalysisService::new(registry);
+    // The gRPC Analysis service and the Remote VPN region filter share analyzer
+    // instances. Models/sessions therefore load once per server process.
+    let mut analysis = AnalysisService::new(registry.clone());
     if let Some(accounts) = &accounts {
         analysis = analysis.with_accounts(accounts.clone());
     }
@@ -552,16 +557,42 @@ pub async fn run(
             .with_segment_store(review_store.clone());
             router = router.add_service(ReviewServer::new(secure_review));
 
+            // Build the child configuration store ONCE. ChildControl,
+            // WgProvision's durable authorization document and the Remote VPN
+            // runtime all refer to this same authority/state directory.
             let child_config = match &cfg.state_dir {
                 Some(dir) => ChildConfigStore::with_state_dir(dir)?,
                 None => ChildConfigStore::new(),
             };
             router = router.add_service(ChildControlServer::new(ChildControlService::new(
-                child_config,
+                child_config.clone(),
                 accounts.clone(),
             )));
 
             let wg_peers = wg_peers.unwrap_or_else(WgPeerStore::new);
+
+            // Start the actual region filtering runtime BEFORE exposing the
+            // provisioning RPC. Therefore a grant carrying filter_active=true
+            // can only be issued after the CA, transparent ingress and analyzer
+            // pipeline have initialized successfully.
+            if let Some(state_dir) = cfg.state_dir.clone() {
+                remote_vpn::start(remote_vpn::RemoteVpnContext {
+                    registry: registry.clone(),
+                    accounts: accounts.clone(),
+                    child_config: child_config.clone(),
+                    hub: hub.clone(),
+                    review_ledger: review_ledger.clone(),
+                    alert_sink: alert_sink.clone(),
+                    state_dir,
+                })
+                .await?;
+            } else if matches!(
+                std::env::var("BULWARK_WG_FILTER_ACTIVE").ok().as_deref(),
+                Some("1") | Some("true") | Some("yes") | Some("on")
+            ) {
+                anyhow::bail!("Remote VPN filtering requires durable BULWARK_STATE_DIR");
+            }
+
             router = router.add_service(WgProvisionServer::new(WgProvisionService::from_env(
                 wg_peers,
                 accounts.clone(),
