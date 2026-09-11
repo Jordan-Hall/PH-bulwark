@@ -14,10 +14,11 @@ command -v jq >/dev/null 2>&1 || fail "jq is required"
 [ -f "$STATE_FILE" ] || fail "desired peer state missing: $STATE_FILE"
 
 exec 201>"$LOCK"
-command -v flock >/dev/null 2>&1 && flock -w 15 201 || true
+if command -v flock >/dev/null 2>&1; then
+  flock -w 15 201 || fail "another WireGuard lease reconciliation is still running"
+fi
 
 now_ms="$(( $(date +%s) * 1000 ))"
-
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 
