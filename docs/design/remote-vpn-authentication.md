@@ -14,7 +14,7 @@ The child never silently changes Local ↔ Remote as a recovery mechanism.
 
 ## Remote VPN authentication
 
-Remote VPN deliberately separates long-lived enrollment from short-lived tunnel access.
+Remote VPN separates long-lived enrollment from short-lived tunnel access.
 
 1. Pairing mints the device's long-lived `device_token`.
 2. The guardian explicitly sets `filtering_enabled=true` and `FILTER_ON_SERVER` for that device.
@@ -33,34 +33,27 @@ The region stores no raw VPN session token. It stores only the desired WireGuard
 
 Required before Remote VPN can issue a grant:
 
-- `BULWARK_STATE_DIR` with the durable `child_config.json` guardian authority.
+- `BULWARK_STATE_DIR` with durable account/child configuration state.
 - `BULWARK_WG_SERVER_PUBLIC_KEY` with the region WireGuard public key.
 - `BULWARK_WG_ENDPOINT` with the region UDP endpoint.
 - `BULWARK_WG_FILTER_ACTIVE=true` only after the region filtering data path is actually active.
 - `BULWARK_WG_INSPECTION_CA_PEM` or `<BULWARK_STATE_DIR>/wg_inspection_ca.pem` with the region inspection root public certificate.
-- `BULWARK_REMOTE_VPN_SESSION_SECRET` containing at least 32 bytes of high-entropy secret material. Store it in the deployment secret manager, never in source control.
 
-Optional:
+The VPN lease signing key is either supplied through `BULWARK_REMOTE_VPN_SESSION_SECRET` (minimum 32 bytes), or generated once at `<BULWARK_STATE_DIR>/remote_vpn_session.key` with owner-only permissions and loaded into the server process on later restarts.
 
-- `BULWARK_REMOTE_VPN_SESSION_TTL_SECS` controls lease lifetime and is bounded server-side.
-- `BULWARK_WG_KEEPALIVE_SECS` controls WireGuard keepalive.
+Optional `BULWARK_REMOTE_VPN_SESSION_TTL_SECS` controls lease lifetime and is bounded server-side. `BULWARK_WG_KEEPALIVE_SECS` controls WireGuard keepalive.
 
 ## Live revocation
 
-`wg_peers.json` now carries `expires_ts`. The root-only `wg-lease-reconcile.sh` service runs every 15 seconds, removes expired peers from live WireGuard, repairs address drift, and applies only currently leased peers.
+`wg_peers.json` carries `expires_ts`. The root-only `wg-lease-reconcile.sh` service runs every 15 seconds, removes expired peers from live WireGuard, repairs address drift, and applies only currently leased peers.
 
-Install it with:
+Install the host reconciler from a repo checkout with:
 
 ```sh
 sudo deploy/wireguard/install-remote-vpn-auth.sh
 ```
 
-The data plane therefore requires both:
-
-- possession of the enrolled device's WireGuard private key; and
-- an unexpired server-issued lease that keeps that peer present in live WireGuard state.
-
-A copied stale key is insufficient after lease expiry/revocation.
+The data plane therefore requires both possession of the enrolled device's WireGuard private key and an unexpired server-issued lease that keeps that peer present in live WireGuard state. A copied stale key is insufficient after lease expiry/revocation.
 
 ## CA trust
 
