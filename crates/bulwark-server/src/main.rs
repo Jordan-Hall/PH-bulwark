@@ -148,27 +148,20 @@ fn validate_production(
         );
     }
 
-    #[cfg(not(feature = "onnx"))]
-    anyhow::bail!(
-        "production image/video coverage requires bulwark-server built with feature `onnx`"
-    );
-    #[cfg(not(feature = "ffmpeg"))]
-    anyhow::bail!(
-        "production video coverage requires bulwark-server built with feature `ffmpeg`"
-    );
-    #[cfg(not(feature = "whisper"))]
-    anyhow::bail!(
-        "production audio/video-speech coverage requires bulwark-server built with feature `whisper`"
-    );
+    #[cfg(not(all(feature = "onnx", feature = "ffmpeg", feature = "whisper")))]
+    {
+        anyhow::bail!(
+            "production analysis coverage requires bulwark-server features `onnx`, `ffmpeg`, and `whisper`"
+        );
+    }
 
     #[cfg(all(feature = "onnx", feature = "ffmpeg", feature = "whisper"))]
     {
         require_file_env("BULWARK_NSFW_MODEL")?;
         require_file_env("BULWARK_WHISPER_MODEL")?;
         require_ffmpeg()?;
+        Ok(())
     }
-
-    Ok(())
 }
 
 #[cfg(all(feature = "onnx", feature = "ffmpeg", feature = "whisper"))]
@@ -178,7 +171,10 @@ fn require_file_env(name: &str) -> anyhow::Result<()> {
         .map(std::path::PathBuf::from)
         .ok_or_else(|| anyhow::anyhow!("production coverage requires {name}"))?;
     if !path.is_file() {
-        anyhow::bail!("{name} does not point to a readable model file: {}", path.display());
+        anyhow::bail!(
+            "{name} does not point to a readable model file: {}",
+            path.display()
+        );
     }
     Ok(())
 }
