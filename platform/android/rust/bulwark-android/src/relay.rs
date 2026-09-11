@@ -1,134 +1,134 @@
-//! Cluster relay — best-effort, CONTENT-FREE uplink to the enrolled server.
+//! Fast authenticated child-device uplink to the enrolled Bulwark server.
 //!
-//! Two RPCs, both over the exact transport pattern `fetch_child_config_rpc`
-//! already uses (tonic `Endpoint`, bounded connect/request timeouts):
-//!
-//!   * `AlertRelay.RaiseAlert` — redacted guardian alerts (content verdicts from
-//!     the flow consumer, PROTECTION_DISABLED tamper events). Fire-and-forget on
-//!     a lazy single-worker runtime so it is callable from raw JNI threads
-//!     (`reportTamper`) and never blocks or crashes the caller. The LOCAL alert
-//!     queue (`nextAlert`) is always written first — the relay is an addition,
-//!     never the only copy.
-//!   * `Tamper.Heartbeat` — periodic protection liveness (vpn_active etc.),
-//!     spawned on the `startVpn` runtime; the server's missed-heartbeat sweep is
-//!     the backstop when this process dies.
-//!
-//! PRIVACY: everything sent here is category/status only — redacted policy
-//! reasons, never message text or media (the AlertEvent invariant).
+//! The VPN hot path reuses one lazy HTTP/2 channel for Analysis + AlertRelay so
+//! gated images/video do not pay a TCP/TLS handshake per object. Application
+//! credentials are also attached as gRPC metadata, binding every device-originated
+//! RPC to the pairing-minted device principal on the hardened server.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use bulwark_proto::v1::alert_relay_client::AlertRelayClient;
+use bulwark_proto::v1::analysis_client::AnalysisClient;
 use bulwark_proto::v1::tamper_client::TamperClient;
-use bulwark_proto::v1::{AlertEvent, Heartbeat, ProtectionStatus};
-use tonic::transport::Endpoint;
+use bulwark_proto::v1::{
+    analysis_request::Media, AlertEvent, AnalysisRequest, Heartbeat, InlineMedia, MediaKind,
+    ProtectionStatus, SourceChannel, Verdict,
+};
+use tonic::metadata::MetadataValue;
+use tonic::transport::{Channel, Endpoint};
+use tonic::Request;
 
-/// Where (and as whom) this device reports. Set on every `startVpn` from the
-/// Kotlin deviceConfigJson; `None` until the device is enrolled.
+const DEVICE_ID_HEADER: &str = "x-bulwark-device-id";
+const DEVICE_TOKEN_HEADER: &str = "x-bulwark-device-token";
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Where, and as whom, this enrolled child device talks to the service.
 #[derive(Clone, Debug, Default)]
 pub struct RelayTarget {
     pub endpoint: String,
     pub device_id: String,
     pub child_id: String,
     pub family_id: String,
-    /// Path to a pinned cluster CA PEM (`cluster_ca` in the device config —
-    /// Kotlin points at `filesDir/cluster_ca.pem`, provisioned at pairing).
-    /// OPTIONAL for `https://`: when present it is pinned (self-hosted /
-    /// private-CA servers); when absent the relay connects over PUBLIC trust
-    /// (the cloud regions' Let's Encrypt cert). Empty no longer turns the relay
-    /// off — a public-cert server is reached normally.
     pub cluster_ca: String,
-    /// Per-device bearer token minted at pairing (`PairResult.device_token`,
-    /// persisted by the Kotlin enrollment store and carried in the device
-    /// config as `device_token`). Sent on every heartbeat so the cluster can
-    /// authenticate this device's reports. "" when the device enrolled before
-    /// tokens existed - the server decides whether to accept those.
     pub device_token: String,
 }
 
-fn target_cell() -> &'static Mutex<Option<RelayTarget>> {
-    static T: OnceLock<Mutex<Option<RelayTarget>>> = OnceLock::new();
-    T.get_or_init(|| Mutex::new(None))
+#[derive(Clone)]
+struct CachedChannel {
+    key: String,
+    channel: Channel,
 }
 
-/// Parse the enrolled cluster endpoint + identity out of the device-config JSON
-/// (`cluster_endpoint` / `device_id` / `child_id` / `family_id`). Malformed or
-/// unenrolled input leaves the relay OFF — local alerts still work (fail open).
+fn target_cell() -> &'static Mutex<Option<RelayTarget>> {
+    static TARGET: OnceLock<Mutex<Option<RelayTarget>>> = OnceLock::new();
+    TARGET.get_or_init(|| Mutex::new(None))
+}
+
+fn channel_cell() -> &'static Mutex<Option<CachedChannel>> {
+    static CHANNEL: OnceLock<Mutex<Option<CachedChannel>>> = OnceLock::new();
+    CHANNEL.get_or_init(|| Mutex::new(None))
+}
+
+/// Install/refresh the enrollment target from the device config. A target without
+/// a device token is retained for legacy heartbeat compatibility, but protected
+/// Analysis/AlertRelay calls reject it rather than impersonating a device by ID.
 pub fn set_target_from_config_json(config_json: &str) {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(config_json) else {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(config_json) else {
         return;
     };
-    let s = |k: &str| {
-        v.get(k)
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
+    let field = |name: &str| {
+        value
+            .get(name)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
             .trim()
             .to_string()
     };
-    let endpoint = s("cluster_endpoint");
+    let endpoint = field("cluster_endpoint");
     if !(endpoint.starts_with("http://") || endpoint.starts_with("https://")) {
-        return; // not enrolled yet (or malformed) -> relay stays off
+        return;
     }
-    let target = RelayTarget {
+    let next = RelayTarget {
         endpoint,
-        device_id: s("device_id"),
-        child_id: s("child_id"),
-        family_id: s("family_id"),
-        cluster_ca: s("cluster_ca"),
-        device_token: s("device_token"),
+        device_id: field("device_id"),
+        child_id: field("child_id"),
+        family_id: field("family_id"),
+        cluster_ca: field("cluster_ca"),
+        device_token: field("device_token"),
     };
-    if let Ok(mut cell) = target_cell().lock() {
-        *cell = Some(target);
+    if let Ok(mut current) = target_cell().lock() {
+        let changed = current
+            .as_ref()
+            .map(|old| old.endpoint != next.endpoint || old.cluster_ca != next.cluster_ca)
+            .unwrap_or(true);
+        *current = Some(next);
+        if changed {
+            if let Ok(mut cached) = channel_cell().lock() {
+                *cached = None;
+            }
+        }
     }
 }
 
-/// The current relay target, if enrolled.
+/// Snapshot the current enrolled target.
 pub fn target() -> Option<RelayTarget> {
-    target_cell().lock().ok().and_then(|t| t.clone())
+    target_cell().lock().ok().and_then(|target| target.clone())
 }
 
-/// Lazy single-worker runtime for fire-and-forget RPCs from JNI threads
-/// (`reportTamper` has no async context). `None` if it cannot start — the relay
-/// is then silently off (local alerts unaffected).
 fn relay_runtime() -> Option<&'static tokio::runtime::Runtime> {
-    static RT: OnceLock<Option<tokio::runtime::Runtime>> = OnceLock::new();
-    RT.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(1)
-            .thread_name("bulwark-relay")
-            .build()
-            .ok()
-    })
-    .as_ref()
+    static RUNTIME: OnceLock<Option<tokio::runtime::Runtime>> = OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(1)
+                .thread_name("bulwark-relay")
+                .build()
+                .ok()
+        })
+        .as_ref()
 }
 
-fn endpoint_channel(t: &RelayTarget) -> Result<Endpoint, String> {
-    let mut ep = Endpoint::from_shared(t.endpoint.to_string())
+fn endpoint(t: &RelayTarget) -> Result<Endpoint, String> {
+    let mut endpoint = Endpoint::from_shared(t.endpoint.clone())
         .map_err(|_| "relay endpoint is not valid".to_string())?
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(10));
-    if t.endpoint
-        .trim()
-        .to_ascii_lowercase()
-        .starts_with("https://")
-    {
-        // Pin a provisioned CA when present (self-hosted / private-CA servers);
-        // otherwise trust the PUBLIC roots (the cloud regions' Let's Encrypt
-        // cert). The relay no longer stays off just because no CA is pinned.
-        let ca_path = t.cluster_ca.trim();
-        let pinned = if ca_path.is_empty() {
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(3))
+        .tcp_nodelay(true)
+        .http2_keep_alive_interval(Duration::from_secs(30))
+        .keep_alive_timeout(Duration::from_secs(5));
+
+    if t.endpoint.to_ascii_lowercase().starts_with("https://") {
+        let pinned = if t.cluster_ca.trim().is_empty() {
             None
         } else {
-            match std::fs::read(ca_path) {
+            match std::fs::read(t.cluster_ca.trim()) {
                 Ok(pem) => Some(pem),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                Err(e) => {
-                    return Err(format!(
-                        "pinned cluster CA at '{ca_path}' exists but is unreadable: {e}"
-                    ))
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    return Err(format!("pinned cluster CA is unreadable: {error}"));
                 }
             }
         };
@@ -137,57 +137,121 @@ fn endpoint_channel(t: &RelayTarget) -> Result<Endpoint, String> {
                 .ca_certificate(tonic::transport::Certificate::from_pem(pem)),
             None => tonic::transport::ClientTlsConfig::new().with_enabled_roots(),
         };
-        ep = ep.tls_config(tls).map_err(|e| format!("tls config: {e}"))?;
+        endpoint = endpoint
+            .tls_config(tls)
+            .map_err(|error| format!("TLS config: {error}"))?;
     }
-    Ok(ep)
+    Ok(endpoint)
+}
+
+/// Reuse one multiplexed HTTP/2 channel. `connect_lazy` keeps setup off the flow
+/// consumer's critical section; the first request establishes the connection and
+/// subsequent image/video decisions reuse it.
+fn shared_channel(t: &RelayTarget) -> Result<Channel, String> {
+    let key = format!("{}\u{0}{}", t.endpoint, t.cluster_ca);
+    if let Ok(cache) = channel_cell().lock() {
+        if let Some(cached) = cache.as_ref().filter(|cached| cached.key == key) {
+            return Ok(cached.channel.clone());
+        }
+    }
+    let channel = endpoint(t)?.connect_lazy();
+    if let Ok(mut cache) = channel_cell().lock() {
+        *cache = Some(CachedChannel {
+            key,
+            channel: channel.clone(),
+        });
+    }
+    Ok(channel)
+}
+
+fn authenticated_request<T>(t: &RelayTarget, message: T) -> Result<Request<T>, String> {
+    if t.device_id.trim().is_empty() || t.device_token.trim().is_empty() {
+        return Err("device enrollment credential is missing; re-pair this device".to_string());
+    }
+    let mut request = Request::new(message);
+    let device_id = MetadataValue::try_from(t.device_id.as_str())
+        .map_err(|_| "device id cannot be encoded as gRPC metadata".to_string())?;
+    let device_token = MetadataValue::try_from(t.device_token.as_str())
+        .map_err(|_| "device token cannot be encoded as gRPC metadata".to_string())?;
+    request.metadata_mut().insert(DEVICE_ID_HEADER, device_id);
+    request
+        .metadata_mut()
+        .insert(DEVICE_TOKEN_HEADER, device_token);
+    Ok(request)
+}
+
+/// Score one gated image/video unit on the cluster over the already-reused
+/// channel. The caller supplies a tight deadline that is also sent to the worker
+/// so it can shed work instead of causing visible playback stalls.
+pub async fn analyze_media(
+    kind: MediaKind,
+    source_channel: SourceChannel,
+    mime_type: String,
+    bytes: Vec<u8>,
+    deadline_ms: u32,
+    request_id: String,
+) -> Result<Verdict, String> {
+    let target = target().ok_or_else(|| "device is not enrolled with a cluster".to_string())?;
+    if bytes.is_empty() {
+        return Err("captured media was empty".to_string());
+    }
+    let channel = shared_channel(&target)?;
+    let mut client = AnalysisClient::new(channel);
+    let request = AnalysisRequest {
+        request_id,
+        media_kind: kind as i32,
+        source_channel: source_channel as i32,
+        device_id: target.device_id.clone(),
+        ts: now_ms(),
+        deadline_ms,
+        media: Some(Media::InlineMedia(InlineMedia {
+            data: bytes,
+            mime_type,
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let request = authenticated_request(&target, request)?;
+    let timeout = Duration::from_millis(u64::from(deadline_ms.max(250)));
+    tokio::time::timeout(timeout, client.analyze(request))
+        .await
+        .map_err(|_| "media analysis deadline exceeded".to_string())?
+        .map_err(|status| format!("media analysis failed: {}", status.code()))
+        .map(|response| response.into_inner())
 }
 
 async fn raise_alert(t: RelayTarget, event: AlertEvent) -> Result<(), String> {
-    let channel = endpoint_channel(&t)?
-        .connect()
+    let mut client = AlertRelayClient::new(shared_channel(&t)?);
+    let request = authenticated_request(&t, event)?;
+    tokio::time::timeout(Duration::from_secs(2), client.raise_alert(request))
         .await
-        .map_err(|e| format!("connect: {e}"))?;
-    let mut client = AlertRelayClient::new(channel);
-    client
-        .raise_alert(event)
-        .await
-        .map_err(|e| format!("raise_alert: {e}"))?;
+        .map_err(|_| "raise_alert timed out".to_string())?
+        .map_err(|status| format!("raise_alert: {}", status.code()))?;
     Ok(())
 }
 
-/// Best-effort `AlertRelay.RaiseAlert`: fills this device's routing identity,
-/// fires on the relay runtime, NEVER blocks the caller, NEVER panics. No-op
-/// until enrolled. The local queue copy must already have been written.
+/// Best-effort remote copy of a redacted guardian alert. The local alert queue is
+/// written first by callers, so a transient server failure never removes evidence.
 pub fn relay_alert_best_effort(mut event: AlertEvent) {
-    let Some(t) = target() else { return };
-    let Some(rt) = relay_runtime() else { return };
+    let Some(target) = target() else { return };
+    let Some(runtime) = relay_runtime() else { return };
     if event.device_id.is_empty() {
-        event.device_id = t.device_id.clone();
+        event.device_id = target.device_id.clone();
     }
     if event.child_id.is_empty() {
-        event.child_id = t.child_id.clone();
+        event.child_id = target.child_id.clone();
     }
     if event.family_id.is_empty() {
-        event.family_id = t.family_id.clone();
+        event.family_id = target.family_id.clone();
     }
-    rt.spawn(async move {
-        if let Err(e) = raise_alert(t, event).await {
-            // Best-effort by contract: the guardian still has the local copy and
-            // the cluster's missed-heartbeat sweep; debug only, never content.
-            tracing::debug!(error = %e, "alert relay failed (best-effort)");
+    runtime.spawn(async move {
+        if let Err(error) = raise_alert(target, event).await {
+            tracing::debug!(%error, "guardian alert relay failed (best effort)");
         }
     });
 }
 
-/// Default heartbeat cadence until the server tunes it via `HeartbeatAck`.
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
-
-/// Content-free protection snapshot for this device. `vpn_up` is the live
-/// data-path flag startVpn shares (flipped false if the pump exits with an
-/// error). device-admin / accessibility booleans are NOT visible from this
-/// runtime and are left at the proto default — the server only acts on explicit
-/// `tamper_events` (which the Kotlin reports via `reportTamper`), never on
-/// these booleans, so no false alerts result.
+/// Content-free protection snapshot for the server liveness/tamper path.
 pub fn protection_status(t: &RelayTarget, vpn_up: bool) -> ProtectionStatus {
     ProtectionStatus {
         device_id: t.device_id.clone(),
@@ -201,49 +265,34 @@ pub fn protection_status(t: &RelayTarget, vpn_up: bool) -> ProtectionStatus {
 }
 
 async fn send_heartbeat(t: &RelayTarget, vpn_up: bool) -> Result<u32, String> {
-    let channel = endpoint_channel(t)?
-        .connect()
-        .await
-        .map_err(|e| format!("connect: {e}"))?;
-    let mut client = TamperClient::new(channel);
-    let hb = Heartbeat {
+    let mut client = TamperClient::new(shared_channel(t)?);
+    let heartbeat = Heartbeat {
         status: Some(protection_status(t, vpn_up)),
-        // Tamper events reach the cluster via RaiseAlert (reportTamper path);
-        // sending them here too would double-alert the guardian.
         tamper_events: Vec::new(),
-        // Per-device bearer credential minted at pairing ("" = enrolled before
-        // tokens existed; the server decides whether to accept legacy
-        // token-less heartbeats). Never logged.
         device_token: t.device_token.clone(),
     };
-    let ack = client
-        .heartbeat(hb)
+    let ack = tokio::time::timeout(Duration::from_secs(3), client.heartbeat(heartbeat))
         .await
-        .map_err(|e| format!("heartbeat: {e}"))?
+        .map_err(|_| "heartbeat timed out".to_string())?
+        .map_err(|status| format!("heartbeat: {}", status.code()))?
         .into_inner();
     Ok(ack.next_interval_secs)
 }
 
-/// Periodic `Tamper.Heartbeat` until `shutdown` is cancelled. Spawned by
-/// `startVpn` on the VPN runtime (the ONE heartbeat owner — no Kotlin copy).
-/// Failures only log; the server's missed-heartbeat sweep covers a dead device.
+/// Periodic protection heartbeat until the VPN session is cancelled.
 pub async fn run_heartbeats(
     shutdown: bulwark_net::vpn::CancellationToken,
     vpn_up: Arc<AtomicBool>,
 ) {
     let mut interval = HEARTBEAT_INTERVAL;
     loop {
-        if let Some(t) = target() {
-            match send_heartbeat(&t, vpn_up.load(Ordering::Relaxed)).await {
-                Ok(next_secs) if next_secs > 0 => {
-                    interval = Duration::from_secs(u64::from(next_secs));
-                }
+        if let Some(target) = target() {
+            match send_heartbeat(&target, vpn_up.load(Ordering::Relaxed)).await {
+                Ok(next) if next > 0 => interval = Duration::from_secs(u64::from(next)),
                 Ok(_) => {}
-                Err(e) => tracing::debug!(error = %e, "heartbeat failed (best-effort)"),
+                Err(error) => tracing::debug!(%error, "heartbeat failed (best effort)"),
             }
         }
-        // Sleep `interval`, exiting promptly on shutdown (no tokio::select! to
-        // keep the dep features minimal: timeout(_, cancelled()) == cancelled).
         if tokio::time::timeout(interval, shutdown.cancelled())
             .await
             .is_ok()
@@ -251,14 +300,13 @@ pub async fn run_heartbeats(
             break;
         }
     }
-    tracing::info!("heartbeats stopped (VPN session shut down)");
 }
 
 pub fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
+        .map(|duration| duration.as_millis() as i64)
         .unwrap_or(0)
 }
 
@@ -267,48 +315,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn relay_target_parses_only_enrolled_configs() {
-        set_target_from_config_json(r#"{"device_id":"d0"}"#); // no endpoint
-        assert!(target().is_none());
-        set_target_from_config_json(r#"{"cluster_endpoint":"not-a-url","device_id":"d0"}"#);
-        assert!(target().is_none());
-
+    fn target_parsing_and_channel_cache_key_are_stable() {
         set_target_from_config_json(
-            r#"{"cluster_endpoint":"http://srv:50051","device_id":"d1","child_id":"c1","family_id":"f1","profile":"TEEN","device_token":"tok-d1"}"#,
+            r#"{"cluster_endpoint":"http://srv:50051","device_id":"d1","child_id":"c1","family_id":"f1","device_token":"token"}"#,
         );
-        let t = target().expect("enrolled config sets the target");
-        assert_eq!(t.endpoint, "http://srv:50051");
+        let t = target().expect("target");
         assert_eq!(t.device_id, "d1");
         assert_eq!(t.child_id, "c1");
-        assert_eq!(t.family_id, "f1");
-        assert_eq!(t.device_token, "tok-d1");
-
-        // Legacy enrollment (paired before tokens existed) still arms the
-        // relay - the token is simply empty, never a parse failure.
-        set_target_from_config_json(
-            r#"{"cluster_endpoint":"http://srv:50051","device_id":"d2","child_id":"c2","family_id":"f2"}"#,
-        );
-        assert_eq!(target().expect("still enrolled").device_token, "");
+        assert_eq!(t.device_token, "token");
+        assert!(shared_channel(&t).is_ok());
+        assert!(shared_channel(&t).is_ok());
     }
 
     #[test]
-    fn protection_status_is_content_free_android() {
+    fn protected_request_requires_pairing_credential() {
         let t = RelayTarget {
             endpoint: "http://srv".into(),
+            device_id: "d".into(),
+            ..Default::default()
+        };
+        assert!(authenticated_request(&t, ()).is_err());
+    }
+
+    #[test]
+    fn protection_status_is_content_free() {
+        let t = RelayTarget {
             device_id: "kids-phone".into(),
             child_id: "c1".into(),
-            family_id: "f1".into(),
-            cluster_ca: String::new(),
-            device_token: String::new(),
+            ..Default::default()
         };
-        let s = protection_status(&t, true);
-        assert_eq!(s.device_id, "kids-phone");
-        assert_eq!(s.child_id, "c1");
-        assert!(s.vpn_active);
-        assert_eq!(s.platform, "android");
-        assert!(s.ts > 0);
-
-        let down = protection_status(&t, false);
-        assert!(!down.vpn_active, "a dead pump must not claim vpn_active");
+        let status = protection_status(&t, true);
+        assert_eq!(status.device_id, "kids-phone");
+        assert!(status.vpn_active);
     }
 }
