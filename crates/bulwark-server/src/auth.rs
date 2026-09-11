@@ -25,6 +25,17 @@ fn metadata_str<'a>(metadata: &'a MetadataMap, key: &'static str) -> Result<&'a 
         .map_err(|_| Status::unauthenticated(format!("invalid {key}")))
 }
 
+/// Strict verification deliberately rejects AccountStore's historical
+/// tokenless-enrollment grace. A legacy record accepts every candidate token;
+/// probing it with an impossible non-hex sentinel lets production callers detect
+/// that state without exposing AccountStore internals. Pair-minted tokens are
+/// lowercase hex, so the sentinel can never be a legitimate token.
+pub fn verify_device_token_strict(accounts: &AccountStore, device_id: &str, token: &str) -> bool {
+    const LEGACY_GRACE_PROBE: &str = "!bulwark-production-requires-pairing!";
+    !accounts.verify_device_token(device_id, LEGACY_GRACE_PROBE)
+        && accounts.verify_device_token(device_id, token)
+}
+
 /// Authenticate an enrolled child device and bind an optional payload identity
 /// to that principal. Authentication happens before request bodies are handed to
 /// analyzers, storage, fan-out, or other expensive work.
@@ -47,9 +58,9 @@ pub fn authenticate_device<T>(
             ));
         }
     }
-    if !accounts.verify_device_token(device_id, token) {
+    if !verify_device_token_strict(accounts, device_id, token) {
         return Err(Status::unauthenticated(
-            "unknown device or invalid device credential",
+            "unknown, legacy-unpaired, or invalid device credential",
         ));
     }
     let (child_id, family_id, _) = accounts
@@ -62,7 +73,6 @@ pub fn authenticate_device<T>(
     })
 }
 
-/// Extract and authenticate a device principal without trusting a body field.
 pub fn authenticate_device_metadata<T>(
     request: &Request<T>,
     accounts: &AccountStore,
