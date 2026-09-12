@@ -58,7 +58,10 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn guardian_approved(flow: &CapturedFlow, verdict: &Verdict) -> bool {
-    if verdict.category() == Category::CsamSuspected {
+    if matches!(
+        verdict.category(),
+        Category::CsamSuspected | Category::Unspecified
+    ) {
         return false;
     }
     let Ok(policy) = policy_cell().read() else {
@@ -67,13 +70,19 @@ fn guardian_approved(flow: &CapturedFlow, verdict: &Verdict) -> bool {
     if policy.expires_ts <= crate::relay::now_ms() {
         return false;
     }
+    let policy_version = policy.version;
     let host = flow.app_or_host.trim().to_ascii_lowercase();
     if !host.is_empty() && policy.hosts.contains(&host) {
+        tracing::trace!(policy_version, %host, "guardian host approval applied");
         return true;
     }
-    verdict.evidence.as_ref().is_some_and(|evidence| {
+    let allowed = verdict.evidence.as_ref().is_some_and(|evidence| {
         !evidence.sha256.is_empty() && policy.hashes.contains(&hex(&evidence.sha256))
-    })
+    });
+    if allowed {
+        tracing::trace!(policy_version, "guardian content-hash approval applied");
+    }
+    allowed
 }
 
 async fn fetch_policy_metadata(
@@ -579,6 +588,21 @@ mod tests {
             ..Default::default()
         };
         let flow = http_flow(4, "example.test", Some("text/plain"), b"x");
+        assert!(!guardian_approved(&flow, &verdict));
+    }
+
+    #[test]
+    fn coverage_gap_cannot_be_guardian_overridden() {
+        replace_local_policy(
+            2,
+            ["example.test".to_string()].into_iter().collect(),
+            HashSet::new(),
+        );
+        let verdict = Verdict {
+            category: Category::Unspecified as i32,
+            ..Default::default()
+        };
+        let flow = http_flow(5, "example.test", Some("text/plain"), b"x");
         assert!(!guardian_approved(&flow, &verdict));
     }
 
