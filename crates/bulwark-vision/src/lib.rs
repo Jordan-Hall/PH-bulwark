@@ -1,25 +1,9 @@
 //! bulwark-vision — small dedicated NSFW image/frame classifier.
 //!
-//! Implements the `Analyzer` contract (interfaces.md) for `MediaKind::IMAGE`.
-//! The model is a small single-purpose NSFW classifier (e.g. Falconsai's
-//! `nsfw_image_detection` exported to ONNX, or NudeNet — see
-//! docs/research/model-research.md), run via the `ort` crate (ONNX Runtime)
-//! behind the optional `onnx` feature.
-//!
-//! ## Default build (no `ort`)
-//! The default build does NOT depend on ONNX Runtime. It uses [`StubScorer`],
-//! which fails **OPEN** (score 0.0 → SAFE/Allow) so the workspace links and the
-//! tests run with no model artifact and no `onnxruntime.dll`. This is deliberate:
-//! the build host enforces Smart App Control, which can block loading the ONNX
-//! Runtime native library (the same environmental block that affected SQLite).
-//!
-//! ## Real classification (`--features onnx`)
-//! Enabling the `onnx` feature compiles [`onnx::OnnxScorer`], which loads an
-//! ONNX model from a path and runs it on the CPU execution provider,
-//! deterministically. See the crate `README.md` for where to drop a model and
-//! the environment variable to point at it.
-//!
-//! Evidence carries the content SHA-256 only — NEVER the raw image. No LLM.
+//! Implements the `Analyzer` contract for `MediaKind::IMAGE`. Production ONNX
+//! scoring is fail-closed: a missing model, absent inline image, decoder failure,
+//! inference error, or non-finite score is `Category::Unspecified` + BLOCK, never
+//! a false SAFE verdict. Evidence is hash-only; raw images are never attached.
 #![forbid(unsafe_code)]
 
 use async_trait::async_trait;
@@ -34,19 +18,17 @@ pub mod postprocess;
 pub mod preprocess;
 
 /// Environment variable holding the filesystem path to the ONNX NSFW model.
-/// Consulted by [`VisionAnalyzer::from_env`] (and [`onnx::OnnxScorer::from_env`]).
 pub const MODEL_PATH_ENV: &str = "BULWARK_NSFW_MODEL";
-/// Optional per-install config file used when [`MODEL_PATH_ENV`] is unset.
+/// Optional per-install model path configuration file.
 pub const MODEL_PATH_CONFIG_FILE: &str = "nsfw_model.txt";
 
-/// Scores image bytes → NSFW probability in `[0, 1]`.
+/// Scores image bytes to an NSFW probability. Non-finite values mean coverage
+/// failed and are handled conservatively by [`VisionAnalyzer`].
 pub trait Scorer: Send + Sync {
     fn score(&self, image_bytes: &[u8]) -> f32;
     fn model_id(&self) -> &str;
 }
 
-/// So a `Box<dyn Scorer>` (used by [`VisionAnalyzer::from_env`]) is itself a
-/// `Scorer` and can fill the analyzer's generic slot.
 impl Scorer for Box<dyn Scorer> {
     fn score(&self, image_bytes: &[u8]) -> f32 {
         (**self).score(image_bytes)
@@ -56,7 +38,8 @@ impl Scorer for Box<dyn Scorer> {
     }
 }
 
-/// Default scorer: fails open (0.0). Real scoring needs `--features onnx`.
+/// No-model sentinel. The analyzer recognizes this id and emits an uncovered
+/// blocking verdict rather than trusting the numeric zero.
 pub struct StubScorer;
 impl Scorer for StubScorer {
     fn score(&self, _image_bytes: &[u8]) -> f32 {
@@ -69,14 +52,11 @@ impl Scorer for StubScorer {
 
 #[derive(Debug, Clone)]
 pub struct VisionConfig {
-    /// NSFW score at/above which we act. Tuned per deployment.
+    /// NSFW score at/above which content is acted on.
     pub nsfw_threshold: f32,
-    /// Optional path to the ONNX model. When `None`, [`MODEL_PATH_ENV`] is
-    /// consulted by the env constructors. Ignored unless the `onnx` feature is
-    /// enabled (the stub scorer never loads a model).
+    /// Optional ONNX model path.
     pub model_path: Option<String>,
-    /// Square edge (pixels) the input image is resized to before inference.
-    /// 224 matches the common ViT/MobileNet NSFW model cards.
+    /// Square input size expected by the model.
     pub input_size: u32,
 }
 impl Default for VisionConfig {
@@ -114,17 +94,8 @@ impl<S: Scorer> VisionAnalyzer<S> {
 }
 
 impl VisionAnalyzer<Box<dyn Scorer>> {
-    /// Build an analyzer using the best scorer available for this build:
-    ///
-    /// * With the `onnx` feature **and** a model configured (via
-    ///   `cfg.model_path` or the [`MODEL_PATH_ENV`] env var) that loads
-    ///   successfully → a real [`onnx::OnnxScorer`].
-    /// * Otherwise → the deterministic [`StubScorer`] that fails OPEN. A single
-    ///   warning is logged the first time we fall back, so default builds and
-    ///   tests need no model and stay quiet.
-    ///
-    /// This never returns an error: an unloadable/missing model degrades to the
-    /// safe stub rather than failing the analyzer construction.
+    /// Build the best configured scorer. If a real scorer cannot be constructed,
+    /// the stub remains explicit and analysis fail-closes at verdict time.
     pub fn from_env(mut cfg: VisionConfig) -> Self {
         if cfg.model_path.is_none() {
             cfg.model_path = model_path_from_env_or_config();
@@ -134,7 +105,7 @@ impl VisionAnalyzer<Box<dyn Scorer>> {
     }
 }
 
-/// Resolve the configured NSFW model path from env or the per-install config.
+/// Resolve the configured NSFW model path from env or per-install config.
 pub fn model_path_from_env_or_config() -> Option<String> {
     std::env::var(MODEL_PATH_ENV)
         .ok()
@@ -173,10 +144,6 @@ fn bulwark_config_dir() -> Option<PathBuf> {
     }
 }
 
-/// Selects the scorer for the current build/config, logging the fallback once.
-/// The bundled, license-pinned NSFW image model: AdamCodd/vit-base-nsfw-detector
-/// (Apache-2.0), int8-quantized ONNX — ViT, 384×384, [-1,1] (half) normalization,
-/// 2-class logits (index 1 = nsfw). Compiled in so `onnx` builds always have a model.
 #[cfg(feature = "onnx")]
 const BUNDLED_NSFW_MODEL: &[u8] = include_bytes!("../models/nsfw_detector.onnx");
 #[cfg(feature = "onnx")]
@@ -185,51 +152,43 @@ const BUNDLED_NSFW_INPUT_SIZE: u32 = 384;
 fn build_scorer(cfg: &VisionConfig) -> Box<dyn Scorer> {
     #[cfg(feature = "onnx")]
     {
-        // 1. An explicit operator-supplied model (BULWARK_NSFW_MODEL / cfg.model_path) wins.
         if let Some(path) = cfg.model_path.as_deref() {
             match onnx::OnnxScorer::from_path_env(path, cfg.input_size) {
-                Ok(s) => {
-                    tracing::info!(model = %path, "bulwark-vision: loaded ONNX NSFW model");
-                    return Box::new(s);
+                Ok(scorer) => {
+                    tracing::info!(model = %path, "loaded configured ONNX NSFW model");
+                    return Box::new(scorer);
                 }
-                Err(e) => log_fallback_once(&format!(
-                    "failed to load ONNX model from {path}: {e}; trying the bundled model"
+                Err(error) => log_fallback_once(&format!(
+                    "failed to load ONNX model from {path}: {error}; trying bundled model"
                 )),
             }
         }
-        // 2. No override → the BUNDLED model, so an `onnx` build always scores for real
-        //    (no external file/env needed). Only if the ONNX Runtime itself is missing
-        //    do we fall to the stub, which emits Unspecified → policy fail-CLOSES.
         match onnx::OnnxScorer::load_from_bytes(
             BUNDLED_NSFW_MODEL,
             BUNDLED_NSFW_INPUT_SIZE,
             crate::preprocess::Normalization::half(),
         ) {
-            Ok(s) => {
-                tracing::info!("bulwark-vision: loaded bundled NSFW model");
-                return Box::new(s);
+            Ok(scorer) => {
+                tracing::info!("loaded bundled NSFW model");
+                return Box::new(scorer);
             }
-            Err(e) => log_fallback_once(&format!(
-                "bundled NSFW model failed to load (ONNX Runtime unavailable?): {e}; \
-                 falling back to stub → emits Unspecified → policy fail-CLOSES"
+            Err(error) => log_fallback_once(&format!(
+                "bundled NSFW model could not load: {error}; image coverage will fail closed"
             )),
         }
     }
     #[cfg(not(feature = "onnx"))]
     {
         let _ = cfg;
-        log_fallback_once(
-            "built without the `onnx` feature; NSFW scoring fails OPEN (stub). \
-             Rebuild with --features onnx and set BULWARK_NSFW_MODEL for real scoring.",
-        );
+        log_fallback_once("built without ONNX image scoring; image coverage will fail closed");
     }
     Box::new(StubScorer)
 }
 
-fn log_fallback_once(msg: &str) {
+fn log_fallback_once(message: &str) {
     use std::sync::Once;
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| tracing::warn!("bulwark-vision: {msg}"));
+    ONCE.call_once(|| tracing::warn!("bulwark-vision: {message}"));
 }
 
 fn sha256(bytes: &[u8]) -> Vec<u8> {
@@ -240,50 +199,55 @@ fn sha256(bytes: &[u8]) -> Vec<u8> {
 
 fn extract_bytes(req: &AnalysisRequest) -> Option<&[u8]> {
     match req.media.as_ref()? {
-        Media::InlineMedia(m) => Some(&m.data),
-        // MediaRef points at a side-channel blob; the server resolves it before
-        // calling the analyzer in a full deployment.
+        Media::InlineMedia(media) => Some(&media.data),
         Media::MediaRef(_) => None,
     }
 }
 
-// Severity ladder + score postprocessing live in `postprocess` (shared with
-// bulwark-infer's local first-pass seam).
+fn uncovered(request_id: String, rationale: impl Into<String>) -> Verdict {
+    Verdict {
+        request_id,
+        category: Category::Unspecified as i32,
+        action: Action::Block as i32,
+        severity: Severity::Medium as i32,
+        score: 0.0,
+        rationale: rationale.into(),
+        ..Default::default()
+    }
+}
 
 #[async_trait]
 impl<S: Scorer> Analyzer for VisionAnalyzer<S> {
     fn handles(&self) -> &[MediaKind] {
-        const K: [MediaKind; 1] = [MediaKind::Image];
-        &K
+        const KINDS: [MediaKind; 1] = [MediaKind::Image];
+        &KINDS
     }
 
     async fn analyze(&self, req: AnalysisRequest) -> Result<Verdict> {
-        // No real model loaded (stub scorer): we CANNOT judge this image. Emit
-        // Unspecified ("couldn't score") so policy fails CLOSED rather than reading
-        // an unscored image as Safe (see bulwark-policy `fail_closed_uncovered`).
         if self.scorer.model_id() == "stub-noop" {
-            return Ok(Verdict {
-                request_id: req.request_id,
-                category: Category::Unspecified as i32,
-                action: Action::Allow as i32, // policy is the authority and fail-closes
-                severity: Severity::Info as i32,
-                score: 0.0,
-                rationale: "no NSFW model loaded; image not scored (coverage gap)".into(),
-                ..Default::default()
-            });
+            return Ok(uncovered(
+                req.request_id,
+                "no real image model is loaded; content was not scored",
+            ));
         }
         let Some(bytes) = extract_bytes(&req) else {
-            return Ok(Verdict {
-                request_id: req.request_id,
-                category: Category::Safe as i32,
-                action: Action::Allow as i32,
-                severity: Severity::Info as i32,
-                score: 0.0,
-                rationale: "no inline image (MediaRef resolved server-side)".into(),
-                ..Default::default()
-            });
+            return Ok(uncovered(
+                req.request_id,
+                "image payload was not available inline to the analyzer",
+            ));
         };
+        if bytes.is_empty() {
+            return Ok(uncovered(req.request_id, "image payload was empty"));
+        }
+
         let score = self.scorer.score(bytes);
+        if !score.is_finite() || !(0.0..=1.0).contains(&score) {
+            return Ok(uncovered(
+                req.request_id,
+                "image decode or model inference failed; content was not scored",
+            ));
+        }
+
         let nsfw = score >= self.cfg.nsfw_threshold;
         let evidence = Evidence {
             sha256: sha256(bytes),
@@ -297,7 +261,6 @@ impl<S: Scorer> Analyzer for VisionAnalyzer<S> {
             } else {
                 Category::Safe
             } as i32,
-            // Blur the frame rather than hard-drop, so non-flagged context survives.
             action: if nsfw { Action::Blur } else { Action::Allow } as i32,
             severity: if nsfw {
                 postprocess::severity_for(score)
@@ -316,6 +279,7 @@ impl<S: Scorer> Analyzer for VisionAnalyzer<S> {
 }
 
 #[cfg(feature = "onnx")]
+#[path = "onnx_safe.rs"]
 pub mod onnx;
 
 #[cfg(test)]
@@ -333,6 +297,16 @@ mod tests {
         }
     }
 
+    struct BrokenScorer;
+    impl Scorer for BrokenScorer {
+        fn score(&self, _: &[u8]) -> f32 {
+            f32::NAN
+        }
+        fn model_id(&self) -> &str {
+            "broken"
+        }
+    }
+
     fn img_req(bytes: Vec<u8>) -> AnalysisRequest {
         AnalysisRequest {
             request_id: "r1".into(),
@@ -347,43 +321,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn flags_nsfw_and_blurs_with_hash_only() {
-        let a = VisionAnalyzer::with_scorer(VisionConfig::default(), AlwaysNsfw);
-        let v = a.analyze(img_req(vec![1, 2, 3])).await.unwrap();
-        assert_eq!(v.category, Category::AdultImage as i32);
-        assert_eq!(v.action, Action::Blur as i32);
-        let ev = v.evidence.unwrap();
-        assert_eq!(ev.sha256.len(), 32, "sha256 present");
-        assert!(ev.safe_thumbnail.is_empty(), "never raw image in evidence");
+    async fn flags_nsfw_and_keeps_hash_only_evidence() {
+        let analyzer = VisionAnalyzer::with_scorer(VisionConfig::default(), AlwaysNsfw);
+        let verdict = analyzer.analyze(img_req(vec![1, 2, 3])).await.unwrap();
+        assert_eq!(verdict.category, Category::AdultImage as i32);
+        assert_eq!(verdict.action, Action::Blur as i32);
+        let evidence = verdict.evidence.unwrap();
+        assert_eq!(evidence.sha256.len(), 32);
+        assert!(evidence.safe_thumbnail.is_empty());
     }
 
     #[tokio::test]
-    async fn stub_emits_uncovered_for_fail_closed() {
-        // No real model: the stub must NOT read as Safe — it emits Unspecified so
-        // policy fails CLOSED on the coverage gap (bulwark-policy fail_closed_uncovered).
-        let a = VisionAnalyzer::new();
-        let v = a.analyze(img_req(vec![9, 9])).await.unwrap();
-        assert_eq!(v.category, Category::Unspecified as i32);
+    async fn stub_and_model_errors_are_never_safe() {
+        let stub = VisionAnalyzer::new();
+        let verdict = stub.analyze(img_req(vec![9, 9])).await.unwrap();
+        assert_eq!(verdict.category(), Category::Unspecified);
+        assert_eq!(verdict.action(), Action::Block);
+
+        let broken = VisionAnalyzer::with_scorer(VisionConfig::default(), BrokenScorer);
+        let verdict = broken.analyze(img_req(vec![1])).await.unwrap();
+        assert_eq!(verdict.category(), Category::Unspecified);
+        assert_eq!(verdict.action(), Action::Block);
     }
 
     #[tokio::test]
-    async fn from_env_without_model_emits_uncovered() {
-        // No `onnx` feature and/or no model → stub → Unspecified (fail-closed),
-        // never a false "Safe" for an image we could not actually score.
-        let a = VisionAnalyzer::from_env(VisionConfig::default());
-        let v = a.analyze(img_req(vec![4, 5, 6])).await.unwrap();
-        assert_eq!(v.category, Category::Unspecified as i32);
+    async fn missing_inline_image_is_never_safe() {
+        let analyzer = VisionAnalyzer::with_scorer(VisionConfig::default(), AlwaysNsfw);
+        let verdict = analyzer
+            .analyze(AnalysisRequest {
+                request_id: "missing".into(),
+                media_kind: MediaKind::Image as i32,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(verdict.category(), Category::Unspecified);
+        assert_eq!(verdict.action(), Action::Block);
     }
 
     #[cfg(feature = "onnx")]
     #[test]
     fn bundled_model_loads_and_scores_a_real_image() {
         use image::Rgb;
-        // A valid PNG so decode→preprocess→inference runs end-to-end on the bundled
-        // model directly (bypassing any local BULWARK_NSFW_MODEL override).
-        let buf = image::ImageBuffer::from_pixel(48, 48, Rgb([130u8, 110, 90]));
+        let buffer = image::ImageBuffer::from_pixel(48, 48, Rgb([130u8, 110, 90]));
         let mut png = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::ImageRgb8(buf)
+        image::DynamicImage::ImageRgb8(buffer)
             .write_to(&mut png, image::ImageFormat::Png)
             .unwrap();
         let scorer = onnx::OnnxScorer::load_from_bytes(
@@ -392,7 +374,6 @@ mod tests {
             crate::preprocess::Normalization::half(),
         )
         .expect("bundled model must load");
-        assert!(scorer.model_id().contains("bundled"));
         let score = scorer.score(&png.into_inner());
         assert!((0.0..=1.0).contains(&score), "score out of range: {score}");
     }
