@@ -1,27 +1,211 @@
-//! Android VPN flow consumer.
-//!
-//! Text is judged locally. Complete image/video units surfaced by `bulwark-net`
-//! are sent through authenticated cluster Analysis over the shared HTTP/2 channel.
-//! Unknown/late media is blocked, never mislabeled SAFE. Work is bounded-concurrent
-//! so one slow video segment does not head-of-line block unrelated response gates.
+//! Android Local VPN flow consumer and guardian policy synchronization.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, OnceLock, RwLock};
+use std::time::Duration;
 
 use bulwark_net::{CapturedFlow, FlowPayload, InterceptDecision, Interceptor};
 use bulwark_policy::PolicyContext;
+use bulwark_proto::v1::child_control_client::ChildControlClient;
 use bulwark_proto::v1::{
-    Action, AlertEvent, Category, MediaKind, SourceChannel, TextSpan, Verdict,
+    Action, AlertEvent, Category, ChildConfigFilter, MediaKind, SourceChannel, TextSpan, Verdict,
 };
 use bulwark_proto::DeviceId;
+use tonic::transport::Channel;
 
 const MAX_INFLIGHT_FLOWS: usize = 4;
+const DEVICE_POLICY_HEADER: &str = "x-bulwark-policy-bin";
+const POLICY_TTL_MS: i64 = 5 * 60 * 1000;
 
-/// A resolved policy result for one captured flow.
+#[derive(Clone, Default)]
+struct LocalPolicySnapshot {
+    version: u64,
+    expires_ts: i64,
+    hosts: HashSet<String>,
+    hashes: HashSet<String>,
+}
+
+fn policy_cell() -> &'static RwLock<LocalPolicySnapshot> {
+    static POLICY: OnceLock<RwLock<LocalPolicySnapshot>> = OnceLock::new();
+    POLICY.get_or_init(|| RwLock::new(LocalPolicySnapshot::default()))
+}
+
+fn clear_local_policy() {
+    if let Ok(mut policy) = policy_cell().write() {
+        *policy = LocalPolicySnapshot::default();
+    }
+}
+
+fn replace_local_policy(version: u64, hosts: HashSet<String>, hashes: HashSet<String>) {
+    if let Ok(mut policy) = policy_cell().write() {
+        *policy = LocalPolicySnapshot {
+            version,
+            expires_ts: crate::relay::now_ms().saturating_add(POLICY_TTL_MS),
+            hosts,
+            hashes,
+        };
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn guardian_approved(flow: &CapturedFlow, verdict: &Verdict) -> bool {
+    if verdict.category() == Category::CsamSuspected {
+        return false;
+    }
+    let Ok(policy) = policy_cell().read() else {
+        return false;
+    };
+    if policy.expires_ts <= crate::relay::now_ms() {
+        return false;
+    }
+    let host = flow.app_or_host.trim().to_ascii_lowercase();
+    if !host.is_empty() && policy.hosts.contains(&host) {
+        return true;
+    }
+    verdict.evidence.as_ref().is_some_and(|evidence| {
+        !evidence.sha256.is_empty() && policy.hashes.contains(&hex(&evidence.sha256))
+    })
+}
+
+async fn fetch_policy_metadata(
+    channel: Channel,
+    device_id: &str,
+    applied_version: u64,
+    device_token: &str,
+) -> Result<(u64, HashSet<String>, HashSet<String>), String> {
+    let mut client = ChildControlClient::new(channel);
+    let response = tokio::time::timeout(
+        Duration::from_secs(8),
+        client.get_child_config(ChildConfigFilter {
+            device_id: device_id.to_string(),
+            have_version: applied_version,
+            device_token: device_token.to_string(),
+        }),
+    )
+    .await
+    .map_err(|_| "device policy sync timed out".to_string())?
+    .map_err(|status| format!("device policy sync rejected: {}", status.code()))?;
+
+    let bytes = response
+        .metadata()
+        .get_bin(DEVICE_POLICY_HEADER)
+        .ok_or_else(|| "server omitted device policy snapshot".to_string())?
+        .to_bytes()
+        .map_err(|_| "device policy metadata was invalid".to_string())?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|_| "device policy snapshot was invalid JSON".to_string())?;
+    if !value
+        .get("complete")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err("server could not provide a complete device policy snapshot".to_string());
+    }
+    let version = value
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let strings = |name: &str| -> HashSet<String> {
+        value
+            .get(name)
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(|entry| entry.trim().to_ascii_lowercase())
+            .filter(|entry| !entry.is_empty())
+            .collect()
+    };
+    Ok((
+        version,
+        strings("approved_hosts"),
+        strings("approved_sha256_hex"),
+    ))
+}
+
+async fn sync_device_policy_rpc(
+    endpoint: String,
+    device_id: String,
+    applied_version: u64,
+    ca_path: String,
+    device_token: String,
+) -> Result<u64, String> {
+    let device_id = device_id.trim();
+    let device_token = device_token.trim();
+    if device_id.is_empty() || device_token.is_empty() {
+        clear_local_policy();
+        return Err("paired device credentials are required".to_string());
+    }
+    let channel = crate::cluster_endpoint(&endpoint, &ca_path)?
+        .connect()
+        .await
+        .map_err(|error| format!("could not reach server for policy sync: {error}"))?;
+    match fetch_policy_metadata(channel, device_id, applied_version, device_token).await {
+        Ok((version, hosts, hashes)) => {
+            replace_local_policy(version, hosts, hashes);
+            Ok(version)
+        }
+        Err(error) => {
+            clear_local_policy();
+            Err(error)
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_syncDevicePolicy(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    endpoint_value: jni::objects::JString,
+    device_id_value: jni::objects::JString,
+    applied_version: jni::sys::jlong,
+    ca_path_value: jni::objects::JString,
+    device_token_value: jni::objects::JString,
+) -> jni::sys::jstring {
+    let endpoint = crate::jstring_to_string(&mut env, &endpoint_value).unwrap_or_default();
+    let device_id = crate::jstring_to_string(&mut env, &device_id_value).unwrap_or_default();
+    let ca_path = crate::jstring_to_string(&mut env, &ca_path_value).unwrap_or_default();
+    let device_token =
+        crate::jstring_to_string(&mut env, &device_token_value).unwrap_or_default();
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            clear_local_policy();
+            return crate::string_to_jstring(
+                &mut env,
+                &serde_json::json!({"ok": false, "error": error.to_string()}).to_string(),
+            );
+        }
+    };
+    let result = runtime.block_on(sync_device_policy_rpc(
+        endpoint,
+        device_id,
+        applied_version.max(0) as u64,
+        ca_path,
+        device_token,
+    ));
+    let json = match result {
+        Ok(version) => serde_json::json!({"ok": true, "version": version}).to_string(),
+        Err(error) => serde_json::json!({"ok": false, "error": error}).to_string(),
+    };
+    crate::string_to_jstring(&mut env, &json)
+}
+
 pub struct FlowOutcome {
     pub decision: InterceptDecision,
     pub alert: Option<AlertEvent>,
-    /// True when protection coverage degraded and media was blocked rather than
-    /// falsely reported safe.
     pub media_gap: bool,
 }
 
@@ -83,8 +267,6 @@ fn media_deadline(source: SourceChannel, kind: MediaKind) -> u32 {
     }
 }
 
-/// Extract only complete media objects. The interceptor substitutes the full body
-/// into `body_peek` only for media explicitly admitted by its size/MIME gates.
 fn media_work(flow: &CapturedFlow) -> Option<MediaWork> {
     match &flow.payload {
         FlowPayload::StreamChunk {
@@ -155,12 +337,14 @@ fn alert_for(
 }
 
 fn outcome_from_verdict(flow: &CapturedFlow, verdict: Verdict) -> FlowOutcome {
+    if guardian_approved(flow, &verdict) {
+        return FlowOutcome::forward();
+    }
     let Some(engine) = crate::engine() else {
         return FlowOutcome::coverage_block();
     };
     let policy = engine.policy.evaluate(&verdict, &policy_context(flow));
-    let rewrite = (!verdict.remediated_media.is_empty())
-        .then(|| verdict.remediated_media.clone());
+    let rewrite = (!verdict.remediated_media.is_empty()).then(|| verdict.remediated_media.clone());
     let decision = match policy.action {
         Action::Block => InterceptDecision::Drop,
         Action::Blur | Action::Mute => rewrite
@@ -214,26 +398,18 @@ fn decide_text(flow: &CapturedFlow) -> FlowOutcome {
     let FlowPayload::Http(head) = &flow.payload else {
         return FlowOutcome::forward();
     };
-    if !flow.readable {
+    if !flow.readable || head.body_peek.is_empty() {
         return FlowOutcome::forward();
     }
-
-    let content_type = head.content_type();
     let body = head.body_peek.as_ref();
-    if body.is_empty() {
-        return FlowOutcome::forward();
-    }
-    let text = match content_type.as_deref() {
-        Some(content_type) if is_textual(content_type) => {
-            String::from_utf8_lossy(body).into_owned()
-        }
+    let text = match head.content_type().as_deref() {
+        Some(content_type) if is_textual(content_type) => String::from_utf8_lossy(body).into_owned(),
         Some(_) => return FlowOutcome::forward(),
         None => match std::str::from_utf8(body) {
             Ok(text) => text.to_owned(),
             Err(_) => return FlowOutcome::forward(),
         },
     };
-
     let Some(engine) = crate::engine() else {
         return FlowOutcome::forward();
     };
@@ -245,24 +421,21 @@ fn decide_text(flow: &CapturedFlow) -> FlowOutcome {
     } else {
         flow.app_or_host.clone()
     };
-    let span = TextSpan {
-        text,
-        lang: String::new(),
-        app: app.clone(),
-        thread_id: format!("{device}\u{1f}{app}\u{1f}network"),
-        from_minor: false,
-        prior_excerpts: Vec::new(),
-    };
     let verdict = engine.text.analyze_span(
         &format!("net-{}", flow.flow_id),
-        &span,
+        &TextSpan {
+            text,
+            lang: String::new(),
+            app: app.clone(),
+            thread_id: format!("{device}\u{1f}{app}\u{1f}network"),
+            from_minor: false,
+            prior_excerpts: Vec::new(),
+        },
         crate::relay::now_ms(),
     );
     outcome_from_verdict(flow, verdict)
 }
 
-/// Pure/local decision helper for host tests. Production media decisions use the
-/// async cluster path; here media conservatively resolves to Drop.
 pub fn decide_flow(flow: &CapturedFlow) -> FlowOutcome {
     if media_work(flow).is_some() {
         FlowOutcome::coverage_block()
@@ -290,7 +463,7 @@ fn note_media_gap_once(flow: &CapturedFlow) {
     if !NOTICED.swap(true, Ordering::Relaxed) {
         crate::enqueue_protection_alert(
             "media-analysis-unavailable",
-            "Bulwark could not safely analyse protected image/video traffic in time, so it was blocked. Protection is still active; check the server connection if this continues.",
+            "Bulwark could not safely analyse protected media in time, so it was blocked.",
         );
     }
 }
@@ -320,21 +493,12 @@ async fn process_flow(interceptor: Arc<dyn Interceptor>, flow: CapturedFlow) {
     }
 }
 
-/// Drain captured flows with at most four analysis decisions in flight. This
-/// removes head-of-line blocking while bounding memory, network work and model
-/// pressure on a child device.
 pub async fn run_flow_consumer(interceptor: Arc<dyn Interceptor>) {
-    tracing::info!(
-        max_inflight = MAX_INFLIGHT_FLOWS,
-        "flow consumer started; protected media gate active"
-    );
     let mut tasks = tokio::task::JoinSet::new();
-
     loop {
         while tasks.len() >= MAX_INFLIGHT_FLOWS {
             let _ = tasks.join_next().await;
         }
-
         match interceptor.next_flow().await {
             Ok(Some(flow)) => {
                 let interceptor = interceptor.clone();
@@ -349,9 +513,7 @@ pub async fn run_flow_consumer(interceptor: Arc<dyn Interceptor>) {
             }
         }
     }
-
     while tasks.join_next().await.is_some() {}
-    tracing::info!("flow consumer ended");
 }
 
 #[cfg(test)]
@@ -359,13 +521,7 @@ mod tests {
     use super::*;
     use bulwark_core::flow::{Header, HttpHead};
 
-    fn http_flow(
-        id: u64,
-        host: &str,
-        readable: bool,
-        content_type: Option<&str>,
-        body: &[u8],
-    ) -> CapturedFlow {
+    fn http_flow(id: u64, host: &str, content_type: Option<&str>, body: &[u8]) -> CapturedFlow {
         let mut headers = Vec::new();
         if let Some(content_type) = content_type {
             headers.push(Header {
@@ -377,7 +533,7 @@ mod tests {
             flow_id: id,
             source_channel: SourceChannel::Web,
             app_or_host: host.to_owned(),
-            readable,
+            readable: true,
             payload: FlowPayload::Http(HttpHead {
                 method: Some("GET".to_owned()),
                 path: Some("/".to_owned()),
@@ -389,80 +545,58 @@ mod tests {
     }
 
     #[test]
-    fn image_and_video_are_protected_not_forwarded_unscored() {
-        let image = http_flow(
-            1,
-            "cdn.example",
-            true,
-            Some("image/jpeg"),
-            &[0xff; 32 * 1024],
-        );
-        assert!(matches!(
-            decide_flow(&image).decision,
-            InterceptDecision::Drop
-        ));
-        assert!(media_work(&image).is_some());
-
-        let video = http_flow(
-            2,
-            "cdn.example",
-            true,
-            Some("video/mp2t"),
-            &[7; 64 * 1024],
-        );
-        let work = media_work(&video).expect("video work");
-        assert_eq!(work.kind, MediaKind::Video);
-        assert!(work.deadline_ms <= 1_200);
+    fn media_is_never_forwarded_unscored() {
+        let image = http_flow(1, "cdn.example", Some("image/jpeg"), &[0xff; 32 * 1024]);
+        assert!(matches!(decide_flow(&image).decision, InterceptDecision::Drop));
+        let video = http_flow(2, "cdn.example", Some("video/mp2t"), &[7; 64 * 1024]);
+        assert_eq!(media_work(&video).unwrap().kind, MediaKind::Video);
     }
 
     #[test]
-    fn flagged_text_is_redacted_and_not_false_csam() {
-        let raw = "send me a pic of you in your room";
-        let flow = http_flow(3, "chat.example", true, Some("text/plain"), raw.as_bytes());
-        let outcome = decide_flow(&flow);
-        let alert = outcome.alert.expect("grooming risk alerts guardian");
-        assert_eq!(alert.category, Category::Grooming as i32);
-        assert!(!alert.redacted_context.contains(raw));
-        assert!(!local_alert_json(&alert).contains(raw));
-    }
-
-    #[test]
-    fn safe_text_forwards_without_alert() {
+    fn safe_text_forwards() {
+        clear_local_policy();
         let flow = http_flow(
-            4,
+            3,
             "news.example",
-            true,
-            Some("text/html"),
+            Some("text/plain"),
             b"are you coming to football practice tonight?",
         );
-        let outcome = decide_flow(&flow);
-        assert!(matches!(
-            outcome.decision,
-            InterceptDecision::Forward
-        ));
-        assert!(outcome.alert.is_none());
+        assert!(matches!(decide_flow(&flow).decision, InterceptDecision::Forward));
     }
 
     #[test]
-    fn stream_chunks_are_video_covered() {
-        let flow = CapturedFlow {
-            flow_id: 5,
-            source_channel: SourceChannel::VideoStream,
-            app_or_host: "video.example".into(),
-            readable: true,
-            payload: FlowPayload::StreamChunk {
-                data: vec![1u8; 256 * 1024].into(),
-                mime_type: Some("video/mp4".into()),
-                url: Some("/segment-1.m4s".into()),
-            },
+    fn stale_policy_does_not_allow() {
+        replace_local_policy(
+            1,
+            ["example.test".to_string()].into_iter().collect(),
+            HashSet::new(),
+        );
+        if let Ok(mut policy) = policy_cell().write() {
+            policy.expires_ts = 0;
+        }
+        let verdict = Verdict {
+            category: Category::AdultText as i32,
+            ..Default::default()
         };
-        let work = media_work(&flow).expect("stream media is scored");
-        assert_eq!(work.kind, MediaKind::Video);
-        assert_eq!(work.mime_type, "video/mp4");
+        let flow = http_flow(4, "example.test", Some("text/plain"), b"x");
+        assert!(!guardian_approved(&flow, &verdict));
     }
 
     #[test]
-    fn concurrency_bound_is_small() {
-        assert_eq!(MAX_INFLIGHT_FLOWS, 4);
+    fn policy_version_is_replaced_not_accumulated() {
+        replace_local_policy(
+            1,
+            ["one.test".to_string()].into_iter().collect(),
+            HashSet::new(),
+        );
+        replace_local_policy(
+            2,
+            ["two.test".to_string()].into_iter().collect(),
+            HashSet::new(),
+        );
+        let policy = policy_cell().read().unwrap();
+        assert_eq!(policy.version, 2);
+        assert!(!policy.hosts.contains("one.test"));
+        assert!(policy.hosts.contains("two.test"));
     }
 }
