@@ -17,6 +17,7 @@ pub mod child_control;
 pub mod family_safety;
 pub mod persist;
 pub mod relay;
+pub mod remote_vpn;
 pub mod reset_mailer;
 pub mod review_security;
 pub mod safety_cases;
@@ -115,17 +116,18 @@ impl AnalyzerRegistry {
         let mut registry = Self::with_text();
 
         #[cfg(feature = "ffmpeg")]
-        let mut video = bulwark_video::VideoAnalyzer::with_demuxer(
+        let video = bulwark_video::VideoAnalyzer::with_demuxer(
             bulwark_video::VideoConfig::default(),
             bulwark_video::ffmpeg::FfmpegDemuxer::new(),
         );
         #[cfg(not(feature = "ffmpeg"))]
-        let mut video = bulwark_video::VideoAnalyzer::new();
+        let video = bulwark_video::VideoAnalyzer::new();
 
         #[cfg(feature = "whisper")]
-        if let Some(stt) = bulwark_audio::whisper::WhisperTranscriber::from_env() {
-            video = video.with_audio_transcriber(Box::new(stt));
-        }
+        let video = match bulwark_audio::whisper::WhisperTranscriber::from_env() {
+            Some(stt) => video.with_audio_transcriber(Box::new(stt)),
+            None => video,
+        };
 
         let mut video: Arc<dyn Analyzer> = Arc::new(video);
         if let Some(store) = store {
