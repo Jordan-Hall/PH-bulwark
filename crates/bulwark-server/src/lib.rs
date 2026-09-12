@@ -17,7 +17,6 @@ pub mod child_control;
 pub mod family_safety;
 pub mod persist;
 pub mod relay;
-pub mod remote_vpn;
 pub mod reset_mailer;
 pub mod review_security;
 pub mod safety_cases;
