@@ -1,26 +1,78 @@
-//! Fail-closed public ONNX scorer wrapper.
+//! Fail-closed, bounded-concurrent public ONNX scorer.
 //!
-//! The legacy implementation is kept as the session/runtime engine, but its
-//! `Scorer::score` compatibility path maps decode/inference errors to `0.0`.
-//! This wrapper uses the engine's error-aware `try_score` API and returns NaN on
-//! failure. Every Bulwark policy-facing caller treats a non-finite score as an
-//! explicit coverage gap, never as a safe image.
+//! Each ONNX Runtime session still has its own internal mutex, but independent
+//! requests are distributed over a small session pool instead of serializing all
+//! image decisions through one process-wide lock. Decode/inference failures remain
+//! explicit coverage gaps (NaN to the caller), never a false zero-risk score.
 
 #[path = "onnx.rs"]
 mod inner;
 
 pub use inner::ExecProviderMode;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use crate::preprocess::Normalization;
 use crate::Scorer;
 
-/// Error-aware ONNX NSFW scorer.
-pub struct OnnxScorer(inner::OnnxScorer);
+const MAX_SESSION_POOL: usize = 4;
+
+/// Error-aware ONNX NSFW scorer with bounded request concurrency.
+pub struct OnnxScorer {
+    scorers: Vec<inner::OnnxScorer>,
+    next: AtomicUsize,
+}
 
 impl OnnxScorer {
+    fn pool_size() -> usize {
+        std::env::var("BULWARK_NSFW_SESSIONS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|value| if value.get() >= 4 { 2 } else { 1 })
+                    .unwrap_or(1)
+            })
+            .clamp(1, MAX_SESSION_POOL)
+    }
+
+    fn build_pool(
+        mut build: impl FnMut() -> anyhow::Result<inner::OnnxScorer>,
+    ) -> anyhow::Result<Self> {
+        let first = build()?;
+        let target = Self::pool_size();
+        let mut scorers = Vec::with_capacity(target);
+        scorers.push(first);
+        while scorers.len() < target {
+            match build() {
+                Ok(scorer) => scorers.push(scorer),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        requested = target,
+                        active = scorers.len(),
+                        "could not create another ONNX session; continuing with smaller pool"
+                    );
+                    break;
+                }
+            }
+        }
+        tracing::info!(sessions = scorers.len(), "ONNX image session pool ready");
+        Ok(Self {
+            scorers,
+            next: AtomicUsize::new(0),
+        })
+    }
+
+    fn selected(&self) -> &inner::OnnxScorer {
+        let index = self.next.fetch_add(1, Ordering::Relaxed) % self.scorers.len();
+        &self.scorers[index]
+    }
+
     /// Load an ONNX model using ImageNet normalization.
     pub fn load(model_path: &str, input_size: u32) -> anyhow::Result<Self> {
-        inner::OnnxScorer::load(model_path, input_size).map(Self)
+        Self::build_pool(|| inner::OnnxScorer::load(model_path, input_size))
     }
 
     /// Load an ONNX model with explicit normalization.
@@ -29,7 +81,7 @@ impl OnnxScorer {
         input_size: u32,
         norm: Normalization,
     ) -> anyhow::Result<Self> {
-        inner::OnnxScorer::load_with(model_path, input_size, norm).map(Self)
+        Self::build_pool(|| inner::OnnxScorer::load_with(model_path, input_size, norm))
     }
 
     /// Load an ONNX model with an explicit execution-provider mode.
@@ -39,7 +91,7 @@ impl OnnxScorer {
         norm: Normalization,
         mode: ExecProviderMode,
     ) -> anyhow::Result<Self> {
-        inner::OnnxScorer::load_with_ep(model_path, input_size, norm, mode).map(Self)
+        Self::build_pool(|| inner::OnnxScorer::load_with_ep(model_path, input_size, norm, mode))
     }
 
     /// Load an embedded/in-memory ONNX model.
@@ -48,28 +100,28 @@ impl OnnxScorer {
         input_size: u32,
         norm: Normalization,
     ) -> anyhow::Result<Self> {
-        inner::OnnxScorer::load_from_bytes(bytes, input_size, norm).map(Self)
+        Self::build_pool(|| inner::OnnxScorer::load_from_bytes(bytes, input_size, norm))
     }
 
     /// Load from the configured model path/environment.
     pub fn from_env(input_size: u32) -> anyhow::Result<Self> {
-        inner::OnnxScorer::from_env(input_size).map(Self)
+        Self::build_pool(|| inner::OnnxScorer::from_env(input_size))
     }
 
     /// Load from an already-resolved model path using environment tuning.
     pub fn from_path_env(model_path: &str, default_input_size: u32) -> anyhow::Result<Self> {
-        inner::OnnxScorer::from_path_env(model_path, default_input_size).map(Self)
+        Self::build_pool(|| inner::OnnxScorer::from_path_env(model_path, default_input_size))
     }
 
     /// Score while preserving decode/inference errors.
     pub fn try_score(&self, image_bytes: &[u8]) -> anyhow::Result<f32> {
-        self.0.try_score(image_bytes)
+        self.selected().try_score(image_bytes)
     }
 }
 
 impl Scorer for OnnxScorer {
     fn score(&self, image_bytes: &[u8]) -> f32 {
-        match self.0.try_score(image_bytes) {
+        match self.try_score(image_bytes) {
             Ok(score) if score.is_finite() => score,
             Ok(_) => {
                 tracing::warn!("ONNX image scorer returned a non-finite score; treating as uncovered");
@@ -83,6 +135,9 @@ impl Scorer for OnnxScorer {
     }
 
     fn model_id(&self) -> &str {
-        self.0.model_id()
+        self.scorers
+            .first()
+            .expect("ONNX scorer pool always contains at least one session")
+            .model_id()
     }
 }
