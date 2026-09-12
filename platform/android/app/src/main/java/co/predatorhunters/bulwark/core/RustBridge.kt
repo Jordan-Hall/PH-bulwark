@@ -12,14 +12,8 @@ object RustBridge {
         }
     }
 
-    /** Local VPN: inspection/inference/enforcement run on this device. */
     external fun startVpn(vpnService: android.net.VpnService, tunFd: Int, configJson: String): Long
 
-    /**
-     * Authenticate and provision Remote VPN before Android creates the TUN.
-     * [stateDir] is app-private storage for the device's persistent WireGuard
-     * private key. The private key never crosses JNI or leaves the device.
-     */
     external fun prepareServerVpn(
         endpoint: String,
         deviceId: String,
@@ -28,7 +22,6 @@ object RustBridge {
         stateDir: String,
     ): String
 
-    /** Remote VPN: the phone only pumps encrypted IP; the region filters. */
     external fun startServerVpn(
         vpnService: android.net.VpnService,
         tunFd: Int,
@@ -58,11 +51,18 @@ object RustBridge {
     fun inspectionCaDir(ctx: android.content.Context): String =
         java.io.File(ctx.filesDir, "ca").absolutePath
 
-    /** App-private Remote VPN key/session working directory. */
     fun remoteVpnDir(ctx: android.content.Context): String =
         java.io.File(ctx.filesDir, "remote_vpn").absolutePath
 
     external fun fetchChildConfig(
+        endpoint: String,
+        deviceId: String,
+        appliedVersion: Long,
+        caPath: String,
+        deviceToken: String,
+    ): String
+
+    external fun syncDevicePolicy(
         endpoint: String,
         deviceId: String,
         appliedVersion: Long,
