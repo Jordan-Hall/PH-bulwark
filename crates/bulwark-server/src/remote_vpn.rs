@@ -1,12 +1,4 @@
-//! In-process Remote VPN filtering runtime for Linux regions.
-//!
-//! Android Remote VPN carries only raw IP over WireGuard. On the region,
-//! `wg-filter.sh` REDIRECTs TCP/80+443 into one transparent listener. That
-//! listener routes each authenticated tunnel source address to an isolated local
-//! TLS-inspection proxy slot. The slot resolves the CURRENT device for that
-//! address before every flow, applies the guardian's current child config,
-//! analyzes content, evaluates policy, applies guardian approvals and answers the
-//! proxy decision gate. No unfiltered fallback exists anywhere in this module.
+//! In-process, peer-attributed filtering for authenticated Remote VPN traffic.
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -19,8 +11,8 @@ use bulwark_flow::{AnalysisUnit, DefaultFlowClassifier, FlowClassifier};
 use bulwark_net::{InterceptDecision, Interceptor, NetConfig, NetInterceptor};
 use bulwark_policy::{AgeProfile, Allowlist, Policy, PolicyContext, ReviewItem};
 use bulwark_proto::v1::{
-    analysis_request::Media, Action, AlertEvent, Category, ChildConfig, FilteringProfile,
-    AnalysisRequest, Evidence, FilterLocation, MediaKind, ReviewDecision, ReviewScope, Severity,
+    analysis_request::Media, Action, AlertEvent, AnalysisRequest, Category, ChildConfig, Evidence,
+    FilterLocation, FilteringProfile, MediaKind, ReviewDecision, ReviewScope, Severity,
     SourceChannel, Verdict,
 };
 use bulwark_proto::DeviceId;
@@ -112,19 +104,19 @@ fn proxy_port_base() -> anyhow::Result<u16> {
 
 fn proxy_for_address(base: u16, address: Ipv4Addr) -> Option<SocketAddr> {
     let octet = address.octets()[3];
-    if !(2..=254).contains(&octet) {
-        return None;
-    }
-    Some(SocketAddr::from(([127, 0, 0, 1], base + u16::from(octet))))
+    (2..=254)
+        .contains(&octet)
+        .then(|| SocketAddr::from(([127, 0, 0, 1], base + u16::from(octet))))
 }
 
 fn analysis_timeout() -> Duration {
-    let ms = std::env::var("BULWARK_REMOTE_VPN_ANALYSIS_TIMEOUT_MS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_ANALYSIS_TIMEOUT_MS)
-        .clamp(100, 5_000);
-    Duration::from_millis(ms)
+    Duration::from_millis(
+        std::env::var("BULWARK_REMOTE_VPN_ANALYSIS_TIMEOUT_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_ANALYSIS_TIMEOUT_MS)
+            .clamp(100, 5_000),
+    )
 }
 
 fn max_in_flight() -> usize {
@@ -152,9 +144,6 @@ fn remote_net_config(state_dir: &Path, proxy: SocketAddr) -> NetConfig {
         proxy_listen: proxy.to_string(),
         ca_common_name: "PH Bulwark Remote VPN Inspection Root".to_string(),
         ca_store_dir: Some(remote_ca_dir(state_dir)),
-        // Remote VPN has no safe network bypass for a pinned host. Keep trying
-        // inspection so a rejected leaf blocks instead of becoming an
-        // uninspected tunnel. Rendered-content coverage remains complementary.
         pinning_fail_open: false,
         flow_channel_capacity: 256,
         ..NetConfig::default()
@@ -175,7 +164,7 @@ fn install_or_verify_region_ca(state_dir: &Path) -> anyhow::Result<()> {
     match std::fs::read(&path) {
         Ok(existing) if existing == pem => Ok(()),
         Ok(_) => anyhow::bail!(
-            "Remote VPN inspection CA at {} does not match the region keystore; refusing silent CA rotation",
+            "Remote VPN inspection CA at {} does not match the region keystore",
             path.display()
         ),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -205,25 +194,28 @@ fn active_peers(path: &Path) -> anyhow::Result<HashMap<Ipv4Addr, String>> {
         if row.expires_ts <= at || row.device_id.trim().is_empty() {
             continue;
         }
-        let address = match row.address.trim().parse::<Ipv4Addr>() {
-            Ok(address) if address.octets()[0..3] == [10, 8, 0] => address,
-            _ => continue,
+        let Ok(address) = row.address.trim().parse::<Ipv4Addr>() else {
+            continue;
         };
+        let octets = address.octets();
+        if octets[..3] != [10, 8, 0] {
+            continue;
+        }
         peers.insert(address, row.device_id.trim().to_string());
     }
     Ok(peers)
 }
 
 fn decode_hex(value: &str) -> Option<Vec<u8>> {
-    let value = value.trim();
-    if value.is_empty() || value.len() % 2 != 0 {
+    let bytes = value.trim().as_bytes();
+    if bytes.is_empty() || bytes.len() & 1 != 0 {
         return None;
     }
-    let mut out = Vec::with_capacity(value.len() / 2);
-    for chunk in value.as_bytes().chunks_exact(2) {
-        let hi = (chunk[0] as char).to_digit(16)?;
-        let lo = (chunk[1] as char).to_digit(16)?;
-        out.push(((hi << 4) | lo) as u8);
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks_exact(2) {
+        let high = (pair[0] as char).to_digit(16)?;
+        let low = (pair[1] as char).to_digit(16)?;
+        out.push(((high << 4) | low) as u8);
     }
     Some(out)
 }
@@ -326,20 +318,19 @@ async fn analyze(
     timeout: Duration,
 ) -> Verdict {
     let request_id = request.request_id.clone();
-    let media_kind = request.media_kind;
-    let Some(analyzer) = registry.analyzer_for(media_kind) else {
+    let Some(analyzer) = registry.analyzer_for(request.media_kind) else {
         return inconclusive(request_id, "no region analyzer is registered for this media kind");
     };
     match tokio::time::timeout(timeout, analyzer.analyze(request)).await {
         Ok(Ok(verdict)) if verdict.category() != Category::Unspecified => verdict,
-        Ok(Ok(verdict)) => inconclusive(
-            request_id,
-            if verdict.rationale.is_empty() {
-                "region analyzer returned incomplete coverage"
+        Ok(Ok(verdict)) => {
+            let rationale = if verdict.rationale.is_empty() {
+                "region analyzer returned incomplete coverage".to_string()
             } else {
                 verdict.rationale
-            },
-        ),
+            };
+            inconclusive(request_id, rationale)
+        }
         Ok(Err(error)) => {
             tracing::warn!(%error, "Remote VPN analyzer failed; blocking flow");
             inconclusive(request_id, "region analysis failed")
@@ -349,7 +340,10 @@ async fn analyze(
 }
 
 fn approved(allowlist: &Allowlist, device_id: &str, host: &str, verdict: &Verdict) -> bool {
-    if verdict.category() == Category::CsamSuspected {
+    if matches!(
+        verdict.category(),
+        Category::CsamSuspected | Category::Unspecified
+    ) {
         return false;
     }
     let device = DeviceId(device_id.to_string());
@@ -375,13 +369,8 @@ fn action_rank(action: Action) -> u8 {
 fn intercept_decision(action: Action, verdict: &Verdict) -> InterceptDecision {
     match action {
         Action::Block | Action::Unspecified => InterceptDecision::Drop,
-        Action::Blur | Action::Mute => {
-            if verdict.remediated_media.is_empty() {
-                InterceptDecision::Drop
-            } else {
-                InterceptDecision::Rewrite(verdict.remediated_media.clone())
-            }
-        }
+        Action::Blur | Action::Mute if verdict.remediated_media.is_empty() => InterceptDecision::Drop,
+        Action::Blur | Action::Mute => InterceptDecision::Rewrite(verdict.remediated_media.clone()),
         Action::Allow | Action::Log | Action::Warn => InterceptDecision::Forward,
     }
 }
@@ -397,7 +386,6 @@ fn sanitized_evidence(category: Category, evidence: Option<Evidence>) -> Option<
 
 async fn emit_alert(
     state: &RuntimeState,
-    config: &ChildConfig,
     device_id: &str,
     host: &str,
     flow_id: u64,
@@ -408,9 +396,8 @@ async fn emit_alert(
     let Some(kind) = decision.raise_alert else {
         return;
     };
-    let (child_id, family_id, _) = match state.context.accounts.child_for_device(device_id) {
-        Some(ids) => ids,
-        None => return,
+    let Some((child_id, family_id, _)) = state.context.accounts.child_for_device(device_id) else {
+        return;
     };
     let category = verdict.category();
     let event = AlertEvent {
@@ -441,7 +428,6 @@ async fn emit_alert(
             tracing::warn!(%error, reached, "Remote VPN guardian notification sink failed");
         }
     }
-    let _ = config;
 }
 
 async fn process_flow(
@@ -454,13 +440,12 @@ async fn process_flow(
     let flow_id = flow.flow_id;
     let host = flow.app_or_host.clone();
     let source_channel = flow.source_channel;
-
-    let device_id = state
+    let Some(device_id) = state
         .peers
         .read()
         .ok()
-        .and_then(|peers| peers.get(&address).cloned());
-    let Some(device_id) = device_id else {
+        .and_then(|peers| peers.get(&address).cloned())
+    else {
         let _ = interceptor.apply(flow_id, InterceptDecision::Drop).await;
         return;
     };
@@ -496,9 +481,8 @@ async fn process_flow(
         .read()
         .map(|allowlist| allowlist.clone())
         .unwrap_or_default();
-
     let mut strongest_action = Action::Allow;
-    let mut strongest_verdict: Option<Verdict> = None;
+    let mut strongest_verdict = None;
 
     for (index, unit) in units.into_iter().enumerate() {
         let request_id = format!("rvpn-{device_id}-{flow_id}-{index}");
@@ -514,7 +498,6 @@ async fn process_flow(
         } else {
             emit_alert(
                 &state,
-                &config,
                 &device_id,
                 &host,
                 flow_id,
@@ -541,10 +524,10 @@ async fn process_flow(
 
     let fallback = Verdict::default();
     let verdict = strongest_verdict.as_ref().unwrap_or(&fallback);
-    let result = interceptor
+    if let Err(error) = interceptor
         .apply(flow_id, intercept_decision(strongest_action, verdict))
-        .await;
-    if let Err(error) = result {
+        .await
+    {
         tracing::debug!(%error, %device_id, flow_id, "Remote VPN decision arrived after proxy gate closed");
     }
 }
@@ -559,8 +542,6 @@ async fn slot_worker(
         match interceptor.next_flow().await {
             Ok(Some(flow)) => {
                 let Ok(permit) = state.concurrency.clone().try_acquire_owned() else {
-                    // Never queue unlimited decrypted work. Under overload, fail
-                    // closed immediately and let the user/app retry.
                     let _ = interceptor.apply(flow.flow_id, InterceptDecision::Drop).await;
                     continue;
                 };
@@ -614,20 +595,19 @@ async fn reconcile_slots(
             HashMap::new()
         }
     };
-
     if let Ok(mut peers) = state.peers.write() {
         *peers = next.clone();
     }
 
-    let wanted: HashSet<Ipv4Addr> = next.keys().copied().collect();
-    let current: Vec<Ipv4Addr> = slots.lock().await.keys().copied().collect();
+    let wanted: HashSet<_> = next.keys().copied().collect();
+    let current: Vec<_> = slots.lock().await.keys().copied().collect();
     for address in current {
-        if !wanted.contains(&address) {
-            let interceptor = slots.lock().await.remove(&address);
-            if let Some(interceptor) = interceptor {
-                if let Err(error) = interceptor.shutdown().await {
-                    tracing::warn!(%error, %address, "Remote VPN slot shutdown failed");
-                }
+        if wanted.contains(&address) {
+            continue;
+        }
+        if let Some(interceptor) = slots.lock().await.remove(&address) {
+            if let Err(error) = interceptor.shutdown().await {
+                tracing::warn!(%error, %address, "Remote VPN slot shutdown failed");
             }
         }
     }
@@ -655,29 +635,20 @@ async fn state_watcher(
     let audit_path = state.context.state_dir.join("allowlist_audit.json");
     loop {
         reconcile_slots(&state, base, &slots).await;
-        match load_approvals(&audit_path) {
-            Ok(allowlist) => {
-                if let Ok(mut approvals) = state.approvals.write() {
-                    *approvals = allowlist;
-                }
-            }
+        let next = match load_approvals(&audit_path) {
+            Ok(allowlist) => allowlist,
             Err(error) => {
-                // Empty allowlist is the conservative interpretation of an
-                // unreadable approval journal; never preserve stale approvals.
                 tracing::error!(%error, "guardian approval journal unreadable; clearing Remote VPN approvals");
-                if let Ok(mut approvals) = state.approvals.write() {
-                    *approvals = Allowlist::new();
-                }
+                Allowlist::new()
             }
+        };
+        if let Ok(mut approvals) = state.approvals.write() {
+            *approvals = next;
         }
         tokio::time::sleep(Duration::from_millis(STATE_REFRESH_MS)).await;
     }
 }
 
-/// Start Remote VPN inspection for this process if `BULWARK_WG_FILTER_ACTIVE`
-/// is enabled. Startup validates/generates the region inspection CA and proves
-/// the transparent bind is available before any gRPC grant can advertise the
-/// filter as active.
 #[cfg(target_os = "linux")]
 pub async fn start(context: RemoteVpnContext) -> anyhow::Result<()> {
     if !env_flag("BULWARK_WG_FILTER_ACTIVE") {
@@ -691,10 +662,6 @@ pub async fn start(context: RemoteVpnContext) -> anyhow::Result<()> {
         .parse()
         .map_err(|error| anyhow::anyhow!("invalid BULWARK_REMOTE_VPN_TRANSPARENT_BIND: {error}"))?;
     let base = proxy_port_base()?;
-
-    // Probe the bind synchronously so server startup fails rather than claiming
-    // Remote VPN readiness with no transparent ingress. The real listener binds
-    // immediately after this probe is released.
     let probe = tokio::net::TcpListener::bind(bind).await?;
     drop(probe);
 
@@ -716,22 +683,28 @@ pub async fn start(context: RemoteVpnContext) -> anyhow::Result<()> {
                 let IpAddr::V4(address) = peer.ip() else {
                     return None;
                 };
-                let authorized = routing_peers
+                routing_peers
                     .read()
                     .ok()
-                    .is_some_and(|peers| peers.contains_key(&address));
-                authorized.then(|| proxy_for_address(base, address)).flatten()
+                    .is_some_and(|peers| peers.contains_key(&address))
+                    .then(|| proxy_for_address(base, address))
+                    .flatten()
             },
             bulwark_net::vpn::CancellationToken::new(),
         )
         .await;
         if let Err(error) = result {
-            tracing::error!(%error, "Remote VPN transparent listener stopped; existing redirect rules now fail closed");
+            tracing::error!(%error, "Remote VPN transparent listener stopped; redirect remains fail closed");
         }
     });
     tokio::spawn(state_watcher(state.clone(), base, slots));
 
-    tracing::info!(%bind, proxy_port_base = base, analysis_timeout_ms = state.analysis_timeout.as_millis(), "Remote VPN region filter runtime active");
+    tracing::info!(
+        %bind,
+        proxy_port_base = base,
+        analysis_timeout_ms = state.analysis_timeout.as_millis(),
+        "Remote VPN region filter runtime active"
+    );
     Ok(())
 }
 
