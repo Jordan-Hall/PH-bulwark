@@ -5,7 +5,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use bulwark_proto::v1::{Category, ReviewDecision, ReviewScope};
 use bulwark_proto::DeviceId;
 
-/// Approved host/content-hash keys for one supervised device.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DeviceAllowlist {
     hosts: BTreeSet<String>,
@@ -13,45 +12,38 @@ pub struct DeviceAllowlist {
 }
 
 impl DeviceAllowlist {
-    /// Whether `host` was guardian-approved.
     pub fn allows_host(&self, host: &str) -> bool {
         let host = host.trim().to_ascii_lowercase();
         !host.is_empty() && self.hosts.contains(&host)
     }
 
-    /// Whether raw SHA-256 bytes were guardian-approved.
     pub fn allows_hash(&self, sha256: &[u8]) -> bool {
         !sha256.is_empty() && self.hashes.contains(&hex(sha256))
     }
 
-    /// Approved lowercase hosts.
     pub fn hosts(&self) -> impl Iterator<Item = &str> {
         self.hosts.iter().map(String::as_str)
     }
 
-    /// Approved hashes in lowercase hex.
     pub fn hashes(&self) -> impl Iterator<Item = &str> {
         self.hashes.iter().map(String::as_str)
     }
+
+    fn is_empty(&self) -> bool {
+        self.hosts.is_empty() && self.hashes.is_empty()
+    }
 }
 
-/// Immutable facts resolved from the alert being reviewed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReviewItem {
-    /// Supervised device affected by the review.
     pub device: DeviceId,
-    /// Original alert id.
     pub alert_id: String,
-    /// Origin host/app when known.
     pub host: String,
-    /// Content SHA-256 when known.
     pub sha256: Vec<u8>,
-    /// Original classification category.
     pub category: Category,
 }
 
 impl ReviewItem {
-    /// Construct a resolved review item.
     pub fn new(
         device: DeviceId,
         alert_id: impl Into<String>,
@@ -69,18 +61,13 @@ impl ReviewItem {
     }
 }
 
-/// Result of applying a guardian review decision.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ApplyOutcome {
-    /// An allow key was added.
     Approved,
-    /// A deny was confirmed.
     DenyConfirmed,
-    /// The requested override was refused conservatively.
     Refused(String),
 }
 
-/// One content-free, chained guardian-decision audit entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuditEntry {
     pub device_id: String,
@@ -95,29 +82,24 @@ pub struct AuditEntry {
     pub chain_hash: String,
 }
 
-/// Append-only hash-chain audit.
 #[derive(Clone, Debug, Default)]
 pub struct AuditLog {
     entries: Vec<AuditEntry>,
 }
 
 impl AuditLog {
-    /// Entries in insertion order.
     pub fn entries(&self) -> &[AuditEntry] {
         &self.entries
     }
 
-    /// Number of entries.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// Whether the log is empty.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    /// Verify the chain, returning the first corrupt entry index.
     pub fn verify(&self) -> Result<(), usize> {
         let mut previous = "bulwark-audit-genesis".to_string();
         for (index, entry) in self.entries.iter().enumerate() {
@@ -140,7 +122,6 @@ impl AuditLog {
     }
 }
 
-/// Guardian-approved keys scoped per supervised device.
 #[derive(Clone, Debug, Default)]
 pub struct Allowlist {
     per_device: BTreeMap<String, DeviceAllowlist>,
@@ -148,34 +129,28 @@ pub struct Allowlist {
 }
 
 impl Allowlist {
-    /// Create an empty allowlist.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Read one device's allow keys.
     pub fn device(&self, device: &DeviceId) -> Option<&DeviceAllowlist> {
         self.per_device.get(&device.0)
     }
 
-    /// Read the guardian-decision audit.
     pub fn audit(&self) -> &AuditLog {
         &self.audit
     }
 
-    /// Whether a host is approved for this device.
     pub fn is_host_allowed(&self, device: &DeviceId, host: &str) -> bool {
-        self.device(device).is_some_and(|entry| entry.allows_host(host))
+        self.device(device)
+            .is_some_and(|entry| entry.allows_host(host))
     }
 
-    /// Whether a content hash is approved for this device.
     pub fn is_hash_allowed(&self, device: &DeviceId, sha256: &[u8]) -> bool {
         self.device(device)
             .is_some_and(|entry| entry.allows_hash(sha256))
     }
 
-    /// Apply and audit one guardian decision. Suspected CSAM is never
-    /// allowlistable, even if the caller requests APPROVE.
     pub fn apply(
         &mut self,
         item: &ReviewItem,
@@ -185,7 +160,7 @@ impl Allowlist {
     ) -> ApplyOutcome {
         let outcome = match decision {
             ReviewDecision::Approve => self.apply_approve(item, scope),
-            ReviewDecision::Deny => ApplyOutcome::DenyConfirmed,
+            ReviewDecision::Deny => self.apply_deny(item, scope),
             ReviewDecision::Unspecified => {
                 ApplyOutcome::Refused("decision unspecified".to_string())
             }
@@ -237,6 +212,31 @@ impl Allowlist {
                 ApplyOutcome::Approved
             }
         }
+    }
+
+    fn apply_deny(&mut self, item: &ReviewItem, scope: ReviewScope) -> ApplyOutcome {
+        let device_key = item.device.0.clone();
+        let mut remove_device = false;
+        if let Some(entry) = self.per_device.get_mut(&device_key) {
+            match scope {
+                ReviewScope::ThisHost => {
+                    let host = item.host.trim().to_ascii_lowercase();
+                    if !host.is_empty() {
+                        entry.hosts.remove(&host);
+                    }
+                }
+                ReviewScope::ThisItem | ReviewScope::Unspecified => {
+                    if !item.sha256.is_empty() {
+                        entry.hashes.remove(&hex(&item.sha256));
+                    }
+                }
+            }
+            remove_device = entry.is_empty();
+        }
+        if remove_device {
+            self.per_device.remove(&device_key);
+        }
+        ApplyOutcome::DenyConfirmed
     }
 }
 
@@ -291,7 +291,6 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
-// Minimal SHA-256 keeps this pure-policy crate dependency-free.
 fn sha256(data: &[u8]) -> [u8; 32] {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
@@ -320,21 +319,19 @@ fn sha256(data: &[u8]) -> [u8; 32] {
     let bit_len = (data.len() as u64).wrapping_mul(8);
     let mut message = data.to_vec();
     message.push(0x80);
-    while message.len().rem_euclid(64) != 56 {
+    while message.len() & 63 != 56 {
         message.push(0);
     }
     message.extend_from_slice(&bit_len.to_be_bytes());
 
-    for chunk in message.chunks_exact(64) {
+    let (blocks, remainder) = message.as_chunks::<64>();
+    debug_assert!(remainder.is_empty());
+    for chunk in blocks {
         let mut w = [0u32; 64];
-        for (index, word) in w.iter_mut().take(16).enumerate() {
-            let offset = index * 4;
-            *word = u32::from_be_bytes([
-                chunk[offset],
-                chunk[offset + 1],
-                chunk[offset + 2],
-                chunk[offset + 3],
-            ]);
+        let (words, remainder) = chunk.as_chunks::<4>();
+        debug_assert!(remainder.is_empty());
+        for (word, bytes) in w.iter_mut().take(16).zip(words.iter()) {
+            *word = u32::from_be_bytes(*bytes);
         }
         for index in 16..64 {
             let s0 = w[index - 15].rotate_right(7)
@@ -401,19 +398,24 @@ mod tests {
     }
 
     #[test]
-    fn sha256_matches_known_vector() {
+    fn sha256_matches_known_vectors() {
         assert_eq!(
             hex(&sha256(b"abc")),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+        assert_eq!(
+            hex(&sha256(b"")),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     #[test]
-    fn host_approval_is_device_scoped() {
+    fn approval_and_deny_revoke_same_host() {
         let mut allowlist = Allowlist::new();
+        let review = item("example.com", vec![0xde, 0xad], Category::AdultImage);
         assert_eq!(
             allowlist.apply(
-                &item("example.com", vec![0xde, 0xad], Category::AdultImage),
+                &review,
                 ReviewDecision::Approve,
                 ReviewScope::ThisHost,
                 1,
@@ -421,6 +423,25 @@ mod tests {
             ApplyOutcome::Approved
         );
         assert!(allowlist.is_host_allowed(&device(), "Example.COM"));
+        assert_eq!(
+            allowlist.apply(&review, ReviewDecision::Deny, ReviewScope::ThisHost, 2),
+            ApplyOutcome::DenyConfirmed
+        );
+        assert!(!allowlist.is_host_allowed(&device(), "example.com"));
+    }
+
+    #[test]
+    fn approval_and_deny_revoke_same_hash() {
+        let mut allowlist = Allowlist::new();
+        let review = item("", vec![0xde, 0xad], Category::AdultImage);
+        allowlist.apply(
+            &review,
+            ReviewDecision::Approve,
+            ReviewScope::ThisItem,
+            1,
+        );
+        assert!(allowlist.is_hash_allowed(&device(), &[0xde, 0xad]));
+        allowlist.apply(&review, ReviewDecision::Deny, ReviewScope::ThisItem, 2);
         assert!(!allowlist.is_hash_allowed(&device(), &[0xde, 0xad]));
     }
 
@@ -436,5 +457,22 @@ mod tests {
         assert!(matches!(outcome, ApplyOutcome::Refused(_)));
         assert_eq!(allowlist.audit().len(), 1);
         assert!(allowlist.audit().verify().is_ok());
+    }
+
+    #[test]
+    fn audit_chain_detects_tampering() {
+        let mut allowlist = Allowlist::new();
+        for index in 0..3u8 {
+            allowlist.apply(
+                &item("example.com", vec![index], Category::AdultImage),
+                ReviewDecision::Approve,
+                ReviewScope::ThisItem,
+                i64::from(index),
+            );
+        }
+        assert!(allowlist.audit().verify().is_ok());
+        let mut tampered = allowlist.audit().clone();
+        tampered.entries[1].host = "evil.example".to_string();
+        assert_eq!(tampered.verify(), Err(1));
     }
 }
