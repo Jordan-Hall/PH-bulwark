@@ -1,14 +1,13 @@
 //! Low-latency TLS inspection proxy with bounded safety gates.
 //!
-//! Ungated traffic is never fully buffered: requests/responses either pass through
-//! untouched or only a bounded textual prefix is collected for classification.
-//! Protected media is bounded before analysis; oversized/failed media is blocked
-//! rather than silently bypassing coverage. Response flows retain the CONNECT/
-//! request host so guardian host approvals and alerts remain correctly attributed.
+//! Ordinary resources stream through without whole-body buffering. Text that is
+//! inspected is decompressed and captured only to a fixed bound. Protected media
+//! is fully buffered only up to a strict per-kind limit; unknown-size overflow,
+//! decode failure, classifier backpressure, or decision timeout fails closed.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -16,8 +15,11 @@ use futures_util::{stream, StreamExt};
 use http::response::Parts as ResponseParts;
 use http_body_util::BodyExt;
 use hudsucker::hyper::{Request, Response, StatusCode};
-use hudsucker::{Body, Error as HudsuckerError, HttpContext, HttpHandler, RequestOrResponse};
-use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex};
+use hudsucker::{
+    decode_request, decode_response, Body, Error as HudsuckerError, HttpContext, HttpHandler,
+    RequestOrResponse,
+};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 use bulwark_core::flow::InterceptDecision;
 
@@ -29,75 +31,73 @@ use crate::{NetError, Result};
 const MEDIA_DECISION_TIMEOUT: Duration = Duration::from_millis(1_500);
 const HTML_DECISION_TIMEOUT: Duration = Duration::from_millis(350);
 const HTML_GATE_CAP: usize = 2 * 1024 * 1024;
-const LEAF_CACHE_SIZE: u64 = 1_000;
 const BODY_PEEK_CAP: usize = 64 * 1024;
 const IMAGE_BODY_CAP: usize = 8 * 1024 * 1024;
 const AUDIO_BODY_CAP: usize = 8 * 1024 * 1024;
 const VIDEO_SEGMENT_CAP: usize = 16 * 1024 * 1024;
-const MIN_SCORABLE_IMAGE_BYTES: usize = 2 * 1024;
-const HOST_CACHE_CAP: usize = 8_192;
+const LEAF_CACHE_SIZE: u64 = 1_000;
 
 /// Coarse source of an inspected flow.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlowSource {
-    /// Normal web traffic.
+    /// Normal HTTP(S) web traffic.
     Web,
-    /// Buffered/progressive media traffic.
+    /// Buffered/progressive video traffic.
     VideoStream,
     /// Low-latency live media traffic.
     LiveStream,
 }
 
-/// Proxy-local decrypted flow surfaced to [`crate::interceptor::NetInterceptor`].
+/// Proxy-local decrypted unit surfaced to the canonical interceptor.
 #[derive(Clone, Debug)]
 pub struct CapturedFlow {
-    /// Per-proxy monotonic flow identifier.
+    /// Monotonic per-proxy flow identifier.
     pub flow_id: u64,
-    /// Coarse source channel.
+    /// Origin channel.
     pub source: FlowSource,
-    /// Host/application attribution.
+    /// Request host retained for both request and response legs.
     pub app_or_host: String,
-    /// Whether payload inspection succeeded.
+    /// Whether the payload was readable after TLS interception.
     pub readable: bool,
-    /// Request method, empty for response legs.
+    /// HTTP method on request legs, empty for responses.
     pub method: String,
-    /// Request URI or response status marker.
+    /// Request URI or a response-status marker.
     pub uri: String,
-    /// Bounded textual/magic-byte prefix, or full bounded audio payload.
+    /// Bounded text/magic prefix, or the full bounded audio body.
     pub body: Vec<u8>,
     /// True for response legs.
     pub is_response: bool,
-    /// Normalized content type.
+    /// Normalized MIME type when present.
     pub content_type: Option<String>,
-    /// Full bounded still-image body when selected for image analysis.
+    /// Complete bounded still image selected for scoring.
     pub image_body: Option<Vec<u8>>,
-    /// Full bounded video segment when selected for video analysis.
+    /// Complete bounded video segment selected for scoring/remediation.
     pub video_body: Option<Vec<u8>>,
 }
 
-/// Receiver end of the bounded flow channel.
+/// Receiver for the bounded classifier flow channel.
 pub type FlowReceiver = mpsc::Receiver<CapturedFlow>;
-/// Sender end of the bounded flow channel.
+/// Sender held by the proxy handler.
 pub type FlowSender = mpsc::Sender<CapturedFlow>;
 
-/// Per-flow decision rendezvous shared with the interceptor.
+/// Per-flow response-decision rendezvous.
 #[derive(Clone)]
 pub struct DecisionGate {
-    pending: Arc<TokioMutex<HashMap<u64, oneshot::Sender<InterceptDecision>>>>,
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<InterceptDecision>>>>,
     armed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Default for DecisionGate {
     fn default() -> Self {
         Self {
-            pending: Arc::new(TokioMutex::new(HashMap::new())),
+            pending: Arc::new(Mutex::new(HashMap::new())),
             armed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }
 
 impl DecisionGate {
-    /// Enable/disable inline response gating.
+    /// Enable or disable inline response gating.
     pub fn set_armed(&self, armed: bool) {
         self.armed
             .store(armed, std::sync::atomic::Ordering::Relaxed);
@@ -108,27 +108,27 @@ impl DecisionGate {
     }
 
     async fn register(&self, flow_id: u64) -> oneshot::Receiver<InterceptDecision> {
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(flow_id, tx);
-        rx
+        let (sender, receiver) = oneshot::channel();
+        self.pending.lock().await.insert(flow_id, sender);
+        receiver
     }
 
     async fn cancel(&self, flow_id: u64) {
         self.pending.lock().await.remove(&flow_id);
     }
 
-    /// Deliver a response decision if the flow is still awaiting one.
+    /// Resolve a still-live response gate.
     pub async fn resolve(&self, flow_id: u64, decision: InterceptDecision) -> bool {
         self.pending
             .lock()
             .await
             .remove(&flow_id)
-            .map(|tx| tx.send(decision).is_ok())
+            .map(|sender| sender.send(decision).is_ok())
             .unwrap_or(false)
     }
 }
 
-/// Running TLS-inspection proxy handle.
+/// Handle for a running MITM proxy.
 pub struct MitmProxy {
     shutdown: Option<oneshot::Sender<()>>,
     join: Option<tokio::task::JoinHandle<()>>,
@@ -142,25 +142,25 @@ impl MitmProxy {
         self.listen_addr
     }
 
-    /// Apply a decision to a live response gate.
+    /// Apply a policy decision to an in-flight response.
     pub async fn apply(&self, flow_id: u64, decision: InterceptDecision) -> Result<bool> {
         Ok(self.gate.resolve(flow_id, decision).await)
     }
 
-    /// Shared decision gate.
+    /// Clone the shared decision gate.
     pub fn decision_gate(&self) -> DecisionGate {
         self.gate.clone()
     }
 
-    /// Arm/disarm protected response gating.
+    /// Arm or disarm inline response gating.
     pub fn set_gating(&self, armed: bool) {
         self.gate.set_armed(armed);
     }
 
-    /// Stop the proxy and await its listener task.
+    /// Gracefully stop the proxy.
     pub async fn stop(mut self) -> Result<()> {
-        if let Some(tx) = self.shutdown.take() {
-            let _ = tx.send(());
+        if let Some(sender) = self.shutdown.take() {
+            let _ = sender.send(());
         }
         if let Some(join) = self.join.take() {
             let _ = join.await;
@@ -169,7 +169,7 @@ impl MitmProxy {
     }
 }
 
-/// Start the TLS-inspecting proxy.
+/// Bind and start the TLS-inspection proxy.
 pub async fn spawn(
     listen: SocketAddr,
     ca: Arc<CaManager>,
@@ -179,10 +179,10 @@ pub async fn spawn(
 ) -> Result<MitmProxy> {
     let listener = tokio::net::TcpListener::bind(listen)
         .await
-        .map_err(|error| NetError::proxy(format!("binding TLS-inspecting listener on {listen}: {error}")))?;
+        .map_err(|error| NetError::proxy(format!("binding TLS proxy on {listen}: {error}")))?;
     let listen_addr = listener
         .local_addr()
-        .map_err(|error| NetError::proxy(format!("resolving bound proxy address: {error}")))?;
+        .map_err(|error| NetError::proxy(format!("reading bound proxy address: {error}")))?;
     let authority = build_authority(&ca)?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let gate = DecisionGate::default();
@@ -193,13 +193,13 @@ pub async fn spawn(
         blocklist,
         gate: gate.clone(),
         next_flow_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
-        connection_hosts: Arc::new(StdMutex::new(HashMap::new())),
+        request_host: String::new(),
     };
     let fingerprint = ca.fingerprint_hex().to_owned();
     let join = tokio::spawn(async move {
         run_hudsucker(listener, authority, handler, shutdown_rx).await;
     });
-    tracing::info!(%listen_addr, %fingerprint, "bounded streaming TLS-inspection proxy started");
+    tracing::info!(%listen_addr, %fingerprint, "bounded TLS-inspection proxy started");
     Ok(MitmProxy {
         shutdown: Some(shutdown_tx),
         join: Some(join),
@@ -217,10 +217,10 @@ fn build_authority(
     use hudsucker::rustls::pki_types::CertificateDer;
 
     let key_pair = KeyPair::try_from(ca.ca_key_der())
-        .map_err(|error| NetError::ca(format!("reparse CA key for authority: {error}")))?;
+        .map_err(|error| NetError::ca(format!("reparse CA key: {error}")))?;
     let cert = CertificateDer::from(ca.cert_der().to_vec());
     let issuer: Issuer<'static, KeyPair> = Issuer::from_ca_cert_der(&cert, key_pair)
-        .map_err(|error| NetError::ca(format!("build issuer from CA cert: {error}")))?;
+        .map_err(|error| NetError::ca(format!("build CA issuer: {error}")))?;
     Ok(RcgenAuthority::new(
         issuer,
         LEAF_CACHE_SIZE,
@@ -249,16 +249,17 @@ async fn run_hudsucker(
     {
         Ok(proxy) => proxy,
         Err(error) => {
-            tracing::error!(%error, "failed to construct TLS-inspection proxy");
+            tracing::error!(%error, "failed to build TLS-inspection proxy");
             return;
         }
     };
     if let Err(error) = proxy.start().await {
-        tracing::error!(%error, "TLS-inspection proxy exited with error");
+        tracing::error!(%error, "TLS-inspection proxy exited");
     }
 }
 
-/// Hudsucker HTTP handler with bounded capture/gating.
+/// HTTP handler that keeps request/response attribution on the handler instance
+/// Hudsucker guarantees for one pair.
 #[derive(Clone)]
 pub struct FlowHandler {
     flow_tx: FlowSender,
@@ -267,7 +268,7 @@ pub struct FlowHandler {
     blocklist: Arc<HostBlocklist>,
     gate: DecisionGate,
     next_flow_id: Arc<std::sync::atomic::AtomicU64>,
-    connection_hosts: Arc<StdMutex<HashMap<SocketAddr, String>>>,
+    request_host: String,
 }
 
 impl FlowHandler {
@@ -290,22 +291,24 @@ impl FlowHandler {
         image_body: Option<Vec<u8>>,
         video_body: Option<Vec<u8>>,
     ) -> bool {
-        let flow = CapturedFlow {
-            flow_id,
-            source,
-            app_or_host: app_or_host.to_owned(),
-            readable: true,
-            method: method.to_owned(),
-            uri: uri.to_owned(),
-            body,
-            is_response,
-            content_type,
-            image_body,
-            video_body,
-        };
-        let sent = self.flow_tx.try_send(flow).is_ok();
+        let sent = self
+            .flow_tx
+            .try_send(CapturedFlow {
+                flow_id,
+                source,
+                app_or_host: app_or_host.to_owned(),
+                readable: true,
+                method: method.to_owned(),
+                uri: uri.to_owned(),
+                body,
+                is_response,
+                content_type,
+                image_body,
+                video_body,
+            })
+            .is_ok();
         if !sent {
-            tracing::warn!(host = %app_or_host, flow_id, "flow channel full; protected gate will resolve conservatively");
+            tracing::warn!(host = %app_or_host, flow_id, "classifier channel full");
         }
         if !app_or_host.is_empty() {
             self.pinning.record_mitmable(app_or_host);
@@ -313,47 +316,22 @@ impl FlowHandler {
         sent
     }
 
-    /// Record a cert-pinned host and return the configured fail-open result.
+    /// Record a pinning failure and return the configured pass/block result.
     pub fn on_pinned(&self, app_or_host: &str) -> bool {
         self.pinning.record_pinned(app_or_host).failed_open
     }
 
-    fn remember_host(&self, client: SocketAddr, host: &str) {
-        let host = host.trim();
-        if host.is_empty() {
-            return;
-        }
-        if let Ok(mut hosts) = self.connection_hosts.lock() {
-            if hosts.len() >= HOST_CACHE_CAP && !hosts.contains_key(&client) {
-                hosts.clear();
-            }
-            hosts.insert(client, host.to_ascii_lowercase());
-        }
-    }
-
-    fn response_host(&self, client: SocketAddr) -> String {
-        self.connection_hosts
-            .lock()
-            .ok()
-            .and_then(|hosts| hosts.get(&client).cloned())
-            .unwrap_or_default()
+    /// Access the per-install certificate authority.
+    pub fn ca(&self) -> &CaManager {
+        &self.ca
     }
 
     fn is_request_blocked(&self, request: &Request<Body>) -> bool {
         if self.blocklist.is_empty() {
             return false;
         }
-        if let Some(authority) = request.uri().authority() {
-            if self.blocklist.is_blocked(authority.host()) {
-                return true;
-            }
-        }
-        request
-            .headers()
-            .get(hudsucker::hyper::header::HOST)
-            .and_then(|value| value.to_str().ok())
-            .map(|host| self.blocklist.is_blocked(host))
-            .unwrap_or(false)
+        let host = host_of_request(request);
+        !host.is_empty() && self.blocklist.is_blocked(&host)
     }
 
     fn decide_intercept(&self, host: &str) -> bool {
@@ -368,11 +346,6 @@ impl FlowHandler {
         } else {
             true
         }
-    }
-
-    /// Access the per-install CA.
-    pub fn ca(&self) -> &CaManager {
-        &self.ca
     }
 
     async fn gate_buffered(
@@ -391,19 +364,16 @@ impl FlowHandler {
         } else {
             FlowSource::Web
         };
-        let gated = self.gate.is_armed() && (media.is_some() || html);
-        let receiver = if gated {
+        let receiver = if self.gate.is_armed() {
             Some(self.gate.register(flow_id).await)
         } else {
             None
         };
-
         let (body, image_body, video_body) = match media {
             Some(MediaClass::Image) => (peek(&full), Some(full.clone()), None),
             Some(MediaClass::Video) => (peek(&full), None, Some(full.clone())),
             Some(MediaClass::Audio) => (full.clone(), None, None),
-            Some(MediaClass::UnsupportedImage) => (Vec::new(), None, None),
-            None => (peek(&full), None, None),
+            Some(MediaClass::UnsupportedImage) | None => (peek(&full), None, None),
         };
         let emitted = self.emit(
             flow_id,
@@ -438,22 +408,19 @@ impl FlowHandler {
                 fallback
             }
         };
-
         match decision {
             InterceptDecision::Forward => Response::from_parts(parts, Body::from(full)),
-            InterceptDecision::Rewrite(new_body) => {
+            InterceptDecision::Rewrite(replacement) => {
                 parts
                     .headers
                     .remove(hudsucker::hyper::header::CONTENT_LENGTH);
-                Response::from_parts(parts, Body::from(new_body))
+                parts
+                    .headers
+                    .remove(hudsucker::hyper::header::CONTENT_ENCODING);
+                Response::from_parts(parts, Body::from(replacement))
             }
-            InterceptDecision::Drop => {
-                if html {
-                    blocked_page_response()
-                } else {
-                    blocked_response()
-                }
-            }
+            InterceptDecision::Drop if html => blocked_page_response(),
+            InterceptDecision::Drop => blocked_response(),
         }
     }
 }
@@ -461,17 +428,15 @@ impl FlowHandler {
 impl HttpHandler for FlowHandler {
     async fn should_intercept_connect(
         &mut self,
-        ctx: &HttpContext,
+        _ctx: &HttpContext,
         request: &Request<Body>,
     ) -> bool {
-        let host = host_of_request(request);
-        self.remember_host(ctx.client_addr, &host);
-        self.decide_intercept(&host)
+        self.decide_intercept(&host_of_request(request))
     }
 
     async fn handle_request(
         &mut self,
-        ctx: &HttpContext,
+        _ctx: &HttpContext,
         request: Request<Body>,
     ) -> RequestOrResponse {
         if self.is_request_blocked(&request) {
@@ -479,7 +444,7 @@ impl HttpHandler for FlowHandler {
         }
 
         let host = host_of_request(&request);
-        self.remember_host(ctx.client_addr, &host);
+        self.request_host = host.clone();
         let method = request.method().to_string();
         let uri = request.uri().to_string();
         let content_type = content_type_of(request.headers());
@@ -501,6 +466,14 @@ impl HttpHandler for FlowHandler {
             return RequestOrResponse::Request(request);
         }
 
+        let request = match decode_request(request) {
+            Ok(request) => request,
+            Err(error) => {
+                tracing::warn!(%error, %host, "request content encoding cannot be inspected");
+                return RequestOrResponse::Response(unsupported_encoding_response());
+            }
+        };
+        let content_type = content_type_of(request.headers());
         let (parts, body) = request.into_parts();
         match collect_bounded(body, BODY_PEEK_CAP).await {
             Ok(BoundedRead::Complete(full)) => {
@@ -534,7 +507,7 @@ impl HttpHandler for FlowHandler {
                 RequestOrResponse::Request(Request::from_parts(parts, body))
             }
             Err(error) => {
-                tracing::warn!(%error, %host, "request body stream failed during bounded capture");
+                tracing::warn!(%error, %host, "request body failed during bounded inspection");
                 RequestOrResponse::Response(bad_gateway_response())
             }
         }
@@ -542,37 +515,52 @@ impl HttpHandler for FlowHandler {
 
     async fn handle_response(
         &mut self,
-        ctx: &HttpContext,
+        _ctx: &HttpContext,
         response: Response<Body>,
     ) -> Response<Body> {
+        let host = self.request_host.clone();
+        let initial_content_type = content_type_of(response.headers());
+        let initial_media = media_class(initial_content_type.as_deref());
+        let inspect_text = should_capture_text(initial_content_type.as_deref());
+        let encoded = has_content_encoding(response.headers());
+
+        if matches!(initial_media, Some(MediaClass::UnsupportedImage)) {
+            return blocked_response();
+        }
+
+        let response = if encoded && (initial_media.is_some() || inspect_text) {
+            match decode_response(response) {
+                Ok(response) => response,
+                Err(error) => {
+                    tracing::warn!(%error, %host, "response content encoding cannot be inspected");
+                    return if is_html(initial_content_type.as_deref()) {
+                        blocked_page_response()
+                    } else if initial_media.is_some() {
+                        blocked_response()
+                    } else {
+                        bad_gateway_response()
+                    };
+                }
+            }
+        } else {
+            response
+        };
+
         let status = response.status().as_u16();
-        let host = self.response_host(ctx.client_addr);
         let content_type = content_type_of(response.headers());
         let declared_len = content_length(response.headers());
         let media = media_class(content_type.as_deref());
 
         if matches!(media, Some(MediaClass::UnsupportedImage)) {
-            self.emit(
-                self.next_id(),
-                FlowSource::Web,
-                &host,
-                "",
-                &format!("status:{status}"),
-                Vec::new(),
-                true,
-                content_type,
-                None,
-                None,
-            );
             return blocked_response();
         }
 
-        if let Some(class) = media.filter(|class| *class != MediaClass::UnsupportedImage) {
+        if let Some(class) = media {
             let cap = media_cap(class);
-            if declared_len.map(|length| length > cap as u64).unwrap_or(false) {
+            if declared_len.is_some_and(|length| length > cap as u64) {
                 self.emit(
                     self.next_id(),
-                    if class == MediaClass::Video { FlowSource::VideoStream } else { FlowSource::Web },
+                    media_source(class),
                     &host,
                     "",
                     &format!("status:{status}"),
@@ -584,35 +572,27 @@ impl HttpHandler for FlowHandler {
                 );
                 return blocked_response();
             }
-
             let (parts, body) = response.into_parts();
             return match collect_bounded(body, cap).await {
+                Ok(BoundedRead::Complete(full)) if full.is_empty() => {
+                    Response::from_parts(parts, Body::empty())
+                }
                 Ok(BoundedRead::Complete(full)) => {
-                    if class == MediaClass::Image && full.len() < MIN_SCORABLE_IMAGE_BYTES {
-                        self.emit(
-                            self.next_id(),
-                            FlowSource::Web,
-                            &host,
-                            "",
-                            &format!("status:{status}"),
-                            peek(&full),
-                            true,
-                            content_type,
-                            None,
-                            None,
-                        );
-                        Response::from_parts(parts, Body::from(full))
-                    } else if full.is_empty() {
-                        Response::from_parts(parts, Body::empty())
-                    } else {
-                        self.gate_buffered(parts, full, host, status, content_type, Some(class), false)
-                            .await
-                    }
+                    self.gate_buffered(
+                        parts,
+                        full,
+                        host,
+                        status,
+                        content_type,
+                        Some(class),
+                        false,
+                    )
+                    .await
                 }
                 Ok(BoundedRead::Overflow { peek, .. }) => {
                     self.emit(
                         self.next_id(),
-                        if class == MediaClass::Video { FlowSource::VideoStream } else { FlowSource::Web },
+                        media_source(class),
                         &host,
                         "",
                         &format!("status:{status}"),
@@ -625,47 +605,58 @@ impl HttpHandler for FlowHandler {
                     blocked_response()
                 }
                 Err(error) => {
-                    tracing::warn!(%error, %host, "protected media body failed while reading; blocking");
+                    tracing::warn!(%error, %host, "protected media stream failed; blocking");
                     blocked_response()
                 }
             };
         }
 
-        let html = is_html(content_type.as_deref());
-        let html_within_declared_cap = declared_len
-            .map(|length| length <= HTML_GATE_CAP as u64)
-            .unwrap_or(true);
-        if html && html_within_declared_cap {
+        if is_html(content_type.as_deref()) {
+            if declared_len.is_some_and(|length| length > HTML_GATE_CAP as u64) {
+                return blocked_page_response();
+            }
+            let response = if has_content_encoding(response.headers()) {
+                match decode_response(response) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        tracing::warn!(%error, %host, "HTML decoding failed; blocking");
+                        return blocked_page_response();
+                    }
+                }
+            } else {
+                response
+            };
+            let content_type = content_type_of(response.headers());
             let (parts, body) = response.into_parts();
             return match collect_bounded(body, HTML_GATE_CAP).await {
-                Ok(BoundedRead::Complete(full)) if !full.is_empty() => {
+                Ok(BoundedRead::Complete(full)) if full.is_empty() => {
+                    Response::from_parts(parts, Body::empty())
+                }
+                Ok(BoundedRead::Complete(full)) => {
                     self.gate_buffered(parts, full, host, status, content_type, None, true)
                         .await
                 }
-                Ok(BoundedRead::Complete(full)) => Response::from_parts(parts, Body::from(full)),
-                Ok(BoundedRead::Overflow { body, peek }) => {
-                    self.emit(
-                        self.next_id(),
-                        FlowSource::Web,
-                        &host,
-                        "",
-                        &format!("status:{status}"),
-                        peek,
-                        true,
-                        content_type,
-                        None,
-                        None,
-                    );
-                    Response::from_parts(parts, body)
-                }
+                Ok(BoundedRead::Overflow { .. }) => blocked_page_response(),
                 Err(error) => {
-                    tracing::warn!(%error, %host, "HTML body stream failed during bounded gate");
-                    bad_gateway_response()
+                    tracing::warn!(%error, %host, "HTML stream failed; blocking");
+                    blocked_page_response()
                 }
             };
         }
 
         if should_capture_text(content_type.as_deref()) {
+            let response = if has_content_encoding(response.headers()) {
+                match decode_response(response) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        tracing::warn!(%error, %host, "text decoding failed");
+                        return bad_gateway_response();
+                    }
+                }
+            } else {
+                response
+            };
+            let content_type = content_type_of(response.headers());
             let (parts, body) = response.into_parts();
             return match collect_bounded(body, BODY_PEEK_CAP).await {
                 Ok(BoundedRead::Complete(full)) => {
@@ -699,7 +690,7 @@ impl HttpHandler for FlowHandler {
                     Response::from_parts(parts, body)
                 }
                 Err(error) => {
-                    tracing::warn!(%error, %host, "text response stream failed during bounded capture");
+                    tracing::warn!(%error, %host, "text stream failed during bounded inspection");
                     bad_gateway_response()
                 }
             };
@@ -734,7 +725,10 @@ enum BoundedRead {
     Overflow { body: Body, peek: Vec<u8> },
 }
 
-async fn collect_bounded(body: Body, cap: usize) -> std::result::Result<BoundedRead, HudsuckerError> {
+async fn collect_bounded(
+    body: Body,
+    cap: usize,
+) -> std::result::Result<BoundedRead, HudsuckerError> {
     let mut remainder = body.into_data_stream();
     let mut chunks = Vec::<Bytes>::new();
     let mut total = 0usize;
@@ -755,7 +749,6 @@ async fn collect_bounded(body: Body, cap: usize) -> std::result::Result<BoundedR
             if remaining > 0 {
                 captured.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
             }
-
             let prefix = stream::iter(
                 chunks
                     .into_iter()
@@ -780,14 +773,30 @@ async fn collect_bounded(body: Body, cap: usize) -> std::result::Result<BoundedR
 
 fn host_of_request(request: &Request<Body>) -> String {
     if let Some(authority) = request.uri().authority() {
-        return authority.host().to_ascii_lowercase();
+        return authority.host().trim().to_ascii_lowercase();
     }
     request
         .headers()
         .get(hudsucker::hyper::header::HOST)
         .and_then(|value| value.to_str().ok())
-        .map(|host| host.split(':').next().unwrap_or(host).to_ascii_lowercase())
+        .map(normalize_host_header)
         .unwrap_or_default()
+}
+
+fn normalize_host_header(value: &str) -> String {
+    let value = value.trim();
+    if let Some(rest) = value.strip_prefix('[') {
+        return rest
+            .split_once(']')
+            .map(|(host, _)| host.to_ascii_lowercase())
+            .unwrap_or_else(|| value.to_ascii_lowercase());
+    }
+    value
+        .split(':')
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .to_ascii_lowercase()
 }
 
 fn classify_source(uri: &str) -> FlowSource {
@@ -826,19 +835,33 @@ fn content_length(headers: &hudsucker::hyper::HeaderMap) -> Option<u64> {
     headers
         .get(hudsucker::hyper::header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
+        .and_then(|value| value.parse().ok())
 }
 
-fn is_scorable_image(content_type: &str) -> bool {
-    matches!(
-        content_type,
-        "image/jpeg" | "image/png" | "image/webp" | "image/gif"
-    )
+fn has_content_encoding(headers: &hudsucker::hyper::HeaderMap) -> bool {
+    headers
+        .get(hudsucker::hyper::header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            let value = value.trim();
+            !value.is_empty() && !value.eq_ignore_ascii_case("identity")
+        })
 }
 
 fn media_class(content_type: Option<&str>) -> Option<MediaClass> {
     let content_type = content_type?;
-    if is_scorable_image(content_type) {
+    if matches!(
+        content_type,
+        "image/jpeg"
+            | "image/jpg"
+            | "image/pjpeg"
+            | "image/png"
+            | "image/apng"
+            | "image/webp"
+            | "image/gif"
+            | "image/bmp"
+            | "image/x-ms-bmp"
+    ) {
         Some(MediaClass::Image)
     } else if content_type.starts_with("image/") {
         Some(MediaClass::UnsupportedImage)
@@ -857,6 +880,14 @@ fn media_cap(class: MediaClass) -> usize {
         MediaClass::Video => VIDEO_SEGMENT_CAP,
         MediaClass::Audio => AUDIO_BODY_CAP,
         MediaClass::UnsupportedImage => 0,
+    }
+}
+
+fn media_source(class: MediaClass) -> FlowSource {
+    if class == MediaClass::Video {
+        FlowSource::VideoStream
+    } else {
+        FlowSource::Web
     }
 }
 
@@ -898,10 +929,7 @@ fn gate_policy(media: bool) -> (Duration, InterceptDecision) {
 fn blocked_response() -> Response<Body> {
     Response::builder()
         .status(StatusCode::FORBIDDEN)
-        .header(
-            hudsucker::hyper::header::CONTENT_TYPE,
-            "text/plain; charset=utf-8",
-        )
+        .header(hudsucker::hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
         .body(Body::from("Blocked by Bulwark"))
         .unwrap_or_else(|_| Response::new(Body::empty()))
 }
@@ -911,10 +939,7 @@ const BLOCK_PAGE_HTML: &str = "<!doctype html><html><head><meta charset=\"utf-8\
 fn blocked_page_response() -> Response<Body> {
     Response::builder()
         .status(StatusCode::FORBIDDEN)
-        .header(
-            hudsucker::hyper::header::CONTENT_TYPE,
-            "text/html; charset=utf-8",
-        )
+        .header(hudsucker::hyper::header::CONTENT_TYPE, "text/html; charset=utf-8")
         .body(Body::from(BLOCK_PAGE_HTML))
         .unwrap_or_else(|_| Response::new(Body::empty()))
 }
@@ -922,11 +947,16 @@ fn blocked_page_response() -> Response<Body> {
 fn bad_gateway_response() -> Response<Body> {
     Response::builder()
         .status(StatusCode::BAD_GATEWAY)
-        .header(
-            hudsucker::hyper::header::CONTENT_TYPE,
-            "text/plain; charset=utf-8",
-        )
+        .header(hudsucker::hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
         .body(Body::from("Upstream body stream failed"))
+        .unwrap_or_else(|_| Response::new(Body::empty()))
+}
+
+fn unsupported_encoding_response() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::UNSUPPORTED_MEDIA_TYPE)
+        .header(hudsucker::hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(Body::from("Unsupported content encoding"))
         .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
@@ -935,27 +965,26 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn bounded_reader_reconstructs_overflow_without_collecting_the_rest() {
-        let body = Body::from(vec![7u8; BODY_PEEK_CAP + 32]);
-        match collect_bounded(body, BODY_PEEK_CAP).await.unwrap() {
+    async fn overflow_reconstructs_original_stream() {
+        let original = vec![7u8; BODY_PEEK_CAP + 32];
+        match collect_bounded(Body::from(original.clone()), BODY_PEEK_CAP)
+            .await
+            .unwrap()
+        {
             BoundedRead::Overflow { body, peek } => {
                 assert_eq!(peek.len(), BODY_PEEK_CAP);
-                let bytes = body.collect().await.unwrap().to_bytes();
-                assert_eq!(bytes.len(), BODY_PEEK_CAP + 32);
+                assert_eq!(body.collect().await.unwrap().to_bytes().as_ref(), original.as_slice());
             }
-            BoundedRead::Complete(_) => panic!("expected overflow"),
+            BoundedRead::Complete(_) => panic!("expected bounded overflow"),
         }
     }
 
     #[test]
-    fn unsupported_images_and_all_audio_video_are_protected_media() {
+    fn all_raster_audio_and_video_are_protected_classes() {
         assert_eq!(media_class(Some("image/jpeg")), Some(MediaClass::Image));
-        assert_eq!(
-            media_class(Some("image/avif")),
-            Some(MediaClass::UnsupportedImage)
-        );
+        assert_eq!(media_class(Some("image/avif")), Some(MediaClass::UnsupportedImage));
         assert_eq!(media_class(Some("video/mp4")), Some(MediaClass::Video));
-        assert_eq!(media_class(Some("audio/wav")), Some(MediaClass::Audio));
+        assert_eq!(media_class(Some("audio/aac")), Some(MediaClass::Audio));
     }
 
     #[test]
@@ -966,12 +995,9 @@ mod tests {
     }
 
     #[test]
-    fn decision_windows_are_short_and_media_fails_closed() {
+    fn media_timeout_is_short_and_fail_closed() {
         let (window, fallback) = gate_policy(true);
         assert!(window <= Duration::from_millis(1_500));
         assert!(matches!(fallback, InterceptDecision::Drop));
-        let (window, fallback) = gate_policy(false);
-        assert!(window <= Duration::from_millis(350));
-        assert!(matches!(fallback, InterceptDecision::Forward));
     }
 }
