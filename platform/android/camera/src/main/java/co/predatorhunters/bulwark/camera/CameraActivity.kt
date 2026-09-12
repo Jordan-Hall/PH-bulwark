@@ -12,6 +12,7 @@ import android.provider.MediaStore
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.LaunchedEffect
@@ -21,7 +22,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.async
 
 /**
  * PH Bulwark Camera — a usable camera for the child's own device where every
@@ -41,20 +42,16 @@ class CameraActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Screenshot / screen-record protection: FLAG_SECURE blacks this window
-        // out of screenshots, screen recordings, the recents thumbnail, and
-        // non-secure displays/casting. Set BEFORE setContent so no frame is
-        // ever capturable. Compose note: this is a WINDOW flag — everything in
-        // this activity is covered, but a Compose Dialog creates a NEW window
-        // that does NOT inherit it, so this app deliberately uses in-window
-        // overlays only (any future Dialog must set
-        // DialogProperties(securePolicy = SecureFlagPolicy.SecureOn)).
-        // HONEST LIMIT: FLAG_SECURE cannot stop a second physical device from
-        // photographing the screen.
         window.setFlags(
             WindowManager.LayoutParams.FLAG_SECURE,
             WindowManager.LayoutParams.FLAG_SECURE,
         )
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+        // Start CameraX initialization immediately instead of waiting for the
+        // Compose tree and model warmups. getInstance is asynchronous and shared,
+        // so CameraScreen later receives the already-started provider future.
+        ProcessCameraProvider.getInstance(applicationContext)
 
         val action = intent?.action
         val captureForResult = action == MediaStore.ACTION_IMAGE_CAPTURE
@@ -64,7 +61,7 @@ class CameraActivity : ComponentActivity() {
 
         setContent {
             BulwarkCameraTheme {
-                Surface(Modifier.fillMaxSize(), color = Mist) {
+                Surface(Modifier.fillMaxSize(), color = Ink) {
                     if (videoRequested) {
                         VideoStubScreen(
                             onDone = {
@@ -75,16 +72,20 @@ class CameraActivity : ComponentActivity() {
                     } else {
                         var gate by remember { mutableStateOf<NsfwGate?>(null) }
                         var gateLoading by remember { mutableStateOf(true) }
-                        // The AR face-box detector is BEST-EFFORT (not a safety
-                        // component): loaded off the safety path, and a null
-                        // detector just means no AR stickers — the camera and the
-                        // NSFW gate are unaffected.
                         var faceDetector by remember { mutableStateOf<FaceDetector?>(null) }
                         LaunchedEffect(Unit) {
-                            gate = withContext(Dispatchers.IO) { NsfwGate.obtain(applicationContext) }
+                            // Independent models warm in parallel. The safety gate
+                            // still controls capture readiness; AR loading never
+                            // delays the first usable shutter.
+                            val gateLoad = async(Dispatchers.IO) {
+                                NsfwGate.obtain(applicationContext)
+                            }
+                            val faceLoad = async(Dispatchers.IO) {
+                                FaceDetector.obtain(applicationContext)
+                            }
+                            gate = gateLoad.await()
                             gateLoading = false
-                            faceDetector =
-                                withContext(Dispatchers.IO) { FaceDetector.obtain(applicationContext) }
+                            faceDetector = faceLoad.await()
                         }
                         CameraScreen(
                             gate = gate,
