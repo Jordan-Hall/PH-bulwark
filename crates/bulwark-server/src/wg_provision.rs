@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use data_encoding::{BASE64, BASE64URL_NOPAD};
-use ring::{digest, hmac};
 use ring::rand::{SecureRandom, SystemRandom};
+use ring::{digest, hmac};
 use serde::{Deserialize, Serialize};
 
 use crate::accounts::AccountStore;
@@ -177,7 +177,9 @@ impl WgPeerStore {
             ));
         }
         if expires_ts <= now_ms() {
-            return Err(Status::invalid_argument("WireGuard lease expiry must be in the future"));
+            return Err(Status::invalid_argument(
+                "WireGuard lease expiry must be in the future",
+            ));
         }
 
         let mut inner = self.inner.lock().expect("wg-peer mutex poisoned");
@@ -480,7 +482,9 @@ impl SessionAuth {
             || claims.wg_key_sha256 != Self::wg_key_hash(public_key.trim())
             || claims.exp_ms <= now_ms()
         {
-            return Err(Status::unauthenticated("expired or mismatched Remote VPN session"));
+            return Err(Status::unauthenticated(
+                "expired or mismatched Remote VPN session",
+            ));
         }
         Ok(())
     }
@@ -514,9 +518,7 @@ fn authorize_remote_mode(state_dir: Option<&Path>, device_id: &str) -> Result<()
     })?;
     let path = state_dir.join("child_config.json");
     let bytes = std::fs::read(&path).map_err(|_| {
-        Status::failed_precondition(
-            "guardian has not authorized Remote VPN for this device",
-        )
+        Status::failed_precondition("guardian has not authorized Remote VPN for this device")
     })?;
     let snapshot: ConfigAuthorizationSnapshot = serde_json::from_slice(&bytes)
         .map_err(|_| Status::unavailable("child configuration state is unreadable"))?;
@@ -620,9 +622,9 @@ impl WgProvisionService {
                 "this region has no WireGuard server identity",
             ));
         }
-        if !self.region.filter_active {
+        if !self.region.filter_active || !crate::remote_vpn_health::is_ready() {
             return Err(Status::failed_precondition(
-                "Remote VPN is unavailable because server-side filtering is not active",
+                "Remote VPN is unavailable because the live server-side filter is not ready",
             ));
         }
         self.sessions.key()?;
@@ -649,7 +651,6 @@ impl WgProvision for WgProvisionService {
             return Err(Status::invalid_argument("wg_public_key is invalid"));
         }
 
-        // Authenticate before revealing region readiness or guardian policy.
         self.authenticate_request(session_token.as_deref(), &request)?;
         authorize_remote_mode(self.state_dir.as_deref(), &request.device_id)?;
         let (inspection_ca, inspection_ca_sha256) = self.remote_ready()?;
@@ -782,7 +783,10 @@ mod tests {
                 .unwrap(),
             "10.8.0.2"
         );
-        assert_eq!(store.device_id_for_address("10.8.0.2").as_deref(), Some("dev-1"));
+        assert_eq!(
+            store.device_id_for_address("10.8.0.2").as_deref(),
+            Some("dev-1")
+        );
     }
 
     #[test]
@@ -831,12 +835,16 @@ mod tests {
         assert!(authorize_remote_mode(Some(&dir), "dev-1").is_ok());
         write_remote_config(&dir, "dev-1", true, false);
         assert_eq!(
-            authorize_remote_mode(Some(&dir), "dev-1").unwrap_err().code(),
+            authorize_remote_mode(Some(&dir), "dev-1")
+                .unwrap_err()
+                .code(),
             tonic::Code::PermissionDenied
         );
         write_remote_config(&dir, "dev-1", false, true);
         assert_eq!(
-            authorize_remote_mode(Some(&dir), "dev-1").unwrap_err().code(),
+            authorize_remote_mode(Some(&dir), "dev-1")
+                .unwrap_err()
+                .code(),
             tonic::Code::PermissionDenied
         );
         let _ = std::fs::remove_dir_all(dir);
@@ -860,7 +868,10 @@ mod tests {
             .unwrap();
         drop(first);
         let second = WgPeerStore::with_state_dir(&dir).unwrap();
-        assert_eq!(second.device_id_for_address("10.8.0.2").as_deref(), Some("dev-1"));
+        assert_eq!(
+            second.device_id_for_address("10.8.0.2").as_deref(),
+            Some("dev-1")
+        );
         let json = std::fs::read_to_string(dir.join("wg_peers.json")).unwrap();
         assert!(json.contains("expires_ts"));
         let _ = std::fs::remove_dir_all(dir);
