@@ -124,7 +124,9 @@ impl AnalyzerRegistry {
 
         #[cfg(feature = "whisper")]
         let video = match bulwark_audio::whisper::WhisperTranscriber::from_env() {
-            Some(stt) => video.with_audio_transcriber(Box::new(stt)),
+            Some(stt) => video.with_audio_transcriber(Box::new(
+                bulwark_audio::FfmpegTranscriber::new(stt),
+            )),
             None => video,
         };
 
@@ -142,9 +144,9 @@ impl AnalyzerRegistry {
         #[cfg(feature = "whisper")]
         {
             use bulwark_audio::whisper::WhisperTranscriber;
-            use bulwark_audio::AudioAnalyzer;
+            use bulwark_audio::{AudioAnalyzer, FfmpegTranscriber};
             let audio: Arc<dyn Analyzer> = match WhisperTranscriber::from_env() {
-                Some(stt) => Arc::new(AudioAnalyzer::with_transcriber(stt)),
+                Some(stt) => Arc::new(AudioAnalyzer::with_transcriber(FfmpegTranscriber::new(stt))),
                 None => Arc::new(AudioAnalyzer::new()),
             };
             registry.register(audio);
