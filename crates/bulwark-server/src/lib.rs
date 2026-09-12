@@ -135,12 +135,15 @@ impl AnalyzerRegistry {
         if let Some(store) = store {
             video = Arc::new(RetainingVideoAnalyzer { inner: video, store });
         }
-        registry.register(video);
+        registry.register(Arc::new(BlockingAnalyzer::new(video)));
 
         #[cfg(feature = "onnx")]
-        registry.register(Arc::new(bulwark_vision::VisionAnalyzer::from_env(
-            bulwark_vision::VisionConfig::default(),
-        )));
+        {
+            let vision: Arc<dyn Analyzer> = Arc::new(bulwark_vision::VisionAnalyzer::from_env(
+                bulwark_vision::VisionConfig::default(),
+            ));
+            registry.register(Arc::new(BlockingAnalyzer::new(vision)));
+        }
 
         #[cfg(feature = "whisper")]
         {
@@ -150,10 +153,46 @@ impl AnalyzerRegistry {
                 Some(stt) => Arc::new(AudioAnalyzer::with_transcriber(FfmpegTranscriber::new(stt))),
                 None => Arc::new(AudioAnalyzer::new()),
             };
-            registry.register(audio);
+            registry.register(Arc::new(BlockingAnalyzer::new(audio)));
         }
 
         registry
+    }
+}
+
+struct BlockingAnalyzer {
+    inner: Arc<dyn Analyzer>,
+    kinds: Vec<MediaKind>,
+}
+
+impl BlockingAnalyzer {
+    fn new(inner: Arc<dyn Analyzer>) -> Self {
+        Self {
+            kinds: inner.handles().to_vec(),
+            inner,
+        }
+    }
+}
+
+#[async_trait]
+impl Analyzer for BlockingAnalyzer {
+    fn handles(&self) -> &[MediaKind] {
+        &self.kinds
+    }
+
+    async fn analyze(&self, request: AnalysisRequest) -> CoreResult<Verdict> {
+        let analyzer = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| bulwark_core::Error::Other(error.into()))?;
+            runtime.block_on(analyzer.analyze(request))
+        })
+        .await
+        .map_err(|error| {
+            bulwark_core::Error::Other(anyhow::anyhow!("media analyzer worker failed: {error}"))
+        })?
     }
 }
 
