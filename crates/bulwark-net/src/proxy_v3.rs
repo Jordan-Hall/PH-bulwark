@@ -459,7 +459,11 @@ impl FlowHandler {
 }
 
 impl HttpHandler for FlowHandler {
-    async fn should_intercept(&mut self, ctx: &HttpContext, request: &Request<Body>) -> bool {
+    async fn should_intercept_connect(
+        &mut self,
+        ctx: &HttpContext,
+        request: &Request<Body>,
+    ) -> bool {
         let host = host_of_request(request);
         self.remember_host(ctx.client_addr, &host);
         self.decide_intercept(&host)
