@@ -9,7 +9,6 @@ import co.predatorhunters.bulwark.admin.Enrollment
 import co.predatorhunters.bulwark.core.RustBridge
 import org.json.JSONObject
 
-/** Reconciles guardian desired config without ever acknowledging intent as applied state. */
 object ChildConfigSync {
     private const val TAG = "BulwarkChildConfig"
     private const val PREFS = "bulwark_child_config"
@@ -58,19 +57,15 @@ object ChildConfigSync {
     fun syncDetail(ctx: Context): String =
         prefs(ctx).getString(KEY_SYNC_DETAIL, "") ?: ""
 
-    /**
-     * Fetch desired config and reconcile it. `have_version` is always the last
-     * successfully enforced version. A local↔server mode transition restarts the
-     * VPN and does not advance the version until the new data path reports ready.
-     */
     fun fetchAndReconcile(ctx: Context) {
         val enrollment = Enrollment.record(ctx) ?: return
+        val applied = appliedVersion(ctx)
         val json = runCatching {
             RustBridge.ensureLoaded()
             RustBridge.fetchChildConfig(
                 enrollment.clusterEndpoint,
                 enrollment.deviceId,
-                appliedVersion(ctx),
+                applied,
                 RustBridge.clusterCaPath(ctx),
                 enrollment.deviceToken,
             )
@@ -88,7 +83,6 @@ object ChildConfigSync {
         }
 
         val version = obj.optLong("config_version", 0L)
-        val applied = appliedVersion(ctx)
         if (version <= 0L) {
             transition(ctx, SyncState.DEGRADED, "server returned config_version=0")
             return
@@ -97,6 +91,22 @@ object ChildConfigSync {
             Log.w(TAG, "ignoring stale config v$version (applied v$applied)")
             transition(ctx, SyncState.DEGRADED, "stale desired config refused")
             return
+        }
+
+        val policyJson = runCatching {
+            RustBridge.syncDevicePolicy(
+                enrollment.clusterEndpoint,
+                enrollment.deviceId,
+                applied,
+                RustBridge.clusterCaPath(ctx),
+                enrollment.deviceToken,
+            )
+        }.getOrNull()
+        val policyOk = policyJson
+            ?.let { runCatching { JSONObject(it).optBoolean("ok", false) }.getOrDefault(false) }
+            ?: false
+        if (!policyOk) {
+            Log.w(TAG, "guardian policy sync unavailable; Local VPN approvals fail closed")
         }
 
         val profile = obj.optString("profile", "")
