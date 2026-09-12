@@ -142,7 +142,15 @@ object ChildConfigSync {
                     SyncState.APPLYING,
                     "switching VPN from ${BulwarkVpnService.activeFilterLocation} to $requestedLocation",
                 )
-                ctx.stopService(Intent(ctx, BulwarkVpnService::class.java))
+                // Reconfigure inside the still-running foreground service. This
+                // tears down only the old TUN/Rust data path, immediately builds
+                // the requested one, and leaves the independent config poller
+                // alive so a mode transition cannot strand the device unprotected.
+                ContextCompat.startForegroundService(
+                    ctx,
+                    Intent(ctx, BulwarkVpnService::class.java)
+                        .setAction(BulwarkVpnService.ACTION_RECONFIGURE),
+                )
                 return
             }
 
