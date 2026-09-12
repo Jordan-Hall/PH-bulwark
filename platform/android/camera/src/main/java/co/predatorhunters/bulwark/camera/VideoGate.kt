@@ -12,9 +12,10 @@ import java.io.File
  *  1. LIVE SAMPLING (advisory, in CameraScreen): the preview-shield analyzer
  *     keeps scoring frames WHILE recording so an unsafe scene stops the take
  *     early. This is the live preview shield's analog.
- *  2. FULL RE-SCAN (authoritative, here): after the recorder finalizes the temp
- *     file, every sampled frame is decoded and scored. Only a fully-clean
- *     re-scan lets the file be published; a single flagged frame blocks it.
+ *  2. FULL-SPAN RE-SCAN (authoritative, here): after the recorder finalizes the
+ *     temp file, bounded samples are distributed across the entire duration.
+ *     Only a fully-clean re-scan lets the file be published; a single flagged
+ *     frame blocks it.
  *
  * HONEST LIMIT (vs. the photo path's "never touches disk"): a video necessarily
  * lands in an APP-PRIVATE temp file while recording — it is never written to the
@@ -28,17 +29,17 @@ import java.io.File
  */
 internal object VideoGate {
 
-    /** Sample interval for the authoritative re-scan (one frame ~every 500 ms). */
-    private const val RESCAN_INTERVAL_US = 500_000L
-
-    /** Cap on frames scored per video so a long clip can't run unbounded. */
-    private const val MAX_RESCAN_FRAMES = 600
+    /** Short clips are sampled about once per second after the live 300 ms gate. */
+    private const val TARGET_RESCAN_INTERVAL_US = 1_000_000L
 
     /**
-     * Decode re-scan frames STRAIGHT to the model input size (384) instead of
-     * full-resolution then scaling — a much faster decode for the same scored
-     * pixels, so video saving isn't bottlenecked on full-frame decodes.
+     * Bound post-record latency. Longer clips use the same number of samples but
+     * spread them uniformly from the first frame through the final frame instead
+     * of scanning only the beginning of the clip.
      */
+    private const val MAX_RESCAN_FRAMES = 32
+
+    /** Decode directly to model resolution instead of allocating full-res frames. */
     private const val RESCAN_DECODE_DIM = 384
 
     sealed interface Result {
@@ -53,9 +54,9 @@ internal object VideoGate {
     }
 
     /**
-     * Decode [tempFile] frame-by-frame and score each with [gate]. Returns
-     * [Result.Clean] only if EVERY sampled frame is safe. Pure CPU/IO work;
-     * call off the main thread.
+     * Sample [tempFile] across its complete duration and score every selected
+     * frame with [gate]. Returns [Result.Clean] only when all samples are safe.
+     * Pure CPU/IO work; call off the main thread.
      */
     fun rescan(tempFile: File, gate: NsfwGate): Result {
         val retriever = MediaMetadataRetriever()
@@ -63,28 +64,41 @@ internal object VideoGate {
             retriever.setDataSource(tempFile.absolutePath)
             val durationMs = retriever.extractMetadata(
                 MediaMetadataRetriever.METADATA_KEY_DURATION,
-            )?.toLongOrNull() ?: 0L
-            val durationUs = durationMs * 1000L
+            )?.toLongOrNull() ?: return Result.CheckFailed
+            if (durationMs < 0L) return Result.CheckFailed
+            val durationUs = durationMs.coerceAtMost(Long.MAX_VALUE / 1000L) * 1000L
 
-            // Always score at least the first frame, even for a ~0 ms clip.
-            var timeUs = 0L
-            var scored = 0
-            while (timeUs <= durationUs && scored < MAX_RESCAN_FRAMES) {
+            val desiredSamples = if (durationUs == 0L) {
+                1
+            } else {
+                ((durationUs + TARGET_RESCAN_INTERVAL_US - 1L) / TARGET_RESCAN_INTERVAL_US + 1L)
+                    .coerceAtMost(MAX_RESCAN_FRAMES.toLong())
+                    .toInt()
+            }
+            val sampleCount = desiredSamples.coerceIn(1, MAX_RESCAN_FRAMES)
+
+            for (index in 0 until sampleCount) {
+                val timeUs = when {
+                    sampleCount == 1 -> 0L
+                    index == sampleCount - 1 -> durationUs
+                    else -> (durationUs.toDouble() * index / (sampleCount - 1)).toLong()
+                }
                 val frame = retriever.getScaledFrameAtTime(
                     timeUs,
                     MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
                     RESCAN_DECODE_DIM,
                     RESCAN_DECODE_DIM,
-                ) ?: return Result.CheckFailed // a missing frame is unscorable -> fail closed
-                val score = runCatching { gate.score(frame) }.getOrElse { return Result.CheckFailed }
-                frame.recycle()
+                ) ?: return Result.CheckFailed
+                val score = try {
+                    gate.score(frame)
+                } catch (_: Throwable) {
+                    return Result.CheckFailed
+                } finally {
+                    frame.recycle()
+                }
                 if (gate.shouldBlock(score)) return Result.Blocked
-                scored++
-                if (durationUs == 0L) break
-                timeUs += RESCAN_INTERVAL_US
             }
-            // A clip we could open but extracted zero frames from is unscorable.
-            if (scored == 0) Result.CheckFailed else Result.Clean
+            Result.Clean
         } catch (_: Throwable) {
             Result.CheckFailed
         } finally {
