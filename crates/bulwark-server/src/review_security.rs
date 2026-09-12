@@ -6,7 +6,7 @@
 //! substitute another device. It also provides offline replay and owner-scoped
 //! streaming of retained review clips.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 use std::pin::Pin;
@@ -162,7 +162,10 @@ impl ReviewLedger {
     /// device, category or content hash is rejected instead of overwriting history.
     pub fn record(&self, event: &AlertEvent) -> io::Result<bool> {
         if event.alert_id.trim().is_empty() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "alert_id is required"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "alert_id is required",
+            ));
         }
         let incoming = StoredAlert::from_proto(event);
         let mut guard = self.inner.lock().expect("review-ledger mutex poisoned");
@@ -183,6 +186,28 @@ impl ReviewLedger {
             let oldest = next.order.remove(0);
             next.alerts.remove(&oldest);
         }
+        if let Some(persist) = &self.persist {
+            persist.store(&next)?;
+        }
+        *guard = next;
+        Ok(true)
+    }
+
+    /// Durably remove a resolved alert from the pending-review set. The
+    /// allowlist audit remains the immutable decision history; this ledger is
+    /// specifically the queue of outstanding review work.
+    pub fn retire(&self, alert_id: &str) -> io::Result<bool> {
+        let alert_id = alert_id.trim();
+        if alert_id.is_empty() {
+            return Ok(false);
+        }
+        let mut guard = self.inner.lock().expect("review-ledger mutex poisoned");
+        if !guard.alerts.contains_key(alert_id) {
+            return Ok(false);
+        }
+        let mut next = guard.clone();
+        next.alerts.remove(alert_id);
+        next.order.retain(|id| id != alert_id);
         if let Some(persist) = &self.persist {
             persist.store(&next)?;
         }
@@ -258,7 +283,9 @@ impl SecureReviewService {
 
     fn authenticated_scope(&self, token: &str) -> Result<GuardianScope, Status> {
         if token.trim().is_empty() {
-            return Err(Status::unauthenticated("guardian session token is required"));
+            return Err(Status::unauthenticated(
+                "guardian session token is required",
+            ));
         }
         self.accounts
             .guardian_scope(token)
@@ -280,9 +307,10 @@ impl Review for SecureReviewService {
         let token = self.token_for(&req, "");
         let scope = self.authenticated_scope(&token)?;
         let review = req.get_ref();
+        let alert_id = review.alert_id.trim().to_string();
         let authoritative = self
             .ledger
-            .alert(&review.alert_id)
+            .alert(&alert_id)
             .ok_or_else(|| Status::not_found("unknown or expired alert_id"))?;
 
         if authoritative.device_id.trim().is_empty()
@@ -303,7 +331,12 @@ impl Review for SecureReviewService {
             ));
         }
 
-        Review::submit_decision(&self.inner, req).await
+        let response = Review::submit_decision(&self.inner, req).await?;
+        self.ledger.retire(&alert_id).map_err(|error| {
+            tracing::error!(%error, %alert_id, "review decision applied but pending alert retirement failed");
+            Status::unavailable("review decision could not be durably retired from the pending queue")
+        })?;
+        Ok(response)
     }
 
     async fn register_push_target(
@@ -373,7 +406,9 @@ impl Review for SecureReviewService {
         let file = segments
             .open_authorized(&uri, &scope.device_ids)
             .map_err(|error| Status::internal(format!("opening retained clip: {error}")))?
-            .ok_or_else(|| Status::not_found("clip not found, expired, or not owned by this guardian"))?;
+            .ok_or_else(|| {
+                Status::not_found("clip not found, expired, or not owned by this guardian")
+            })?;
         let file = tokio::fs::File::from_std(file);
 
         let stream = futures_util::stream::unfold((file, false), |(mut file, done)| async move {
@@ -419,6 +454,16 @@ mod tests {
         assert!(!ledger.record(&event("a", "d1")).unwrap());
         let error = ledger.record(&event("a", "d2")).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn retired_alert_is_not_pending() {
+        let ledger = ReviewLedger::new();
+        assert!(ledger.record(&event("a", "d1")).unwrap());
+        assert!(ledger.alert("a").is_some());
+        assert!(ledger.retire("a").unwrap());
+        assert!(ledger.alert("a").is_none());
+        assert!(!ledger.retire("a").unwrap());
     }
 
     #[test]
