@@ -420,7 +420,12 @@ async fn emit_alert(
     };
 
     if let Err(error) = state.context.review_ledger.record(&event) {
-        tracing::error!(%error, alert_id = %event.alert_id, "Remote VPN alert ledger write failed");
+        tracing::error!(
+            %error,
+            alert_id = %event.alert_id,
+            "Remote VPN alert ledger write failed; suppressing non-durable guardian notification"
+        );
+        return;
     }
     let reached = state.context.hub.publish(event.clone());
     if let Some(sink) = &state.context.alert_sink {
