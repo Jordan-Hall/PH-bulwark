@@ -4,6 +4,8 @@
 //! inspected is decompressed and captured only to a fixed bound. Protected media
 //! is fully buffered only up to a strict per-kind limit; unknown-size overflow,
 //! decode failure, classifier backpressure, or decision timeout fails closed.
+//! WebSocket text frames use the same text/policy gate; transport control frames
+//! and opaque binary frames are passed without pretending they are inspectable media.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -15,9 +17,10 @@ use futures_util::{stream, StreamExt};
 use http::response::Parts as ResponseParts;
 use http_body_util::BodyExt;
 use hudsucker::hyper::{Request, Response, StatusCode};
+use hudsucker::tokio_tungstenite::tungstenite::Message;
 use hudsucker::{
     decode_request, decode_response, Body, Error as HudsuckerError, HttpContext, HttpHandler,
-    RequestOrResponse,
+    RequestOrResponse, WebSocketContext, WebSocketHandler,
 };
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -30,6 +33,7 @@ use crate::{NetError, Result};
 
 const MEDIA_DECISION_TIMEOUT: Duration = Duration::from_millis(1_500);
 const HTML_DECISION_TIMEOUT: Duration = Duration::from_millis(350);
+const WEBSOCKET_DECISION_TIMEOUT: Duration = Duration::from_millis(250);
 const HTML_GATE_CAP: usize = 2 * 1024 * 1024;
 const BODY_PEEK_CAP: usize = 64 * 1024;
 const IMAGE_BODY_CAP: usize = 8 * 1024 * 1024;
@@ -195,9 +199,17 @@ pub async fn spawn(
         next_flow_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         request_host: String::new(),
     };
+    let websocket_handler = handler.clone();
     let fingerprint = ca.fingerprint_hex().to_owned();
     let join = tokio::spawn(async move {
-        run_hudsucker(listener, authority, handler, shutdown_rx).await;
+        run_hudsucker(
+            listener,
+            authority,
+            handler,
+            websocket_handler,
+            shutdown_rx,
+        )
+        .await;
     });
     tracing::info!(%listen_addr, %fingerprint, "bounded TLS-inspection proxy started");
     Ok(MitmProxy {
@@ -232,6 +244,7 @@ async fn run_hudsucker(
     listener: tokio::net::TcpListener,
     authority: hudsucker::certificate_authority::RcgenAuthority,
     handler: FlowHandler,
+    websocket_handler: FlowHandler,
     shutdown_rx: oneshot::Receiver<()>,
 ) {
     use hudsucker::rustls::crypto::aws_lc_rs;
@@ -242,6 +255,7 @@ async fn run_hudsucker(
         .with_ca(authority)
         .with_rustls_connector(aws_lc_rs::default_provider())
         .with_http_handler(handler)
+        .with_websocket_handler(websocket_handler)
         .with_graceful_shutdown(async move {
             let _ = shutdown_rx.await;
         })
@@ -712,6 +726,65 @@ impl HttpHandler for FlowHandler {
     }
 }
 
+impl WebSocketHandler for FlowHandler {
+    async fn handle_message(
+        &mut self,
+        ctx: &WebSocketContext,
+        message: Message,
+    ) -> Option<Message> {
+        let text = match &message {
+            Message::Text(text) => text.to_string(),
+            Message::Ping(_) | Message::Pong(_) | Message::Close(_) => return Some(message),
+            Message::Binary(_) | Message::Frame(_) => return Some(message),
+        };
+        if text.is_empty() {
+            return Some(message);
+        }
+        if text.len() > BODY_PEEK_CAP {
+            tracing::warn!(bytes = text.len(), "oversized WebSocket text frame blocked unscored");
+            return None;
+        }
+
+        let flow_id = self.next_id();
+        let is_response = matches!(ctx, WebSocketContext::ServerToClient { .. });
+        let receiver = if self.gate.is_armed() {
+            Some(self.gate.register(flow_id).await)
+        } else {
+            None
+        };
+        let emitted = self.emit(
+            flow_id,
+            FlowSource::Web,
+            "",
+            if is_response { "" } else { "WEBSOCKET" },
+            "websocket",
+            text.into_bytes(),
+            is_response,
+            Some("text/plain".to_string()),
+            None,
+            None,
+        );
+        let Some(receiver) = receiver else {
+            return Some(message);
+        };
+        if !emitted {
+            self.gate.cancel(flow_id).await;
+            return None;
+        }
+        let decision = match tokio::time::timeout(WEBSOCKET_DECISION_TIMEOUT, receiver).await {
+            Ok(Ok(decision)) => decision,
+            Ok(Err(_)) | Err(_) => {
+                self.gate.cancel(flow_id).await;
+                InterceptDecision::Drop
+            }
+        };
+        match decision {
+            InterceptDecision::Forward => Some(message),
+            InterceptDecision::Rewrite(_) | InterceptDecision::Drop => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MediaClass {
     Image,
@@ -995,9 +1068,10 @@ mod tests {
     }
 
     #[test]
-    fn media_timeout_is_short_and_fail_closed() {
+    fn protected_decision_windows_are_short() {
         let (window, fallback) = gate_policy(true);
         assert!(window <= Duration::from_millis(1_500));
         assert!(matches!(fallback, InterceptDecision::Drop));
+        assert!(WEBSOCKET_DECISION_TIMEOUT <= Duration::from_millis(250));
     }
 }
