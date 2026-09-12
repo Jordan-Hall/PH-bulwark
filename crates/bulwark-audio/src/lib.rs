@@ -9,6 +9,10 @@ use bulwark_proto::v1::{
 };
 use bulwark_text::TextAnalyzer;
 
+const MAX_AUDIO_INPUT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_NORMALIZED_WAV_BYTES: usize = 32 * 1024 * 1024;
+const FFMPEG_NORMALIZE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(600);
+
 pub trait Transcriber: Send + Sync {
     fn transcribe(&self, audio: &[u8]) -> Option<String>;
     fn engine_id(&self) -> &str;
@@ -30,6 +34,166 @@ impl Transcriber for Box<dyn Transcriber> {
     }
     fn engine_id(&self) -> &str {
         (**self).engine_id()
+    }
+}
+
+/// Normalizes compressed/container audio to 16 kHz mono PCM WAV with a bounded
+/// ffmpeg sidecar before delegating to the underlying transcriber. WAV input is
+/// passed straight through, so video-extracted speech windows pay no extra process
+/// startup cost.
+pub struct FfmpegTranscriber<T: Transcriber> {
+    inner: T,
+    id: String,
+}
+
+impl<T: Transcriber> FfmpegTranscriber<T> {
+    pub fn new(inner: T) -> Self {
+        let id = format!("ffmpeg-normalize+{}", inner.engine_id());
+        Self { inner, id }
+    }
+
+    fn normalize(&self, audio: &[u8]) -> Option<Vec<u8>> {
+        if is_wav(audio) {
+            return Some(audio.to_vec());
+        }
+        if audio.is_empty() || audio.len() > MAX_AUDIO_INPUT_BYTES {
+            return None;
+        }
+
+        let workspace = AudioWorkspace::new(audio).ok()?;
+        let binary = std::env::var_os("BULWARK_FFMPEG_BINARY")
+            .filter(|value| !value.is_empty())
+            .or_else(|| std::env::var_os("FFMPEG_BINARY").filter(|value| !value.is_empty()))
+            .unwrap_or_else(|| "ffmpeg".into());
+        let mut command = std::process::Command::new(binary);
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .arg("-nostdin")
+            .arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-threads")
+            .arg("1")
+            .arg("-i")
+            .arg(&workspace.input)
+            .arg("-vn")
+            .arg("-ac")
+            .arg("1")
+            .arg("-ar")
+            .arg("16000")
+            .arg("-c:a")
+            .arg("pcm_s16le")
+            .arg("-fs")
+            .arg(MAX_NORMALIZED_WAV_BYTES.to_string())
+            .arg("-f")
+            .arg("wav")
+            .arg("-y")
+            .arg(&workspace.output);
+
+        if !run_command_bounded(&mut command, FFMPEG_NORMALIZE_TIMEOUT) {
+            return None;
+        }
+        let normalized = std::fs::read(&workspace.output).ok()?;
+        if normalized.is_empty() || normalized.len() > MAX_NORMALIZED_WAV_BYTES || !is_wav(&normalized)
+        {
+            return None;
+        }
+        Some(normalized)
+    }
+}
+
+impl<T: Transcriber> Transcriber for FfmpegTranscriber<T> {
+    fn transcribe(&self, audio: &[u8]) -> Option<String> {
+        let normalized = self.normalize(audio)?;
+        self.inner.transcribe(&normalized)
+    }
+
+    fn engine_id(&self) -> &str {
+        &self.id
+    }
+}
+
+fn is_wav(bytes: &[u8]) -> bool {
+    bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WAVE"
+}
+
+fn run_command_bounded(command: &mut std::process::Command, timeout: std::time::Duration) -> bool {
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
+struct AudioWorkspace {
+    dir: std::path::PathBuf,
+    input: std::path::PathBuf,
+    output: std::path::PathBuf,
+}
+
+impl AudioWorkspace {
+    fn new(audio: &[u8]) -> std::io::Result<Self> {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "bulwark-audio-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+
+        let input = dir.join("input.media");
+        let output = dir.join("normalized.wav");
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&input)?;
+        file.write_all(audio)?;
+        file.sync_all()?;
+        Ok(Self { dir, input, output })
+    }
+}
+
+impl Drop for AudioWorkspace {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn run_blocking<R>(work: impl FnOnce() -> R) -> R {
+    let multithread = tokio::runtime::Handle::try_current()
+        .map(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+        .unwrap_or(false);
+    if multithread {
+        tokio::task::block_in_place(work)
+    } else {
+        work()
     }
 }
 
@@ -74,13 +238,16 @@ impl<T: Transcriber> Analyzer for AudioAnalyzer<T> {
 
     async fn analyze(&self, req: AnalysisRequest) -> Result<Verdict> {
         let bytes = match req.media.as_ref() {
-            Some(Media::InlineMedia(media)) => media.data.clone(),
+            Some(Media::InlineMedia(media)) if !media.data.is_empty() => media.data.clone(),
             _ => return Ok(uncovered(req.request_id, "no inline audio payload")),
         };
-        let Some(transcript) = self.transcriber.transcribe(&bytes) else {
+        if bytes.len() > MAX_AUDIO_INPUT_BYTES {
+            return Ok(uncovered(req.request_id, "audio payload exceeds bounded analysis limit"));
+        }
+        let Some(transcript) = run_blocking(|| self.transcriber.transcribe(&bytes)) else {
             return Ok(uncovered(
                 req.request_id,
-                "audio transcription unavailable or failed; content not scored",
+                "audio transcription unavailable, timed out, or failed; content not scored",
             ));
         };
         if transcript.trim().is_empty() {
@@ -90,8 +257,6 @@ impl<T: Transcriber> Analyzer for AudioAnalyzer<T> {
         let span = TextSpan {
             text: transcript,
             app: "audio".into(),
-            // Never use the historical empty thread id. Audio state is scoped to
-            // the authenticated installation and analysis request/conversation.
             thread_id: format!("{}\u{1f}audio\u{1f}{}", req.device_id, req.request_id),
             ..Default::default()
         };
@@ -274,5 +439,24 @@ mod tests {
         let verdict = AudioAnalyzer::new().analyze(request()).await.unwrap();
         assert_eq!(verdict.category(), Category::Unspecified);
         assert_eq!(verdict.action(), Action::Block);
+    }
+
+    struct EchoTranscriber;
+    impl Transcriber for EchoTranscriber {
+        fn transcribe(&self, audio: &[u8]) -> Option<String> {
+            is_wav(audio).then(|| "hello".to_string())
+        }
+        fn engine_id(&self) -> &str {
+            "echo"
+        }
+    }
+
+    #[test]
+    fn wav_bypasses_ffmpeg_normalization() {
+        let transcriber = FfmpegTranscriber::new(EchoTranscriber);
+        let mut wav = b"RIFF".to_vec();
+        wav.extend_from_slice(&[0u8; 4]);
+        wav.extend_from_slice(b"WAVE");
+        assert_eq!(transcriber.transcribe(&wav).as_deref(), Some("hello"));
     }
 }
