@@ -440,7 +440,7 @@ impl FlowHandler {
 }
 
 impl HttpHandler for FlowHandler {
-    async fn should_intercept_connect(
+    async fn should_intercept(
         &mut self,
         _ctx: &HttpContext,
         request: &Request<Body>,
