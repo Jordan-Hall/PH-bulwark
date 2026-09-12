@@ -27,23 +27,39 @@ class BulwarkVpnService : VpnService() {
     @Volatile private var polling = false
     @Volatile private var configPolling = false
     @Volatile private var establishing = false
+    @Volatile private var reconfiguring = false
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         running = true
-        ready = false
         lastFailure = ""
         startForeground(NOTIF_ID, buildNotification())
-        if (tun == null && !establishing) {
-            establishing = true
-            Thread({
-                try {
-                    establish()
-                } finally {
-                    establishing = false
-                }
-            }, "bulwark-vpn-start").apply { isDaemon = true }.start()
+
+        val replaceDataPath = intent?.action == ACTION_RECONFIGURE
+        if (replaceDataPath || tun == null) {
+            launchEstablish(replaceDataPath)
         }
         return START_STICKY
+    }
+
+    @Synchronized
+    private fun launchEstablish(replaceDataPath: Boolean) {
+        if (establishing) return
+        establishing = true
+        reconfiguring = replaceDataPath
+        ready = false
+        Thread({
+            try {
+                if (replaceDataPath) {
+                    stopDataPath(clearConfigPoller = false)
+                }
+                establish()
+            } finally {
+                reconfiguring = false
+                establishing = false
+            }
+        }, if (replaceDataPath) "bulwark-vpn-reconfigure" else "bulwark-vpn-start")
+            .apply { isDaemon = true }
+            .start()
     }
 
     private fun establish() {
@@ -61,7 +77,13 @@ class BulwarkVpnService : VpnService() {
         }
 
         val builder = Builder()
-            .setSession(if (mode == ChildConfigSync.FILTER_ON_SERVER) "PH Bulwark Remote VPN" else "PH Bulwark Local VPN")
+            .setSession(
+                if (mode == ChildConfigSync.FILTER_ON_SERVER) {
+                    "PH Bulwark Remote VPN"
+                } else {
+                    "PH Bulwark Local VPN"
+                },
+            )
             .setMtu(startup.mtu)
             .addAddress(startup.address, 32)
             .addDnsServer(startup.dnsServer)
@@ -99,6 +121,7 @@ class BulwarkVpnService : VpnService() {
 
         ready = true
         lastFailure = ""
+        startForeground(NOTIF_ID, buildNotification())
         Log.i(TAG, "${modeLabel(mode)} ready (rustHandle=$rustHandle)")
         startAlertPoller()
         startConfigPoller()
@@ -200,7 +223,7 @@ class BulwarkVpnService : VpnService() {
         polling = true
         Thread({
             while (polling) {
-                if (runCatching { RustBridge.isDataPathDown() }.getOrDefault(true)) {
+                if (!reconfiguring && runCatching { RustBridge.isDataPathDown() }.getOrDefault(true)) {
                     Log.e(TAG, "VPN data path/authentication down — releasing TUN")
                     ready = false
                     lastFailure = "VPN protection stopped or Remote VPN authentication expired"
@@ -225,33 +248,32 @@ class BulwarkVpnService : VpnService() {
         }, "bulwark-config-poller").apply { isDaemon = true }.start()
     }
 
-    private fun failStart(detail: String) {
-        lastFailure = detail.take(256)
+    private fun stopDataPath(clearConfigPoller: Boolean) {
         ready = false
-        Log.e(TAG, detail)
+        polling = false
+        if (clearConfigPoller) configPolling = false
         if (rustHandle != 0L) {
             runCatching { RustBridge.stopVpn(rustHandle) }
             rustHandle = 0L
         }
         runCatching { tun?.close() }
         tun = null
+        activeFilterLocation = ""
+    }
+
+    private fun failStart(detail: String) {
+        lastFailure = detail.take(256)
+        Log.e(TAG, detail)
+        stopDataPath(clearConfigPoller = true)
         running = false
         stopSelf()
     }
 
     override fun onDestroy() {
-        ready = false
         running = false
-        polling = false
-        configPolling = false
+        reconfiguring = false
         establishing = false
-        activeFilterLocation = ""
-        if (rustHandle != 0L) {
-            RustBridge.stopVpn(rustHandle)
-            rustHandle = 0L
-        }
-        runCatching { tun?.close() }
-        tun = null
+        stopDataPath(clearConfigPoller = true)
         super.onDestroy()
     }
 
@@ -263,7 +285,9 @@ class BulwarkVpnService : VpnService() {
         val mode = modeLabel(ChildConfigSync.desiredFilterLocation(this))
         return Notification.Builder(this, CHANNEL)
             .setContentTitle("PH Bulwark $mode is protecting this device")
-            .setContentText("Protection is reported as applied only after the requested VPN mode is authenticated and ready.")
+            .setContentText(
+                "Protection is reported as applied only after the requested VPN mode is authenticated and ready.",
+            )
             .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
             .setOngoing(true)
             .build()
@@ -301,6 +325,8 @@ class BulwarkVpnService : VpnService() {
     )
 
     companion object {
+        const val ACTION_RECONFIGURE = "co.predatorhunters.bulwark.vpn.RECONFIGURE"
+
         private const val TAG = "BulwarkVpn"
         private const val CHANNEL = "bulwark_vpn"
         private const val STATUS_CHANNEL = "bulwark_status"
