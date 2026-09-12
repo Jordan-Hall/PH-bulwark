@@ -47,9 +47,6 @@
 //! This crate does pure protocol interception. There are no models and nothing
 //! reports off-device (PLAN §0b, §3).
 
-// `deny` (not `forbid`) at the root so the three isolated FFI modules
-// (ca::dpapi, truststore, tun::windows) can locally `#![allow(unsafe_code)]`
-// for audited, SAFETY-documented blocks. Unsafe stays denied everywhere else.
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -59,13 +56,11 @@ pub mod config;
 pub mod error;
 pub mod interceptor;
 pub mod pinning;
+#[path = "proxy_v2.rs"]
 pub mod proxy;
 pub mod quic;
 pub mod truststore;
 pub mod tun;
-// VPN mode. DESKTOP (Windows/Linux/macOS) drives its own TUN; ANDROID reuses the
-// same transparent smoltcp pump (`vpn::run_netstack`) over the VpnService fd handed
-// in via `open_tun_from_fd`. iOS uses the native NetworkExtension shell instead.
 #[cfg(any(
     windows,
     target_os = "linux",
@@ -73,8 +68,6 @@ pub mod tun;
     target_os = "android"
 ))]
 pub mod vpn;
-
-// --- Curated public API -----------------------------------------------------
 
 pub use blocklist::HostBlocklist;
 pub use ca::{CaKeyStore, CaManager, DevInMemoryKeyStore, FileKeyStore, KeyStoreTier};
@@ -94,9 +87,6 @@ pub use vpn::transparent::run_transparent_listener;
 pub use vpn::{
     elevation_command, is_elevated, run_vpn, wintun_available, CancellationToken, VpnConfig,
 };
-// No-Device-Owner host filter (DNS sinkhole + TLS-SNI reset, NO decryption).
-// unix here = linux/macos/android (the desktop-TUN entry); the JNI fd entry is
-// android-only.
 #[cfg(target_os = "android")]
 pub use vpn::run_android_host_filter;
 #[cfg(all(
@@ -105,6 +95,4 @@ pub use vpn::run_android_host_filter;
 ))]
 pub use vpn::run_vpn_host_filter;
 
-// Re-export the proto SourceChannel so downstream code can name the flow source
-// without a separate bulwark-proto import.
 pub use bulwark_proto::SourceChannel;
