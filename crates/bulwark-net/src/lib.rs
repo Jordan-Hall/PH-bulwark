@@ -56,7 +56,7 @@ pub mod config;
 pub mod error;
 pub mod interceptor;
 pub mod pinning;
-#[path = "proxy_v2.rs"]
+#[path = "proxy_v3.rs"]
 pub mod proxy;
 pub mod quic;
 pub mod truststore;
