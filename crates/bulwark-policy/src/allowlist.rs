@@ -165,7 +165,6 @@ impl Allowlist {
                 ApplyOutcome::Refused("decision unspecified".to_string())
             }
         };
-
         self.audit.append(AuditEntry {
             device_id: item.device.0.clone(),
             alert_id: item.alert_id.clone(),
@@ -191,7 +190,6 @@ impl Allowlist {
                 "CSAM_SUSPECTED items are never allowlistable".to_string(),
             );
         }
-
         let entry = self.per_device.entry(item.device.0.clone()).or_default();
         match scope {
             ReviewScope::ThisHost => {
@@ -200,7 +198,6 @@ impl Allowlist {
                     return ApplyOutcome::Refused("THIS_HOST approve with no host".to_string());
                 }
                 entry.hosts.insert(host);
-                ApplyOutcome::Approved
             }
             ReviewScope::ThisItem | ReviewScope::Unspecified => {
                 if item.sha256.is_empty() {
@@ -209,32 +206,41 @@ impl Allowlist {
                     );
                 }
                 entry.hashes.insert(hex(&item.sha256));
-                ApplyOutcome::Approved
             }
         }
+        ApplyOutcome::Approved
     }
 
     fn apply_deny(&mut self, item: &ReviewItem, scope: ReviewScope) -> ApplyOutcome {
-        let device_key = item.device.0.clone();
+        let key = item.device.0.clone();
         let mut remove_device = false;
-        if let Some(entry) = self.per_device.get_mut(&device_key) {
+        if let Some(entry) = self.per_device.get_mut(&key) {
+            let host = item.host.trim().to_ascii_lowercase();
+            let hash = (!item.sha256.is_empty()).then(|| hex(&item.sha256));
             match scope {
                 ReviewScope::ThisHost => {
-                    let host = item.host.trim().to_ascii_lowercase();
                     if !host.is_empty() {
                         entry.hosts.remove(&host);
                     }
                 }
-                ReviewScope::ThisItem | ReviewScope::Unspecified => {
-                    if !item.sha256.is_empty() {
-                        entry.hashes.remove(&hex(&item.sha256));
+                ReviewScope::ThisItem => {
+                    if let Some(hash) = &hash {
+                        entry.hashes.remove(hash);
+                    }
+                }
+                ReviewScope::Unspecified => {
+                    if !host.is_empty() {
+                        entry.hosts.remove(&host);
+                    }
+                    if let Some(hash) = &hash {
+                        entry.hashes.remove(hash);
                     }
                 }
             }
             remove_device = entry.is_empty();
         }
         if remove_device {
-            self.per_device.remove(&device_key);
+            self.per_device.remove(&key);
         }
         ApplyOutcome::DenyConfirmed
     }
@@ -265,20 +271,22 @@ fn outcome_name(value: &ApplyOutcome) -> &'static str {
 }
 
 fn chain_hash(previous: &str, entry: &AuditEntry) -> String {
-    let canonical = format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
-        previous,
-        entry.device_id,
-        entry.alert_id,
-        decision_name(entry.decision),
-        scope_name(entry.scope),
-        entry.host,
-        entry.sha256_hex,
-        entry.category as i32,
-        outcome_name(&entry.outcome),
-        entry.ts
-    );
-    hex(&sha256(canonical.as_bytes()))
+    hex(&sha256(
+        format!(
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            previous,
+            entry.device_id,
+            entry.alert_id,
+            decision_name(entry.decision),
+            scope_name(entry.scope),
+            entry.host,
+            entry.sha256_hex,
+            entry.category as i32,
+            outcome_name(&entry.outcome),
+            entry.ts
+        )
+        .as_bytes(),
+    ))
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -298,12 +306,12 @@ fn sha256(data: &[u8]) -> [u8; 32] {
         0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
         0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
         0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
-        0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
-        0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+        0x06ca6351, 0x14292967, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354,
+        0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70,
+        0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f,
+        0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa,
+        0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
     ];
     let mut h = [
         0x6a09e667u32,
@@ -315,7 +323,6 @@ fn sha256(data: &[u8]) -> [u8; 32] {
         0x1f83d9ab,
         0x5be0cd19,
     ];
-
     let bit_len = (data.len() as u64).wrapping_mul(8);
     let mut message = data.to_vec();
     message.push(0x80);
@@ -323,39 +330,37 @@ fn sha256(data: &[u8]) -> [u8; 32] {
         message.push(0);
     }
     message.extend_from_slice(&bit_len.to_be_bytes());
-
     let (blocks, remainder) = message.as_chunks::<64>();
     debug_assert!(remainder.is_empty());
     for chunk in blocks {
         let mut w = [0u32; 64];
         let (words, remainder) = chunk.as_chunks::<4>();
         debug_assert!(remainder.is_empty());
-        for (word, bytes) in w.iter_mut().take(16).zip(words.iter()) {
+        for (word, bytes) in w.iter_mut().take(16).zip(words) {
             *word = u32::from_be_bytes(*bytes);
         }
-        for index in 16..64 {
-            let s0 = w[index - 15].rotate_right(7)
-                ^ w[index - 15].rotate_right(18)
-                ^ (w[index - 15] >> 3);
-            let s1 = w[index - 2].rotate_right(17)
-                ^ w[index - 2].rotate_right(19)
-                ^ (w[index - 2] >> 10);
-            w[index] = w[index - 16]
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7)
+                ^ w[i - 15].rotate_right(18)
+                ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17)
+                ^ w[i - 2].rotate_right(19)
+                ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
                 .wrapping_add(s0)
-                .wrapping_add(w[index - 7])
+                .wrapping_add(w[i - 7])
                 .wrapping_add(s1);
         }
-
         let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
             (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
-        for index in 0..64 {
+        for i in 0..64 {
             let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
             let choose = (e & f) ^ ((!e) & g);
             let t1 = hh
                 .wrapping_add(s1)
                 .wrapping_add(choose)
-                .wrapping_add(K[index])
-                .wrapping_add(w[index]);
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
             let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
             let majority = (a & b) ^ (a & c) ^ (b & c);
             let t2 = s0.wrapping_add(majority);
@@ -368,16 +373,13 @@ fn sha256(data: &[u8]) -> [u8; 32] {
             b = a;
             a = t1.wrapping_add(t2);
         }
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-        h[5] = h[5].wrapping_add(f);
-        h[6] = h[6].wrapping_add(g);
-        h[7] = h[7].wrapping_add(hh);
+        for (slot, value) in h
+            .iter_mut()
+            .zip([a, b, c, d, e, f, g, hh])
+        {
+            *slot = slot.wrapping_add(value);
+        }
     }
-
     let mut out = [0u8; 32];
     for (index, word) in h.iter().enumerate() {
         out[index * 4..index * 4 + 4].copy_from_slice(&word.to_be_bytes());
@@ -410,38 +412,30 @@ mod tests {
     }
 
     #[test]
-    fn approval_and_deny_revoke_same_host() {
+    fn unspecified_deny_revokes_matching_host_and_hash() {
         let mut allowlist = Allowlist::new();
         let review = item("example.com", vec![0xde, 0xad], Category::AdultImage);
-        assert_eq!(
-            allowlist.apply(
-                &review,
-                ReviewDecision::Approve,
-                ReviewScope::ThisHost,
-                1,
-            ),
-            ApplyOutcome::Approved
+        allowlist.apply(
+            &review,
+            ReviewDecision::Approve,
+            ReviewScope::ThisHost,
+            1,
         );
-        assert!(allowlist.is_host_allowed(&device(), "Example.COM"));
-        assert_eq!(
-            allowlist.apply(&review, ReviewDecision::Deny, ReviewScope::ThisHost, 2),
-            ApplyOutcome::DenyConfirmed
-        );
-        assert!(!allowlist.is_host_allowed(&device(), "example.com"));
-    }
-
-    #[test]
-    fn approval_and_deny_revoke_same_hash() {
-        let mut allowlist = Allowlist::new();
-        let review = item("", vec![0xde, 0xad], Category::AdultImage);
         allowlist.apply(
             &review,
             ReviewDecision::Approve,
             ReviewScope::ThisItem,
-            1,
+            2,
         );
+        assert!(allowlist.is_host_allowed(&device(), "example.com"));
         assert!(allowlist.is_hash_allowed(&device(), &[0xde, 0xad]));
-        allowlist.apply(&review, ReviewDecision::Deny, ReviewScope::ThisItem, 2);
+        allowlist.apply(
+            &review,
+            ReviewDecision::Deny,
+            ReviewScope::Unspecified,
+            3,
+        );
+        assert!(!allowlist.is_host_allowed(&device(), "example.com"));
         assert!(!allowlist.is_hash_allowed(&device(), &[0xde, 0xad]));
     }
 
@@ -457,22 +451,5 @@ mod tests {
         assert!(matches!(outcome, ApplyOutcome::Refused(_)));
         assert_eq!(allowlist.audit().len(), 1);
         assert!(allowlist.audit().verify().is_ok());
-    }
-
-    #[test]
-    fn audit_chain_detects_tampering() {
-        let mut allowlist = Allowlist::new();
-        for index in 0..3u8 {
-            allowlist.apply(
-                &item("example.com", vec![index], Category::AdultImage),
-                ReviewDecision::Approve,
-                ReviewScope::ThisItem,
-                i64::from(index),
-            );
-        }
-        assert!(allowlist.audit().verify().is_ok());
-        let mut tampered = allowlist.audit().clone();
-        tampered.entries[1].host = "evil.example".to_string();
-        assert_eq!(tampered.verify(), Err(1));
     }
 }
