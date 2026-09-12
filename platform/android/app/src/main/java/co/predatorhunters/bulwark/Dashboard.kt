@@ -2,12 +2,14 @@ package co.predatorhunters.bulwark
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -80,12 +82,8 @@ internal fun PremiumStatusDashboard(
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         ProtectionHero(active = active, reason = statusReason(context, state))
-
-        if (enrollment != null) {
-            SosCard()
-        }
-
-        ProtectionLayers(state = state)
+        if (enrollment != null) SosCard()
+        ProtectionLayers(state)
 
         if (!state.isDeviceOwner) {
             ManagedDevicePrompt(
@@ -100,8 +98,7 @@ internal fun PremiumStatusDashboard(
             onStartVpn = onStartVpn,
             onOpenBrowser = onOpenBrowser,
         )
-
-        DeviceCard(enrollment = enrollment, fallbackDeviceId = deviceId)
+        DeviceCard(enrollment, deviceId)
 
         OutlinedButton(
             onClick = onReconfigure,
@@ -109,7 +106,7 @@ internal fun PremiumStatusDashboard(
                 .fillMaxWidth()
                 .height(50.dp),
             shape = RoundedCornerShape(16.dp),
-            border = androidx.compose.foundation.BorderStroke(1.dp, DashboardOutline),
+            border = BorderStroke(1.dp, DashboardOutline),
         ) {
             Text(
                 stringResource(R.string.dashboard_review),
@@ -117,7 +114,6 @@ internal fun PremiumStatusDashboard(
                 fontWeight = FontWeight.SemiBold,
             )
         }
-
         PrivacyCard()
         Spacer(Modifier.height(8.dp))
     }
@@ -188,14 +184,12 @@ private fun ProtectionHero(active: Boolean, reason: String) {
                     )
                 }
             }
-
             Text(
                 reason,
                 color = Color.White.copy(alpha = 0.88f),
                 fontSize = 14.sp,
                 lineHeight = 20.sp,
             )
-
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -206,25 +200,15 @@ private fun ProtectionHero(active: Boolean, reason: String) {
                     active = active,
                     modifier = Modifier.weight(1f),
                 )
-                MiniSignal(
-                    symbol = "◉",
-                    label = "Private",
-                    active = true,
-                    modifier = Modifier.weight(1f),
-                )
-                MiniSignal(
-                    symbol = "⌁",
-                    label = "On device",
-                    active = true,
-                    modifier = Modifier.weight(1f),
-                )
+                MiniSignal("◉", "Private", true, Modifier.weight(1f))
+                MiniSignal("⌁", "On device", true, Modifier.weight(1f))
             }
         }
     }
 }
 
 @Composable
-private fun MiniSignal(symbol: String, label: String, active: Boolean, modifier: Modifier = Modifier) {
+private fun MiniSignal(symbol: String, label: String, active: Boolean, modifier: Modifier) {
     Row(
         modifier
             .clip(RoundedCornerShape(13.dp))
@@ -251,12 +235,7 @@ private fun MiniSignal(symbol: String, label: String, active: Boolean, modifier:
 @Composable
 private fun ProtectionLayers(state: SetupState) {
     PremiumCard {
-        Text(
-            "Protection layers",
-            color = Ink,
-            fontSize = 18.sp,
-            fontWeight = FontWeight.Bold,
-        )
+        Text("Protection layers", color = Ink, fontSize = 18.sp, fontWeight = FontWeight.Bold)
         Text(
             "What is actively protecting this device right now.",
             color = Slate,
@@ -264,29 +243,29 @@ private fun ProtectionLayers(state: SetupState) {
         )
         Spacer(Modifier.height(4.dp))
         ProtectionRow(
-            symbol = "Aa",
-            title = stringResource(R.string.summary_chat_safety),
-            detail = "On-screen messages are checked locally for grooming signals.",
-            active = state.accessibilityOn,
+            "Aa",
+            stringResource(R.string.summary_chat_safety),
+            "On-screen messages are checked locally for grooming signals.",
+            state.accessibilityOn,
         )
         ProtectionRow(
-            symbol = "↗",
-            title = stringResource(R.string.summary_filtering_on),
-            detail = "Web and app traffic is checked before unsafe content loads.",
-            active = state.vpnRunning,
+            "↗",
+            stringResource(R.string.summary_filtering_on),
+            "Web and app traffic is checked before unsafe content loads.",
+            state.vpnRunning,
         )
         ProtectionRow(
-            symbol = "◆",
-            title = stringResource(R.string.summary_managed),
-            detail = "Managed-device trust keeps secure-site filtering reliable.",
-            active = state.isDeviceOwner && state.caInstalled,
+            "◆",
+            stringResource(R.string.summary_managed),
+            "Managed-device trust keeps secure-site filtering reliable.",
+            state.isDeviceOwner && state.caInstalled,
             optional = !state.isDeviceOwner,
         )
         ProtectionRow(
-            symbol = "⌁",
-            title = stringResource(R.string.summary_paired),
-            detail = "Redacted safety alerts can reach the linked guardian.",
-            active = state.paired,
+            "⌁",
+            stringResource(R.string.summary_paired),
+            "Redacted safety alerts can reach the linked guardian.",
+            state.paired,
         )
     }
 }
@@ -332,7 +311,7 @@ private fun ProtectionRow(
             )
         }
         Spacer(Modifier.width(8.dp))
-        StatusPill(active = active, optional = optional)
+        StatusPill(active, optional)
     }
 }
 
@@ -373,21 +352,21 @@ private fun RecoveryActions(
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         if (!state.accessibilityOn) {
             PrimaryAction(
-                symbol = "Aa",
-                title = stringResource(R.string.dashboard_action_chat),
-                detail = "Finish the on-device message safety layer.",
-                onClick = onOpenAccessibility,
+                "Aa",
+                stringResource(R.string.dashboard_action_chat),
+                "Finish the on-device message safety layer.",
+                onOpenAccessibility,
             )
         }
         if (!state.vpnRunning) {
             PrimaryAction(
-                symbol = "↗",
-                title = stringResource(R.string.dashboard_action_filtering),
-                detail = "Start the filtering tunnel and verify it is ready.",
-                onClick = onStartVpn,
+                "↗",
+                stringResource(R.string.dashboard_action_filtering),
+                "Start the filtering tunnel and verify it is ready.",
+                onStartVpn,
             )
         }
-        BrowserAction(onClick = onOpenBrowser)
+        BrowserAction(onOpenBrowser)
     }
 }
 
@@ -401,7 +380,7 @@ private fun PrimaryAction(symbol: String, title: String, detail: String, onClick
         shape = RoundedCornerShape(18.dp),
         colors = ButtonDefaults.buttonColors(containerColor = Navy, contentColor = Color.White),
         elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp),
+        contentPadding = PaddingValues(horizontal = 16.dp),
     ) {
         Text(symbol, fontSize = 18.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.width(12.dp))
@@ -432,7 +411,7 @@ private fun BrowserAction(onClick: () -> Unit) {
             contentColor = Navy,
         ),
         elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp),
+        contentPadding = PaddingValues(horizontal = 16.dp),
     ) {
         Box(
             Modifier
@@ -446,21 +425,14 @@ private fun BrowserAction(onClick: () -> Unit) {
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
             Text("Open safe browser", fontSize = 14.sp, fontWeight = FontWeight.Bold)
-            Text(
-                "Pages are checked before they are shown.",
-                color = Slate,
-                fontSize = 11.sp,
-            )
+            Text("Pages are checked before they are shown.", color = Slate, fontSize = 11.sp)
         }
         Text("›", fontSize = 24.sp, color = Navy.copy(alpha = 0.6f))
     }
 }
 
 @Composable
-private fun ManagedDevicePrompt(
-    canProvisionManaged: Boolean,
-    onProvisionManaged: () -> Unit,
-) {
+private fun ManagedDevicePrompt(canProvisionManaged: Boolean, onProvisionManaged: () -> Unit) {
     Box(
         Modifier
             .fillMaxWidth()
@@ -488,11 +460,7 @@ private fun ManagedDevicePrompt(
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold,
                     )
-                    Text(
-                        "One last layer for secure-site filtering",
-                        color = Color(0xFF7B641E),
-                        fontSize = 12.sp,
-                    )
+                    Text("One last layer for secure-site filtering", color = Color(0xFF7B641E), fontSize = 12.sp)
                 }
             }
             Text(
@@ -553,22 +521,16 @@ private fun DeviceCard(enrollment: EnrollmentRecord?, fallbackDeviceId: String) 
         }
         Spacer(Modifier.height(4.dp))
         DeviceLine(
-            label = stringResource(R.string.dashboard_detail_device),
-            value = compactId(enrollment?.deviceId ?: fallbackDeviceId),
+            stringResource(R.string.dashboard_detail_device),
+            compactId(enrollment?.deviceId ?: fallbackDeviceId),
         )
         enrollment?.let {
-            DeviceLine(
-                label = stringResource(R.string.dashboard_detail_child),
-                value = compactId(it.childId),
-            )
-            DeviceLine(
-                label = stringResource(R.string.dashboard_detail_server),
-                value = compactEndpoint(it.clusterEndpoint),
-            )
+            DeviceLine(stringResource(R.string.dashboard_detail_child), compactId(it.childId))
+            DeviceLine(stringResource(R.string.dashboard_detail_server), compactEndpoint(it.clusterEndpoint))
             if (it.deviceOwnerProvisioned) {
                 DeviceLine(
-                    label = stringResource(R.string.dashboard_management),
-                    value = stringResource(R.string.dashboard_management_active),
+                    stringResource(R.string.dashboard_management),
+                    stringResource(R.string.dashboard_management_active),
                 )
             }
         }
@@ -630,19 +592,20 @@ private fun PrivacyCard() {
 }
 
 @Composable
-private fun PremiumCard(content: @Composable Column.() -> Unit) {
+private fun PremiumCard(content: @Composable () -> Unit) {
     Card(
         Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(22.dp),
         colors = CardDefaults.cardColors(containerColor = DashboardSurface),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, DashboardOutline),
+        border = BorderStroke(1.dp, DashboardOutline),
     ) {
         Column(
             Modifier.padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
-            content = content,
-        )
+        ) {
+            content()
+        }
     }
 }
 
