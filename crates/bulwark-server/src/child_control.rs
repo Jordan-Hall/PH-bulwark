@@ -64,7 +64,7 @@ impl ChildConfigStore {
 
     pub fn with_state_dir(dir: &Path) -> std::io::Result<Self> {
         let file = JsonFile::new(dir, "child_config.json")?;
-        let snapshot: ConfigSnapshot = file.load_or_default();
+        let snapshot: ConfigSnapshot = file.load_strict()?.unwrap_or_default();
         let mut inner = Inner::default();
         for row in snapshot.applied {
             inner.applied_by_device.insert(
@@ -100,12 +100,14 @@ impl ChildConfigStore {
             .unwrap_or(0)
     }
 
-    fn persist_locked(&self, inner: &Inner) {
+    fn persist_snapshot(&self, snapshot: &ConfigSnapshot) -> Result<(), Status> {
         if let Some(file) = &self.persist {
-            if let Err(error) = file.store(&inner.snapshot()) {
-                tracing::warn!(%error, "failed to persist child config state");
-            }
+            file.store(snapshot).map_err(|error| {
+                tracing::error!(%error, "failed to durably persist child config state");
+                Status::unavailable("could not durably persist child configuration")
+            })?;
         }
+        Ok(())
     }
 
     pub fn set_config(
@@ -146,6 +148,24 @@ impl ChildConfigStore {
         config.updated_ts = Self::now_ms();
         config.updated_by = accounts.account_for_session(token).unwrap_or_default();
 
+        // Durability is part of the guardian update transaction. The new desired
+        // config must not become visible to devices until the exact authorization
+        // document consumed after restart has been committed successfully.
+        let mut next_snapshot = inner.snapshot();
+        let next_row = ConfigRow::from_proto(&config);
+        match next_snapshot
+            .configs
+            .iter_mut()
+            .find(|row| row.child_id == child_id)
+        {
+            Some(existing) => *existing = next_row,
+            None => next_snapshot.configs.push(next_row),
+        }
+        next_snapshot
+            .configs
+            .sort_by(|left, right| left.child_id.cmp(&right.child_id));
+        self.persist_snapshot(&next_snapshot)?;
+
         if !device_id.is_empty() {
             inner
                 .device_to_child
@@ -164,7 +184,6 @@ impl ChildConfigStore {
                 inner.by_child.insert(child_id, ConfigEntry { tx });
             }
         }
-        self.persist_locked(&inner);
         Ok((version, config))
     }
 
@@ -182,8 +201,7 @@ impl ChildConfigStore {
             .by_child
             .get(child_id)
             .ok_or_else(|| Status::not_found("no config for this device yet"))?;
-        let config = entry.tx.borrow().clone();
-        Ok(config)
+        Ok(entry.tx.borrow().clone())
     }
 
     pub fn record_applied_report(&self, device_id: &str, version: u64) {
@@ -202,15 +220,48 @@ impl ChildConfigStore {
             .map(|entry| entry.tx.borrow().config_version)
             .unwrap_or(0);
         let version = version.min(desired);
+        let current = inner
+            .applied_by_device
+            .get(device_id)
+            .copied()
+            .unwrap_or_default();
+        let now = Self::now_ms();
+        let changed = version > current.version;
+
+        if changed {
+            let mut next_snapshot = inner.snapshot();
+            match next_snapshot
+                .applied
+                .iter_mut()
+                .find(|row| row.device_id == device_id)
+            {
+                Some(row) => row.version = version,
+                None => next_snapshot.applied.push(AppliedRow {
+                    device_id: device_id.to_string(),
+                    version,
+                }),
+            }
+            next_snapshot
+                .applied
+                .sort_by(|left, right| left.device_id.cmp(&right.device_id));
+            if let Err(error) = self.persist_snapshot(&next_snapshot) {
+                tracing::warn!(%error, device_id, "applied-version report not persisted");
+                inner
+                    .applied_by_device
+                    .entry(device_id.to_string())
+                    .or_default()
+                    .ts = now;
+                return;
+            }
+        }
+
         let report = inner
             .applied_by_device
             .entry(device_id.to_string())
             .or_default();
-        report.ts = Self::now_ms();
-        let changed = version > report.version;
+        report.ts = now;
         if changed {
             report.version = version;
-            self.persist_locked(&inner);
         }
     }
 
