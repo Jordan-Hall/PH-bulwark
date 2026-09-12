@@ -19,6 +19,7 @@ pub mod persist;
 pub mod relay;
 pub mod reset_mailer;
 pub mod review_security;
+pub(crate) mod remote_vpn_health;
 pub mod safety_cases;
 pub mod service;
 pub mod staff;
