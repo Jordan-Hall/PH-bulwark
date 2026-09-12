@@ -306,7 +306,7 @@ class BulwarkVpnService : VpnService() {
         private const val STATUS_CHANNEL = "bulwark_status"
         private const val NOTIF_ID = 1001
         private const val STATUS_NOTIF_ID = 1002
-        private const val CONFIG_POLL_MS = 60_000L
+        private const val CONFIG_POLL_MS = 10_000L
 
         @Volatile var running = false
             private set
