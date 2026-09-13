@@ -5,6 +5,9 @@ import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Rect
 import android.graphics.RectF
 import android.os.Process
 import android.util.Log
@@ -69,8 +72,8 @@ class FaceDetector private constructor(
         val input = preprocess(bitmap)
         OnnxTensor.createTensor(ORT, FloatBuffer.wrap(input), INPUT_SHAPE).use { tensor ->
             session.run(mapOf(inputName to tensor)).use { out ->
-                val scores = out.get(scoresName).get().value as Array<*>      // [1][4420][2]
-                val boxes = out.get(boxesName).get().value as Array<*>        // [1][4420][4]
+                val scores = out.get(scoresName).get().value as Array<*>
+                val boxes = out.get(boxesName).get().value as Array<*>
                 postprocess(scores[0] as Array<*>, boxes[0] as Array<*>)
             }
         }
@@ -94,6 +97,17 @@ class FaceDetector private constructor(
         private const val ASSET_PATH = "model/face_detector.onnx"
         private val INPUT_SHAPE = longArrayOf(1, 3, IN_H.toLong(), IN_W.toLong())
         private val ORT: OrtEnvironment get() = OrtEnvironment.getEnvironment()
+
+        private class Scratch {
+            val scaled = Bitmap.createBitmap(IN_W, IN_H, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(scaled)
+            val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
+            val destination = Rect(0, 0, IN_W, IN_H)
+            val pixels = IntArray(IN_W * IN_H)
+            val input = FloatArray(3 * IN_W * IN_H)
+        }
+
+        private val scratch = ThreadLocal.withInitial { Scratch() }
 
         @Volatile
         private var cached: FaceDetector? = null
@@ -123,11 +137,11 @@ class FaceDetector private constructor(
                 if (Process.is64Bit()) booleanArrayOf(true, false) else booleanArrayOf(false)
             for (useNnapi in providers) {
                 val det = runCatching { build(model, useNnapi) }.getOrNull() ?: continue
-                val warm = runCatching {
-                    det.detect(Bitmap.createBitmap(IN_W, IN_H, Bitmap.Config.ARGB_8888))
-                }
+                val warmBitmap = Bitmap.createBitmap(IN_W, IN_H, Bitmap.Config.ARGB_8888)
+                val warm = runCatching { det.detect(warmBitmap) }
+                warmBitmap.recycle()
                 if (warm.isSuccess) {
-                    Log.i(TAG, "face detector ready (engine=${det.engine})") // content-free
+                    Log.i(TAG, "face detector ready (engine=${det.engine})")
                     return det
                 }
                 runCatching { det.session.close() }
@@ -137,16 +151,23 @@ class FaceDetector private constructor(
         }
 
         private fun build(model: File, nnapi: Boolean): FaceDetector {
-            val opts = OrtSession.SessionOptions()
-            if (nnapi) opts.addNnapi()
+            val opts = OrtSession.SessionOptions().apply {
+                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+                setMemoryPatternOptimization(true)
+                if (nnapi) {
+                    addNnapi()
+                } else {
+                    setIntraOpNumThreads(
+                        Runtime.getRuntime().availableProcessors().coerceAtLeast(1).coerceAtMost(2),
+                    )
+                    setInterOpNumThreads(1)
+                }
+            }
             val session = ORT.createSession(model.absolutePath, opts)
             val inputName = session.inputNames.first()
-            // The export names the outputs "scores"/"boxes"; resolve defensively
-            // by shape (last dim 2 = scores, 4 = boxes) so a re-export can't break us.
             val names = session.outputNames.toList()
             val scores = names.firstOrNull { it.equals("scores", true) } ?: names.first()
-            val boxes = names.firstOrNull { it.equals("boxes", true) }
-                ?: names.last()
+            val boxes = names.firstOrNull { it.equals("boxes", true) } ?: names.last()
             return FaceDetector(session, inputName, scores, boxes, if (nnapi) "nnapi" else "cpu")
         }
 
@@ -175,19 +196,17 @@ class FaceDetector private constructor(
 
         /** Resize to 320x240, RGB, NCHW, normalised (px - 127) / 128. */
         private fun preprocess(bitmap: Bitmap): FloatArray {
-            val scaled = Bitmap.createScaledBitmap(bitmap, IN_W, IN_H, true)
-            val px = IntArray(IN_W * IN_H)
-            scaled.getPixels(px, 0, IN_W, 0, 0, IN_W, IN_H)
-            if (scaled !== bitmap) scaled.recycle()
+            val work = scratch.get()
+            work.canvas.drawBitmap(bitmap, null, work.destination, work.paint)
+            work.scaled.getPixels(work.pixels, 0, IN_W, 0, 0, IN_W, IN_H)
             val plane = IN_W * IN_H
-            val data = FloatArray(3 * plane)
             for (i in 0 until plane) {
-                val c = px[i]
-                data[i] = ((c shr 16 and 0xFF) - MEAN) / STD          // R
-                data[plane + i] = ((c shr 8 and 0xFF) - MEAN) / STD   // G
-                data[2 * plane + i] = ((c and 0xFF) - MEAN) / STD     // B
+                val c = work.pixels[i]
+                work.input[i] = ((c shr 16 and 0xFF) - MEAN) / STD
+                work.input[plane + i] = ((c shr 8 and 0xFF) - MEAN) / STD
+                work.input[2 * plane + i] = ((c and 0xFF) - MEAN) / STD
             }
-            return data
+            return work.input
         }
 
         /**

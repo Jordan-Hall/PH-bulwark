@@ -10,6 +10,11 @@ bulwark-core = { path = "../bulwark-core" }
 bulwark-cluster = { path = "../bulwark-cluster" }
 bulwark-text = { path = "../bulwark-text" }
 bulwark-alert = { path = "../bulwark-alert" }
+# Shared interception + flow classifier power Remote VPN on Linux. The region
+# runs the same TLS inspection / media gating stack as Local VPN; devices only
+# carry the WireGuard transport in remote mode.
+bulwark-net = { path = "../bulwark-net" }
+bulwark-flow = { path = "../bulwark-flow" }
 # bulwark-policy is pure-Rust (no rusqlite/SQLite) — it carries the per-device
 # approve-allowlist + tamper-evident audit chain the Review service applies.
 bulwark-policy = { path = "../bulwark-policy" }
@@ -37,14 +42,14 @@ thiserror.workspace = true
 async-trait.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
+bytes.workspace = true
 # Password hashing for parent accounts. ring (PBKDF2-HMAC-SHA256) is the LEGACY
 # path, kept for transparent on-login migration of existing accounts; new/rotated
 # passwords use Argon2id. ring is already in the build graph (tonic tls-ring).
 ring.workspace = true
 # Argon2id (memory-hard, OWASP-recommended) + the PHC `$argon2id$...` string
-# format. Pure Rust (MIT/Apache-2.0) — no native dep, no rusqlite/SAC surface,
-# builds on Linux/CI and the Windows host. `data-encoding` base32-encodes the
-# one-time self-service recovery codes (already a transitive dep; MIT).
+# format. Pure Rust (MIT/Apache-2.0), no native dep. `data-encoding` is also used
+# by Remote VPN WireGuard/session material.
 argon2.workspace = true
 password-hash.workspace = true
 data-encoding.workspace = true
@@ -52,8 +57,7 @@ data-encoding.workspace = true
 # snapshots via the `persist` module. NO rusqlite (won't build on this host).
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-# URL parsing for the SSRF guard on registered UnifiedPush endpoints (the server
-# POSTs to these on every alert). Pure-Rust, MIT/Apache-2.0; already in the graph.
+# URL parsing for the SSRF guard on registered UnifiedPush endpoints.
 url = "2"
 
 [features]
@@ -69,21 +73,12 @@ whisper = ["dep:bulwark-audio", "bulwark-audio/whisper"]
 # Enable real on-worker VIDEO decode + frame/audio scoring + remediation via the
 # ffmpeg-sidecar demuxer. Needs the ffmpeg binary at runtime (provisioned at deploy).
 ffmpeg = ["bulwark-video/ffmpeg"]
-# Enable the self-hosted UnifiedPush fan-out sink (forwards to bulwark-alert's
-# push feature; FOSS, no Google/Apple). OFF by default so the default server
-# build + host CI stay byte-identical.
+# Enable the self-hosted UnifiedPush fan-out sink.
 push = ["bulwark-alert/push"]
 
 [dev-dependencies]
-# In-process end-to-end guardian approve/deny test (tests/e2e_review.rs):
-# spin the AlertRelay + Review tonic services on a loopback OS-assigned port
-# (plaintext — no TLS), drive them with the generated gRPC clients, and assert
-# the fan-out + decision loop. NOTE: deliberately no bulwark-store/rusqlite — it
-# does not build on this host and is not needed for the relay path.
 bulwark-proto = { path = "../bulwark-proto" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
 tonic = { version = "0.14", features = ["transport"] }
 tokio-stream = { version = "0.1", features = ["net"] }
-# The push e2e test (cfg(feature="push")) builds a mock PushTransport over a
-# serde_json::Value payload; dev-only, so the default build is unaffected.
 serde_json = { workspace = true }

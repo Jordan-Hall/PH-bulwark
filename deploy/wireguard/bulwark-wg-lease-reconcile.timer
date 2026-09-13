@@ -1,0 +1,11 @@
+[Unit]
+Description=Reconcile PH Bulwark Remote VPN authentication leases
+
+[Timer]
+OnBootSec=10s
+OnUnitActiveSec=15s
+AccuracySec=2s
+Unit=bulwark-wg-lease-reconcile.service
+
+[Install]
+WantedBy=timers.target

@@ -1,54 +1,47 @@
-# Build the Bulwark CHILD Android APK (VpnService filter + enrollment).
+# Build every installable PH Bulwark Android APK in CI.
 #
-# The dev host has no full Android toolchain, so APKs build here on a Linux
-# runner. Flow: build the Rust JNI lib (libbulwark_client.so) for both ABIs with
-# cargo-ndk into the app's jniLibs, then assemble the debug APK with Gradle and
-# upload it as an artifact.
+# Shipping Android applications:
+#   child   -> co.predatorhunters.bulwark          (Gradle :app + Rust JNI)
+#   camera  -> co.predatorhunters.bulwark.camera   (Gradle :camera)
+#   manager -> co.predatorhunters.bulwark.manager  (Dioxus apps/parent)
 #
-# NOTE: the parent/"adult" app is Dioxus-mobile (experimental) and is a
-# documented follow-up — this workflow focuses on the child VpnService APK.
+# CI intentionally emits DEBUG APKs here: Android/Gradle signs debug builds
+# automatically, so every artifact can be sideloaded directly without repository
+# signing secrets. The release workflow remains responsible for production
+# release signing. A final bundle artifact contains all three stable filenames.
 name: android
 
 on:
   push:
-    # Branch pushes only: GitHub skips `paths` filters on tag pushes, so without
-    # this a `v*` tag would build the APK twice (standalone + the release.yml
-    # workflow_call). The release path comes solely through workflow_call.
     branches: ["**"]
     paths:
       - "platform/android/**"
+      - "apps/parent/**"
       - "crates/**"
-      # the root crates resolve workspace dep versions/features from the root
-      # manifest+lockfile, so a change there can break the JNI/APK build too.
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/android.yml"
   pull_request:
     paths:
       - "platform/android/**"
-      # bulwark-android depends on the root crates via ../../../../crates/...,
-      # so a PR that only touches a crate (bulwark-text/policy/core/proto) — or the
-      # root manifest/lockfile those crates inherit workspace deps from — can
-      # break the JNI/APK build; mirror the push filter to catch it pre-merge.
+      - "apps/parent/**"
       - "crates/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/android.yml"
   workflow_dispatch: {}
-  # Reusable: release.yml calls this workflow on version tags so the release
-  # pipeline ships the SAME proven child-APK build instead of duplicating it.
   workflow_call: {}
 
-# Harden cargo against the recurring transient crates.io download flake on the
-# runner ("curl failed [16] Error in the HTTP2 framing layer" while installing
-# cargo-ndk / fetching deps): retry downloads, and force HTTP/1.1 which avoids the
-# HTTP/2 multiplexing framing bug. Applies to every cargo invocation in the job.
 env:
   CARGO_NET_RETRY: "10"
   CARGO_HTTP_MULTIPLEXING: "false"
+  ANDROID_NDK_VERSION: "26.3.11579264"
+  ANDROID_PLATFORM: "android-34"
+  ANDROID_BUILD_TOOLS: "34.0.0"
 
 jobs:
   child-apk:
+    name: child + camera installable APKs
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -65,14 +58,11 @@ jobs:
       - name: Set up Android SDK + NDK
         uses: android-actions/setup-android@v4
 
-      - name: Install NDK + export its path
+      - name: Install Android toolchain
         run: |
-          sdkmanager "ndk;26.3.11579264" "platforms;android-34" "build-tools;34.0.0"
-          # setup-android sets ANDROID_SDK_ROOT but NOT ANDROID_NDK_ROOT, so
-          # cargo-ndk would see an empty NDK path. Pin the concrete NDK dir for
-          # all subsequent steps.
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITHUB_ENV"
+          sdkmanager "ndk;$ANDROID_NDK_VERSION" "platforms;$ANDROID_PLATFORM" "build-tools;$ANDROID_BUILD_TOOLS"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
 
       - name: Set up Rust + Android targets
         uses: dtolnay/rust-toolchain@stable
@@ -85,13 +75,14 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.cargo/bin/cargo-ndk
             platform/android/rust/bulwark-android/target
           key: ${{ runner.os }}-cargo-ndk-${{ hashFiles('platform/android/rust/bulwark-android/Cargo.lock') }}
 
       - name: Install cargo-ndk
-        run: cargo install cargo-ndk --locked
+        run: command -v cargo-ndk >/dev/null || cargo install cargo-ndk --locked
 
-      - name: Build JNI lib (arm64-v8a + armeabi-v7a) into jniLibs
+      - name: Build child JNI library
         working-directory: platform/android/rust/bulwark-android
         run: |
           cargo ndk \
@@ -103,26 +94,155 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v5
 
-      - name: Assemble debug APK
+      - name: Assemble child + camera debug APKs
         working-directory: platform/android
-        # setup-gradle provides `gradle`; no committed gradle-wrapper.jar needed.
-        run: gradle assembleDebug --no-daemon --stacktrace
+        run: gradle :app:assembleDebug :camera:assembleDebug --no-daemon --stacktrace
+
+      - name: Stage and verify installable APKs
+        working-directory: platform/android
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/ph-bulwark-child-debug.apk
+          cp camera/build/outputs/apk/debug/camera-debug.apk dist/ph-bulwark-camera-debug.apk
+          APKSIGNER="$ANDROID_SDK_ROOT/build-tools/$ANDROID_BUILD_TOOLS/apksigner"
+          "$APKSIGNER" verify --verbose dist/ph-bulwark-child-debug.apk
+          "$APKSIGNER" verify --verbose dist/ph-bulwark-camera-debug.apk
 
       - name: Upload child debug APK
         uses: actions/upload-artifact@v6
         with:
           name: bulwark-child-debug-apk
-          path: platform/android/app/build/outputs/apk/**/*-debug.apk
+          path: platform/android/dist/ph-bulwark-child-debug.apk
           if-no-files-found: error
 
       - name: Upload camera debug APK
-        # `gradle assembleDebug` (above) also assembles the :camera module (the
-        # standalone child-safety camera). Ship its APK as its own artifact so
-        # sideloading testers don't have to build it locally (beta-readiness gap).
-        # The pinned NSFW model is copied into the APK by the module's build
-        # (copyNsfwModel), so this artifact is the full, functional camera.
         uses: actions/upload-artifact@v6
         with:
           name: bulwark-camera-debug-apk
-          path: platform/android/camera/build/outputs/apk/**/*-debug.apk
+          path: platform/android/dist/ph-bulwark-camera-debug.apk
+          if-no-files-found: error
+
+  manager-apk:
+    name: parent Manager installable APK
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK + NDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android toolchain
+        run: |
+          sdkmanager "ndk;$ANDROID_NDK_VERSION" "platforms;$ANDROID_PLATFORM" "build-tools;$ANDROID_BUILD_TOOLS"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: Set up Rust + arm64 Android target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache Manager Android build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/dx
+            apps/parent/target
+          key: ${{ runner.os }}-cargo-manager-android-v1-${{ hashFiles('apps/parent/Cargo.toml', 'apps/parent/Dioxus.toml') }}
+
+      - name: Install Dioxus CLI
+        run: command -v dx >/dev/null || cargo install dioxus-cli --version 0.8.0-alpha.0 --locked
+
+      - name: Export NDK cross-compiler environment
+        run: |
+          TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "CC_aarch64_linux_android=$TOOLCHAIN/aarch64-linux-android34-clang" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$TOOLCHAIN/llvm-ar" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TOOLCHAIN/aarch64-linux-android34-clang" >> "$GITHUB_ENV"
+
+      - name: Build Manager debug APK for physical Android phones
+        working-directory: apps/parent
+        run: dx build --platform android --target aarch64-linux-android
+
+      - name: Apply Manager launcher resources and repackage
+        working-directory: apps/parent
+        run: |
+          set -euo pipefail
+          GEN="target/dx/bulwark-parent/debug/android/app"
+          RES="$GEN/app/src/main/res"
+          test -d "$RES"
+          cp android/res/drawable/ic_launcher_background.xml "$RES/drawable/ic_launcher_background.xml"
+          mkdir -p "$RES/drawable-v24"
+          cp android/res/drawable-v24/ic_launcher_foreground.xml "$RES/drawable-v24/ic_launcher_foreground.xml"
+          chmod +x "$GEN/gradlew"
+          (cd "$GEN" && ./gradlew assembleDebug --no-daemon --stacktrace)
+
+      - name: Stage and verify Manager installable APK
+        working-directory: apps/parent
+        run: |
+          set -euo pipefail
+          RAW="target/dx/bulwark-parent/debug/android/app/app/build/outputs/apk/debug/app-debug.apk"
+          test -f "$RAW"
+          mkdir -p dist
+          cp "$RAW" dist/ph-bulwark-manager-debug.apk
+          "$ANDROID_SDK_ROOT/build-tools/$ANDROID_BUILD_TOOLS/apksigner" verify --verbose dist/ph-bulwark-manager-debug.apk
+
+      - name: Upload Manager debug APK
+        uses: actions/upload-artifact@v6
+        with:
+          name: bulwark-manager-debug-apk
+          path: apps/parent/dist/ph-bulwark-manager-debug.apk
+          if-no-files-found: error
+
+  android-apk-bundle:
+    name: all installable Android APKs
+    needs: [child-apk, manager-apk]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download child APK
+        uses: actions/download-artifact@v5
+        with:
+          name: bulwark-child-debug-apk
+          path: dist
+
+      - name: Download camera APK
+        uses: actions/download-artifact@v5
+        with:
+          name: bulwark-camera-debug-apk
+          path: dist
+
+      - name: Download Manager APK
+        uses: actions/download-artifact@v5
+        with:
+          name: bulwark-manager-debug-apk
+          path: dist
+
+      - name: Create checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          test -f ph-bulwark-child-debug.apk
+          test -f ph-bulwark-camera-debug.apk
+          test -f ph-bulwark-manager-debug.apk
+          sha256sum *.apk > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload complete Android install bundle
+        uses: actions/upload-artifact@v6
+        with:
+          name: ph-bulwark-android-installable-apks
+          path: dist/*
           if-no-files-found: error

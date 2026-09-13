@@ -1,0 +1,97 @@
+name: remote-vpn-deploy
+
+on:
+  workflow_run:
+    workflows: [deploy]
+    types: [completed]
+  workflow_dispatch: {}
+
+concurrency:
+  group: remote-vpn-production
+  cancel-in-progress: true
+
+jobs:
+  activate:
+    if: >-
+      ${{ vars.BULWARK_WG_ENABLED == 'true' &&
+          (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success') }}
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Install and activate authenticated Remote VPN
+        env:
+          IID: ${{ vars.AWS_INSTANCE_ID }}
+          BULWARK_PORT: ${{ vars.BULWARK_PORT }}
+          WG_PORT: ${{ vars.BULWARK_WG_PORT }}
+          WG_HOST: ${{ vars.BULWARK_WG_HOST }}
+        run: |
+          set -euo pipefail
+          PORT="${BULWARK_PORT:-8443}"
+          VPN_PORT="${WG_PORT:-51820}"
+          VPN_HOST="${WG_HOST:-vpn.predatorhunters.co.uk}"
+          [[ "$PORT" =~ ^[0-9]{1,5}$ ]] || { echo "::error::BULWARK_PORT must be numeric"; exit 1; }
+          [[ "$VPN_PORT" =~ ^[0-9]{1,5}$ ]] || { echo "::error::BULWARK_WG_PORT must be numeric"; exit 1; }
+          [[ "$VPN_HOST" =~ ^[A-Za-z0-9.-]+$ ]] || { echo "::error::BULWARK_WG_HOST is invalid"; exit 1; }
+
+          ROOT=deploy/wireguard
+          PEERS_B64="$(base64 -w0 "$ROOT/wg-peers.sh")"
+          FILTER_B64="$(base64 -w0 "$ROOT/wg-filter.sh")"
+          LEASE_B64="$(base64 -w0 "$ROOT/wg-lease-reconcile.sh")"
+          ACTIVATE_B64="$(base64 -w0 "$ROOT/activate-remote-vpn-container.sh")"
+          INSTALL_B64="$(base64 -w0 "$ROOT/install-remote-vpn-auth.sh")"
+          SERVICE_B64="$(base64 -w0 "$ROOT/bulwark-wg-lease-reconcile.service")"
+          TIMER_B64="$(base64 -w0 "$ROOT/bulwark-wg-lease-reconcile.timer")"
+
+          cat > params-remote-vpn.json <<JSON
+          {"commands":[
+            "set -eu",
+            "export DEBIAN_FRONTEND=noninteractive",
+            "command -v wg >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v iptables >/dev/null 2>&1 || { apt-get update -y -q && apt-get install -y -q wireguard jq iptables iproute2; }",
+            "mkdir -p /opt/bulwark-remote-vpn && chmod 700 /opt/bulwark-remote-vpn",
+            "printf '%s' '${PEERS_B64}' | base64 -d > /opt/bulwark-remote-vpn/wg-peers.sh",
+            "printf '%s' '${FILTER_B64}' | base64 -d > /opt/bulwark-remote-vpn/wg-filter.sh",
+            "printf '%s' '${LEASE_B64}' | base64 -d > /opt/bulwark-remote-vpn/wg-lease-reconcile.sh",
+            "printf '%s' '${ACTIVATE_B64}' | base64 -d > /opt/bulwark-remote-vpn/activate-remote-vpn-container.sh",
+            "printf '%s' '${INSTALL_B64}' | base64 -d > /opt/bulwark-remote-vpn/install-remote-vpn-auth.sh",
+            "printf '%s' '${SERVICE_B64}' | base64 -d > /opt/bulwark-remote-vpn/bulwark-wg-lease-reconcile.service",
+            "printf '%s' '${TIMER_B64}' | base64 -d > /opt/bulwark-remote-vpn/bulwark-wg-lease-reconcile.timer",
+            "chmod 700 /opt/bulwark-remote-vpn/*.sh",
+            "cd /opt/bulwark-remote-vpn && ./install-remote-vpn-auth.sh",
+            "BULWARK_PORT=${PORT} BULWARK_WG_PORT=${VPN_PORT} BULWARK_WG_HOST=${VPN_HOST} /usr/local/sbin/bulwark-activate-remote-vpn",
+            "/usr/local/sbin/bulwark-wg-filter status",
+            "/usr/local/sbin/bulwark-wg-peers list-peers || true"
+          ]}
+          JSON
+
+          CID=$(aws ssm send-command \
+            --instance-ids "$IID" \
+            --document-name AWS-RunShellScript \
+            --comment "PH Bulwark authenticated Remote VPN activation" \
+            --parameters file://params-remote-vpn.json \
+            --query Command.CommandId --output text)
+          echo "SSM command: $CID"
+          for _ in $(seq 1 60); do
+            ST=$(aws ssm get-command-invocation --command-id "$CID" --instance-id "$IID" --query Status --output text 2>/dev/null || echo Pending)
+            echo "status: $ST"
+            case "$ST" in
+              Success) break ;;
+              Failed|Cancelled|TimedOut)
+                aws ssm get-command-invocation --command-id "$CID" --instance-id "$IID" --query StandardErrorContent --output text
+                exit 1 ;;
+            esac
+            sleep 10
+          done
+          [ "$ST" = "Success" ] || { echo "::error::Remote VPN activation timed out"; exit 1; }
+          aws ssm get-command-invocation --command-id "$CID" --instance-id "$IID" --query StandardOutputContent --output text

@@ -1,13 +1,4 @@
-//! bulwark-server — the clusterable analysis backend.
-//!
-//! One binary, three roles (`lb` | `worker` | `all-in-one`, see PLAN §1). It
-//! hosts the gRPC services from `bulwark-proto` over **mTLS** and dispatches
-//! `AnalysisRequest`s by `media_kind` to the registered [`Analyzer`]s:
-//!   * TEXT  → `bulwark-text` (deterministic grooming rules; classifier optional)
-//!   * IMAGE/AUDIO/VIDEO → `bulwark-vision`/`-audio`/`-video` (registered when built)
-//!
-//! `all-in-one` additionally mounts `ClusterControl` (single-node) and
-//! `AlertRelay`. No AI beyond the small dedicated analyzers. `#![forbid(unsafe_code)]`.
+//! bulwark-server — authenticated analysis + family-safety backend.
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
@@ -16,15 +7,19 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bulwark_core::{Analyzer, Result as CoreResult};
 use bulwark_proto::v1::{
-    AnalysisRequest, DeviceProfile, ExecutionProvider, MediaKind, OffloadPolicy, Verdict,
+    analysis_request::Media, Action, AnalysisRequest, Category, DeviceProfile, ExecutionProvider,
+    MediaKind, OffloadPolicy, Severity, Verdict,
 };
 
 pub mod accounts;
+pub mod auth;
 pub mod child_control;
 pub mod family_safety;
 pub mod persist;
 pub mod relay;
+pub(crate) mod remote_vpn_health;
 pub mod reset_mailer;
+pub mod review_security;
 pub mod safety_cases;
 pub mod service;
 pub mod staff;
@@ -32,23 +27,21 @@ pub mod tamper;
 pub mod wg_provision;
 
 pub use accounts::{AccountStore, AccountsService};
+pub use auth::{authenticate_device, authenticate_device_metadata, DevicePrincipal};
 pub use child_control::{ChildConfigStore, ChildControlService};
 pub use family_safety::{FamilySafetyService, SafetyBroadcastStore};
 pub use relay::{AlertHub, ReviewService};
 pub use reset_mailer::ResetMailer;
+pub use review_security::{ReviewLedger, SecureReviewService};
 pub use safety_cases::SafetyCaseStore;
 pub use staff::{StaffAdminService, StaffStore};
 pub use tamper::TamperService;
 pub use wg_provision::{WgPeerStore, WgProvisionService};
 
-/// Which role this process plays. Chosen by `--role` / `BULWARK_ROLE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerRole {
-    /// Load balancer / gateway: terminates client mTLS, routes to workers.
     Lb,
-    /// Analysis worker: runs the models, claims from the work queue.
     Worker,
-    /// Home single-node: everything in one process.
     AllInOne,
 }
 
@@ -66,31 +59,14 @@ impl ServerRole {
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub role: ServerRole,
-    pub bind: String, // host:port
-    /// Transport security material (PEM). cert+key → server-authenticated TLS;
-    /// adding `client_ca_pem` also requires client certs (mTLS). None → plaintext
-    /// (dev only — the binary refuses accounts mode without TLS material).
+    pub bind: String,
     pub tls_cert_pem: Option<Vec<u8>>,
     pub tls_key_pem: Option<Vec<u8>>,
     pub client_ca_pem: Option<Vec<u8>>,
-    /// Enable parent ACCOUNTS mode: mount the Accounts service and scope
-    /// Review (pending stream + decisions) to a guardian session token.
-    ///
-    /// Default `false` = legacy device-scoped relay: a client connects with an
-    /// empty token and receives/decides alerts for its device (single-home / dev).
-    /// Set `true` (productised multi-tenant) only once guardian sessions exist —
-    /// otherwise the token check rejects every default empty-token client. See the
-    /// round-3/round-7 review threads on PR #1.
     pub accounts_enabled: bool,
-    /// When set (`BULWARK_STATE_DIR`), guardian accounts are persisted as JSON under
-    /// this directory and reloaded on startup (the `persist` module). `None`
-    /// (default) = pure in-memory, so dev/tests are unaffected.
     pub state_dir: Option<std::path::PathBuf>,
-    /// Mount the internal `StaffAdmin` service (PH staff operators console).
-    /// OFF by default — a guardian-facing node exposes no staff surface unless
-    /// explicitly enabled (`BULWARK_STAFF=1`). Staff accounts live in a
-    /// SEPARATE store + token namespace from guardian accounts.
     pub staff_enabled: bool,
+    pub production_mode: bool,
 }
 
 impl Default for ServerConfig {
@@ -104,11 +80,11 @@ impl Default for ServerConfig {
             accounts_enabled: false,
             state_dir: None,
             staff_enabled: false,
+            production_mode: false,
         }
     }
 }
 
-/// Dispatches by `MediaKind` to the registered analyzer.
 #[derive(Default, Clone)]
 pub struct AnalyzerRegistry {
     by_kind: HashMap<i32, Arc<dyn Analyzer>>,
@@ -120,8 +96,8 @@ impl AnalyzerRegistry {
     }
 
     pub fn register(&mut self, analyzer: Arc<dyn Analyzer>) -> &mut Self {
-        for k in analyzer.handles() {
-            self.by_kind.insert(*k as i32, analyzer.clone());
+        for kind in analyzer.handles() {
+            self.by_kind.insert(*kind as i32, analyzer.clone());
         }
         self
     }
@@ -130,75 +106,143 @@ impl AnalyzerRegistry {
         self.by_kind.get(&kind).cloned()
     }
 
-    /// All-in-one default wiring: text analysis is always available.
     pub fn with_text() -> Self {
-        let mut r = Self::new();
-        r.register(Arc::new(TextAnalyzerAdapter::new()));
-        r
+        let mut registry = Self::new();
+        registry.register(Arc::new(TextAnalyzerAdapter::new()));
+        registry
     }
 
-    /// Default wiring plus buffered-video dispatch (`MediaKind::VIDEO` →
-    /// [`bulwark_video::VideoAnalyzer`]). Without bulwark-video's `ffmpeg` feature the
-    /// analyzer fails open, so registering it is safe; it makes the worker dispatch
-    /// VIDEO units instead of returning "no analyzer".
-    ///
-    /// `store`: where blocked/borderline NON-CSAM clips are retained so a verdict
-    /// can carry `local_segment_uri`. Pass `Some` ONLY when the reviewer (guardian
-    /// app) can read that location — i.e. an **all-in-one** node where the parent
-    /// app resolves `blob://` from the same disk. For a distributed worker the
-    /// parent is remote and a local `blob://` is unreachable, so pass `None`
-    /// (segment retention then stays the device-side client's job; remote video
-    /// review needs a clip-fetch API — tracked as a follow-up).
     pub fn with_text_and_video(store: Option<bulwark_video::SegmentStore>) -> Self {
-        let mut r = Self::with_text();
-        // Decode + score real video frames/audio with the ffmpeg demuxer when built
-        // with `ffmpeg` (the binary is provisioned at deploy); otherwise the
-        // NullDemuxer leaves video undecoded → policy fail-CLOSES.
+        let mut registry = Self::with_text();
+
         #[cfg(feature = "ffmpeg")]
-        let mut video = bulwark_video::VideoAnalyzer::with_demuxer(
+        let video = bulwark_video::VideoAnalyzer::with_demuxer(
             bulwark_video::VideoConfig::default(),
             bulwark_video::ffmpeg::FfmpegDemuxer::new(),
         );
         #[cfg(not(feature = "ffmpeg"))]
-        let mut video = bulwark_video::VideoAnalyzer::new();
-        if let Some(store) = store {
-            video = video.with_segment_store(store);
-        }
-        // Transcribe the video's OWN audio track with whisper (same model as the
-        // standalone audio analyzer). Needs `ffmpeg` to extract the windows; without a
-        // model the video audio stays fail-CLOSED.
+        let video = bulwark_video::VideoAnalyzer::new();
+
         #[cfg(feature = "whisper")]
-        if let Some(stt) = bulwark_audio::whisper::WhisperTranscriber::from_env() {
-            video = video.with_audio_transcriber(Box::new(stt));
+        let video = match bulwark_audio::whisper::WhisperTranscriber::from_env() {
+            Some(stt) => {
+                video.with_audio_transcriber(Box::new(bulwark_audio::FfmpegTranscriber::new(stt)))
+            }
+            None => video,
+        };
+
+        let mut video: Arc<dyn Analyzer> = Arc::new(video);
+        if let Some(store) = store {
+            video = Arc::new(RetainingVideoAnalyzer {
+                inner: video,
+                store,
+            });
         }
-        r.register(Arc::new(video));
-        // Real on-worker image NSFW scoring when built with `onnx` + a pinned model
-        // (BULWARK_NSFW_MODEL). Without a model the vision analyzer emits Unspecified,
-        // which policy fail-CLOSES — so IMAGE is never silently allowed. Without the
-        // feature, IMAGE stays unregistered → also fail-closed via `inconclusive`.
+        registry.register(Arc::new(BlockingAnalyzer::new(video)));
+
         #[cfg(feature = "onnx")]
-        r.register(Arc::new(bulwark_vision::VisionAnalyzer::from_env(
-            bulwark_vision::VisionConfig::default(),
-        )));
-        // Real on-worker AUDIO scoring when built with `whisper` + a model
-        // (BULWARK_WHISPER_MODEL): transcribe speech → bulwark-text. With no model the
-        // analyzer emits Unspecified → policy fail-CLOSES; without the feature, AUDIO
-        // stays unregistered → also fail-closed via `inconclusive`.
+        {
+            let vision: Arc<dyn Analyzer> = Arc::new(bulwark_vision::VisionAnalyzer::from_env(
+                bulwark_vision::VisionConfig::default(),
+            ));
+            registry.register(Arc::new(BlockingAnalyzer::new(vision)));
+        }
+
         #[cfg(feature = "whisper")]
         {
             use bulwark_audio::whisper::WhisperTranscriber;
-            use bulwark_audio::AudioAnalyzer;
+            use bulwark_audio::{AudioAnalyzer, FfmpegTranscriber};
             let audio: Arc<dyn Analyzer> = match WhisperTranscriber::from_env() {
-                Some(stt) => Arc::new(AudioAnalyzer::with_transcriber(stt)),
+                Some(stt) => Arc::new(AudioAnalyzer::with_transcriber(FfmpegTranscriber::new(stt))),
                 None => Arc::new(AudioAnalyzer::new()),
             };
-            r.register(audio);
+            registry.register(Arc::new(BlockingAnalyzer::new(audio)));
         }
-        r
+
+        registry
     }
 }
 
-/// Adapts `bulwark-text` to the server [`Analyzer`] trait. TEXT only.
+struct BlockingAnalyzer {
+    inner: Arc<dyn Analyzer>,
+    kinds: Vec<MediaKind>,
+}
+
+impl BlockingAnalyzer {
+    fn new(inner: Arc<dyn Analyzer>) -> Self {
+        Self {
+            kinds: inner.handles().to_vec(),
+            inner,
+        }
+    }
+}
+
+#[async_trait]
+impl Analyzer for BlockingAnalyzer {
+    fn handles(&self) -> &[MediaKind] {
+        &self.kinds
+    }
+
+    async fn analyze(&self, request: AnalysisRequest) -> CoreResult<Verdict> {
+        let analyzer = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| bulwark_core::Error::Other(error.into()))?;
+            runtime.block_on(analyzer.analyze(request))
+        })
+        .await
+        .map_err(|error| {
+            bulwark_core::Error::Other(anyhow::anyhow!("media analyzer worker failed: {error}"))
+        })?
+    }
+}
+
+struct RetainingVideoAnalyzer {
+    inner: Arc<dyn Analyzer>,
+    store: bulwark_video::SegmentStore,
+}
+
+#[async_trait]
+impl Analyzer for RetainingVideoAnalyzer {
+    fn handles(&self) -> &[MediaKind] {
+        const KINDS: [MediaKind; 1] = [MediaKind::Video];
+        &KINDS
+    }
+
+    async fn analyze(&self, req: AnalysisRequest) -> CoreResult<Verdict> {
+        let request_id = req.request_id.clone();
+        let device_id = req.device_id.trim().to_string();
+        let segment = match req.media.as_ref() {
+            Some(Media::InlineMedia(media)) => media.data.clone(),
+            _ => Vec::new(),
+        };
+
+        let mut verdict = self.inner.analyze(req).await?;
+        if !device_id.is_empty() && !segment.is_empty() {
+            let owner = bulwark_video::store::SegmentOwner {
+                device_id,
+                alert_id: request_id,
+                ..Default::default()
+            };
+            match self.store.store_scoped_if_allowed(
+                &owner,
+                verdict.category(),
+                verdict.action(),
+                &segment,
+            ) {
+                Ok(Some(stored)) => verdict.local_segment_uri = stored.uri,
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "review clip retention failed; verdict still enforced")
+                }
+            }
+        }
+        Ok(verdict)
+    }
+}
+
 pub struct TextAnalyzerAdapter {
     inner: bulwark_text::TextAnalyzer,
 }
@@ -226,24 +270,47 @@ impl Analyzer for TextAnalyzerAdapter {
     }
 
     async fn analyze(&self, req: AnalysisRequest) -> CoreResult<Verdict> {
-        let span = req.text_span.clone().unwrap_or_default();
-        // Integration seam: bulwark-text exposes `analyze_span(request_id, &TextSpan, ts)`.
+        let Some(mut span) = req.text_span.clone() else {
+            return Ok(Verdict {
+                request_id: req.request_id,
+                category: Category::Unspecified as i32,
+                action: Action::Block as i32,
+                severity: Severity::Medium as i32,
+                rationale: "text analysis request did not contain a TextSpan".into(),
+                ..Default::default()
+            });
+        };
+        let device = if req.device_id.trim().is_empty() {
+            "__unbound_dev__"
+        } else {
+            req.device_id.trim()
+        };
+        let app = if span.app.trim().is_empty() {
+            "__unknown_app__"
+        } else {
+            span.app.trim()
+        };
+        let conversation = if span.thread_id.trim().is_empty() {
+            &req.request_id
+        } else {
+            span.thread_id.trim()
+        };
+        span.thread_id = format!("{device}\u{1f}{app}\u{1f}{conversation}");
         Ok(self.inner.analyze_span(&req.request_id, &span, req.ts))
     }
 }
 
-/// Simple offload policy heuristic from a device profile. Mobile/low-power and
-/// GPU-less devices offload heavy media; text always stays local.
 pub fn default_offload_policy(profile: &DeviceProfile) -> OffloadPolicy {
     let is_mobile = matches!(profile.platform.as_str(), "android" | "ios");
-    let has_gpu = profile.exec_providers.iter().any(|p| {
-        *p != ExecutionProvider::Cpu as i32 && *p != ExecutionProvider::Unspecified as i32
+    let has_gpu = profile.exec_providers.iter().any(|provider| {
+        *provider != ExecutionProvider::Cpu as i32
+            && *provider != ExecutionProvider::Unspecified as i32
     });
     OffloadPolicy {
-        run_text_local: true, // grooming rules are cheap + explainable
+        run_text_local: true,
         run_image_local: has_gpu && !is_mobile,
         run_audio_local: has_gpu && !is_mobile,
-        run_video_local: false, // heavy: prefer cluster everywhere
+        run_video_local: false,
         max_local_rtt_ms: 120,
         min_battery_pct: 20,
         cluster_queue_backpressure: 256,
@@ -266,7 +333,7 @@ mod tests {
 
     #[test]
     fn offload_policy_mobile_offloads_heavy_keeps_text_local() {
-        let p = DeviceProfile {
+        let profile = DeviceProfile {
             platform: "android".into(),
             exec_providers: vec![
                 ExecutionProvider::Nnapi as i32,
@@ -274,34 +341,30 @@ mod tests {
             ],
             ..Default::default()
         };
-        let pol = default_offload_policy(&p);
-        assert!(pol.run_text_local);
-        assert!(!pol.run_video_local);
-        assert!(!pol.run_image_local, "mobile should offload images");
+        let policy = default_offload_policy(&profile);
+        assert!(policy.run_text_local);
+        assert!(!policy.run_video_local);
+        assert!(!policy.run_image_local);
     }
 
     #[tokio::test]
     async fn registry_dispatches_text() {
-        let reg = AnalyzerRegistry::with_text();
-        assert!(reg.analyzer_for(MediaKind::Text as i32).is_some());
-        assert!(reg.analyzer_for(MediaKind::Video as i32).is_none());
+        let registry = AnalyzerRegistry::with_text();
+        assert!(registry.analyzer_for(MediaKind::Text as i32).is_some());
+        assert!(registry.analyzer_for(MediaKind::Video as i32).is_none());
     }
 
     #[test]
-    fn accounts_mode_is_off_by_default() {
-        // Safety default: a local/dev server must NOT require a guardian session
-        // token, or a default empty-token client connects but never gets alerts
-        // (the round-7 regression). Productised multi-tenant opts in explicitly.
-        assert!(!ServerConfig::default().accounts_enabled);
+    fn production_is_explicit() {
+        let cfg = ServerConfig::default();
+        assert!(!cfg.accounts_enabled);
+        assert!(!cfg.production_mode);
     }
 
     #[tokio::test]
     async fn registry_with_video_dispatches_text_and_video() {
-        let reg = AnalyzerRegistry::with_text_and_video(None);
-        assert!(reg.analyzer_for(MediaKind::Text as i32).is_some());
-        assert!(
-            reg.analyzer_for(MediaKind::Video as i32).is_some(),
-            "video units must dispatch to the video analyzer, not fall through"
-        );
+        let registry = AnalyzerRegistry::with_text_and_video(None);
+        assert!(registry.analyzer_for(MediaKind::Text as i32).is_some());
+        assert!(registry.analyzer_for(MediaKind::Video as i32).is_some());
     }
 }

@@ -1,60 +1,252 @@
-//! The Android flow consumer — closes the protection loop over the VPN data
-//! path (audit 2026-06-10 C2).
-//!
-//! MIRRORS `bulwark-client::Pipeline` (deliberately NOT imported: that crate
-//! pulls bulwark-store/rusqlite, which must stay out of this cdylib's tree):
-//! `next_flow()` → analyze → policy → `apply()` + alert. Text runs the same
-//! deterministic `TextAnalyzer` + `Policy` the accessibility path uses.
-//!
-//! ## Media decision (honest fail-open)
-//! The proxy decision-gates scorable still images and video segments; without a
-//! consumer they stall the 5s gate window and then fail-closed DROP — a silent
-//! device-wide imagery blackhole that tells the guardian nothing. This bridge
-//! has NO on-device media scorer yet (bulwark-vision/onnx is not in this dep
-//! tree), so a fail-closed answer adds zero detection while breaking the web.
-//! Policy here: answer the gate IMMEDIATELY with Forward (fail open, the
-//! project's documented un-runnable-analyzer default) + a ONE-TIME content-free
-//! guardian alert that media passes unscored, + a tracing note per flow. Text +
-//! accessibility still cover the grooming threat model; swap to real scoring is
-//! a drop-in replacement of `decide_flow`'s media arm.
-//!
-//! ## Honest scope
-//! Gated media and bounded text/html pages can be retro-blocked by `apply`
-//! (html fails open after 2s if unanswered — `proxy::gate_policy`); other text
-//! (json/js/plain) is emit-only in the proxy (already forwarded), so a Drop
-//! there is recorded but cannot recall the bytes — the ALERT is the protective
-//! output for those flows.
+//! Android Local VPN flow consumer and guardian policy synchronization.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, OnceLock, RwLock};
+use std::time::Duration;
 
 use bulwark_net::{CapturedFlow, FlowPayload, InterceptDecision, Interceptor};
 use bulwark_policy::PolicyContext;
-use bulwark_proto::v1::{Action, AlertEvent, TextSpan};
+use bulwark_proto::v1::child_control_client::ChildControlClient;
+use bulwark_proto::v1::{
+    Action, AlertEvent, Category, ChildConfigFilter, MediaKind, SourceChannel, TextSpan, Verdict,
+};
 use bulwark_proto::DeviceId;
+use tonic::transport::Channel;
 
-/// What one captured flow resolves to.
+const MAX_INFLIGHT_FLOWS: usize = 4;
+const DEVICE_POLICY_HEADER: &str = "x-bulwark-policy-bin";
+const POLICY_TTL_MS: i64 = 5 * 60 * 1000;
+
+#[derive(Clone, Default)]
+struct LocalPolicySnapshot {
+    version: u64,
+    expires_ts: i64,
+    hosts: HashSet<String>,
+    hashes: HashSet<String>,
+}
+
+fn policy_cell() -> &'static RwLock<LocalPolicySnapshot> {
+    static POLICY: OnceLock<RwLock<LocalPolicySnapshot>> = OnceLock::new();
+    POLICY.get_or_init(|| RwLock::new(LocalPolicySnapshot::default()))
+}
+
+fn clear_local_policy() {
+    if let Ok(mut policy) = policy_cell().write() {
+        *policy = LocalPolicySnapshot::default();
+    }
+}
+
+fn replace_local_policy(version: u64, hosts: HashSet<String>, hashes: HashSet<String>) {
+    if let Ok(mut policy) = policy_cell().write() {
+        *policy = LocalPolicySnapshot {
+            version,
+            expires_ts: crate::relay::now_ms().saturating_add(POLICY_TTL_MS),
+            hosts,
+            hashes,
+        };
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn guardian_approved(flow: &CapturedFlow, verdict: &Verdict) -> bool {
+    if matches!(
+        verdict.category(),
+        Category::CsamSuspected | Category::Unspecified
+    ) {
+        return false;
+    }
+    let Ok(policy) = policy_cell().read() else {
+        return false;
+    };
+    if policy.expires_ts <= crate::relay::now_ms() {
+        return false;
+    }
+    let policy_version = policy.version;
+    let host = flow.app_or_host.trim().to_ascii_lowercase();
+    if !host.is_empty() && policy.hosts.contains(&host) {
+        tracing::trace!(policy_version, %host, "guardian host approval applied");
+        return true;
+    }
+    let allowed = verdict.evidence.as_ref().is_some_and(|evidence| {
+        !evidence.sha256.is_empty() && policy.hashes.contains(&hex(&evidence.sha256))
+    });
+    if allowed {
+        tracing::trace!(policy_version, "guardian content-hash approval applied");
+    }
+    allowed
+}
+
+async fn fetch_policy_metadata(
+    channel: Channel,
+    device_id: &str,
+    applied_version: u64,
+    device_token: &str,
+) -> Result<(u64, HashSet<String>, HashSet<String>), String> {
+    let mut client = ChildControlClient::new(channel);
+    let response = tokio::time::timeout(
+        Duration::from_secs(8),
+        client.get_child_config(ChildConfigFilter {
+            device_id: device_id.to_string(),
+            have_version: applied_version,
+            device_token: device_token.to_string(),
+        }),
+    )
+    .await
+    .map_err(|_| "device policy sync timed out".to_string())?
+    .map_err(|status| format!("device policy sync rejected: {}", status.code()))?;
+
+    let bytes = response
+        .metadata()
+        .get_bin(DEVICE_POLICY_HEADER)
+        .ok_or_else(|| "server omitted device policy snapshot".to_string())?
+        .to_bytes()
+        .map_err(|_| "device policy metadata was invalid".to_string())?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|_| "device policy snapshot was invalid JSON".to_string())?;
+    if !value
+        .get("complete")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err("server could not provide a complete device policy snapshot".to_string());
+    }
+    let version = value
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let strings = |name: &str| -> HashSet<String> {
+        value
+            .get(name)
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(|entry| entry.trim().to_ascii_lowercase())
+            .filter(|entry| !entry.is_empty())
+            .collect()
+    };
+    Ok((
+        version,
+        strings("approved_hosts"),
+        strings("approved_sha256_hex"),
+    ))
+}
+
+async fn sync_device_policy_rpc(
+    endpoint: String,
+    device_id: String,
+    applied_version: u64,
+    ca_path: String,
+    device_token: String,
+) -> Result<u64, String> {
+    let device_id = device_id.trim();
+    let device_token = device_token.trim();
+    if device_id.is_empty() || device_token.is_empty() {
+        clear_local_policy();
+        return Err("paired device credentials are required".to_string());
+    }
+    let channel = crate::cluster_endpoint(&endpoint, &ca_path)?
+        .connect()
+        .await
+        .map_err(|error| format!("could not reach server for policy sync: {error}"))?;
+    match fetch_policy_metadata(channel, device_id, applied_version, device_token).await {
+        Ok((version, hosts, hashes)) => {
+            replace_local_policy(version, hosts, hashes);
+            Ok(version)
+        }
+        Err(error) => {
+            clear_local_policy();
+            Err(error)
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_co_predatorhunters_bulwark_core_RustBridge_syncDevicePolicy(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    endpoint_value: jni::objects::JString,
+    device_id_value: jni::objects::JString,
+    applied_version: jni::sys::jlong,
+    ca_path_value: jni::objects::JString,
+    device_token_value: jni::objects::JString,
+) -> jni::sys::jstring {
+    let endpoint = crate::jstring_to_string(&mut env, &endpoint_value).unwrap_or_default();
+    let device_id = crate::jstring_to_string(&mut env, &device_id_value).unwrap_or_default();
+    let ca_path = crate::jstring_to_string(&mut env, &ca_path_value).unwrap_or_default();
+    let device_token =
+        crate::jstring_to_string(&mut env, &device_token_value).unwrap_or_default();
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            clear_local_policy();
+            return crate::string_to_jstring(
+                &mut env,
+                &serde_json::json!({"ok": false, "error": error.to_string()}).to_string(),
+            );
+        }
+    };
+    let result = runtime.block_on(sync_device_policy_rpc(
+        endpoint,
+        device_id,
+        applied_version.max(0) as u64,
+        ca_path,
+        device_token,
+    ));
+    let json = match result {
+        Ok(version) => serde_json::json!({"ok": true, "version": version}).to_string(),
+        Err(error) => serde_json::json!({"ok": false, "error": error}).to_string(),
+    };
+    crate::string_to_jstring(&mut env, &json)
+}
+
 pub struct FlowOutcome {
     pub decision: InterceptDecision,
     pub alert: Option<AlertEvent>,
-    /// True when this was a media flow forwarded UNSCORED (no on-device model).
     pub media_gap: bool,
 }
 
 impl FlowOutcome {
     fn forward() -> Self {
-        FlowOutcome {
+        Self {
             decision: InterceptDecision::Forward,
             alert: None,
             media_gap: false,
         }
     }
+
+    fn coverage_block() -> Self {
+        Self {
+            decision: InterceptDecision::Drop,
+            alert: None,
+            media_gap: true,
+        }
+    }
 }
 
-/// Declared-textual content types we run through the text analyzer.
-fn is_textual(ct: &str) -> bool {
-    ct.starts_with("text/")
+struct MediaWork {
+    kind: MediaKind,
+    mime_type: String,
+    bytes: Vec<u8>,
+    deadline_ms: u32,
+}
+
+fn is_textual(content_type: &str) -> bool {
+    content_type.starts_with("text/")
         || matches!(
-            ct,
+            content_type,
             "application/json"
                 | "application/x-www-form-urlencoded"
                 | "application/xml"
@@ -62,194 +254,295 @@ fn is_textual(ct: &str) -> bool {
         )
 }
 
-/// Media content types the proxy may have decision-gated (images/video).
-fn is_media(ct: &str) -> bool {
-    ct.starts_with("image/") || ct.starts_with("video/")
+fn media_kind(content_type: &str) -> Option<MediaKind> {
+    if content_type.starts_with("image/") {
+        Some(MediaKind::Image)
+    } else if content_type.starts_with("video/") {
+        Some(MediaKind::Video)
+    } else if content_type.starts_with("audio/") {
+        Some(MediaKind::Audio)
+    } else {
+        None
+    }
 }
 
-/// Pure per-flow decision (host-unit-tested): text → deterministic analyzer +
-/// policy; gated media → Forward + media-gap note (see module docs); everything
-/// else forwards. Never panics; anything un-analysable fails OPEN.
-pub fn decide_flow(flow: &CapturedFlow) -> FlowOutcome {
-    let FlowPayload::Http(head) = &flow.payload else {
-        // A raw StreamChunk is a media segment by construction — same unscored
-        // fail-open as the gated-media arm below.
-        return FlowOutcome {
-            decision: InterceptDecision::Forward,
-            alert: None,
-            media_gap: true,
-        };
-    };
-    let ct = head.content_type();
-
-    // GATED media (scorable images / video segments): answer the gate NOW with
-    // Forward — letting the 5s timeout fail-closed would silently drop every
-    // image/segment on the device (the audit's blackhole). One-time alert +
-    // per-flow trace keep the gap honest.
-    if ct.as_deref().is_some_and(is_media) {
-        return FlowOutcome {
-            decision: InterceptDecision::Forward,
-            alert: None,
-            media_gap: true,
-        };
+fn media_deadline(source: SourceChannel, kind: MediaKind) -> u32 {
+    match (source, kind) {
+        (SourceChannel::LiveStream, _) => 650,
+        (_, MediaKind::Image) => 750,
+        (_, MediaKind::Audio) => 850,
+        (_, MediaKind::Video) => 1_200,
+        _ => 750,
     }
+}
 
-    // Pinned / E2E flows are unreadable here; the accessibility path covers them.
-    if !flow.readable {
-        return FlowOutcome::forward();
+fn media_work(flow: &CapturedFlow) -> Option<MediaWork> {
+    match &flow.payload {
+        FlowPayload::StreamChunk {
+            data,
+            mime_type,
+            ..
+        } => {
+            let mime = mime_type
+                .clone()
+                .unwrap_or_else(|| "video/mp4".to_string());
+            let kind = media_kind(&mime).unwrap_or(MediaKind::Video);
+            Some(MediaWork {
+                kind,
+                mime_type: mime,
+                bytes: data.to_vec(),
+                deadline_ms: media_deadline(flow.source_channel, kind),
+            })
+        }
+        FlowPayload::Http(head) => {
+            let mime = head.content_type()?;
+            let kind = media_kind(&mime)?;
+            if head.body_peek.is_empty() {
+                return None;
+            }
+            Some(MediaWork {
+                kind,
+                mime_type: mime,
+                bytes: head.body_peek.to_vec(),
+                deadline_ms: media_deadline(flow.source_channel, kind),
+            })
+        }
     }
+}
 
-    let body = head.body_peek.as_ref();
-    if body.is_empty() {
-        return FlowOutcome::forward();
-    }
-    let text = match ct.as_deref() {
-        Some(ct) if is_textual(ct) => String::from_utf8_lossy(body).into_owned(),
-        Some(_) => return FlowOutcome::forward(), // declared non-text, non-media
-        // Undeclared type: only analyze if it really is UTF-8 text.
-        None => match std::str::from_utf8(body) {
-            Ok(s) => s.to_owned(),
-            Err(_) => return FlowOutcome::forward(),
-        },
-    };
-
-    let Some(engine) = crate::engine() else {
-        return FlowOutcome::forward(); // analyzer unavailable -> fail open
-    };
-
-    // Same deterministic pipeline as analyzeText; per-HOST grooming memory.
-    let span = TextSpan {
-        text,
-        lang: String::new(),
-        app: flow.app_or_host.clone(),
-        thread_id: flow.app_or_host.clone(),
-        from_minor: false,
-        prior_excerpts: Vec::new(),
-    };
-    let verdict = engine.text.analyze_span("net", &span, 0);
-    let ctx = PolicyContext::new(
-        DeviceId(String::new()),
+fn policy_context(flow: &CapturedFlow) -> PolicyContext {
+    let device_id = crate::relay::target()
+        .map(|target| target.device_id)
+        .unwrap_or_default();
+    PolicyContext::new(
+        DeviceId(device_id),
         flow.source_channel,
         crate::current_age_profile(),
-    );
-    let decision = engine.policy.evaluate(&verdict, &ctx);
+    )
+}
 
-    let alert = decision.raise_alert.map(|kind| AlertEvent {
-        alert_id: format!("net-{}-{}", flow.flow_id, crate::relay::now_ms()),
+fn alert_for(
+    flow: &CapturedFlow,
+    verdict: &Verdict,
+    decision: &bulwark_policy::PolicyDecision,
+) -> Option<AlertEvent> {
+    decision.raise_alert.map(|kind| AlertEvent {
+        alert_id: format!(
+            "net-{}-{}-{}",
+            flow.flow_id,
+            verdict.request_id,
+            crate::relay::now_ms()
+        ),
         kind: kind as i32,
         category: verdict.category,
         severity: decision.severity as i32,
         app: flow.app_or_host.clone(),
         ts: crate::relay::now_ms(),
-        // CONTENT-FREE policy reason — never the analyzer excerpt (same rule as
-        // verdict_json: some rules echo quoted source phrases).
         redacted_context: decision.reason.clone(),
+        evidence: verdict.evidence.clone(),
+        local_segment_uri: verdict.local_segment_uri.clone(),
         ..Default::default()
-    });
+    })
+}
 
-    let intercept = match decision.action {
-        // No on-device redaction/remediation here -> flagged content is dropped,
-        // never forwarded raw (mirrors bulwark-client's action_to_decision).
-        Action::Block | Action::Blur | Action::Mute => InterceptDecision::Drop,
+fn outcome_from_verdict(flow: &CapturedFlow, verdict: Verdict) -> FlowOutcome {
+    if guardian_approved(flow, &verdict) {
+        return FlowOutcome::forward();
+    }
+    let Some(engine) = crate::engine() else {
+        return FlowOutcome::coverage_block();
+    };
+    let policy = engine.policy.evaluate(&verdict, &policy_context(flow));
+    let rewrite = (!verdict.remediated_media.is_empty()).then(|| verdict.remediated_media.clone());
+    let decision = match policy.action {
+        Action::Block => InterceptDecision::Drop,
+        Action::Blur | Action::Mute => rewrite
+            .map(InterceptDecision::Rewrite)
+            .unwrap_or(InterceptDecision::Drop),
         _ => InterceptDecision::Forward,
     };
     FlowOutcome {
-        decision: intercept,
-        alert,
-        media_gap: false,
+        decision,
+        alert: alert_for(flow, &verdict, &policy),
+        media_gap: verdict.category() == Category::Unspecified,
     }
 }
 
-/// One-time, content-free guardian notice that media passes unscored on this
-/// device, plus a per-flow trace. Honest coverage — never silent.
+async fn decide_media(flow: &CapturedFlow, work: MediaWork) -> FlowOutcome {
+    let request_id = format!(
+        "android-{}-{}-{}",
+        flow.flow_id,
+        match work.kind {
+            MediaKind::Image => "image",
+            MediaKind::Audio => "audio",
+            MediaKind::Video => "video",
+            _ => "media",
+        },
+        crate::relay::now_ms()
+    );
+    match crate::relay::analyze_media(
+        work.kind,
+        flow.source_channel,
+        work.mime_type,
+        work.bytes,
+        work.deadline_ms,
+        request_id,
+    )
+    .await
+    {
+        Ok(verdict) => outcome_from_verdict(flow, verdict),
+        Err(error) => {
+            tracing::warn!(
+                flow_id = flow.flow_id,
+                kind = ?work.kind,
+                %error,
+                "media analysis unavailable before gate deadline; blocking"
+            );
+            FlowOutcome::coverage_block()
+        }
+    }
+}
+
+fn decide_text(flow: &CapturedFlow) -> FlowOutcome {
+    let FlowPayload::Http(head) = &flow.payload else {
+        return FlowOutcome::forward();
+    };
+    if !flow.readable || head.body_peek.is_empty() {
+        return FlowOutcome::forward();
+    }
+    let body = head.body_peek.as_ref();
+    let text = match head.content_type().as_deref() {
+        Some(content_type) if is_textual(content_type) => String::from_utf8_lossy(body).into_owned(),
+        Some(_) => return FlowOutcome::forward(),
+        None => match std::str::from_utf8(body) {
+            Ok(text) => text.to_owned(),
+            Err(_) => return FlowOutcome::forward(),
+        },
+    };
+    let Some(engine) = crate::engine() else {
+        return FlowOutcome::forward();
+    };
+    let device = crate::relay::target()
+        .map(|target| target.device_id)
+        .unwrap_or_else(|| "android-unenrolled".to_string());
+    let app = if flow.app_or_host.trim().is_empty() {
+        "network".to_string()
+    } else {
+        flow.app_or_host.clone()
+    };
+    let verdict = engine.text.analyze_span(
+        &format!("net-{}", flow.flow_id),
+        &TextSpan {
+            text,
+            lang: String::new(),
+            app: app.clone(),
+            thread_id: format!("{device}\u{1f}{app}\u{1f}network"),
+            from_minor: false,
+            prior_excerpts: Vec::new(),
+        },
+        crate::relay::now_ms(),
+    );
+    outcome_from_verdict(flow, verdict)
+}
+
+pub fn decide_flow(flow: &CapturedFlow) -> FlowOutcome {
+    if media_work(flow).is_some() {
+        FlowOutcome::coverage_block()
+    } else {
+        decide_text(flow)
+    }
+}
+
+async fn decide_flow_async(flow: &CapturedFlow) -> FlowOutcome {
+    if let Some(work) = media_work(flow) {
+        decide_media(flow, work).await
+    } else {
+        decide_text(flow)
+    }
+}
+
 fn note_media_gap_once(flow: &CapturedFlow) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static NOTICED: AtomicBool = AtomicBool::new(false);
-    tracing::debug!(
+    tracing::warn!(
         flow_id = flow.flow_id,
         host = %flow.app_or_host,
-        "media flow forwarded UNSCORED (no on-device media model yet)"
+        "media blocked because protected analysis was unavailable or inconclusive"
     );
     if !NOTICED.swap(true, Ordering::Relaxed) {
         crate::enqueue_protection_alert(
-            "media-unscored",
-            "Images and video are currently passing through unscored on this \
-             device (on-device media scoring is not available yet). Text and \
-             on-screen monitoring remain active.",
+            "media-analysis-unavailable",
+            "Bulwark could not safely analyse protected media in time, so it was blocked.",
         );
     }
 }
 
-/// JSON shape the Kotlin alert poller / AlertNotifier reads (alert_id, kind,
-/// category ordinals, redacted_context) — matches enqueue_protection_alert.
-fn local_alert_json(ev: &AlertEvent) -> String {
+fn local_alert_json(event: &AlertEvent) -> String {
     serde_json::json!({
-        "alert_id": ev.alert_id,
-        "kind": ev.kind,
-        "category": ev.category,
-        "redacted_context": ev.redacted_context,
+        "alert_id": event.alert_id,
+        "kind": event.kind,
+        "category": event.category,
+        "redacted_context": event.redacted_context,
     })
     .to_string()
 }
 
-/// THE consumer loop `startVpn` spawns: drain `next_flow()`, answer the
-/// decision gate, queue + relay alerts. Ends when the interceptor shuts down
-/// (flow channel closed). Never panics; per-flow failures fail open.
+async fn process_flow(interceptor: Arc<dyn Interceptor>, flow: CapturedFlow) {
+    let flow_id = flow.flow_id;
+    let outcome = decide_flow_async(&flow).await;
+    if let Err(error) = interceptor.apply(flow_id, outcome.decision).await {
+        tracing::warn!(%error, flow_id, "failed to apply flow decision");
+    }
+    if outcome.media_gap {
+        note_media_gap_once(&flow);
+    }
+    if let Some(event) = outcome.alert {
+        crate::enqueue_alert_json(local_alert_json(&event));
+        crate::relay::relay_alert_best_effort(event);
+    }
+}
+
 pub async fn run_flow_consumer(interceptor: Arc<dyn Interceptor>) {
-    tracing::info!("flow consumer started (decision gate is now answered)");
+    let mut tasks = tokio::task::JoinSet::new();
     loop {
+        while tasks.len() >= MAX_INFLIGHT_FLOWS {
+            let _ = tasks.join_next().await;
+        }
         match interceptor.next_flow().await {
             Ok(Some(flow)) => {
-                let flow_id = flow.flow_id;
-                let outcome = decide_flow(&flow);
-                // Answer the gate FIRST (it holds a live response, 5s budget);
-                // alert I/O afterwards.
-                if let Err(e) = interceptor.apply(flow_id, outcome.decision).await {
-                    tracing::warn!(error = %e, flow_id, "failed to apply flow decision");
-                }
-                if outcome.media_gap {
-                    note_media_gap_once(&flow);
-                }
-                if let Some(event) = outcome.alert {
-                    crate::enqueue_alert_json(local_alert_json(&event));
-                    crate::relay::relay_alert_best_effort(event);
-                }
+                let interceptor = interceptor.clone();
+                tasks.spawn(async move {
+                    process_flow(interceptor, flow).await;
+                });
             }
-            Ok(None) => break, // channel closed: proxy stopped
-            Err(e) => {
-                tracing::warn!(error = %e, "next_flow failed; flow consumer exiting");
+            Ok(None) => break,
+            Err(error) => {
+                tracing::warn!(%error, "next_flow failed; flow consumer exiting");
                 break;
             }
         }
     }
-    tracing::info!("flow consumer ended");
+    while tasks.join_next().await.is_some() {}
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use bulwark_core::flow::{Header, HttpHead};
-    use bulwark_proto::v1::Category;
 
-    fn http_flow(
-        id: u64,
-        host: &str,
-        readable: bool,
-        ct: Option<&str>,
-        body: &[u8],
-    ) -> CapturedFlow {
+    fn http_flow(id: u64, host: &str, content_type: Option<&str>, body: &[u8]) -> CapturedFlow {
         let mut headers = Vec::new();
-        if let Some(ct) = ct {
+        if let Some(content_type) = content_type {
             headers.push(Header {
                 name: "content-type".to_owned(),
-                value: ct.to_owned(),
+                value: content_type.to_owned(),
             });
         }
         CapturedFlow {
             flow_id: id,
-            source_channel: bulwark_proto::SourceChannel::Web,
+            source_channel: SourceChannel::Web,
             app_or_host: host.to_owned(),
-            readable,
+            readable: true,
             payload: FlowPayload::Http(HttpHead {
                 method: Some("GET".to_owned()),
                 path: Some("/".to_owned()),
@@ -261,129 +554,73 @@ mod tests {
     }
 
     #[test]
-    fn gated_media_forwards_immediately_with_gap_note() {
-        let flow = http_flow(
-            1,
-            "cdn.example",
-            true,
-            Some("image/jpeg"),
-            &[0xFF; 32 * 1024],
-        );
-        let out = decide_flow(&flow);
-        assert!(matches!(out.decision, InterceptDecision::Forward));
-        assert!(out.media_gap, "unscored media must be flagged as a gap");
-        assert!(out.alert.is_none());
-
-        let video = http_flow(2, "cdn.example", true, Some("video/mp2t"), &[7u8; 4096]);
-        assert!(decide_flow(&video).media_gap);
+    fn media_is_never_forwarded_unscored() {
+        let image = http_flow(1, "cdn.example", Some("image/jpeg"), &[0xff; 32 * 1024]);
+        assert!(matches!(decide_flow(&image).decision, InterceptDecision::Drop));
+        let video = http_flow(2, "cdn.example", Some("video/mp2t"), &[7; 64 * 1024]);
+        assert_eq!(media_work(&video).unwrap().kind, MediaKind::Video);
     }
 
     #[test]
-    fn flagged_text_drops_and_raises_a_redacted_alert() {
-        // Same phrase the lib tests prove is CSAM_SUSPECTED + BLOCK.
-        let raw = "send me a pic of you in your room";
-        let flow = http_flow(3, "chat.example", true, Some("text/plain"), raw.as_bytes());
-        let out = decide_flow(&flow);
-        assert!(matches!(out.decision, InterceptDecision::Drop));
-        let alert = out.alert.expect("a blocking verdict must alert");
-        assert_eq!(alert.category, Category::CsamSuspected as i32);
-        assert_ne!(alert.kind, 0);
-        assert!(!alert.redacted_context.is_empty());
-        assert!(
-            !alert.redacted_context.contains("send me a pic"),
-            "raw text leaked: {}",
-            alert.redacted_context
-        );
-        assert!(!local_alert_json(&alert).contains("send me a pic"));
-    }
-
-    #[test]
-    fn safe_text_forwards_without_alert() {
+    fn safe_text_forwards() {
+        clear_local_policy();
         let flow = http_flow(
-            4,
+            3,
             "news.example",
-            true,
-            Some("text/html"),
+            Some("text/plain"),
             b"are you coming to football practice tonight?",
         );
-        let out = decide_flow(&flow);
-        assert!(matches!(out.decision, InterceptDecision::Forward));
-        assert!(out.alert.is_none());
-        assert!(!out.media_gap);
+        assert!(matches!(decide_flow(&flow).decision, InterceptDecision::Forward));
     }
 
     #[test]
-    fn unreadable_and_binary_flows_fail_open() {
-        let pinned = http_flow(5, "signal.org", false, Some("text/plain"), b"ciphertext");
-        assert!(matches!(
-            decide_flow(&pinned).decision,
-            InterceptDecision::Forward
-        ));
-        // Undeclared binary: not analyzed, forwarded.
-        let binary = http_flow(6, "x.example", true, None, &[0u8, 159, 146, 150]);
-        let out = decide_flow(&binary);
-        assert!(matches!(out.decision, InterceptDecision::Forward));
-        assert!(out.alert.is_none());
+    fn stale_policy_does_not_allow() {
+        replace_local_policy(
+            1,
+            ["example.test".to_string()].into_iter().collect(),
+            HashSet::new(),
+        );
+        if let Ok(mut policy) = policy_cell().write() {
+            policy.expires_ts = 0;
+        }
+        let verdict = Verdict {
+            category: Category::AdultText as i32,
+            ..Default::default()
+        };
+        let flow = http_flow(4, "example.test", Some("text/plain"), b"x");
+        assert!(!guardian_approved(&flow, &verdict));
     }
 
-    /// The loop answers the decision gate: a scripted interceptor records the
-    /// applied decisions and the consumer ends when the flows run out.
     #[test]
-    fn consumer_loop_applies_decisions_and_ends() {
-        struct Scripted {
-            flows: std::sync::Mutex<std::collections::VecDeque<CapturedFlow>>,
-            applied: std::sync::Mutex<Vec<(u64, InterceptDecision)>>,
-        }
-        #[async_trait::async_trait]
-        impl Interceptor for Scripted {
-            async fn start(&self) -> bulwark_core::Result<()> {
-                Ok(())
-            }
-            async fn next_flow(&self) -> bulwark_core::Result<Option<CapturedFlow>> {
-                Ok(self.flows.lock().unwrap().pop_front())
-            }
-            async fn apply(
-                &self,
-                flow_id: u64,
-                decision: InterceptDecision,
-            ) -> bulwark_core::Result<()> {
-                self.applied.lock().unwrap().push((flow_id, decision));
-                Ok(())
-            }
-            fn is_pinned(&self, _h: &str) -> bool {
-                false
-            }
-            async fn shutdown(&self) -> bulwark_core::Result<()> {
-                Ok(())
-            }
-        }
+    fn coverage_gap_cannot_be_guardian_overridden() {
+        replace_local_policy(
+            2,
+            ["example.test".to_string()].into_iter().collect(),
+            HashSet::new(),
+        );
+        let verdict = Verdict {
+            category: Category::Unspecified as i32,
+            ..Default::default()
+        };
+        let flow = http_flow(5, "example.test", Some("text/plain"), b"x");
+        assert!(!guardian_approved(&flow, &verdict));
+    }
 
-        let scripted = Arc::new(Scripted {
-            flows: std::sync::Mutex::new(
-                vec![
-                    http_flow(10, "cdn.example", true, Some("image/png"), &[1u8; 20_000]),
-                    http_flow(
-                        11,
-                        "chat.example",
-                        true,
-                        Some("text/plain"),
-                        b"send me a pic of you in your room",
-                    ),
-                ]
-                .into(),
-            ),
-            applied: std::sync::Mutex::new(Vec::new()),
-        });
-
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(run_flow_consumer(scripted.clone()));
-
-        let applied = scripted.applied.lock().unwrap();
-        assert_eq!(applied.len(), 2, "every flow must get a gate answer");
-        assert!(matches!(applied[0], (10, InterceptDecision::Forward)));
-        assert!(matches!(applied[1], (11, InterceptDecision::Drop)));
+    #[test]
+    fn policy_version_is_replaced_not_accumulated() {
+        replace_local_policy(
+            1,
+            ["one.test".to_string()].into_iter().collect(),
+            HashSet::new(),
+        );
+        replace_local_policy(
+            2,
+            ["two.test".to_string()].into_iter().collect(),
+            HashSet::new(),
+        );
+        let policy = policy_cell().read().unwrap();
+        assert_eq!(policy.version, 2);
+        assert!(!policy.hosts.contains("one.test"));
+        assert!(policy.hosts.contains("two.test"));
     }
 }

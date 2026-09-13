@@ -1,89 +1,42 @@
-# bulwark-android — the JNI bridge that backs `co.predatorhunters.bulwark.core.RustBridge`.
+# bulwark-android — JNI bridge for `co.predatorhunters.bulwark.core.RustBridge`.
 #
-# This crate is the C-ABI shared library the Android app loads with
-# `System.loadLibrary("bulwark_client")` (see RustBridge.kt). It exposes the
-# `Java_co_predatorhunters_bulwark_core_RustBridge_*` symbols and forwards the
-# on-device-captured text into the LEGITIMATE, deterministic content analyzers:
-#
-#   * bulwark-text   — the rules-first grooming / adult-text detector (TextAnalyzer)
-#   * bulwark-policy — the Verdict -> Action policy engine (Policy)
-#
-# It is a TRANSPARENT content-safety + tamper-EVIDENCE bridge: it analyses
-# on-device text and relays redacted PROTECTION_DISABLED events (uninstall attempt
-# / protection turned off) to the guardian. Anti-removal ENFORCEMENT (device admin
-# / Device Owner / always-on-VPN lockdown) lives in the consented Android policy
-# layer (co.predatorhunters.bulwark.admin), applied openly on a managed child device —
-# never covertly. No screen mirroring, no remote wipe, no hidden location, no
-# reading other apps beyond the transparent on-device safety check.
-#
-# DETACHED from the root cargo workspace (own empty `[workspace]` table, like
-# apps/parent/Cargo.toml) so it never perturbs `cargo build --workspace` for the
-# engine crates and is free to pull the `jni` cdylib toolchain on its own.
+# The Android build supports two explicit VPN modes:
+#   * Local VPN  — TLS inspection + policy on the device.
+#   * Remote VPN — transport-only WireGuard on the device; the region filters.
 
 [package]
 name = "bulwark-android"
 version = "0.0.0"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
-description = "JNI bridge: Android app -> Bulwark deterministic content analyzers."
+description = "JNI bridge: Android app -> Bulwark content-safety core."
 
 [lib]
-# The Android app links `libbulwark_client.so`; cdylib emits exactly that shape.
-# (The output stem is set per-target by cargo-ndk via the [lib] name below.)
 name = "bulwark_client"
 crate-type = ["cdylib"]
 
 [dependencies]
-# JNI surface (latest 0.21.x). `extern "system" fn Java_...` exports + JNIEnv.
 jni = "0.21"
-
-# The legitimate on-device analyzers, by relative path. Depth check from
-# platform/android/rust/bulwark-android/ : bulwark-android -> rust -> android ->
-# platform -> <root>, i.e. four `..`, then crates/<crate>.
-#
-# NOTE: deliberately NO bulwark-store / rusqlite dependency — rusqlite fails to
-# build on this Windows host (os error 4551, environmental). The bridge needs
-# only the pure analyzers, which have no DB dependency.
 bulwark-text = { path = "../../../../crates/bulwark-text" }
 bulwark-policy = { path = "../../../../crates/bulwark-policy" }
 bulwark-core = { path = "../../../../crates/bulwark-core" }
 bulwark-proto = { path = "../../../../crates/bulwark-proto" }
-
-# The interception layer — its transparent VPN pump (`vpn::run_android_data_path`)
-# is what `startVpn` runs over the VpnService fd. Pulls the TLS-inspecting proxy + per-install
-# CA + smoltcp pump; cross-compiles for android (cargo-ndk).
 bulwark-net = { path = "../../../../crates/bulwark-net" }
-
-# Minimal JSON assembly for the Verdict the Kotlin side parses. (serde_json is
-# already in the workspace tree via the analyzer crates' dev-deps; pull it here
-# explicitly as a normal dep.)
 serde_json = "1"
-
-# Structured logging — already in the tree via bulwark-net; used to record a
-# data-path exit alongside the guardian-facing protection-status alert. The
-# `log` feature makes tracing events ALSO emit `log` records when no tracing
-# subscriber is installed; android_logger (below) is the logcat backend, so the
-# on-device VPN data path (bulwark-net's `tracing::info!/debug!/error!`) becomes
-# visible in `adb logcat` instead of vanishing silently.
 tracing = { version = "0.1", features = ["log"] }
-
-# Child enrollment talks to the same Accounts gRPC service as the parent app.
-# Keep this in Rust so Android does not need a second generated gRPC client.
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 tonic = { version = "0.14", features = ["transport", "tls-ring", "tls-webpki-roots"] }
 
-# Android: route Rust `tracing`/`log` diagnostics to logcat (tag `BulwarkRust`)
-# so the on-device VPN data path is observable. Android-only — the host detached-
-# workspace build (unit tests) doesn't link android liblog.
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.13"
 log = "0.4"
+bulwark-net = { path = "../../../../crates/bulwark-net", features = ["wg-client"] }
+boringtun = "0.7"
+data-encoding = "2"
+libc = "0.2"
+rand_core = { version = "0.6.4", features = ["getrandom"] }
 
 [dev-dependencies]
-# Host tests implement the bulwark-net `Interceptor` trait with a scripted stub
-# (the trait is #[async_trait]); test-only, never in the shipped cdylib.
 async-trait = "0.1"
 
-# Detached workspace — this crate builds on its own:
-#   cd platform/android/rust/bulwark-android && cargo build
 [workspace]
