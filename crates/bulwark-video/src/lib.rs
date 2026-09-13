@@ -233,7 +233,10 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
             return Ok(uncovered(req.request_id, "empty video segment"));
         }
         if segment.len() > MAX_INLINE_VIDEO_BYTES {
-            return Ok(uncovered(req.request_id, "video segment exceeds bounded analysis limit"));
+            return Ok(uncovered(
+                req.request_id,
+                "video segment exceeds bounded analysis limit",
+            ));
         }
 
         let decoded = self.demux.sample(&segment, self.cfg.sample_fps);
@@ -548,7 +551,9 @@ pub mod ffmpeg {
                 return None;
             }
             let workspace = TempWorkspace::new(segment, output_ext(segment)).ok()?;
-            let output = workspace.dir.join(format!("cleaned.{}", output_ext(segment)));
+            let output = workspace
+                .dir
+                .join(format!("cleaned.{}", output_ext(segment)));
             let mut command = self.command();
             command
                 .arg("-hide_banner")
@@ -635,8 +640,7 @@ pub mod ffmpeg {
             .into_samples::<i16>()
             .filter_map(Result::ok)
             .collect::<Vec<_>>();
-        let per_window =
-            spec.sample_rate as usize * window_secs as usize * spec.channels as usize;
+        let per_window = spec.sample_rate as usize * window_secs as usize * spec.channels as usize;
         if per_window == 0 {
             return Vec::new();
         }

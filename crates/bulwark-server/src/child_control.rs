@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use bulwark_policy::{Allowlist, ReviewItem};
 use bulwark_proto::v1::child_control_server::ChildControl;
 use bulwark_proto::v1::{
-    Category, ChildConfig, ChildConfigAck, ChildConfigFilter, ChildConfigStatus, ChildStatusRequest,
-    ReviewDecision, ReviewScope, SetChildConfigRequest,
+    Category, ChildConfig, ChildConfigAck, ChildConfigFilter, ChildConfigStatus,
+    ChildStatusRequest, ReviewDecision, ReviewScope, SetChildConfigRequest,
 };
 use bulwark_proto::DeviceId;
 use futures_core::Stream;
@@ -170,9 +170,7 @@ impl ChildConfigStore {
             inner
                 .device_to_child
                 .retain(|device, child| child != &child_id || device == &device_id);
-            inner
-                .device_to_child
-                .insert(device_id, child_id.clone());
+            inner.device_to_child.insert(device_id, child_id.clone());
         }
 
         match inner.by_child.get(&child_id) {
@@ -311,7 +309,10 @@ impl ChildConfigStore {
     ) -> Option<tokio::sync::watch::Receiver<ChildConfig>> {
         let inner = self.inner.lock().ok()?;
         let child_id = inner.device_to_child.get(device_id.trim())?;
-        inner.by_child.get(child_id).map(|entry| entry.tx.subscribe())
+        inner
+            .by_child
+            .get(child_id)
+            .map(|entry| entry.tx.subscribe())
     }
 }
 
@@ -498,7 +499,8 @@ fn device_policy_snapshot(device_id: &str) -> DevicePolicySnapshot {
     snapshot.version = rows.len() as u64;
     let mut allowlist = Allowlist::new();
     for row in rows {
-        let decision = ReviewDecision::try_from(row.decision).unwrap_or(ReviewDecision::Unspecified);
+        let decision =
+            ReviewDecision::try_from(row.decision).unwrap_or(ReviewDecision::Unspecified);
         let scope = ReviewScope::try_from(row.scope).unwrap_or(ReviewScope::Unspecified);
         let category = Category::try_from(row.category).unwrap_or(Category::Unspecified);
         let item = ReviewItem::new(
@@ -518,7 +520,10 @@ fn device_policy_snapshot(device_id: &str) -> DevicePolicySnapshot {
     if snapshot.approved_hosts.len() > POLICY_ENTRY_CAP
         || snapshot.approved_sha256_hex.len() > POLICY_ENTRY_CAP
     {
-        tracing::warn!(device_id, "device policy exceeds sync cap; failing closed to no approvals");
+        tracing::warn!(
+            device_id,
+            "device policy exceeds sync cap; failing closed to no approvals"
+        );
         snapshot.approved_hosts.clear();
         snapshot.approved_sha256_hex.clear();
         snapshot.complete = false;
@@ -630,9 +635,7 @@ impl ChildControl for ChildControlService {
     ) -> Result<Response<ChildConfigStatus>, Status> {
         let token = Self::token_or_meta(&request, &request.get_ref().token);
         let child_id = request.into_inner().child_id;
-        let status = self
-            .store
-            .child_status(&self.accounts, &token, &child_id)?;
+        let status = self.store.child_status(&self.accounts, &token, &child_id)?;
         Ok(Response::new(status))
     }
 }
@@ -702,9 +705,7 @@ mod tests {
         accounts
             .create_account("other@example.test", "password123", "Other")
             .unwrap();
-        let (other, _, _) = accounts
-            .login("other@example.test", "password123")
-            .unwrap();
+        let (other, _, _) = accounts.login("other@example.test", "password123").unwrap();
         let error = ChildConfigStore::new()
             .set_config(&accounts, &other, proto_config(&child_id, "dev-1"))
             .unwrap_err();

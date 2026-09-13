@@ -116,12 +116,7 @@ fn original_dst(client: &TcpStream) -> Result<SocketAddr> {
     Ok(SocketAddr::from((ip, port)))
 }
 
-async fn bridge_one(
-    mut client: TcpStream,
-    proxy: SocketAddr,
-    authority: String,
-    peer: SocketAddr,
-) {
+async fn bridge_one(mut client: TcpStream, proxy: SocketAddr, authority: String, peer: SocketAddr) {
     match super::netstack::connect_via_proxy(proxy, &authority).await {
         Ok(mut upstream) => {
             if let Err(error) = super::netstack::splice(&mut client, &mut upstream).await {

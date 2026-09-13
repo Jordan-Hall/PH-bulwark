@@ -325,7 +325,8 @@ impl Review for SecureReviewService {
                 "review device_id does not match the alert's original device",
             ));
         }
-        if !authoritative.child_id.is_empty() && !scope.child_ids.contains(&authoritative.child_id) {
+        if !authoritative.child_id.is_empty() && !scope.child_ids.contains(&authoritative.child_id)
+        {
             return Err(Status::permission_denied(
                 "guardian is not assigned to the alert's original child",
             ));

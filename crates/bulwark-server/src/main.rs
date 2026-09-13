@@ -15,8 +15,7 @@ async fn main() -> anyhow::Result<()> {
         .or_else(|| std::env::var("BULWARK_ROLE").ok())
         .and_then(|value| ServerRole::parse(&value))
         .unwrap_or(ServerRole::AllInOne);
-    let bind = std::env::var("BULWARK_BIND")
-        .unwrap_or_else(|_| "127.0.0.1:8443".to_string());
+    let bind = std::env::var("BULWARK_BIND").unwrap_or_else(|_| "127.0.0.1:8443".to_string());
     let production_mode = env_flag("BULWARK_PRODUCTION");
     let accounts_enabled = env_flag("BULWARK_ACCOUNTS");
     let staff_enabled = env_flag("BULWARK_STAFF");
@@ -178,9 +177,7 @@ fn configure_remote_vpn_auth(state_dir: Option<&std::path::Path>) -> anyhow::Res
         .ok()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "BULWARK_WG_FILTER_ACTIVE requires BULWARK_WG_SERVER_PUBLIC_KEY"
-            )
+            anyhow::anyhow!("BULWARK_WG_FILTER_ACTIVE requires BULWARK_WG_SERVER_PUBLIC_KEY")
         })?;
 
     let state_dir = state_dir.ok_or_else(|| {
@@ -216,10 +213,7 @@ fn configure_remote_vpn_auth(state_dir: Option<&std::path::Path>) -> anyhow::Res
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(
-                    &secret_path,
-                    std::fs::Permissions::from_mode(0o600),
-                )?;
+                std::fs::set_permissions(&secret_path, std::fs::Permissions::from_mode(0o600))?;
             }
             bytes.to_vec()
         }
@@ -282,8 +276,9 @@ fn read_pem_env(var: &str) -> anyhow::Result<Option<Vec<u8>>> {
     match std::env::var_os(var).filter(|value| !value.is_empty()) {
         Some(path) => {
             let path = std::path::PathBuf::from(path);
-            let pem = std::fs::read(&path)
-                .map_err(|error| anyhow::anyhow!("{var}: cannot read {}: {error}", path.display()))?;
+            let pem = std::fs::read(&path).map_err(|error| {
+                anyhow::anyhow!("{var}: cannot read {}: {error}", path.display())
+            })?;
             Ok(Some(pem))
         }
         None => Ok(None),

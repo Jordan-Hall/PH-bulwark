@@ -110,7 +110,10 @@ impl AnalysisService {
 
 #[tonic::async_trait]
 impl Analysis for AnalysisService {
-    async fn analyze(&self, request: Request<AnalysisRequest>) -> Result<Response<Verdict>, Status> {
+    async fn analyze(
+        &self,
+        request: Request<AnalysisRequest>,
+    ) -> Result<Response<Verdict>, Status> {
         let principal = self.principal(&request)?;
         let mut request = request.into_inner();
         if let Some(principal) = &principal {
@@ -344,7 +347,10 @@ impl AlertRelayService {
 
 #[tonic::async_trait]
 impl AlertRelay for AlertRelayService {
-    async fn raise_alert(&self, request: Request<AlertEvent>) -> Result<Response<AlertAck>, Status> {
+    async fn raise_alert(
+        &self,
+        request: Request<AlertEvent>,
+    ) -> Result<Response<AlertAck>, Status> {
         let principal = self.principal(&request)?;
         let event = Self::bind_alert(request.into_inner(), principal.as_ref())?;
         self.deliver(event).await.map(Response::new)
@@ -549,12 +555,9 @@ pub async fn run(
 
         if let Some(accounts) = accounts.clone() {
             let legacy_review = ReviewService::with_accounts(hub.clone(), accounts.clone());
-            let secure_review = SecureReviewService::new(
-                legacy_review,
-                accounts.clone(),
-                review_ledger.clone(),
-            )
-            .with_segment_store(review_store.clone());
+            let secure_review =
+                SecureReviewService::new(legacy_review, accounts.clone(), review_ledger.clone())
+                    .with_segment_store(review_store.clone());
             router = router.add_service(ReviewServer::new(secure_review));
 
             // Build the child configuration store ONCE. ChildControl,

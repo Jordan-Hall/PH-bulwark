@@ -124,7 +124,9 @@ impl Scorer for OnnxScorer {
         match self.try_score(image_bytes) {
             Ok(score) if score.is_finite() => score,
             Ok(_) => {
-                tracing::warn!("ONNX image scorer returned a non-finite score; treating as uncovered");
+                tracing::warn!(
+                    "ONNX image scorer returned a non-finite score; treating as uncovered"
+                );
                 f32::NAN
             }
             Err(error) => {

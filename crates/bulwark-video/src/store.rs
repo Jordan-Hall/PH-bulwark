@@ -319,8 +319,7 @@ fn render_meta(metadata: &SegmentMeta) -> String {
 
 fn parse_blob_uri(uri: &str) -> Option<String> {
     let id = uri.strip_prefix("blob://")?;
-    (id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()))
-        .then(|| id.to_ascii_lowercase())
+    (id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit())).then(|| id.to_ascii_lowercase())
 }
 
 fn read_meta(path: &Path) -> Option<SegmentMeta> {
@@ -450,10 +449,16 @@ mod tests {
             .unwrap();
 
         let wrong = HashSet::from(["device-b".to_string()]);
-        assert!(store.open_authorized(&stored.uri, &wrong).unwrap().is_none());
+        assert!(store
+            .open_authorized(&stored.uri, &wrong)
+            .unwrap()
+            .is_none());
 
         let right = HashSet::from(["device-a".to_string()]);
-        assert!(store.open_authorized(&stored.uri, &right).unwrap().is_some());
+        assert!(store
+            .open_authorized(&stored.uri, &right)
+            .unwrap()
+            .is_some());
     }
 
     #[test]

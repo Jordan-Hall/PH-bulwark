@@ -66,22 +66,26 @@ impl TamperService {
 
         let mut family_id = String::new();
         if let Some(accounts) = &self.accounts {
-            if let Some((child_id, authoritative_family, _)) = accounts.child_for_device(&device_id) {
+            if let Some((child_id, authoritative_family, _)) = accounts.child_for_device(&device_id)
+            {
                 status.child_id = child_id;
                 family_id = authoritative_family;
             }
         }
 
-        self.liveness.lock().expect("liveness mutex poisoned").insert(
-            device_id.clone(),
-            DeviceLiveness {
-                last_seen_ms: now_ms,
-                platform: status.platform.clone(),
-                child_id: status.child_id.clone(),
-                family_id: family_id.clone(),
-                overdue_alerted: false,
-            },
-        );
+        self.liveness
+            .lock()
+            .expect("liveness mutex poisoned")
+            .insert(
+                device_id.clone(),
+                DeviceLiveness {
+                    last_seen_ms: now_ms,
+                    platform: status.platform.clone(),
+                    child_id: status.child_id.clone(),
+                    family_id: family_id.clone(),
+                    overdue_alerted: false,
+                },
+            );
 
         heartbeat
             .tamper_events
@@ -129,7 +133,10 @@ impl TamperService {
 
 #[tonic::async_trait]
 impl Tamper for TamperService {
-    async fn heartbeat(&self, request: Request<Heartbeat>) -> Result<Response<HeartbeatAck>, Status> {
+    async fn heartbeat(
+        &self,
+        request: Request<Heartbeat>,
+    ) -> Result<Response<HeartbeatAck>, Status> {
         let heartbeat = request.into_inner();
         let device_id = heartbeat
             .status

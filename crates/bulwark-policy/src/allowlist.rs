@@ -313,26 +313,11 @@ mod tests {
     fn unspecified_deny_revokes_matching_host_and_hash() {
         let mut allowlist = Allowlist::new();
         let review = item("example.com", vec![0xde, 0xad], Category::AdultImage);
-        allowlist.apply(
-            &review,
-            ReviewDecision::Approve,
-            ReviewScope::ThisHost,
-            1,
-        );
-        allowlist.apply(
-            &review,
-            ReviewDecision::Approve,
-            ReviewScope::ThisItem,
-            2,
-        );
+        allowlist.apply(&review, ReviewDecision::Approve, ReviewScope::ThisHost, 1);
+        allowlist.apply(&review, ReviewDecision::Approve, ReviewScope::ThisItem, 2);
         assert!(allowlist.is_host_allowed(&device(), "example.com"));
         assert!(allowlist.is_hash_allowed(&device(), &[0xde, 0xad]));
-        allowlist.apply(
-            &review,
-            ReviewDecision::Deny,
-            ReviewScope::Unspecified,
-            3,
-        );
+        allowlist.apply(&review, ReviewDecision::Deny, ReviewScope::Unspecified, 3);
         assert!(!allowlist.is_host_allowed(&device(), "example.com"));
         assert!(!allowlist.is_hash_allowed(&device(), &[0xde, 0xad]));
         assert!(allowlist.audit().verify().is_ok());

@@ -202,14 +202,7 @@ pub async fn spawn(
     let websocket_handler = handler.clone();
     let fingerprint = ca.fingerprint_hex().to_owned();
     let join = tokio::spawn(async move {
-        run_hudsucker(
-            listener,
-            authority,
-            handler,
-            websocket_handler,
-            shutdown_rx,
-        )
-        .await;
+        run_hudsucker(listener, authority, handler, websocket_handler, shutdown_rx).await;
     });
     tracing::info!(%listen_addr, %fingerprint, "bounded TLS-inspection proxy started");
     Ok(MitmProxy {
@@ -440,11 +433,7 @@ impl FlowHandler {
 }
 
 impl HttpHandler for FlowHandler {
-    async fn should_intercept(
-        &mut self,
-        _ctx: &HttpContext,
-        request: &Request<Body>,
-    ) -> bool {
+    async fn should_intercept(&mut self, _ctx: &HttpContext, request: &Request<Body>) -> bool {
         self.decide_intercept(&host_of_request(request))
     }
 
@@ -592,16 +581,8 @@ impl HttpHandler for FlowHandler {
                     Response::from_parts(parts, Body::empty())
                 }
                 Ok(BoundedRead::Complete(full)) => {
-                    self.gate_buffered(
-                        parts,
-                        full,
-                        host,
-                        status,
-                        content_type,
-                        Some(class),
-                        false,
-                    )
-                    .await
+                    self.gate_buffered(parts, full, host, status, content_type, Some(class), false)
+                        .await
                 }
                 Ok(BoundedRead::Overflow { peek, .. }) => {
                     self.emit(
@@ -741,7 +722,10 @@ impl WebSocketHandler for FlowHandler {
             return Some(message);
         }
         if text.len() > BODY_PEEK_CAP {
-            tracing::warn!(bytes = text.len(), "oversized WebSocket text frame blocked unscored");
+            tracing::warn!(
+                bytes = text.len(),
+                "oversized WebSocket text frame blocked unscored"
+            );
             return None;
         }
 
@@ -1002,7 +986,10 @@ fn gate_policy(media: bool) -> (Duration, InterceptDecision) {
 fn blocked_response() -> Response<Body> {
     Response::builder()
         .status(StatusCode::FORBIDDEN)
-        .header(hudsucker::hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(
+            hudsucker::hyper::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )
         .body(Body::from("Blocked by Bulwark"))
         .unwrap_or_else(|_| Response::new(Body::empty()))
 }
@@ -1012,7 +999,10 @@ const BLOCK_PAGE_HTML: &str = "<!doctype html><html><head><meta charset=\"utf-8\
 fn blocked_page_response() -> Response<Body> {
     Response::builder()
         .status(StatusCode::FORBIDDEN)
-        .header(hudsucker::hyper::header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(
+            hudsucker::hyper::header::CONTENT_TYPE,
+            "text/html; charset=utf-8",
+        )
         .body(Body::from(BLOCK_PAGE_HTML))
         .unwrap_or_else(|_| Response::new(Body::empty()))
 }
@@ -1020,7 +1010,10 @@ fn blocked_page_response() -> Response<Body> {
 fn bad_gateway_response() -> Response<Body> {
     Response::builder()
         .status(StatusCode::BAD_GATEWAY)
-        .header(hudsucker::hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(
+            hudsucker::hyper::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )
         .body(Body::from("Upstream body stream failed"))
         .unwrap_or_else(|_| Response::new(Body::empty()))
 }
@@ -1028,7 +1021,10 @@ fn bad_gateway_response() -> Response<Body> {
 fn unsupported_encoding_response() -> Response<Body> {
     Response::builder()
         .status(StatusCode::UNSUPPORTED_MEDIA_TYPE)
-        .header(hudsucker::hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(
+            hudsucker::hyper::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )
         .body(Body::from("Unsupported content encoding"))
         .unwrap_or_else(|_| Response::new(Body::empty()))
 }
@@ -1046,7 +1042,10 @@ mod tests {
         {
             BoundedRead::Overflow { body, peek } => {
                 assert_eq!(peek.len(), BODY_PEEK_CAP);
-                assert_eq!(body.collect().await.unwrap().to_bytes().as_ref(), original.as_slice());
+                assert_eq!(
+                    body.collect().await.unwrap().to_bytes().as_ref(),
+                    original.as_slice()
+                );
             }
             BoundedRead::Complete(_) => panic!("expected bounded overflow"),
         }
@@ -1055,7 +1054,10 @@ mod tests {
     #[test]
     fn all_raster_audio_and_video_are_protected_classes() {
         assert_eq!(media_class(Some("image/jpeg")), Some(MediaClass::Image));
-        assert_eq!(media_class(Some("image/avif")), Some(MediaClass::UnsupportedImage));
+        assert_eq!(
+            media_class(Some("image/avif")),
+            Some(MediaClass::UnsupportedImage)
+        );
         assert_eq!(media_class(Some("video/mp4")), Some(MediaClass::Video));
         assert_eq!(media_class(Some("audio/aac")), Some(MediaClass::Audio));
     }

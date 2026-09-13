@@ -243,7 +243,11 @@ impl Pipeline {
                     span.app.trim(),
                     span.thread_id.trim()
                 );
-                let request_id = format!("{}-text-{}", self.cfg.device_id, short_hash_hex(scoped.thread_id.as_bytes()));
+                let request_id = format!(
+                    "{}-text-{}",
+                    self.cfg.device_id,
+                    short_hash_hex(scoped.thread_id.as_bytes())
+                );
                 self.text.analyze_span(&request_id, &scoped, span_now())
             }
             AnalysisUnit::Image(media) => self.analyze_image(media),
@@ -255,7 +259,11 @@ impl Pipeline {
                         .await
                 }
                 None => coverage_gap(
-                    format!("{}-video-{}", self.cfg.device_id, short_hash_hex(&media.data)),
+                    format!(
+                        "{}-video-{}",
+                        self.cfg.device_id,
+                        short_hash_hex(&media.data)
+                    ),
                     "video analyzer unavailable; content was not analysed",
                 ),
             },
@@ -265,7 +273,11 @@ impl Pipeline {
                         .await
                 }
                 None => coverage_gap(
-                    format!("{}-audio-{}", self.cfg.device_id, short_hash_hex(&media.data)),
+                    format!(
+                        "{}-audio-{}",
+                        self.cfg.device_id,
+                        short_hash_hex(&media.data)
+                    ),
                     "audio analyzer/offload unavailable; content was not analysed",
                 ),
             },
@@ -304,7 +316,10 @@ impl Pipeline {
             ),
             Err(error) => {
                 tracing::error!(%error, kind = ?kind, "offload analysis failed; blocking uncovered media");
-                coverage_gap(request_id, "remote analysis failed; content was not analysed")
+                coverage_gap(
+                    request_id,
+                    "remote analysis failed; content was not analysed",
+                )
             }
         }
     }
@@ -339,7 +354,10 @@ impl Pipeline {
             ),
             Err(error) => {
                 tracing::error!(%error, "video analysis failed; blocking uncovered segment");
-                coverage_gap(request_id, "video analysis failed; content was not analysed")
+                coverage_gap(
+                    request_id,
+                    "video analysis failed; content was not analysed",
+                )
             }
         }
     }
@@ -426,8 +444,8 @@ impl Pipeline {
 
         for unit in &units {
             let verdict = self.analyze(unit).await;
-            let rewrite = (!verdict.remediated_media.is_empty())
-                .then(|| verdict.remediated_media.clone());
+            let rewrite =
+                (!verdict.remediated_media.is_empty()).then(|| verdict.remediated_media.clone());
             let ctx = bulwark_policy::PolicyContext {
                 device: self.cfg.device_id.clone().into(),
                 source_channel,
@@ -445,9 +463,9 @@ impl Pipeline {
                 ..
             } = unit
             {
-                if let Err(error) = self
-                    .classifier
-                    .apply(*segment_id, action, rewrite.clone().map(Into::into))
+                if let Err(error) =
+                    self.classifier
+                        .apply(*segment_id, action, rewrite.clone().map(Into::into))
                 {
                     tracing::warn!(%error, segment_id, "failed to release buffered video segment");
                 }
@@ -550,7 +568,9 @@ fn build_nsfw_scorer() -> Box<dyn Scorer> {
         }
     }
     #[cfg(not(feature = "onnx"))]
-    tracing::error!("client built without ONNX image coverage; images will be blocked as uncovered");
+    tracing::error!(
+        "client built without ONNX image coverage; images will be blocked as uncovered"
+    );
     Box::new(bulwark_vision::StubScorer)
 }
 

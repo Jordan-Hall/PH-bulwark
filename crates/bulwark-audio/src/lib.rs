@@ -96,7 +96,9 @@ impl<T: Transcriber> FfmpegTranscriber<T> {
             return None;
         }
         let normalized = std::fs::read(&workspace.output).ok()?;
-        if normalized.is_empty() || normalized.len() > MAX_NORMALIZED_WAV_BYTES || !is_wav(&normalized)
+        if normalized.is_empty()
+            || normalized.len() > MAX_NORMALIZED_WAV_BYTES
+            || !is_wav(&normalized)
         {
             return None;
         }
@@ -242,7 +244,10 @@ impl<T: Transcriber> Analyzer for AudioAnalyzer<T> {
             _ => return Ok(uncovered(req.request_id, "no inline audio payload")),
         };
         if bytes.len() > MAX_AUDIO_INPUT_BYTES {
-            return Ok(uncovered(req.request_id, "audio payload exceeds bounded analysis limit"));
+            return Ok(uncovered(
+                req.request_id,
+                "audio payload exceeds bounded analysis limit",
+            ));
         }
         let Some(transcript) = run_blocking(|| self.transcriber.transcribe(&bytes)) else {
             return Ok(uncovered(
@@ -251,7 +256,10 @@ impl<T: Transcriber> Analyzer for AudioAnalyzer<T> {
             ));
         };
         if transcript.trim().is_empty() {
-            return Ok(safe(req.request_id, "transcription completed; no speech detected"));
+            return Ok(safe(
+                req.request_id,
+                "transcription completed; no speech detected",
+            ));
         }
 
         let span = TextSpan {
@@ -264,7 +272,9 @@ impl<T: Transcriber> Analyzer for AudioAnalyzer<T> {
         if verdict.category == Category::AdultText as i32 {
             verdict.category = Category::AdultAudio as i32;
         }
-        if verdict.category != Category::Safe as i32 && verdict.category != Category::Grooming as i32 {
+        if verdict.category != Category::Safe as i32
+            && verdict.category != Category::Grooming as i32
+        {
             verdict.action = Action::Mute as i32;
         }
         let evidence = verdict.evidence.get_or_insert_with(Evidence::default);
@@ -328,11 +338,9 @@ pub mod whisper {
         }
 
         pub fn load(model_path: &str) -> anyhow::Result<Self> {
-            let ctx = WhisperContext::new_with_params(
-                model_path,
-                WhisperContextParameters::default(),
-            )
-            .map_err(|error| anyhow::anyhow!("whisper: load {model_path}: {error}"))?;
+            let ctx =
+                WhisperContext::new_with_params(model_path, WhisperContextParameters::default())
+                    .map_err(|error| anyhow::anyhow!("whisper: load {model_path}: {error}"))?;
             Ok(Self {
                 ctx,
                 id: format!("whisper:{model_path}"),

@@ -269,7 +269,9 @@ impl FamilySafety for FamilySafetyService {
             let Some((authoritative_child, authoritative_family, authoritative_name)) =
                 accounts.child_for_device(&device_id)
             else {
-                return Err(Status::unauthenticated("device enrollment is no longer valid"));
+                return Err(Status::unauthenticated(
+                    "device enrollment is no longer valid",
+                ));
             };
             child_id = authoritative_child;
             family_id = authoritative_family;
@@ -424,12 +426,13 @@ fn now_ms() -> i64 {
 
 fn to_hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
-    bytes
-        .iter()
-        .fold(String::with_capacity(bytes.len() * 2), |mut output, byte| {
+    bytes.iter().fold(
+        String::with_capacity(bytes.len() * 2),
+        |mut output, byte| {
             let _ = write!(output, "{byte:02x}");
             output
-        })
+        },
+    )
 }
 
 fn sha256_hex(value: &str) -> String {

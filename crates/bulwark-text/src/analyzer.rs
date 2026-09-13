@@ -299,7 +299,8 @@ impl<C: TextClassifier + 'static> Analyzer for TextAnalyzer<C> {
     }
 
     async fn analyze(&self, req: AnalysisRequest) -> bulwark_core::Result<Verdict> {
-        let span = require_text_span(&req).map_err(|error| bulwark_core::Error::Other(error.into()))?;
+        let span =
+            require_text_span(&req).map_err(|error| bulwark_core::Error::Other(error.into()))?;
         Ok(self.analyze_span(&req.request_id, span, req.ts))
     }
 }

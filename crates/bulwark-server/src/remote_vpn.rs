@@ -229,7 +229,8 @@ fn load_approvals(path: &Path) -> anyhow::Result<Allowlist> {
     let rows: Vec<AuditRow> = serde_json::from_slice(&bytes)?;
     let mut allowlist = Allowlist::new();
     for row in rows {
-        let decision = ReviewDecision::try_from(row.decision).unwrap_or(ReviewDecision::Unspecified);
+        let decision =
+            ReviewDecision::try_from(row.decision).unwrap_or(ReviewDecision::Unspecified);
         let scope = ReviewScope::try_from(row.scope).unwrap_or(ReviewScope::Unspecified);
         let category = Category::try_from(row.category).unwrap_or(Category::Unspecified);
         let item = ReviewItem::new(
@@ -319,7 +320,10 @@ async fn analyze(
 ) -> Verdict {
     let request_id = request.request_id.clone();
     let Some(analyzer) = registry.analyzer_for(request.media_kind) else {
-        return inconclusive(request_id, "no region analyzer is registered for this media kind");
+        return inconclusive(
+            request_id,
+            "no region analyzer is registered for this media kind",
+        );
     };
     match tokio::time::timeout(timeout, analyzer.analyze(request)).await {
         Ok(Ok(verdict)) if verdict.category() != Category::Unspecified => verdict,
@@ -369,7 +373,9 @@ fn action_rank(action: Action) -> u8 {
 fn intercept_decision(action: Action, verdict: &Verdict) -> InterceptDecision {
     match action {
         Action::Block | Action::Unspecified => InterceptDecision::Drop,
-        Action::Blur | Action::Mute if verdict.remediated_media.is_empty() => InterceptDecision::Drop,
+        Action::Blur | Action::Mute if verdict.remediated_media.is_empty() => {
+            InterceptDecision::Drop
+        }
         Action::Blur | Action::Mute => InterceptDecision::Rewrite(verdict.remediated_media.clone()),
         Action::Allow | Action::Log | Action::Warn => InterceptDecision::Forward,
     }
@@ -502,13 +508,7 @@ async fn process_flow(
             decision.reason = "guardian-approved content/host".to_string();
         } else {
             emit_alert(
-                &state,
-                &device_id,
-                &host,
-                flow_id,
-                index,
-                &verdict,
-                &decision,
+                &state, &device_id, &host, flow_id, index, &verdict, &decision,
             )
             .await;
         }
@@ -537,17 +537,15 @@ async fn process_flow(
     }
 }
 
-async fn slot_worker(
-    address: Ipv4Addr,
-    interceptor: Arc<NetInterceptor>,
-    state: RuntimeState,
-) {
+async fn slot_worker(address: Ipv4Addr, interceptor: Arc<NetInterceptor>, state: RuntimeState) {
     let classifier = DefaultFlowClassifier::with_defaults();
     loop {
         match interceptor.next_flow().await {
             Ok(Some(flow)) => {
                 let Ok(permit) = state.concurrency.clone().try_acquire_owned() else {
-                    let _ = interceptor.apply(flow.flow_id, InterceptDecision::Drop).await;
+                    let _ = interceptor
+                        .apply(flow.flow_id, InterceptDecision::Drop)
+                        .await;
                     continue;
                 };
                 let interceptor = interceptor.clone();

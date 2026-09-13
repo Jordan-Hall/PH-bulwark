@@ -17,9 +17,9 @@ pub mod child_control;
 pub mod family_safety;
 pub mod persist;
 pub mod relay;
+pub(crate) mod remote_vpn_health;
 pub mod reset_mailer;
 pub mod review_security;
-pub(crate) mod remote_vpn_health;
 pub mod safety_cases;
 pub mod service;
 pub mod staff;
@@ -125,15 +125,18 @@ impl AnalyzerRegistry {
 
         #[cfg(feature = "whisper")]
         let video = match bulwark_audio::whisper::WhisperTranscriber::from_env() {
-            Some(stt) => video.with_audio_transcriber(Box::new(
-                bulwark_audio::FfmpegTranscriber::new(stt),
-            )),
+            Some(stt) => {
+                video.with_audio_transcriber(Box::new(bulwark_audio::FfmpegTranscriber::new(stt)))
+            }
             None => video,
         };
 
         let mut video: Arc<dyn Analyzer> = Arc::new(video);
         if let Some(store) = store {
-            video = Arc::new(RetainingVideoAnalyzer { inner: video, store });
+            video = Arc::new(RetainingVideoAnalyzer {
+                inner: video,
+                store,
+            });
         }
         registry.register(Arc::new(BlockingAnalyzer::new(video)));
 

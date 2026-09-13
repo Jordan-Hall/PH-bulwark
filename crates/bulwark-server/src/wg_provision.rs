@@ -543,9 +543,8 @@ fn inspection_ca_path(state_dir: Option<&Path>) -> Option<PathBuf> {
 }
 
 fn inspection_ca_material(state_dir: Option<&Path>) -> Result<(Vec<u8>, String), Status> {
-    let path = inspection_ca_path(state_dir).ok_or_else(|| {
-        Status::failed_precondition("Remote VPN inspection CA is not configured")
-    })?;
+    let path = inspection_ca_path(state_dir)
+        .ok_or_else(|| Status::failed_precondition("Remote VPN inspection CA is not configured"))?;
     let pem = std::fs::read(&path).map_err(|error| {
         Status::failed_precondition(format!(
             "Remote VPN inspection CA {} is unavailable: {error}",

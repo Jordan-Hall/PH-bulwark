@@ -327,10 +327,9 @@ mod tests {
     #[tokio::test]
     async fn malformed_endpoint_is_rejected_before_dial() {
         let auth = DeviceAuth::new("dev-1", "b".repeat(64)).unwrap();
-        let error =
-            OffloadClient::connect_authenticated("not a url", &dummy_identity(), auth)
-                .await
-                .unwrap_err();
+        let error = OffloadClient::connect_authenticated("not a url", &dummy_identity(), auth)
+            .await
+            .unwrap_err();
         assert!(matches!(error, bulwark_core::Error::Other(_)));
     }
 }

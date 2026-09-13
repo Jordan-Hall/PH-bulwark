@@ -64,7 +64,10 @@ impl UnifiedPushTransport {
                 "UnifiedPush endpoint resolved to no addresses".into(),
             ));
         }
-        if let Some(addr) = resolved.iter().find(|addr| !is_public_destination(addr.ip())) {
+        if let Some(addr) = resolved
+            .iter()
+            .find(|addr| !is_public_destination(addr.ip()))
+        {
             return Err(AlertError::Push(format!(
                 "UnifiedPush endpoint resolves to a blocked internal/non-routable address: {}",
                 addr.ip()
@@ -370,7 +373,9 @@ mod tests {
             assert!(!is_public_destination(ip.parse().unwrap()), "{ip}");
         }
         assert!(is_public_destination("8.8.8.8".parse().unwrap()));
-        assert!(is_public_destination("2606:4700:4700::1111".parse().unwrap()));
+        assert!(is_public_destination(
+            "2606:4700:4700::1111".parse().unwrap()
+        ));
     }
 
     #[test]

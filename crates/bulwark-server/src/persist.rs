@@ -121,7 +121,10 @@ fn production_mode() -> bool {
 
 fn fatal_state(path: &Path, detail: &str) -> ! {
     tracing::error!(path = %path.display(), detail, "fatal durable-state integrity failure");
-    eprintln!("fatal durable-state integrity failure at {}: {detail}", path.display());
+    eprintln!(
+        "fatal durable-state integrity failure at {}: {detail}",
+        path.display()
+    );
     std::process::abort()
 }
 
