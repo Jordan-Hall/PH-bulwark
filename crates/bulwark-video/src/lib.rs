@@ -774,7 +774,9 @@ mod tests {
     #[test]
     fn production_sampling_is_latency_bounded() {
         assert!(VideoConfig::default().sample_fps <= 1.0);
-        assert!(MAX_SAMPLED_FRAMES <= 16);
-        assert!(MAX_AUDIO_WINDOWS <= 8);
+        const {
+            assert!(MAX_SAMPLED_FRAMES <= 16);
+            assert!(MAX_AUDIO_WINDOWS <= 8);
+        }
     }
 }
