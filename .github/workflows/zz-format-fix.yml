@@ -1,0 +1,100 @@
+name: One-shot production repair
+
+on:
+  push:
+    branches:
+      - production-readiness/full-hardening
+
+permissions:
+  contents: write
+
+env:
+  RUSTFLAGS: -D warnings
+
+jobs:
+  repair:
+    if: github.repository == 'Jordan-Hall/PH-bulwark'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: production-readiness/full-hardening
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - name: Apply targeted source repairs
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_one(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one replacement, found {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          replace_one(
+              "crates/bulwark-video/src/lib.rs",
+              "    use std::path::{Path, PathBuf};\n",
+              "    use std::path::PathBuf;\n",
+          )
+          replace_one(
+              "crates/bulwark-video/src/lib.rs",
+              "        assert!(MAX_SAMPLED_FRAMES <= 16);\n        assert!(MAX_AUDIO_WINDOWS <= 8);\n",
+              "        const {\n            assert!(MAX_SAMPLED_FRAMES <= 16);\n            assert!(MAX_AUDIO_WINDOWS <= 8);\n        }\n",
+          )
+          replace_one(
+              "crates/bulwark-store/src/model.rs",
+              "    for pair in bytes.chunks_exact(2) {\n        match (val(pair[0]), val(pair[1])) {\n",
+              "    for index in (0..bytes.len()).step_by(2) {\n        match (val(bytes[index]), val(bytes[index + 1])) {\n",
+          )
+          replace_one(
+              "crates/bulwark-net/src/ca/mod.rs",
+              "    for chunk in msg.chunks_exact(64) {\n        let mut w = [0u32; 64];\n",
+              "    for start in (0..msg.len()).step_by(64) {\n        let chunk = &msg[start..start + 64];\n        let mut w = [0u32; 64];\n",
+          )
+          replace_one(
+              "crates/bulwark-net/src/proxy.rs",
+              "        media: Option<MediaClass>,\n        html: bool,\n    ) -> Response<Body> {\n        let flow_id = self.next_id();\n",
+              "        media: Option<MediaClass>,\n    ) -> Response<Body> {\n        let html = is_html(content_type.as_deref());\n        let flow_id = self.next_id();\n",
+          )
+          replace_one(
+              "crates/bulwark-net/src/proxy.rs",
+              "                    self.gate_buffered(parts, full, host, status, content_type, Some(class), false)\n",
+              "                    self.gate_buffered(parts, full, host, status, content_type, Some(class))\n",
+          )
+          replace_one(
+              "crates/bulwark-net/src/proxy.rs",
+              "                    self.gate_buffered(parts, full, host, status, content_type, None, true)\n",
+              "                    self.gate_buffered(parts, full, host, status, content_type, None)\n",
+          )
+          replace_one(
+              "crates/bulwark-server/src/child_control.rs",
+              "        Ok(entry.tx.borrow().clone())\n",
+              "        let config = entry.tx.borrow().clone();\n        Ok(config)\n",
+          )
+          PY
+      - name: Format workspace
+        run: cargo fmt --all
+      - name: Verify formatting
+        run: cargo fmt --all --check
+      - name: Clippy workspace
+        run: cargo clippy --workspace --all-targets
+      - name: Verify FFmpeg feature build
+        run: cargo build -p bulwark-video --features ffmpeg
+      - name: Verify server build
+        run: cargo check -p bulwark-server
+      - name: Commit validated source repairs
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- '*.rs'
+          git commit -m 'fix: clear Rust production-readiness blockers'
+          git push origin HEAD:production-readiness/full-hardening

@@ -7,15 +7,9 @@ version = "0.0.0"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
 repository = "local"
-rust-version = "1.79"
+rust-version = "1.85"
 
-# Shared dependencies are pinned here once Wave A (crate research) confirms
-# exact versions + licenses. Builders depend on workspace versions, not their own.
 [workspace.dependencies]
-# Staged from Wave A crate research (docs/research/crate-research.md, 2026-06).
-# Exact versions get reconciled against the live registry at the first online build.
-
-# Async + plumbing
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
@@ -26,7 +20,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1"
 thiserror = "2"
 
-# Detection + text rule engine (added by Wave C batch 1)
 sysinfo = "0.33"
 aho-corasick = "1"
 regex = "1"
@@ -35,80 +28,45 @@ futures-core = "0.3"
 futures-util = "0.3"
 bytes = "1"
 
-# Interception / networking
 hudsucker = "0.24"
 rustls = "0.23"
 tokio-rustls = "0.26"
 rcgen = "0.14"
-wintun = "0.5"        # Windows TUN (target-gated)
-tun-rs = "2.8"        # Linux/macOS TUN (target-gated)
-jni = "0.22"          # Android VpnService shim (target-gated)
-windows = { version = "0.60", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Memory"] } # DPAPI + cert store (target-gated)
+wintun = "0.5"
+tun-rs = "2.8"
+jni = "0.22"
+windows = { version = "0.60", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Memory"] }
 
-# gRPC + clustering (client/server)
 tonic = { version = "0.14", features = ["tls-ring"] }
 tonic-build = "0.14"
-tonic-prost = "0.14"        # runtime ProstCodec the generated stubs use (tonic 0.14 split)
-tonic-prost-build = "0.14"  # build-time codegen (replaces tonic-build's prost path)
-protox = "0.8"              # pure-Rust protobuf compiler → no system protoc needed
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
+protox = "0.8"
 tonic-health = "0.14"
 prost = "0.14"
-foca = "0.13"         # SWIM membership (fallback: chitchat 0.10)
-ginepro = "0.8"       # client-side gRPC load balancing
+foca = "0.13"
+ginepro = "0.8"
 
-# Inference (small dedicated models).
-# `download-binaries` (WITHOUT load-dynamic) fetches the onnxruntime that MATCHES
-# this ort version and links it directly — so we use the correct runtime instead
-# of the OS loader picking up an incompatible system DLL (Windows-ML's
-# onnxruntime.dll 1.17 in System32 ABI-mismatches ort 2.0-rc and HANGS session
-# creation). No ORT_DYLIB_PATH / system runtime needed. (`onnx` features are
-# opt-in per crate, so the default build never pulls ort.)
 ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
 
-# VPN data path — PERMISSIVE ONLY (productise + open-source; NO GPL).
-#   * smoltcp (0BSD): userspace TCP/IP netstack for TUN capture + redirect to the
-#     local TLS-inspecting proxy, with full control of UDP/QUIC/WebRTC + raw sockets.
-#   * boringtun (BSD-3, Cloudflare): industry-standard userspace WireGuard for the
-#     secure device<->filter-node transport leg.
-# (Replaced `tun2proxy`, which pulled `socks5-impl` = GPL-3.0-or-later — copyleft,
-#  incompatible with the MIT/Apache product license.)
-# tokio-util's CancellationToken drives clean VPN shutdown / route teardown.
 smoltcp = "0.12"
-boringtun = "0.7" # 0.7.1: noise core only (empty default feature set), BSD-3-Clause
+boringtun = "0.7"
 tokio-util = "0.7"
 
-# Media + OCR (conventional)
 ffmpeg-sidecar = "0.5"
 leptess = "0.14"
 
-# Storage + crypto
-# Postgres ONLY — default-features off so sqlx can't pull the sqlite backend,
-# which would link a second libsqlite3-sys and conflict with rusqlite/SQLCipher.
 sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "macros"] }
 rusqlite = { version = "0.40", features = ["bundled-sqlcipher"] }
 age = "0.11"
 ring = "0.17"
-# Parent-account password hashing — pure Rust (MIT/Apache-2.0), no native dep, no
-# rusqlite/SAC surface; builds clean on Linux/CI and the Windows host. Argon2id is
-# the memory-hard, OWASP-recommended successor to the legacy PBKDF2 path (which we
-# keep verifying for transparent on-login migration). `password-hash` gives the
-# PHC `$argon2id$...` string format + constant-time verify; `data-encoding`
-# (already in the tree, MIT) base32-encodes the one-time recovery codes.
 argon2 = { version = "0.5", features = ["std"] }
 password-hash = { version = "0.5", features = ["std"] }
 data-encoding = "2"
 
-# Email + web
-# default off (drops native-tls); rustls async SMTP with the ring provider + cert verifier.
 lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "pool", "smtp-transport", "tokio1-rustls-tls", "ring"] }
 axum = { version = "0.8", features = ["macros", "ws"] }
 
-# Push (self-hosted UnifiedPush; FOSS, no Google/Apple) — used by bulwark-alert
-# behind the non-default `push` feature.
-# reqwest: default-features off so no native-tls is ever linked. In reqwest 0.13
-# the `rustls` feature selects the rustls TLS stack (incl. its crypto provider);
-# `json` carries the redacted UnifiedPush POST body. (`form` is retained for any
-# form-encoded callers; the UnifiedPush sink uses only `json`.)
 reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls", "http2"] }
 
 [profile.release]

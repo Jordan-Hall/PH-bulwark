@@ -1,7 +1,4 @@
-//! `bulwark-server` binary. Role chosen by `--role lb|worker|all-in-one`
-//! (or `$BULWARK_ROLE`), bind address by `$BULWARK_BIND` (default 127.0.0.1:8443).
-//!
-//! Single-node usage:  `bulwark-server --role all-in-one`
+//! `bulwark-server` binary. Production mode is explicit and fail-closed.
 #![forbid(unsafe_code)]
 
 use std::sync::Arc;
@@ -13,67 +10,51 @@ async fn main() -> anyhow::Result<()> {
     let _ = bulwark_core::init_tracing_default();
 
     let role = std::env::args()
-        .skip_while(|a| a != "--role")
+        .skip_while(|arg| arg != "--role")
         .nth(1)
         .or_else(|| std::env::var("BULWARK_ROLE").ok())
-        .and_then(|s| ServerRole::parse(&s))
+        .and_then(|value| ServerRole::parse(&value))
         .unwrap_or(ServerRole::AllInOne);
-
     let bind = std::env::var("BULWARK_BIND").unwrap_or_else(|_| "127.0.0.1:8443".to_string());
-
-    // Accounts (multi-tenant guardian sessions) are OFF by default so a local/dev
-    // install works with an empty token (device-scoped Review). Opt in with
-    // BULWARK_ACCOUNTS=1 once guardian sessions are provisioned.
-    let accounts_enabled = matches!(
-        std::env::var("BULWARK_ACCOUNTS").ok().as_deref(),
-        Some("1") | Some("true") | Some("yes")
-    );
-
-    // Durable guardian state: when BULWARK_STATE_DIR is set, accounts are persisted
-    // there and reloaded on restart; unset = in-memory (dev default).
+    let production_mode = env_flag("BULWARK_PRODUCTION");
+    let accounts_enabled = env_flag("BULWARK_ACCOUNTS");
+    let staff_enabled = env_flag("BULWARK_STAFF");
+    let allow_plaintext = env_flag("BULWARK_ALLOW_PLAINTEXT");
     let state_dir = std::env::var_os("BULWARK_STATE_DIR")
-        .filter(|s| !s.is_empty())
+        .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from);
 
-    // Transport security: BULWARK_TLS_CERT + BULWARK_TLS_KEY (PEM file paths)
-    // enable server TLS; BULWARK_TLS_CLIENT_CA additionally requires client
-    // certificates (mTLS). Read at startup so a typo'd path fails the boot
-    // loudly instead of silently falling back to plaintext.
+    // Remote VPN uses a separate short-lived signed lease after device pairing.
+    // When an operator does not inject a secret, generate it once into the
+    // durable server state directory and reuse it across restarts. The region
+    // filtering runtime below owns inspection-CA generation/consistency checks,
+    // so there is no circular "CA must exist before the CA runtime starts" gate.
+    if env_flag("BULWARK_WG_FILTER_ACTIVE") {
+        configure_remote_vpn_auth(state_dir.as_deref())?;
+    }
+
     let tls_cert_pem = read_pem_env("BULWARK_TLS_CERT")?;
     let tls_key_pem = read_pem_env("BULWARK_TLS_KEY")?;
     let client_ca_pem = read_pem_env("BULWARK_TLS_CLIENT_CA")?;
     if tls_cert_pem.is_some() != tls_key_pem.is_some() {
-        anyhow::bail!("BULWARK_TLS_CERT and BULWARK_TLS_KEY must be set together (PEM file paths)");
+        anyhow::bail!("BULWARK_TLS_CERT and BULWARK_TLS_KEY must be set together");
     }
 
-    // Guardian passwords and session tokens MUST NOT cross the network in clear:
-    // accounts mode without TLS refuses to start. BULWARK_ALLOW_PLAINTEXT=1 is
-    // the explicit, grep-able dev override — a log warning could regress unseen.
-    let allow_plaintext = matches!(
-        std::env::var("BULWARK_ALLOW_PLAINTEXT").ok().as_deref(),
-        Some("1") | Some("true") | Some("yes")
-    );
-    if accounts_enabled && tls_cert_pem.is_none() && !allow_plaintext {
+    if (accounts_enabled || staff_enabled) && tls_cert_pem.is_none() && !allow_plaintext {
         anyhow::bail!(
-            "refusing to start: accounts mode (BULWARK_ACCOUNTS=1) over plaintext would send \
-             guardian passwords and session tokens in clear. Set BULWARK_TLS_CERT/BULWARK_TLS_KEY \
-             (PEM file paths), or BULWARK_ALLOW_PLAINTEXT=1 for local development only."
+            "refusing plaintext credentials: configure BULWARK_TLS_CERT/BULWARK_TLS_KEY or use BULWARK_ALLOW_PLAINTEXT=1 for local development only"
         );
     }
 
-    // Staff admin (internal operators console): OFF by default; opt in with
-    // BULWARK_STAFF=1. Same plaintext refusal as accounts mode — staff
-    // passwords and TOTP codes must never cross the network in clear.
-    let staff_enabled = matches!(
-        std::env::var("BULWARK_STAFF").ok().as_deref(),
-        Some("1") | Some("true") | Some("yes")
-    );
-    if staff_enabled && tls_cert_pem.is_none() && !allow_plaintext {
-        anyhow::bail!(
-            "refusing to start: staff mode (BULWARK_STAFF=1) over plaintext would send \
-             staff passwords and TOTP codes in clear. Set BULWARK_TLS_CERT/BULWARK_TLS_KEY \
-             (PEM file paths), or BULWARK_ALLOW_PLAINTEXT=1 for local development only."
-        );
+    if production_mode {
+        validate_production(
+            role,
+            accounts_enabled,
+            staff_enabled,
+            allow_plaintext,
+            state_dir.as_deref(),
+            tls_cert_pem.as_deref(),
+        )?;
     }
 
     let cfg = ServerConfig {
@@ -85,102 +66,219 @@ async fn main() -> anyhow::Result<()> {
         tls_key_pem,
         client_ca_pem,
         staff_enabled,
+        production_mode,
     };
 
-    // Text + buffered-video dispatch (image/audio stay on the device fast path /
-    // future worker wiring). Video fails open without bulwark-video's `ffmpeg`.
-    //
-    // Retain blocked video clips for guardian replay ONLY on an all-in-one node,
-    // where the parent app reads `blob://` from the same disk. A distributed
-    // worker's local store is unreachable by a remote parent, so it keeps no store
-    // (the child device's client pipeline retains clips there instead).
     let segment_store = matches!(role, ServerRole::AllInOne)
         .then(bulwark_video::SegmentStore::default_location)
-        .and_then(|r| {
-            r.map_err(|e| tracing::warn!(error = %e, "segment store unavailable; video review clips not retained server-side"))
+        .and_then(|result| {
+            result
+                .map_err(|error| {
+                    tracing::warn!(%error, "review clip store unavailable; raw retention disabled")
+                })
                 .ok()
         });
     let registry = AnalyzerRegistry::with_text_and_video(segment_store);
 
-    // Cluster config from the environment (BULWARK_NODE_ID / _CLUSTER_ADDRESS /
-    // _CLUSTER_SEEDS / _QUORUM_DSN / …) so a multi-node deployment (e.g. the Ansible
-    // cluster playbook) can point workers at the LB's address without code changes.
     let cluster = matches!(role, ServerRole::AllInOne | ServerRole::Lb).then(|| {
         Arc::new(bulwark_cluster::Cluster::new(
             bulwark_cluster::ClusterConfig::from_env(),
         ))
     });
 
-    // Guardian-ALERT email sink: on only when BULWARK_ALERT_FROM +
-    // BULWARK_ALERT_RECIPIENTS are set (BULWARK_SMTP_HOST is the shared
-    // transport — it may be set purely for the password-reset mailer, which
-    // must NOT force a static alert recipient). A partial config fails at
-    // startup rather than silently dropping alerts.
     let email_sink: Option<Arc<dyn bulwark_alert::AlertSink>> =
-        match bulwark_alert::AlertConfig::from_env().map_err(|e| anyhow::anyhow!(e))? {
-            Some(cfg) => {
-                let sink =
-                    bulwark_alert::EmailAlertSink::new(cfg).map_err(|e| anyhow::anyhow!(e))?;
-                tracing::info!("email alert sink configured (SMTP)");
-                Some(Arc::new(sink))
-            }
-            None => {
-                tracing::info!(
-                    "no guardian-alert email sink (BULWARK_ALERT_FROM/RECIPIENTS unset); \
-                     password-reset mail is independent and uses BULWARK_SMTP_HOST + BULWARK_RESET_FROM"
-                );
-                None
-            }
+        match bulwark_alert::AlertConfig::from_env().map_err(anyhow::Error::msg)? {
+            Some(alert_cfg) => Some(Arc::new(
+                bulwark_alert::EmailAlertSink::new(alert_cfg).map_err(anyhow::Error::msg)?,
+            )),
+            None => None,
         };
 
-    // DEFAULT build: the relay hub is built inside `run`; only email is wired, so
-    // the default server build + host CI stay byte-identical.
     #[cfg(not(feature = "push"))]
     let (alert_sink, hub) = (email_sink, None::<bulwark_server::AlertHub>);
 
-    // PUSH build: build the hub HERE so the UnifiedPush fan-out sink can read its
-    // live push_targets at raise time; compose email + push best-effort.
-    //
-    // UnifiedPush needs NO server-side config (no project id, no service account,
-    // no OAuth) — it just HTTP-POSTs the redacted payload to whatever guardian
-    // endpoint URLs are registered. So the sink is always available under the
-    // `push` feature and fans to whatever the registry currently holds (an empty
-    // registry is a successful no-op).
     #[cfg(feature = "push")]
     let (alert_sink, hub) = {
         let hub = match &cfg.state_dir {
             Some(dir) => {
-                bulwark_server::AlertHub::with_state_dir(dir).map_err(|e| anyhow::anyhow!(e))?
+                bulwark_server::AlertHub::with_state_dir(dir).map_err(anyhow::Error::from)?
             }
             None => bulwark_server::AlertHub::new(),
         };
-        let reg = Arc::new(bulwark_server::relay::HubTokenRegistry::new(hub.clone()));
+        let registry = Arc::new(bulwark_server::relay::HubTokenRegistry::new(hub.clone()));
         let push_sink: Arc<dyn bulwark_alert::AlertSink> = Arc::new(
-            bulwark_alert::UnifiedPushFanoutSink::new(reg).map_err(|e| anyhow::anyhow!(e))?,
+            bulwark_alert::UnifiedPushFanoutSink::new(registry).map_err(anyhow::Error::msg)?,
         );
-        tracing::info!("UnifiedPush fan-out sink configured (self-hosted; no Google/Apple)");
         let combined: Option<Arc<dyn bulwark_alert::AlertSink>> = match email_sink {
-            Some(e) => Some(Arc::new(bulwark_alert::CompositeSink::new(vec![
-                e, push_sink,
+            Some(email) => Some(Arc::new(bulwark_alert::CompositeSink::new(vec![
+                email, push_sink,
             ]))),
             None => Some(push_sink),
         };
         (combined, Some(hub))
     };
 
-    tracing::info!(?role, "starting bulwark-server");
+    tracing::info!(?role, production_mode, "starting bulwark-server");
     service::run(cfg, registry, alert_sink, cluster, hub).await
 }
 
-/// Read an env var holding a PEM **file path** into bytes. Unset/empty → `None`;
-/// set-but-unreadable → an error (a bad cert path must fail the boot, never
-/// silently fall back to plaintext).
+fn validate_production(
+    role: ServerRole,
+    accounts_enabled: bool,
+    staff_enabled: bool,
+    allow_plaintext: bool,
+    state_dir: Option<&std::path::Path>,
+    tls_cert: Option<&[u8]>,
+) -> anyhow::Result<()> {
+    if allow_plaintext {
+        anyhow::bail!("BULWARK_ALLOW_PLAINTEXT is forbidden when BULWARK_PRODUCTION=1");
+    }
+    if role != ServerRole::AllInOne {
+        anyhow::bail!(
+            "production currently requires --role all-in-one; cluster control is not exposed on the family listener"
+        );
+    }
+    if !accounts_enabled {
+        anyhow::bail!("BULWARK_PRODUCTION=1 requires BULWARK_ACCOUNTS=1");
+    }
+    if state_dir.is_none() {
+        anyhow::bail!("BULWARK_PRODUCTION=1 requires durable BULWARK_STATE_DIR");
+    }
+    if tls_cert.is_none() {
+        anyhow::bail!("BULWARK_PRODUCTION=1 requires server TLS");
+    }
+    if staff_enabled {
+        anyhow::bail!(
+            "BULWARK_STAFF must run on a dedicated internal listener, not the family listener"
+        );
+    }
+
+    #[cfg(not(all(feature = "onnx", feature = "ffmpeg", feature = "whisper")))]
+    {
+        anyhow::bail!(
+            "production analysis coverage requires bulwark-server features `onnx`, `ffmpeg`, and `whisper`"
+        );
+    }
+
+    #[cfg(all(feature = "onnx", feature = "ffmpeg", feature = "whisper"))]
+    {
+        require_file_env("BULWARK_NSFW_MODEL")?;
+        require_file_env("BULWARK_WHISPER_MODEL")?;
+        require_ffmpeg()?;
+        Ok(())
+    }
+}
+
+fn configure_remote_vpn_auth(state_dir: Option<&std::path::Path>) -> anyhow::Result<()> {
+    use ring::rand::{SecureRandom, SystemRandom};
+    use std::io::Write;
+
+    std::env::var("BULWARK_WG_SERVER_PUBLIC_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("BULWARK_WG_FILTER_ACTIVE requires BULWARK_WG_SERVER_PUBLIC_KEY")
+        })?;
+
+    let state_dir = state_dir.ok_or_else(|| {
+        anyhow::anyhow!("Remote VPN authentication requires durable BULWARK_STATE_DIR")
+    })?;
+
+    if std::env::var("BULWARK_REMOTE_VPN_SESSION_SECRET")
+        .ok()
+        .is_some_and(|value| value.len() >= 32)
+    {
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(state_dir)?;
+    let secret_path = state_dir.join("remote_vpn_session.key");
+    let secret = match std::fs::read(&secret_path) {
+        Ok(bytes) if bytes.len() >= 32 => bytes,
+        Ok(_) => anyhow::bail!(
+            "Remote VPN signing key is corrupt/too short: {}",
+            secret_path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut bytes = [0u8; 32];
+            SystemRandom::new()
+                .fill(&mut bytes)
+                .map_err(|_| anyhow::anyhow!("could not generate Remote VPN signing key"))?;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&secret_path)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&secret_path, std::fs::Permissions::from_mode(0o600))?;
+            }
+            bytes.to_vec()
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    // Hex is only an in-process environment representation of the persisted
+    // random secret; it is never logged or exposed over an RPC.
+    let secret_hex = secret
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    std::env::set_var("BULWARK_REMOTE_VPN_SESSION_SECRET", secret_hex);
+    tracing::info!("Remote VPN lease signing key loaded from durable server state");
+    Ok(())
+}
+
+#[cfg(all(feature = "onnx", feature = "ffmpeg", feature = "whisper"))]
+fn require_file_env(name: &str) -> anyhow::Result<()> {
+    let path = std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("production coverage requires {name}"))?;
+    if !path.is_file() {
+        anyhow::bail!(
+            "{name} does not point to a readable model file: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "onnx", feature = "ffmpeg", feature = "whisper"))]
+fn require_ffmpeg() -> anyhow::Result<()> {
+    let binary = std::env::var_os("BULWARK_FFMPEG_BINARY")
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var_os("FFMPEG_BINARY").filter(|value| !value.is_empty()))
+        .unwrap_or_else(|| "ffmpeg".into());
+    let status = std::process::Command::new(&binary)
+        .arg("-version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|error| anyhow::anyhow!("cannot execute ffmpeg {:?}: {error}", binary))?;
+    if !status.success() {
+        anyhow::bail!("ffmpeg runtime check failed for {:?}", binary);
+    }
+    Ok(())
+}
+
+fn env_flag(name: &str) -> bool {
+    matches!(
+        std::env::var(name).ok().as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    )
+}
+
 fn read_pem_env(var: &str) -> anyhow::Result<Option<Vec<u8>>> {
-    match std::env::var_os(var).filter(|v| !v.is_empty()) {
+    match std::env::var_os(var).filter(|value| !value.is_empty()) {
         Some(path) => {
             let path = std::path::PathBuf::from(path);
-            let pem = std::fs::read(&path)
-                .map_err(|e| anyhow::anyhow!("{var}: cannot read {}: {e}", path.display()))?;
+            let pem = std::fs::read(&path).map_err(|error| {
+                anyhow::anyhow!("{var}: cannot read {}: {error}", path.display())
+            })?;
             Ok(Some(pem))
         }
         None => Ok(None),

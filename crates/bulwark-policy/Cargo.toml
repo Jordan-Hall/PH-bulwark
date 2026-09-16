@@ -11,6 +11,7 @@ figment.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+ring.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

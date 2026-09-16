@@ -1,6 +1,4 @@
-//! gRPC service implementations (Analysis / Offload / AlertRelay) and the
-//! role-based `run` launcher. ClusterControl is mounted from `bulwark-cluster`.
-//! All links are mTLS when cert material is configured.
+//! gRPC service composition and authenticated device-facing handlers.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -16,37 +14,41 @@ use bulwark_proto::v1::staff_admin_server::StaffAdminServer;
 use bulwark_proto::v1::tamper_server::TamperServer;
 use bulwark_proto::v1::wg_provision_server::WgProvisionServer;
 use bulwark_proto::v1::{
-    Action, AlertAck, AlertAckBatch, AlertBatch, AlertEvent, AnalysisBatch, AnalysisRequest,
-    Category, DeviceProfile, OffloadPolicy, RefreshOffloadRequest, Severity, Verdict, VerdictBatch,
+    Action, AlertAck, AlertAckBatch, AlertBatch, AlertEvent, AlertKind, AnalysisBatch,
+    AnalysisRequest, Category, DeviceProfile, OffloadPolicy, RefreshOffloadRequest, Severity,
+    Verdict, VerdictBatch,
 };
-use futures_util::StreamExt;
+use futures_util::{stream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::accounts::{AccountStore, AccountsService};
+use crate::auth::{authenticate_device_metadata, DevicePrincipal};
 use crate::child_control::{ChildConfigStore, ChildControlService};
 use crate::family_safety::{FamilySafetyService, SafetyBroadcastStore};
 use crate::relay::{AlertHub, ReviewService};
+use crate::review_security::{ReviewLedger, SecureReviewService};
 use crate::staff::{StaffAdminService, StaffStore};
 use crate::tamper::{self, TamperService};
 use crate::wg_provision::{WgPeerStore, WgProvisionService};
 use crate::{default_offload_policy, AnalyzerRegistry, ServerConfig, ServerRole};
 
-fn to_status(e: bulwark_core::Error) -> Status {
-    Status::internal(e.to_string())
+#[path = "remote_vpn.rs"]
+mod remote_vpn;
+
+const ANALYSIS_BATCH_CONCURRENCY: usize = 8;
+
+fn to_status(error: bulwark_core::Error) -> Status {
+    Status::internal(error.to_string())
 }
 
-/// Verdict returned when no analyzer is registered for a media kind yet
-/// (e.g. video before `bulwark-video` is wired). Fails *open* + logs.
-fn inconclusive(request_id: String) -> Verdict {
+fn inconclusive(request_id: String, rationale: impl Into<String>) -> Verdict {
     Verdict {
         request_id,
-        // Unspecified (not Safe) so policy can distinguish "couldn't score" from
-        // "scored safe" and fail-closed on the coverage gap.
         category: Category::Unspecified as i32,
-        action: Action::Allow as i32,
-        severity: Severity::Info as i32,
+        action: Action::Block as i32,
+        severity: Severity::Medium as i32,
         score: 0.0,
-        rationale: "no analyzer registered for this media kind".to_string(),
+        rationale: rationale.into(),
         evidence: None,
         grooming: None,
         worker_id: String::new(),
@@ -55,43 +57,93 @@ fn inconclusive(request_id: String) -> Verdict {
     }
 }
 
+fn bind_analysis_identity(
+    request: &mut AnalysisRequest,
+    principal: &DevicePrincipal,
+) -> Result<(), Status> {
+    let claimed = request.device_id.trim();
+    if !claimed.is_empty() && claimed != principal.device_id {
+        return Err(Status::permission_denied(
+            "analysis request device_id does not match authenticated device",
+        ));
+    }
+    request.device_id = principal.device_id.clone();
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct AnalysisService {
     registry: AnalyzerRegistry,
+    accounts: Option<AccountStore>,
 }
 
 impl AnalysisService {
     pub fn new(registry: AnalyzerRegistry) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            accounts: None,
+        }
+    }
+
+    pub fn with_accounts(mut self, accounts: AccountStore) -> Self {
+        self.accounts = Some(accounts);
+        self
+    }
+
+    fn principal<T>(&self, request: &Request<T>) -> Result<Option<DevicePrincipal>, Status> {
+        self.accounts
+            .as_ref()
+            .map(|accounts| authenticate_device_metadata(request, accounts))
+            .transpose()
+    }
+
+    async fn dispatch(&self, request: AnalysisRequest) -> Result<Verdict, Status> {
+        match self.registry.analyzer_for(request.media_kind) {
+            Some(analyzer) => analyzer.analyze(request).await.map_err(to_status),
+            None => Ok(inconclusive(
+                request.request_id,
+                "no analyzer is registered for this media kind",
+            )),
+        }
     }
 }
 
 #[tonic::async_trait]
 impl Analysis for AnalysisService {
-    async fn analyze(&self, req: Request<AnalysisRequest>) -> Result<Response<Verdict>, Status> {
-        let req = req.into_inner();
-        match self.registry.analyzer_for(req.media_kind) {
-            Some(a) => a.analyze(req).await.map(Response::new).map_err(to_status),
-            None => {
-                tracing::warn!(kind = req.media_kind, "no analyzer; failing open");
-                Ok(Response::new(inconclusive(req.request_id)))
-            }
+    async fn analyze(
+        &self,
+        request: Request<AnalysisRequest>,
+    ) -> Result<Response<Verdict>, Status> {
+        let principal = self.principal(&request)?;
+        let mut request = request.into_inner();
+        if let Some(principal) = &principal {
+            bind_analysis_identity(&mut request, principal)?;
         }
+        self.dispatch(request).await.map(Response::new)
     }
 
     async fn analyze_batch(
         &self,
-        req: Request<AnalysisBatch>,
+        request: Request<AnalysisBatch>,
     ) -> Result<Response<VerdictBatch>, Status> {
-        let batch = req.into_inner();
-        let mut verdicts = Vec::with_capacity(batch.requests.len());
-        for r in batch.requests {
-            let v = match self.registry.analyzer_for(r.media_kind) {
-                Some(a) => a.analyze(r).await.map_err(to_status)?,
-                None => inconclusive(r.request_id),
-            };
-            verdicts.push(v);
+        let principal = self.principal(&request)?;
+        let mut requests = request.into_inner().requests;
+        if let Some(principal) = &principal {
+            for request in &mut requests {
+                bind_analysis_identity(request, principal)?;
+            }
         }
+
+        let this = self.clone();
+        let results: Vec<Result<Verdict, Status>> = stream::iter(requests)
+            .map(move |request| {
+                let this = this.clone();
+                async move { this.dispatch(request).await }
+            })
+            .buffered(ANALYSIS_BATCH_CONCURRENCY)
+            .collect()
+            .await;
+        let verdicts = results.into_iter().collect::<Result<Vec<_>, _>>()?;
         Ok(Response::new(VerdictBatch { verdicts }))
     }
 
@@ -100,40 +152,64 @@ impl Analysis for AnalysisService {
 
     async fn analyze_stream(
         &self,
-        req: Request<Streaming<AnalysisRequest>>,
+        request: Request<Streaming<AnalysisRequest>>,
     ) -> Result<Response<Self::AnalyzeStreamStream>, Status> {
-        let registry = self.registry.clone();
-        let inbound = req.into_inner();
-        let out = inbound.then(move |item| {
-            let registry = registry.clone();
+        let principal = self.principal(&request)?;
+        let this = self.clone();
+        let inbound = request.into_inner();
+        let output = inbound.then(move |item| {
+            let this = this.clone();
+            let principal = principal.clone();
             async move {
-                let r = item?;
-                match registry.analyzer_for(r.media_kind) {
-                    Some(a) => a.analyze(r).await.map_err(to_status),
-                    None => Ok(inconclusive(r.request_id)),
+                let mut request = item?;
+                if let Some(principal) = &principal {
+                    bind_analysis_identity(&mut request, principal)?;
                 }
+                this.dispatch(request).await
             }
         });
-        Ok(Response::new(Box::pin(out)))
+        Ok(Response::new(Box::pin(output)))
     }
 }
 
-/// Caches the per-device [`DeviceProfile`] captured at `negotiate_offload` so a
-/// later `refresh_offload` — which only carries fresh RTT/battery, not the device
-/// capabilities — can re-derive a CONSISTENT policy instead of a hardcoded stub.
 #[derive(Clone, Default)]
 pub struct OffloadService {
-    profiles: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, DeviceProfile>>>,
+    profiles: Arc<std::sync::Mutex<std::collections::HashMap<String, DeviceProfile>>>,
+    accounts: Option<AccountStore>,
+}
+
+impl OffloadService {
+    pub fn with_accounts(mut self, accounts: AccountStore) -> Self {
+        self.accounts = Some(accounts);
+        self
+    }
+
+    fn principal<T>(&self, request: &Request<T>) -> Result<Option<DevicePrincipal>, Status> {
+        self.accounts
+            .as_ref()
+            .map(|accounts| authenticate_device_metadata(request, accounts))
+            .transpose()
+    }
 }
 
 #[tonic::async_trait]
 impl Offload for OffloadService {
     async fn negotiate_offload(
         &self,
-        req: Request<DeviceProfile>,
+        request: Request<DeviceProfile>,
     ) -> Result<Response<OffloadPolicy>, Status> {
-        let profile = req.into_inner();
-        // Cache the capabilities so a later refresh re-derives against live RTT/battery.
+        let principal = self.principal(&request)?;
+        let mut profile = request.into_inner();
+        if let Some(principal) = &principal {
+            if !profile.device_id.trim().is_empty()
+                && profile.device_id.trim() != principal.device_id
+            {
+                return Err(Status::permission_denied(
+                    "profile device_id does not match authenticated device",
+                ));
+            }
+            profile.device_id = principal.device_id.clone();
+        }
         if let Ok(mut cache) = self.profiles.lock() {
             cache.insert(profile.device_id.clone(), profile.clone());
         }
@@ -142,75 +218,114 @@ impl Offload for OffloadService {
 
     async fn refresh_offload(
         &self,
-        req: Request<RefreshOffloadRequest>,
+        request: Request<RefreshOffloadRequest>,
     ) -> Result<Response<OffloadPolicy>, Status> {
-        let r = req.into_inner();
-        // Re-derive from the cached device profile updated with the fresh RTT/battery,
-        // so a refresh stays consistent with the original negotiate (not a fixed stub).
+        let principal = self.principal(&request)?;
+        let mut refresh = request.into_inner();
+        if let Some(principal) = &principal {
+            if !refresh.device_id.trim().is_empty()
+                && refresh.device_id.trim() != principal.device_id
+            {
+                return Err(Status::permission_denied(
+                    "refresh device_id does not match authenticated device",
+                ));
+            }
+            refresh.device_id = principal.device_id.clone();
+        }
         let profile = self
             .profiles
             .lock()
             .ok()
-            .and_then(|c| c.get(&r.device_id).cloned())
-            .map(|mut p| {
-                p.rtt_ms = r.rtt_ms;
-                p.battery_pct = r.battery_pct;
-                p
+            .and_then(|cache| cache.get(&refresh.device_id).cloned())
+            .map(|mut profile| {
+                profile.rtt_ms = refresh.rtt_ms;
+                profile.battery_pct = refresh.battery_pct;
+                profile
             })
             .unwrap_or_else(|| DeviceProfile {
-                device_id: r.device_id.clone(),
-                rtt_ms: r.rtt_ms,
-                battery_pct: r.battery_pct,
+                device_id: refresh.device_id.clone(),
+                rtt_ms: refresh.rtt_ms,
+                battery_pct: refresh.battery_pct,
                 ..Default::default()
             });
         let mut policy = default_offload_policy(&profile);
-        // Keep the client's existing policy id for continuity if it sent one.
-        if !r.policy_id.is_empty() {
-            policy.policy_id = r.policy_id;
+        if !refresh.policy_id.is_empty() {
+            policy.policy_id = refresh.policy_id;
         }
         Ok(Response::new(policy))
     }
 }
 
-/// Hosts the `AlertRelay` service. Every accepted [`AlertEvent`] is fanned out
-/// to subscribed guardian clients via the shared [`AlertHub`] broadcast (which
-/// `Review::StreamPendingReviews` consumes) and, when configured, also handed to
-/// the `bulwark-alert` e-mail [`AlertSink`](bulwark_alert::AlertSink). The sink is
-/// optional so the broadcast fan-out works even on a bare local node.
 #[derive(Clone)]
 pub struct AlertRelayService {
     hub: AlertHub,
     sink: Option<Arc<dyn bulwark_alert::AlertSink>>,
+    accounts: Option<AccountStore>,
+    review_ledger: Option<ReviewLedger>,
 }
 
 impl AlertRelayService {
-    /// Build a relay that fans alerts into `hub` and, if `sink` is `Some`, also
-    /// e-mails them via `bulwark-alert`.
     pub fn new(hub: AlertHub, sink: Option<Arc<dyn bulwark_alert::AlertSink>>) -> Self {
-        Self { hub, sink }
+        Self {
+            hub,
+            sink,
+            accounts: None,
+            review_ledger: None,
+        }
     }
-}
 
-#[tonic::async_trait]
-impl AlertRelay for AlertRelayService {
-    async fn raise_alert(&self, req: Request<AlertEvent>) -> Result<Response<AlertAck>, Status> {
-        let event = req.into_inner();
+    pub fn with_accounts(mut self, accounts: AccountStore) -> Self {
+        self.accounts = Some(accounts);
+        self
+    }
 
-        // Fan the redacted event out to any subscribed guardian Review streams.
+    pub fn with_review_ledger(mut self, review_ledger: ReviewLedger) -> Self {
+        self.review_ledger = Some(review_ledger);
+        self
+    }
+
+    fn principal<T>(&self, request: &Request<T>) -> Result<Option<DevicePrincipal>, Status> {
+        self.accounts
+            .as_ref()
+            .map(|accounts| authenticate_device_metadata(request, accounts))
+            .transpose()
+    }
+
+    fn bind_alert(
+        mut event: AlertEvent,
+        principal: Option<&DevicePrincipal>,
+    ) -> Result<AlertEvent, Status> {
+        if event.kind() == AlertKind::SafetyBroadcast {
+            return Err(Status::permission_denied(
+                "SAFETY_BROADCAST is staff-originated and cannot enter through AlertRelay",
+            ));
+        }
+        if let Some(principal) = principal {
+            if !event.device_id.trim().is_empty() && event.device_id.trim() != principal.device_id {
+                return Err(Status::permission_denied(
+                    "alert device_id does not match authenticated device",
+                ));
+            }
+            event.device_id = principal.device_id.clone();
+            event.child_id = principal.child_id.clone();
+            event.family_id = principal.family_id.clone();
+        }
+        Ok(event)
+    }
+
+    async fn deliver(&self, event: AlertEvent) -> Result<AlertAck, Status> {
+        if let Some(ledger) = &self.review_ledger {
+            ledger
+                .record(&event)
+                .map_err(|error| Status::unavailable(format!("durable alert ledger: {error}")))?;
+        }
         let reached = self.hub.publish(event.clone());
-
         match &self.sink {
-            // A sink (email and/or UnifiedPush) is configured: it is ONE delivery
-            // path, the live Review stream is ANOTHER. Combine them — a guardian
-            // streaming right now received the alert even if the sink delivered to
-            // nobody (e.g. the UnifiedPush registry is empty, or SMTP deduped it).
-            // Returning only the sink's ack would mislabel a stream-delivered alert
-            // as undelivered.
             Some(sink) => {
                 let mut ack = sink
                     .raise(event)
                     .await
-                    .map_err(|e| Status::internal(e.to_string()))?;
+                    .map_err(|error| Status::internal(error.to_string()))?;
                 if reached > 0 && !ack.delivered {
                     ack.delivered = true;
                     ack.detail = format!(
@@ -218,111 +333,103 @@ impl AlertRelay for AlertRelayService {
                         ack.detail
                     );
                 }
-                Ok(Response::new(ack))
+                Ok(ack)
             }
-            // No sink: the broadcast fan-out is the delivery path. Ack as
-            // delivered iff at least one guardian stream received it.
-            None => Ok(Response::new(AlertAck {
+            None => Ok(AlertAck {
                 alert_id: event.alert_id,
                 delivered: reached > 0,
                 deduped: false,
-                detail: format!("fanned out to {reached} guardian stream(s)"),
-            })),
-        }
-    }
-
-    async fn raise_alerts(
-        &self,
-        req: Request<AlertBatch>,
-    ) -> Result<Response<AlertAckBatch>, Status> {
-        let batch = req.into_inner();
-
-        // Fan every event out to subscribed guardian Review streams, remembering
-        // how many streams each alert reached so a sink ack can be upgraded the
-        // same way single raise_alert does (stream delivery is a real path).
-        let mut reached: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
-        for ev in &batch.events {
-            let n = self.hub.publish(ev.clone());
-            *reached.entry(ev.alert_id.clone()).or_default() += n;
-        }
-
-        match &self.sink {
-            Some(sink) => {
-                let mut resp = sink
-                    .raise_batch(batch)
-                    .await
-                    .map_err(|e| Status::internal(e.to_string()))?;
-                for ack in &mut resp.acks {
-                    if !ack.delivered && reached.get(&ack.alert_id).copied().unwrap_or(0) > 0 {
-                        let n = reached[&ack.alert_id];
-                        ack.delivered = true;
-                        ack.detail =
-                            format!("{} + fanned out to {n} guardian stream(s)", ack.detail);
-                    }
-                }
-                Ok(Response::new(resp))
-            }
-            None => {
-                let acks = batch
-                    .events
-                    .into_iter()
-                    .map(|ev| AlertAck {
-                        alert_id: ev.alert_id,
-                        delivered: true,
-                        deduped: false,
-                        detail: "fanned out (no SMTP sink configured)".to_string(),
-                    })
-                    .collect();
-                Ok(Response::new(AlertAckBatch { acks }))
-            }
+                detail: format!("durably recorded; fanned out to {reached} guardian stream(s)"),
+            }),
         }
     }
 }
 
-/// Build the tonic server for the configured role and serve until shutdown.
-///
-/// `cluster` and `alert_sink` are only mounted for `AllInOne`/`Lb`. mTLS is
-/// enabled when the config carries cert/key/ca PEM.
+#[tonic::async_trait]
+impl AlertRelay for AlertRelayService {
+    async fn raise_alert(
+        &self,
+        request: Request<AlertEvent>,
+    ) -> Result<Response<AlertAck>, Status> {
+        let principal = self.principal(&request)?;
+        let event = Self::bind_alert(request.into_inner(), principal.as_ref())?;
+        self.deliver(event).await.map(Response::new)
+    }
+
+    async fn raise_alerts(
+        &self,
+        request: Request<AlertBatch>,
+    ) -> Result<Response<AlertAckBatch>, Status> {
+        let principal = self.principal(&request)?;
+        let batch = request.into_inner();
+        let mut acks = Vec::with_capacity(batch.events.len());
+        for event in batch.events {
+            let event = Self::bind_alert(event, principal.as_ref())?;
+            acks.push(self.deliver(event).await?);
+        }
+        Ok(Response::new(AlertAckBatch { acks }))
+    }
+}
+
 pub async fn run(
     cfg: ServerConfig,
     registry: AnalyzerRegistry,
     alert_sink: Option<Arc<dyn bulwark_alert::AlertSink>>,
     cluster: Option<Arc<bulwark_cluster::Cluster>>,
-    // Pre-built guardian relay hub (so main.rs can wire a push fan-out sink that
-    // reads its live tokens). `None` → build one here (default / all-in-one path).
     hub: Option<AlertHub>,
 ) -> anyhow::Result<()> {
     use tonic::transport::Server;
 
+    if cfg.production_mode {
+        if !cfg.accounts_enabled || cfg.state_dir.is_none() {
+            anyhow::bail!("production server requires accounts + durable state");
+        }
+        if cfg.tls_cert_pem.is_none() || cfg.tls_key_pem.is_none() {
+            anyhow::bail!("production server requires server-authenticated TLS");
+        }
+        if cfg.role != ServerRole::AllInOne {
+            anyhow::bail!(
+                "production distributed roles are disabled until internal-node auth is complete"
+            );
+        }
+    }
+
     let addr = parse_bind(&cfg.bind)?;
     let mut builder = Server::builder();
-
     match (&cfg.tls_cert_pem, &cfg.tls_key_pem) {
         (Some(cert), Some(key)) => {
             use tonic::transport::{Certificate, Identity, ServerTlsConfig};
             let mut tls = ServerTlsConfig::new().identity(Identity::from_pem(cert, key));
             if let Some(ca) = &cfg.client_ca_pem {
                 tls = tls.client_ca_root(Certificate::from_pem(ca));
-                tracing::info!("mTLS enabled (client certs required)");
+                tracing::info!("server TLS + optional client-certificate authentication enabled");
             } else {
-                tracing::info!("TLS enabled (server-authenticated; client certs not yet required)");
+                tracing::info!(
+                    "server TLS enabled; device/guardian authorization uses application credentials"
+                );
             }
             builder = builder.tls_config(tls)?;
         }
-        _ => {
-            tracing::warn!(
-                "serving WITHOUT TLS — dev only; set BULWARK_TLS_CERT/BULWARK_TLS_KEY for any real deployment"
-            );
-        }
+        _ => tracing::warn!("serving without TLS; local development only"),
     }
 
-    let analysis = AnalysisServer::new(AnalysisService::new(registry));
-    let mut router = builder.add_service(analysis);
+    let accounts = if cfg.accounts_enabled {
+        Some(match &cfg.state_dir {
+            Some(dir) => AccountStore::with_state_dir(dir)?,
+            None => AccountStore::new(),
+        })
+    } else {
+        None
+    };
 
-    // Standard gRPC health service (`grpc.health.v1.Health`) for LB / systemd /
-    // k8s / `grpc_health_probe` readiness checks. The overall ("") status is
-    // SERVING once we've built the router and are about to listen.
+    // The gRPC Analysis service and the Remote VPN region filter share analyzer
+    // instances. Models/sessions therefore load once per server process.
+    let mut analysis = AnalysisService::new(registry.clone());
+    if let Some(accounts) = &accounts {
+        analysis = analysis.with_accounts(accounts.clone());
+    }
+    let mut router = builder.add_service(AnalysisServer::new(analysis));
+
     let (health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter
         .set_service_status("", tonic_health::ServingStatus::Serving)
@@ -330,60 +437,36 @@ pub async fn run(
     router = router.add_service(health_service);
 
     if matches!(cfg.role, ServerRole::AllInOne | ServerRole::Lb) {
-        router = router.add_service(OffloadServer::new(OffloadService::default()));
+        let mut offload = OffloadService::default();
+        if let Some(accounts) = &accounts {
+            offload = offload.with_accounts(accounts.clone());
+        }
+        router = router.add_service(OffloadServer::new(offload));
 
-        // Shared guardian relay state: the broadcast hub fans redacted alerts
-        // from AlertRelay out to Review's StreamPendingReviews, and carries the
-        // per-device approve-allowlist Review::SubmitDecision writes through. A
-        // caller may pass a pre-built hub (so a push fan-out sink can read its
-        // tokens); otherwise build one here — persisted when a state dir is set.
         let hub = match (hub, &cfg.state_dir) {
-            (Some(h), _) => h,
+            (Some(hub), _) => hub,
             (None, Some(dir)) => AlertHub::with_state_dir(dir)?,
             (None, None) => AlertHub::default(),
         };
-
-        // AlertRelay is always mounted on guardian-facing nodes (even without
-        // an SMTP sink) so the broadcast fan-out path is available; the sink is
-        // attached when SMTP is configured.
-        router = router.add_service(AlertRelayServer::new(AlertRelayService::new(
-            hub.clone(),
-            alert_sink.clone(),
-        )));
-
-        // Parent accounts + per-child guardians (accounts mode): built BEFORE
-        // the Tamper service so heartbeats can verify the per-device token
-        // minted at pairing. The same store also scopes Review, ChildControl,
-        // and the Accounts service below — one source of truth. Persisted when
-        // a state dir is configured (else in-memory).
-        let accounts = if cfg.accounts_enabled {
-            Some(match &cfg.state_dir {
-                Some(dir) => AccountStore::with_state_dir(dir)?,
-                None => AccountStore::new(),
-            })
-        } else {
-            None
-        };
-
-        // Scope guardian push fan-out per family (#140): hand the hub the accounts
-        // store so its `endpoints_for` routes a redacted alert ONLY to the
-        // guardians assigned to that child/device — never another family. Without
-        // this (single-tenant dev) the fan-out stays flat. Harmless when the push
-        // feature is off (nothing reads it).
-        if let Some(a) = &accounts {
-            hub.attach_accounts(a.clone());
+        if let Some(accounts) = &accounts {
+            hub.attach_accounts(accounts.clone());
         }
 
-        // Tamper: child-device protection liveness + uninstall/disable alerts,
-        // fanned out through the SAME hub (so they reach guardian Review streams,
-        // scoped per child/device). A background task sweeps for devices that have
-        // gone silent past the grace window and raises a missed-heartbeat alert.
-        // In accounts mode, heartbeats authenticate with the pairing-minted
-        // device token (legacy-enrolled devices pass the store's logged grace).
-        let tamper = match &accounts {
-            Some(accounts) => TamperService::new(hub.clone()).with_accounts(accounts.clone()),
-            None => TamperService::new(hub.clone()),
+        let review_ledger = match &cfg.state_dir {
+            Some(dir) => ReviewLedger::with_state_dir(dir)?,
+            None => ReviewLedger::new(),
         };
+        let mut relay = AlertRelayService::new(hub.clone(), alert_sink.clone())
+            .with_review_ledger(review_ledger.clone());
+        if let Some(accounts) = &accounts {
+            relay = relay.with_accounts(accounts.clone());
+        }
+        router = router.add_service(AlertRelayServer::new(relay));
+
+        let mut tamper = TamperService::new(hub.clone());
+        if let Some(accounts) = &accounts {
+            tamper = tamper.with_accounts(accounts.clone());
+        }
         {
             let sweeper = tamper.clone();
             tokio::spawn(async move {
@@ -394,30 +477,17 @@ pub async fn run(
                     tick.tick().await;
                     let now_ms = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as i64)
+                        .map(|duration| duration.as_millis() as i64)
                         .unwrap_or(0);
                     let fired = sweeper.sweep(now_ms);
                     if fired > 0 {
-                        tracing::warn!(devices = fired, "tamper: missed-heartbeat alert(s) raised");
+                        tracing::warn!(devices = fired, "missed-heartbeat alerts raised");
                     }
                 }
             });
         }
         router = router.add_service(TamperServer::new(tamper));
 
-        // StaffAdmin (internal PH operators console) — separate staff account
-        // store + token namespace (a guardian session can never authorize a
-        // staff RPC and vice versa); content-free by message shape; every
-        // staff action is appended to a tamper-evident audit chain. Mounted
-        // only when explicitly enabled (BULWARK_STAFF=1).
-        // Built once and shared: StaffAdmin owns it, and FamilySafety authorizes
-        // broadcasts against the SAME staff sessions (so a SAFETY_OFFICER/ADMIN
-        // session authenticates a broadcast and stamps a real audit id).
-        // WireGuard peer store (FILTER_ON_SERVER): built HERE (before the staff
-        // and WgProvision blocks) so the staff fleet dashboard can read its
-        // enrolled-peer COUNT. Persists the desired peer set to wg_peers.json
-        // under the state dir; an on-box reconciler applies it (the gRPC path
-        // never touches wg(8)). `None` outside accounts mode (no provisioning).
         let wg_peers = if accounts.is_some() {
             Some(
                 match &cfg.state_dir {
@@ -436,52 +506,29 @@ pub async fn run(
                 None => StaffStore::new(),
             }
             .with_bootstrap_from_env();
-            // Wire the guardian AccountStore + reset mailer so the increment-2
-            // support RPCs (reset / unlock / metadata) can act on guardian accounts
-            // (by email, content-free). Absent accounts → those RPCs return
-            // FAILED_PRECONDITION; absent SMTP → a reset mints but can't email.
-            let mut staff_svc = StaffAdminService::from_env(staff.clone());
-            if let Some(acc) = &accounts {
-                staff_svc = staff_svc.with_accounts(acc.clone());
+            let mut staff_service = StaffAdminService::from_env(staff.clone());
+            if let Some(accounts) = &accounts {
+                staff_service = staff_service.with_accounts(accounts.clone());
                 if let Some(mailer) = crate::reset_mailer::ResetMailer::from_env() {
-                    staff_svc = staff_svc.with_reset_mailer(mailer);
+                    staff_service = staff_service.with_reset_mailer(mailer);
                 }
             }
-            // Persistent safety-report queue (NCMEC workflow, increment 3) under
-            // the state dir when one is configured; in-memory otherwise. Cases
-            // carry hashes + workflow state only — no media, ever.
             if let Some(dir) = &cfg.state_dir {
-                staff_svc = staff_svc
+                staff_service = staff_service
                     .with_safety_cases(crate::safety_cases::SafetyCaseStore::with_state_dir(dir)?);
             }
-            // Live fleet data (increment 4): attach THIS node's cluster handle
-            // (live HealthStatus for the local region) + the WG peer store.
-            // `from_env` already set the local region name + TLS-cert expiry, so
-            // live gauges land on the right RegionInfo. Cross-region data is out
-            // of scope (no cross-region gossip on the single-box deploy) — other
-            // regions stay probed=false.
-            if let Some(c) = &cluster {
-                staff_svc = staff_svc.with_cluster(c.clone());
+            if let Some(cluster) = &cluster {
+                staff_service = staff_service.with_cluster(cluster.clone());
             }
-            if let Some(wg) = &wg_peers {
-                staff_svc = staff_svc.with_wg_peers(wg.clone());
+            if let Some(wg_peers) = &wg_peers {
+                staff_service = staff_service.with_wg_peers(wg_peers.clone());
             }
-            router = router.add_service(StaffAdminServer::new(staff_svc));
-            tracing::info!(
-                "staff admin ENABLED — separate staff accounts, TOTP required, every action audited"
-            );
+            router = router.add_service(StaffAdminServer::new(staff_service));
             Some(staff)
         } else {
             None
         };
 
-        // FamilySafety: child SOS (URGENT guardian alert; device-token
-        // authenticated in accounts mode, same gate as heartbeats) + staff
-        // safety broadcasts (gated by the placeholder shared env token,
-        // BULWARK_STAFF_BROADCAST_TOKEN, until the staff accounts system
-        // ships). SOS fans through the SAME hub as every other alert AND the
-        // email/push sink when configured; broadcasts persist under the state
-        // dir so a console that connects later can still fetch the active list.
         let broadcast_store = match &cfg.state_dir {
             Some(dir) => SafetyBroadcastStore::with_state_dir(dir)?,
             None => SafetyBroadcastStore::new(),
@@ -489,8 +536,6 @@ pub async fn run(
         let mut family_safety = FamilySafetyService::new(hub.clone(), broadcast_store)
             .with_alert_sink(alert_sink.clone())
             .with_staff_token_from_env();
-        // Prefer the real per-staff accounts system for broadcast auth when it's
-        // enabled; the shared env token above stays as the legacy fallback.
         if let Some(staff) = &staff_store {
             family_safety = family_safety.with_staff_store(staff.clone());
         }
@@ -499,98 +544,90 @@ pub async fn run(
         }
         router = router.add_service(FamilySafetyServer::new(family_safety));
 
-        // Review (+ optional Accounts) depends on the deployment mode:
-        //   * accounts_enabled = false (DEFAULT, single-home/dev): device-scoped
-        //     Review only — a client connects with an EMPTY token and gets its
-        //     device's alerts/decisions. The Accounts service is NOT mounted, so
-        //     the token gate never rejects the default client.
-        //   * accounts_enabled = true (productised multi-tenant): Review is scoped
-        //     to a guardian session token and the Accounts service is mounted for
-        //     registration/login/child/guardian management. Enable only once
-        //     guardian sessions exist (else the gate rejects empty-token clients).
-        //
-        // Retained-clip store for FetchSegment (remote video review): all-in-one
-        // re-opens the default segment store as a read handle (the registry writes
-        // clips to the same location), so a guardian on a DIFFERENT device than the
-        // server can pull a blocked clip. A distributed worker keeps no store.
         let review_store = matches!(cfg.role, ServerRole::AllInOne)
             .then(bulwark_video::SegmentStore::default_location)
-            .and_then(|r| {
-                r.map_err(|e| tracing::warn!(error = %e, "segment store unavailable; remote video review disabled"))
+            .and_then(|result| {
+                result
+                    .map_err(|error| tracing::warn!(%error, "review clip store unavailable"))
                     .ok()
             })
             .map(Arc::new);
-        if let Some(accounts) = accounts {
-            // The shared accounts store (built above, also verifying device
-            // tokens for Tamper) scopes Review's pending stream/decisions AND
-            // backs the Accounts service.
-            router = router.add_service(ReviewServer::new(
-                ReviewService::with_accounts(hub, accounts.clone())
-                    .with_segment_store(review_store.clone()),
-            ));
-            // ChildControl (parent-set, child-applied runtime config) shares the
-            // SAME accounts store so guardian→child scoping is one source of truth.
-            // Persisted alongside accounts when a state dir is configured.
+
+        if let Some(accounts) = accounts.clone() {
+            let legacy_review = ReviewService::with_accounts(hub.clone(), accounts.clone());
+            let secure_review =
+                SecureReviewService::new(legacy_review, accounts.clone(), review_ledger.clone())
+                    .with_segment_store(review_store.clone());
+            router = router.add_service(ReviewServer::new(secure_review));
+
+            // Build the child configuration store ONCE. ChildControl,
+            // WgProvision's durable authorization document and the Remote VPN
+            // runtime all refer to this same authority/state directory.
             let child_config = match &cfg.state_dir {
                 Some(dir) => ChildConfigStore::with_state_dir(dir)?,
                 None => ChildConfigStore::new(),
             };
             router = router.add_service(ChildControlServer::new(ChildControlService::new(
-                child_config,
+                child_config.clone(),
                 accounts.clone(),
             )));
-            // WireGuard peer provisioning (FILTER_ON_SERVER): device-token-
-            // authenticated against the SAME accounts store. The handler only
-            // persists the DESIRED peer set (wg_peers.json under the state
-            // dir) — an on-box reconciler applies it with
-            // deploy/wireguard/wg-peers.sh; the gRPC path never touches wg(8).
-            // Region material comes from BULWARK_WG_* env (from_env). The store
-            // was built above (so the staff fleet dashboard shares its count);
-            // in accounts mode it is always Some.
+
             let wg_peers = wg_peers.unwrap_or_else(WgPeerStore::new);
+
+            // Start the actual region filtering runtime BEFORE exposing the
+            // provisioning RPC. Therefore a grant carrying filter_active=true
+            // can only be issued after the CA, transparent ingress and analyzer
+            // pipeline have initialized successfully.
+            if let Some(state_dir) = cfg.state_dir.clone() {
+                remote_vpn::start(remote_vpn::RemoteVpnContext {
+                    registry: registry.clone(),
+                    accounts: accounts.clone(),
+                    child_config: child_config.clone(),
+                    hub: hub.clone(),
+                    review_ledger: review_ledger.clone(),
+                    alert_sink: alert_sink.clone(),
+                    state_dir,
+                })
+                .await?;
+            } else if matches!(
+                std::env::var("BULWARK_WG_FILTER_ACTIVE").ok().as_deref(),
+                Some("1") | Some("true") | Some("yes") | Some("on")
+            ) {
+                anyhow::bail!("Remote VPN filtering requires durable BULWARK_STATE_DIR");
+            }
+
             router = router.add_service(WgProvisionServer::new(WgProvisionService::from_env(
                 wg_peers,
                 accounts.clone(),
             )));
-            // Enable the EMAIL-based password-reset path automatically when SMTP is
-            // configured (BULWARK_SMTP_*). Without it, guardians self-reset with their
-            // saved recovery code (from_env logs which path is active).
             router = router.add_service(AccountsServer::new(AccountsService::from_env(accounts)));
-            tracing::info!(
-                "accounts mode ENABLED — Review + ChildControl require a guardian session token"
-            );
         } else {
+            if cfg.production_mode {
+                anyhow::bail!("production Review cannot run without accounts");
+            }
             router = router.add_service(ReviewServer::new(
                 ReviewService::new(hub).with_segment_store(review_store),
             ));
-            tracing::info!("accounts mode disabled — device-scoped Review (legacy/dev)");
         }
 
-        if let Some(c) = cluster {
-            let svc = bulwark_cluster::service::ClusterControlService::new(c);
-            router = router.add_service(
-                bulwark_proto::v1::cluster_control_server::ClusterControlServer::new(svc),
+        if cluster.is_some() {
+            tracing::info!(
+                "ClusterControl public mount disabled; internal control plane is isolated"
             );
         }
     }
 
-    tracing::info!(role = ?cfg.role, %cfg.bind, "bulwark-server listening");
-    // Serve until a shutdown signal so in-flight gRPC calls drain cleanly on a
-    // systemd/SCM/Docker stop, instead of being cut off mid-response.
+    tracing::info!(role = ?cfg.role, %cfg.bind, production = cfg.production_mode, "bulwark-server listening");
     router.serve_with_shutdown(addr, shutdown_signal()).await?;
     tracing::info!("bulwark-server stopped");
     Ok(())
 }
 
-/// Parse the bind address with a clear, operator-facing error (the raw
-/// `AddrParseError` doesn't say which value was wrong).
 fn parse_bind(bind: &str) -> anyhow::Result<std::net::SocketAddr> {
     bind.parse()
-        .map_err(|e| anyhow::anyhow!("invalid bind address {bind:?} (BULWARK_BIND): {e}"))
+        .map_err(|error| anyhow::anyhow!("invalid bind address {bind:?} (BULWARK_BIND): {error}"))
 }
 
-/// Resolves when the process is asked to stop: Ctrl-C on any platform, plus
-/// SIGTERM on Unix (systemd/Docker/k8s send SIGTERM). Drives graceful shutdown.
 async fn shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
@@ -598,11 +635,11 @@ async fn shutdown_signal() {
     #[cfg(unix)]
     let terminate = async {
         match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut sig) => {
-                sig.recv().await;
+            Ok(mut signal) => {
+                signal.recv().await;
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "SIGTERM handler unavailable; Ctrl-C only");
+            Err(error) => {
+                tracing::warn!(%error, "SIGTERM handler unavailable; Ctrl-C only");
                 std::future::pending::<()>().await;
             }
         }
@@ -619,16 +656,23 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_bind;
+    use super::{inconclusive, parse_bind};
+    use bulwark_proto::v1::{Action, Category};
 
     #[test]
     fn parse_bind_accepts_valid_and_rejects_garbage() {
         assert!(parse_bind("127.0.0.1:8443").is_ok());
         assert!(parse_bind("0.0.0.0:8443").is_ok());
         assert!(parse_bind("[::1]:8443").is_ok());
-        // A clear, value-bearing error — not a bare AddrParseError.
-        let err = parse_bind("not-an-addr").unwrap_err().to_string();
-        assert!(err.contains("not-an-addr") && err.contains("BULWARK_BIND"));
-        assert!(parse_bind("127.0.0.1").is_err()); // missing port
+        let error = parse_bind("not-an-addr").unwrap_err().to_string();
+        assert!(error.contains("not-an-addr") && error.contains("BULWARK_BIND"));
+        assert!(parse_bind("127.0.0.1").is_err());
+    }
+
+    #[test]
+    fn uncovered_analysis_is_never_safe_or_allowed() {
+        let verdict = inconclusive("r".into(), "missing model");
+        assert_eq!(verdict.category(), Category::Unspecified);
+        assert_eq!(verdict.action(), Action::Block);
     }
 }
