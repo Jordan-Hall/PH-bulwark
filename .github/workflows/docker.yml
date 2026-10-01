@@ -58,19 +58,22 @@ jobs:
           test "$status" -ne 0
           grep -E 'TLS|tls|certificate' startup.log
           smoke_dir=$(mktemp -d)
-          chmod 777 "$smoke_dir"
+          mkdir "$smoke_dir/tls" "$smoke_dir/state"
+          chmod 755 "$smoke_dir/tls"
           openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=localhost \
-            -addext subjectAltName=DNS:localhost -keyout "$smoke_dir/key.pem" -out "$smoke_dir/cert.pem"
-          chmod 644 "$smoke_dir/key.pem"
+            -addext subjectAltName=DNS:localhost -keyout "$smoke_dir/tls/key.pem" -out "$smoke_dir/tls/cert.pem"
+          chmod 644 "$smoke_dir/tls/key.pem"
+          sudo chown 10001:10001 "$smoke_dir/state"
           docker run -d --name bulwark-smoke -p 127.0.0.1:18443:8443 \
-            -v "$smoke_dir:/var/lib/bulwark" \
+            -v "$smoke_dir/state:/var/lib/bulwark" \
+            -v "$smoke_dir/tls:/run/bulwark-tls:ro" \
             -e BULWARK_PRODUCTION=1 -e BULWARK_ACCOUNTS=1 \
-            -e BULWARK_TLS_CERT=/var/lib/bulwark/cert.pem \
-            -e BULWARK_TLS_KEY=/var/lib/bulwark/key.pem bulwark-server:ci
+            -e BULWARK_TLS_CERT=/run/bulwark-tls/cert.pem \
+            -e BULWARK_TLS_KEY=/run/bulwark-tls/key.pem bulwark-server:ci
           trap 'docker logs bulwark-smoke; docker rm -f bulwark-smoke' EXIT
           for attempt in $(seq 1 60); do
             if timeout 2 openssl s_client -connect 127.0.0.1:18443 \
-                -CAfile "$smoke_dir/cert.pem" -verify_return_error </dev/null > tls.log 2>&1; then
+                -CAfile "$smoke_dir/tls/cert.pem" -verify_return_error </dev/null > tls.log 2>&1; then
               cat tls.log
               exit 0
             fi

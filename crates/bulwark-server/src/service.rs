@@ -582,6 +582,7 @@ pub async fn run(
             // can only be issued after the CA, transparent ingress and analyzer
             // pipeline have initialized successfully.
             if let Some(state_dir) = cfg.state_dir.clone() {
+                #[cfg(target_os = "linux")]
                 remote_vpn::start(remote_vpn::RemoteVpnContext {
                     registry: registry.clone(),
                     accounts: accounts.clone(),
@@ -592,6 +593,8 @@ pub async fn run(
                     state_dir,
                 })
                 .await?;
+                #[cfg(not(target_os = "linux"))]
+                remote_vpn::start(state_dir).await?;
             } else if matches!(
                 std::env::var("BULWARK_WG_FILTER_ACTIVE").ok().as_deref(),
                 Some("1") | Some("true") | Some("yes") | Some("on")

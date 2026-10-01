@@ -1,14 +1,17 @@
 //! In-process, peer-attributed filtering for authenticated Remote VPN traffic.
 
-use crate::accounts::AccountStore;
-use crate::child_control::ChildConfigStore;
-use crate::relay::AlertHub;
-use crate::review_security::ReviewLedger;
-use crate::AnalyzerRegistry;
-use bulwark_alert::AlertSink;
 use std::path::PathBuf;
-use std::sync::Arc;
+#[cfg(target_os = "linux")]
+use {
+    crate::{
+        accounts::AccountStore, child_control::ChildConfigStore, relay::AlertHub,
+        review_security::ReviewLedger, AnalyzerRegistry,
+    },
+    bulwark_alert::AlertSink,
+    std::sync::Arc,
+};
 
+#[cfg(target_os = "linux")]
 #[derive(Clone)]
 pub struct RemoteVpnContext {
     pub registry: AnalyzerRegistry,
@@ -35,7 +38,7 @@ pub use linux::start;
 mod linux;
 
 #[cfg(not(target_os = "linux"))]
-pub async fn start(_context: RemoteVpnContext) -> anyhow::Result<()> {
+pub async fn start(_state_dir: PathBuf) -> anyhow::Result<()> {
     if env_flag("BULWARK_WG_FILTER_ACTIVE") {
         anyhow::bail!("Remote VPN server filtering is supported only on Linux regions");
     }
