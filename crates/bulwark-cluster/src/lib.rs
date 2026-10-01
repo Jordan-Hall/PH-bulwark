@@ -138,11 +138,18 @@ impl Cluster {
     pub fn complete_inflight(&self) {
         // Saturating decrement: an extra completion (or one with nothing in
         // flight) must not wrap the unsigned counter to u32::MAX.
-        let _ = self
-            .inflight
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                Some(v.saturating_sub(1))
-            });
+        let mut current = self.inflight.load(Ordering::Relaxed);
+        while current > 0 {
+            match self.inflight.compare_exchange_weak(
+                current,
+                current - 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     /// Acknowledge a completed work item: clear its lease so it isn't redelivered,

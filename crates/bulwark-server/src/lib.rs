@@ -163,11 +163,13 @@ impl AnalyzerRegistry {
     }
 }
 
+#[cfg(any(feature = "onnx", feature = "whisper"))]
 struct BlockingAnalyzer {
     inner: Arc<dyn Analyzer>,
     kinds: Vec<MediaKind>,
 }
 
+#[cfg(any(feature = "onnx", feature = "whisper"))]
 impl BlockingAnalyzer {
     fn new(inner: Arc<dyn Analyzer>) -> Self {
         Self {
@@ -177,6 +179,7 @@ impl BlockingAnalyzer {
     }
 }
 
+#[cfg(any(feature = "onnx", feature = "whisper"))]
 #[async_trait]
 impl Analyzer for BlockingAnalyzer {
     fn handles(&self) -> &[MediaKind] {
