@@ -143,3 +143,38 @@ impl Scorer for OnnxScorer {
             .model_id()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dynamic_bundled_model_requires_the_correct_dimensions() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("models/nsfw_detector.onnx");
+        assert!(inner::OnnxScorer::load_with_ep(
+            path.to_str().expect("model path"),
+            224,
+            Normalization::half(),
+            ExecProviderMode::Cpu,
+        )
+        .is_err());
+        let scorer = OnnxScorer::load_with_ep(
+            path.to_str().expect("model path"),
+            crate::BUNDLED_NSFW_INPUT_SIZE,
+            Normalization::half(),
+            ExecProviderMode::Cpu,
+        )
+        .expect("load bundled model");
+        let image = image::RgbImage::from_pixel(16, 16, image::Rgb([10, 120, 200]));
+        let mut png = Vec::new();
+        use image::ImageEncoder;
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(image.as_raw(), 16, 16, image::ExtendedColorType::Rgb8)
+            .expect("encode fixture");
+        let score = scorer.try_score(&png).expect("real model inference");
+        assert!(score.is_finite() && (0.0..=1.0).contains(&score));
+        assert!(scorer.try_score(b"invalid image").is_err());
+        assert!(scorer.score(b"invalid image").is_nan());
+    }
+}

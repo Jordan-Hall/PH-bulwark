@@ -51,3 +51,5 @@ EXPOSE 8443
 VOLUME ["/var/lib/bulwark"]
 ENTRYPOINT ["/usr/local/bin/bulwark-server"]
 CMD ["--role", "all-in-one"]
+
+ENV BULWARK_NSFW_INPUT_SIZE=384

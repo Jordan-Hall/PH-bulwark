@@ -102,11 +102,14 @@ impl OnnxScorer {
         norm: Normalization,
         mode: ExecProviderMode,
     ) -> anyhow::Result<Self> {
-        let session = match mode {
+        let mut session = match mode {
             ExecProviderMode::Cpu => build_session(model_path, cpu_only())?,
             ExecProviderMode::Gpu => build_session(model_path, gpu_then_cpu())?,
             ExecProviderMode::Auto => auto_select_session(model_path, input_size)?,
         };
+        let input_size = model_input_size(&session, input_size);
+        anyhow::ensure!(time_warmup(&mut session, input_size).is_some(),
+            "ONNX model warmup failed at {input_size}x{input_size}; check BULWARK_NSFW_INPUT_SIZE for dynamic models");
         Ok(Self {
             model_id: format!("nsfw-onnx:{model_path}:{}", mode.label()),
             input_size,
@@ -123,7 +126,10 @@ impl OnnxScorer {
         input_size: u32,
         norm: Normalization,
     ) -> anyhow::Result<Self> {
-        let session = build_session_from_bytes(bytes, cpu_only())?;
+        let mut session = build_session_from_bytes(bytes, cpu_only())?;
+        let input_size = model_input_size(&session, input_size);
+        anyhow::ensure!(time_warmup(&mut session, input_size).is_some(),
+            "ONNX model warmup failed at {input_size}x{input_size}; check BULWARK_NSFW_INPUT_SIZE for dynamic models");
         Ok(Self {
             model_id: format!("nsfw-onnx:bundled:{input_size}"),
             input_size,
@@ -151,6 +157,18 @@ impl OnnxScorer {
             class.input_size()
         } else {
             default_input_size
+        };
+        let input_size = match std::env::var("BULWARK_NSFW_INPUT_SIZE") {
+            Ok(value) => {
+                let size: u32 = value.parse()?;
+                anyhow::ensure!(
+                    (1..=4096).contains(&size),
+                    "invalid BULWARK_NSFW_INPUT_SIZE"
+                );
+                size
+            }
+            Err(std::env::VarError::NotPresent) => input_size,
+            Err(error) => return Err(error.into()),
         };
         let norm = norm_from_env(class);
         let mode = ExecProviderMode::from_env();
@@ -305,6 +323,7 @@ fn auto_select_session(model_path: &str, input_size: u32) -> anyhow::Result<Sess
         }
     };
 
+    let input_size = model_input_size(&cpu, input_size);
     let cpu_ms = time_warmup(&mut cpu, input_size);
     let gpu_ms = time_warmup(&mut gpu, input_size);
 
@@ -320,6 +339,21 @@ fn auto_select_session(model_path: &str, input_size: u32) -> anyhow::Result<Sess
         // If either benchmark couldn't run, prefer the CPU session (always valid).
         _ => Ok(cpu),
     }
+}
+
+fn model_input_size(session: &Session, fallback: u32) -> u32 {
+    session
+        .inputs()
+        .first()
+        .and_then(|input| input.dtype().tensor_shape())
+        .and_then(|shape| {
+            if shape.len() == 4 && shape[1] == 3 && shape[2] > 0 && shape[2] == shape[3] {
+                u32::try_from(shape[2]).ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(fallback)
 }
 
 /// Time one inference of a zero-filled `[1,3,size,size]` input (after one warm

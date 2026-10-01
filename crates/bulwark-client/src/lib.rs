@@ -129,8 +129,8 @@ impl ImageScoreCache {
     }
 
     fn insert(&mut self, hash: [u8; 32], score: f32) {
-        if self.scores.contains_key(&hash) {
-            self.scores.insert(hash, score);
+        if let Some(current) = self.scores.get_mut(&hash) {
+            *current = score;
             return;
         }
         while self.scores.len() >= self.capacity {

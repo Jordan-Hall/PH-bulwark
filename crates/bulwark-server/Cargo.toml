@@ -31,6 +31,7 @@ bulwark-vision = { path = "../bulwark-vision", optional = true }
 # speech and judges it with bulwark-text; without a model it fail-CLOSES.
 bulwark-audio = { path = "../bulwark-audio", optional = true }
 tonic.workspace = true
+rustls.workspace = true
 # Standard gRPC health service (grpc.health.v1.Health) for readiness probes.
 tonic-health = "0.14"
 prost.workspace = true

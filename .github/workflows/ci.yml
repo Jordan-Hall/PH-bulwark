@@ -61,7 +61,7 @@ jobs:
       matrix:
         command:
           - build -p bulwark-text --features classifier
-          - build -p bulwark-vision --features onnx
+          - test -p bulwark-vision --features onnx
           - test -p bulwark-infer --features onnx
           - test -p bulwark-video --features ffmpeg
           - build -p bulwark-audio --features whisper

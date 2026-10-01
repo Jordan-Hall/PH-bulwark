@@ -738,6 +738,7 @@ dependencies = [
  "password-hash",
  "prost 0.14.3",
  "ring",
+ "rustls",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

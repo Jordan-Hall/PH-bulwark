@@ -161,3 +161,5 @@ ffmpeg paths when the env vars are absent.
 
 | Browser warns the CA isn't trusted | CA not installed / wrong store | re-run setup elevated; confirm install |
 ```
+
+For an ONNX image model with dynamic height and width, set `BULWARK_NSFW_INPUT_SIZE` to its trained square resolution. The bundled `nsfw_detector.onnx` requires `384`; the Docker image configures this automatically. Static square model dimensions take precedence over the fallback. Model loading validates a real warmup before reporting readiness.

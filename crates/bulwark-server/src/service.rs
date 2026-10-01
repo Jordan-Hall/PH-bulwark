@@ -380,6 +380,9 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     use tonic::transport::Server;
 
+    // Feature unification can enable both Rustls providers; choose deterministically.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     if cfg.production_mode {
         if !cfg.accounts_enabled || cfg.state_dir.is_none() {
             anyhow::bail!("production server requires accounts + durable state");
