@@ -7,7 +7,7 @@ version = "0.0.0"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
 repository = "local"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }

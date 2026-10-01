@@ -199,7 +199,8 @@ impl ChildConfigStore {
             .by_child
             .get(child_id)
             .ok_or_else(|| Status::not_found("no config for this device yet"))?;
-        Ok(entry.tx.borrow().clone())
+        let config = entry.tx.borrow().clone();
+        Ok(config)
     }
 
     pub fn record_applied_report(&self, device_id: &str, version: u64) {

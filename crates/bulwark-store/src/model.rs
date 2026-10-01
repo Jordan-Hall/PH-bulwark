@@ -263,7 +263,7 @@ pub fn hex_decode(s: &str) -> Vec<u8> {
             _ => None,
         }
     };
-    for pair in bytes.chunks_exact(2) {
+    for pair in bytes.chunks(2) {
         match (val(pair[0]), val(pair[1])) {
             (Some(hi), Some(lo)) => out.push((hi << 4) | lo),
             _ => return Vec::new(),
@@ -336,5 +336,9 @@ mod tests {
         assert_eq!(hex_decode(&hex_encode(&b)), b);
         assert_eq!(hex_encode(&[]), "");
         assert_eq!(hex_decode("zz"), Vec::<u8>::new());
+        assert_eq!(hex_decode(""), Vec::<u8>::new());
+        assert_eq!(hex_decode("a"), Vec::<u8>::new());
+        assert_eq!(hex_decode("aBcD"), vec![0xab, 0xcd]);
+        assert_eq!(hex_decode("00zz"), Vec::<u8>::new());
     }
 }

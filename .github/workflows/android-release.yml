@@ -65,6 +65,8 @@ jobs:
 
       - name: Set up Android SDK + NDK
         uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
 
       - name: Install NDK + export its path
         run: |
@@ -205,6 +207,8 @@ jobs:
 
       - name: Set up Android SDK + NDK
         uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
 
       - name: Install NDK + export its path
         run: |

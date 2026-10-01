@@ -138,7 +138,7 @@ impl AnalyzerRegistry {
                 store,
             });
         }
-        registry.register(Arc::new(BlockingAnalyzer::new(video)));
+        registry.register(video);
 
         #[cfg(feature = "onnx")]
         {

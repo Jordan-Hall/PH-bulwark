@@ -1,6 +1,10 @@
 //! Bounded video decode → sample → classify → remediate pipeline.
 #![forbid(unsafe_code)]
 
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -20,6 +24,46 @@ const MAX_SAMPLED_FRAMES: usize = 16;
 const MAX_AUDIO_WINDOWS: usize = 8;
 const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024;
 
+/// One shared deadline and cancellation signal for the entire video operation.
+#[derive(Clone)]
+pub struct AnalysisBudget {
+    deadline: Instant,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl AnalysisBudget {
+    /// A zero request deadline uses 850 ms; explicit deadlines are capped at 5 s.
+    pub fn new(deadline_ms: u32) -> Self {
+        Self {
+            deadline: Instant::now()
+                + Duration::from_millis(u64::from(if deadline_ms == 0 {
+                    850
+                } else {
+                    deadline_ms.min(5000)
+                })),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn expired(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed) || Instant::now() >= self.deadline
+    }
+
+    fn remaining_ms(&self) -> u32 {
+        self.deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis()
+            .min(u128::from(u32::MAX)) as u32
+    }
+}
+
+struct CancelOnDrop(AnalysisBudget);
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancelled.store(true, Ordering::Relaxed);
+    }
+}
+
 /// Video-analysis sampling configuration.
 #[derive(Debug, Clone)]
 pub struct VideoConfig {
@@ -37,7 +81,7 @@ impl Default for VideoConfig {
 /// Synchronous container decode/remediation seam.
 pub trait Demuxer: Send + Sync {
     /// Decode bounded representative frame/audio samples.
-    fn sample(&self, segment: &[u8], sample_fps: f32) -> DecodedSegment;
+    fn sample(&self, segment: &[u8], sample_fps: f32, budget: &AnalysisBudget) -> DecodedSegment;
 
     /// Produce a cleaned replacement for flagged time ranges.
     fn remediate(
@@ -45,6 +89,7 @@ pub trait Demuxer: Send + Sync {
         _segment: &[u8],
         _blur_ranges: &[(f32, f32)],
         _mute_ranges: &[(f32, f32)],
+        _budget: &AnalysisBudget,
     ) -> Option<Vec<u8>> {
         None
     }
@@ -67,7 +112,12 @@ pub struct DecodedSegment {
 pub struct NullDemuxer;
 
 impl Demuxer for NullDemuxer {
-    fn sample(&self, _segment: &[u8], _sample_fps: f32) -> DecodedSegment {
+    fn sample(
+        &self,
+        _segment: &[u8],
+        _sample_fps: f32,
+        _budget: &AnalysisBudget,
+    ) -> DecodedSegment {
         DecodedSegment::default()
     }
 }
@@ -75,9 +125,9 @@ impl Demuxer for NullDemuxer {
 /// Buffered-video analyzer.
 pub struct VideoAnalyzer<D: Demuxer = NullDemuxer> {
     cfg: VideoConfig,
-    demux: D,
-    vision: VisionAnalyzer<Box<dyn Scorer>>,
-    audio: AudioAnalyzer<Box<dyn Transcriber>>,
+    demux: Arc<D>,
+    vision: Arc<VisionAnalyzer<Box<dyn Scorer>>>,
+    audio: Arc<AudioAnalyzer<Box<dyn Transcriber>>>,
     segment_store: Option<SegmentStore>,
 }
 
@@ -86,11 +136,11 @@ impl VideoAnalyzer<NullDemuxer> {
     pub fn new() -> Self {
         Self {
             cfg: VideoConfig::default(),
-            demux: NullDemuxer,
-            vision: VisionAnalyzer::from_env(VisionConfig::default()),
-            audio: AudioAnalyzer::with_transcriber(
+            demux: Arc::new(NullDemuxer),
+            vision: Arc::new(VisionAnalyzer::from_env(VisionConfig::default())),
+            audio: Arc::new(AudioAnalyzer::with_transcriber(
                 Box::new(StubTranscriber) as Box<dyn Transcriber>
-            ),
+            )),
             segment_store: None,
         }
     }
@@ -107,11 +157,11 @@ impl<D: Demuxer> VideoAnalyzer<D> {
     pub fn with_demuxer(cfg: VideoConfig, demux: D) -> Self {
         Self {
             cfg,
-            demux,
-            vision: VisionAnalyzer::from_env(VisionConfig::default()),
-            audio: AudioAnalyzer::with_transcriber(
+            demux: Arc::new(demux),
+            vision: Arc::new(VisionAnalyzer::from_env(VisionConfig::default())),
+            audio: Arc::new(AudioAnalyzer::with_transcriber(
                 Box::new(StubTranscriber) as Box<dyn Transcriber>
-            ),
+            )),
             segment_store: None,
         }
     }
@@ -124,13 +174,13 @@ impl<D: Demuxer> VideoAnalyzer<D> {
 
     /// Override the frame scorer.
     pub fn with_vision_scorer(mut self, scorer: Box<dyn Scorer>) -> Self {
-        self.vision = VisionAnalyzer::with_scorer(VisionConfig::default(), scorer);
+        self.vision = Arc::new(VisionAnalyzer::with_scorer(VisionConfig::default(), scorer));
         self
     }
 
     /// Override the audio transcriber.
     pub fn with_audio_transcriber(mut self, transcriber: Box<dyn Transcriber>) -> Self {
-        self.audio = AudioAnalyzer::with_transcriber(transcriber);
+        self.audio = Arc::new(AudioAnalyzer::with_transcriber(transcriber));
         self
     }
 }
@@ -207,18 +257,65 @@ fn uncovered(request_id: String, rationale: impl Into<String>) -> Verdict {
     }
 }
 
-fn over_deadline(started: Instant, deadline_ms: u32) -> bool {
-    deadline_ms > 0 && started.elapsed() >= Duration::from_millis(u64::from(deadline_ms))
-}
-
 #[async_trait]
-impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
+impl<D: Demuxer + 'static> Analyzer for VideoAnalyzer<D> {
     fn handles(&self) -> &[MediaKind] {
         const KINDS: [MediaKind; 1] = [MediaKind::Video];
         &KINDS
     }
 
     async fn analyze(&self, req: AnalysisRequest) -> Result<Verdict> {
+        static WORKERS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
+            std::sync::OnceLock::new();
+        let budget = AnalysisBudget::new(req.deadline_ms);
+        let _cancel = CancelOnDrop(budget.clone());
+        let permit = match WORKERS
+            .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)))
+            .clone()
+            .try_acquire_owned()
+        {
+            Ok(permit) => permit,
+            Err(_) => {
+                return Ok(uncovered(
+                    req.request_id,
+                    "video workers saturated; coverage unavailable",
+                ))
+            }
+        };
+        let worker = Self {
+            cfg: self.cfg.clone(),
+            demux: self.demux.clone(),
+            vision: self.vision.clone(),
+            audio: self.audio.clone(),
+            segment_store: self.segment_store.clone(),
+        };
+        let request_id = req.request_id.clone();
+        let deadline = tokio::time::Instant::from_std(budget.deadline);
+        let job = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| bulwark_core::Error::Other(error.into()))?;
+            runtime.block_on(worker.analyze_bounded(req, budget))
+        });
+        match tokio::time::timeout_at(deadline, job).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Ok(uncovered(
+                request_id,
+                "video worker failed; coverage unavailable",
+            )),
+            Err(_) => Ok(uncovered(request_id, "video protection deadline elapsed")),
+        }
+    }
+}
+
+impl<D: Demuxer> VideoAnalyzer<D> {
+    async fn analyze_bounded(
+        &self,
+        mut req: AnalysisRequest,
+        budget: AnalysisBudget,
+    ) -> Result<Verdict> {
         let started = Instant::now();
         let segment = match req.media.as_ref() {
             Some(Media::InlineMedia(media)) => media.data.clone(),
@@ -239,8 +336,8 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
             ));
         }
 
-        let decoded = self.demux.sample(&segment, self.cfg.sample_fps);
-        if over_deadline(started, req.deadline_ms) {
+        let decoded = self.demux.sample(&segment, self.cfg.sample_fps, &budget);
+        if budget.expired() {
             return Ok(uncovered(
                 req.request_id,
                 "video decode exceeded the requested protection deadline",
@@ -268,7 +365,7 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
             || decoded.audio_windows.len() > MAX_AUDIO_WINDOWS;
 
         for (index, frame) in decoded.frames.iter().take(MAX_SAMPLED_FRAMES).enumerate() {
-            if over_deadline(started, req.deadline_ms) {
+            if budget.expired() {
                 incomplete = true;
                 break;
             }
@@ -276,6 +373,7 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
                 incomplete = true;
                 continue;
             }
+            req.deadline_ms = budget.remaining_ms().max(1);
             let verdict = self
                 .vision
                 .analyze(image_req(
@@ -311,10 +409,11 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
                 .take(MAX_AUDIO_WINDOWS)
                 .enumerate()
             {
-                if over_deadline(started, req.deadline_ms) {
+                if budget.expired() {
                     incomplete = true;
                     break;
                 }
+                req.deadline_ms = budget.remaining_ms().max(1);
                 let verdict = self
                     .audio
                     .analyze(audio_req(
@@ -335,6 +434,7 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
             }
         }
 
+        incomplete |= budget.expired();
         let mut verdict = worst.unwrap_or_else(|| Verdict {
             request_id: req.request_id.clone(),
             category: Category::Safe as i32,
@@ -346,18 +446,11 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
         });
         verdict.request_id = req.request_id.clone();
 
-        if incomplete {
-            if verdict.category() == Category::Safe {
-                verdict = uncovered(
-                    req.request_id.clone(),
-                    "video protection deadline elapsed before complete bounded coverage",
-                );
-            } else {
-                verdict.action = Action::Block as i32;
-                verdict
-                    .rationale
-                    .push_str("; additional samples were not fully scored before deadline");
-            }
+        if incomplete && verdict.category() != Category::CsamSuspected {
+            return Ok(uncovered(
+                req.request_id,
+                "video coverage incomplete or deadline exhausted",
+            ));
         }
 
         if verdict.category() == Category::CsamSuspected {
@@ -366,14 +459,19 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
         } else if !blur_ranges.is_empty() || !mute_ranges.is_empty() {
             // Remediation is optional only after the unsafe classification is
             // known. If there is no time budget left, blocking is safer and faster.
-            if over_deadline(started, req.deadline_ms) {
+            if budget.expired() {
                 verdict.action = Action::Block as i32;
                 verdict
                     .rationale
                     .push_str("; deadline exhausted before safe remediation");
             } else {
-                match self.demux.remediate(&segment, &blur_ranges, &mute_ranges) {
-                    Some(cleaned) if !cleaned.is_empty() => verdict.remediated_media = cleaned,
+                match self
+                    .demux
+                    .remediate(&segment, &blur_ranges, &mute_ranges, &budget)
+                {
+                    Some(cleaned) if !cleaned.is_empty() && !budget.expired() => {
+                        verdict.remediated_media = cleaned
+                    }
                     _ => {
                         verdict.action = Action::Block as i32;
                         verdict
@@ -382,6 +480,13 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
                     }
                 }
             }
+        }
+
+        if budget.expired() && verdict.category() != Category::CsamSuspected {
+            return Ok(uncovered(
+                req.request_id,
+                "video deadline exhausted during remediation",
+            ));
         }
 
         if let Some(store) = &self.segment_store {
@@ -398,21 +503,29 @@ impl<D: Demuxer> Analyzer for VideoAnalyzer<D> {
 
 #[cfg(feature = "ffmpeg")]
 pub mod ffmpeg {
-    use super::{DecodedSegment, Demuxer, MAX_SAMPLED_FRAMES};
+    use super::{
+        AnalysisBudget, DecodedSegment, Demuxer, MAX_AUDIO_WINDOWS, MAX_FRAME_BYTES,
+        MAX_INLINE_VIDEO_BYTES, MAX_SAMPLED_FRAMES,
+    };
     use std::ffi::OsString;
     use std::io::Write;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::process::{Command, Stdio};
     use std::time::{Duration, SystemTime};
 
     const AUDIO_WINDOW_SECS: u32 = 10;
-    const FFMPEG_TIMEOUT: Duration = Duration::from_millis(850);
     const FRAME_EDGE: u32 = 384;
 
     /// Sidecar ffmpeg decoder. ffmpeg remains out-of-process.
     #[derive(Default)]
     pub struct FfmpegDemuxer {
         binary: Option<PathBuf>,
+    }
+
+    enum AudioStream {
+        Absent,
+        Samples(Vec<Vec<u8>>),
+        Incomplete,
     }
 
     impl FfmpegDemuxer {
@@ -446,16 +559,18 @@ pub mod ffmpeg {
             command
         }
 
-        fn run_bounded(&self, command: &mut Command) -> bool {
+        fn run_bounded(&self, command: &mut Command, budget: &AnalysisBudget) -> bool {
+            if budget.expired() {
+                return false;
+            }
             let mut child = match command.spawn() {
                 Ok(child) => child,
                 Err(_) => return false,
             };
-            let started = std::time::Instant::now();
             loop {
                 match child.try_wait() {
                     Ok(Some(status)) => return status.success(),
-                    Ok(None) if started.elapsed() < FFMPEG_TIMEOUT => {
+                    Ok(None) if !budget.expired() => {
                         std::thread::sleep(Duration::from_millis(10));
                     }
                     Ok(None) | Err(_) => {
@@ -471,6 +586,7 @@ pub mod ffmpeg {
             &self,
             workspace: &TempWorkspace,
             sample_fps: f32,
+            budget: &AnalysisBudget,
         ) -> Option<Vec<Vec<u8>>> {
             let pattern = workspace.dir.join("frame-%04d.jpg");
             let mut command = self.command();
@@ -478,6 +594,7 @@ pub mod ffmpeg {
                 .arg("-hide_banner")
                 .arg("-loglevel")
                 .arg("error")
+                .arg("-xerror")
                 .arg("-threads")
                 .arg("2")
                 .arg("-i")
@@ -489,56 +606,112 @@ pub mod ffmpeg {
                     FRAME_EDGE
                 ))
                 .arg("-frames:v")
-                .arg(MAX_SAMPLED_FRAMES.to_string())
+                .arg((MAX_SAMPLED_FRAMES + 1).to_string())
                 .arg("-q:v")
                 .arg("8")
                 .arg("-y")
                 .arg(pattern);
-            if !self.run_bounded(&mut command) {
+            if !self.run_bounded(&mut command, budget) {
                 return None;
             }
 
-            let mut paths = std::fs::read_dir(&workspace.dir)
-                .ok()?
-                .filter_map(Result::ok)
-                .map(|entry| entry.path())
-                .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("jpg"))
-                .collect::<Vec<_>>();
-            paths.sort();
-            Some(
-                paths
-                    .into_iter()
-                    .take(MAX_SAMPLED_FRAMES)
-                    .filter_map(|path| std::fs::read(path).ok())
-                    .collect(),
-            )
+            read_frames(workspace)
         }
 
-        fn decode_audio(&self, workspace: &TempWorkspace) -> Option<Vec<Vec<u8>>> {
+        fn decode_audio(
+            &self,
+            workspace: &TempWorkspace,
+            present: bool,
+            budget: &AnalysisBudget,
+        ) -> AudioStream {
+            if !present {
+                return AudioStream::Absent;
+            }
+            match self.extract_audio(workspace, budget) {
+                Some(windows) => AudioStream::Samples(windows),
+                None => AudioStream::Incomplete,
+            }
+        }
+
+        fn extract_audio(
+            &self,
+            workspace: &TempWorkspace,
+            budget: &AnalysisBudget,
+        ) -> Option<Vec<Vec<u8>>> {
             let output = workspace.dir.join("audio.wav");
             let mut command = self.command();
             command
-                .arg("-hide_banner")
-                .arg("-loglevel")
-                .arg("error")
-                .arg("-threads")
-                .arg("1")
-                .arg("-i")
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-xerror",
+                    "-threads",
+                    "1",
+                    "-i",
+                ])
                 .arg(&workspace.input)
-                .arg("-vn")
-                .arg("-ac")
-                .arg("1")
-                .arg("-ar")
-                .arg("16000")
-                .arg("-c:a")
-                .arg("pcm_s16le")
+                .args([
+                    "-map",
+                    "0:a:0",
+                    "-vn",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "16000",
+                    "-c:a",
+                    "pcm_s16le",
+                    "-t",
+                ])
+                .arg((AUDIO_WINDOW_SECS as usize * (MAX_AUDIO_WINDOWS + 1)).to_string())
+                .arg("-fs")
+                .arg(MAX_WAV_BYTES.to_string())
                 .arg("-y")
                 .arg(&output);
-            if !self.run_bounded(&mut command) {
-                return Some(Vec::new());
+            if !self.run_bounded(&mut command, budget) {
+                return None;
             }
-            let wav = std::fs::read(output).ok()?;
-            Some(window_wav(&wav, AUDIO_WINDOW_SECS))
+            let file = std::fs::File::open(output).ok()?;
+            if file.metadata().ok()?.len() > MAX_WAV_BYTES {
+                return None;
+            }
+            window_wav(file, AUDIO_WINDOW_SECS, budget)
+        }
+
+        fn probe_audio(&self, workspace: &TempWorkspace, budget: &AnalysisBudget) -> Option<bool> {
+            let probe = self.binary();
+            let probe = PathBuf::from(probe).with_file_name(if cfg!(windows) {
+                "ffprobe.exe"
+            } else {
+                "ffprobe"
+            });
+            let output = workspace.dir.join("streams.json");
+            let file = std::fs::File::create(&output).ok()?;
+            let mut command = Command::new(probe);
+            command
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .stdout(file)
+                .args([
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "a",
+                    "-show_entries",
+                    "stream=index",
+                    "-of",
+                    "json",
+                ])
+                .arg(&workspace.input);
+            if !self.run_bounded(&mut command, budget) {
+                return None;
+            }
+            if std::fs::metadata(&output).ok()?.len() > 64 * 1024 {
+                return None;
+            }
+            let data: serde_json::Value =
+                serde_json::from_reader(std::fs::File::open(output).ok()?).ok()?;
+            Some(!data.get("streams")?.as_array()?.is_empty())
         }
 
         fn remediate_impl(
@@ -546,6 +719,7 @@ pub mod ffmpeg {
             segment: &[u8],
             blur_ranges: &[(f32, f32)],
             mute_ranges: &[(f32, f32)],
+            budget: &AnalysisBudget,
         ) -> Option<Vec<u8>> {
             if segment.is_empty() || (blur_ranges.is_empty() && mute_ranges.is_empty()) {
                 return None;
@@ -559,6 +733,7 @@ pub mod ffmpeg {
                 .arg("-hide_banner")
                 .arg("-loglevel")
                 .arg("error")
+                .arg("-xerror")
                 .arg("-threads")
                 .arg("2")
                 .arg("-i")
@@ -574,8 +749,15 @@ pub mod ffmpeg {
             } else {
                 command.arg("-c:a").arg("copy");
             }
-            command.arg("-y").arg(&output);
-            if !self.run_bounded(&mut command) {
+            command
+                .arg("-fs")
+                .arg((MAX_INLINE_VIDEO_BYTES + 1).to_string())
+                .arg("-y")
+                .arg(&output);
+            if !self.run_bounded(&mut command, budget) {
+                return None;
+            }
+            if std::fs::metadata(&output).ok()?.len() > MAX_INLINE_VIDEO_BYTES as u64 {
                 return None;
             }
             std::fs::read(output).ok().filter(|bytes| !bytes.is_empty())
@@ -583,27 +765,42 @@ pub mod ffmpeg {
     }
 
     impl Demuxer for FfmpegDemuxer {
-        fn sample(&self, segment: &[u8], sample_fps: f32) -> DecodedSegment {
+        fn sample(
+            &self,
+            segment: &[u8],
+            sample_fps: f32,
+            budget: &AnalysisBudget,
+        ) -> DecodedSegment {
             let workspace = match TempWorkspace::new(segment, output_ext(segment)) {
                 Ok(workspace) => workspace,
                 Err(_) => return DecodedSegment::default(),
             };
 
+            let Some(audio_present) = self.probe_audio(&workspace, budget) else {
+                return DecodedSegment::default();
+            };
+
             // Video decode and audio extraction are independent; doing them in
             // parallel removes an entire sidecar duration from the gate latency.
-            let (frames, audio_windows) = std::thread::scope(|scope| {
-                let frame_job = scope.spawn(|| self.decode_frames(&workspace, sample_fps));
-                let audio_job = scope.spawn(|| self.decode_audio(&workspace));
+            let (frames, audio_stream) = std::thread::scope(|scope| {
+                let frame_job = scope.spawn(|| self.decode_frames(&workspace, sample_fps, budget));
+                let audio_job =
+                    scope.spawn(|| self.decode_audio(&workspace, audio_present, budget));
                 (
                     frame_job.join().ok().flatten(),
-                    audio_job.join().ok().flatten().unwrap_or_default(),
+                    audio_job.join().unwrap_or(AudioStream::Incomplete),
                 )
             });
 
+            let audio_windows = match audio_stream {
+                AudioStream::Absent => Some(Vec::new()),
+                AudioStream::Samples(windows) => Some(windows),
+                AudioStream::Incomplete => None,
+            };
             DecodedSegment {
-                decoded: frames.is_some(),
+                decoded: frames.is_some() && audio_windows.is_some() && !budget.expired(),
                 frames: frames.unwrap_or_default(),
-                audio_windows,
+                audio_windows: audio_windows.unwrap_or_default(),
                 audio_window_secs: AUDIO_WINDOW_SECS as f32,
             }
         }
@@ -613,8 +810,9 @@ pub mod ffmpeg {
             segment: &[u8],
             blur_ranges: &[(f32, f32)],
             mute_ranges: &[(f32, f32)],
+            budget: &AnalysisBudget,
         ) -> Option<Vec<u8>> {
-            self.remediate_impl(segment, blur_ranges, mute_ranges)
+            self.remediate_impl(segment, blur_ranges, mute_ranges, budget)
         }
     }
 
@@ -630,32 +828,69 @@ pub mod ffmpeg {
         Some(format!("{filter}:enable='{enable}'"))
     }
 
-    fn window_wav(wav: &[u8], window_secs: u32) -> Vec<Vec<u8>> {
-        let reader = match hound::WavReader::new(std::io::Cursor::new(wav)) {
-            Ok(reader) => reader,
-            Err(_) => return Vec::new(),
-        };
-        let spec = reader.spec();
-        let samples = reader
-            .into_samples::<i16>()
-            .filter_map(Result::ok)
+    fn read_frames(workspace: &TempWorkspace) -> Option<Vec<Vec<u8>>> {
+        let entries = std::fs::read_dir(&workspace.dir)
+            .ok()?
+            .collect::<std::io::Result<Vec<_>>>()
+            .ok()?;
+        let mut paths = entries
+            .into_iter()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("jpg"))
             .collect::<Vec<_>>();
-        let per_window = spec.sample_rate as usize * window_secs as usize * spec.channels as usize;
-        if per_window == 0 {
-            return Vec::new();
-        }
-        samples
-            .chunks(per_window)
-            .filter_map(|chunk| {
-                let mut buffer = std::io::Cursor::new(Vec::new());
-                let mut writer = hound::WavWriter::new(&mut buffer, spec).ok()?;
-                for sample in chunk {
-                    writer.write_sample(*sample).ok()?;
+        paths.sort();
+        paths
+            .into_iter()
+            .take(MAX_SAMPLED_FRAMES + 1)
+            .map(|path| {
+                if std::fs::metadata(&path)?.len() > MAX_FRAME_BYTES as u64 {
+                    return Err(std::io::Error::other("frame exceeds byte limit"));
                 }
-                writer.finalize().ok()?;
-                Some(buffer.into_inner())
+                std::fs::read(path)
             })
-            .collect()
+            .collect::<std::io::Result<Vec<_>>>()
+            .ok()
+    }
+
+    const MAX_WAV_BYTES: u64 =
+        16000 * 2 * AUDIO_WINDOW_SECS as u64 * (MAX_AUDIO_WINDOWS as u64 + 1) + 4096;
+
+    fn window_wav(
+        file: std::fs::File,
+        window_secs: u32,
+        budget: &AnalysisBudget,
+    ) -> Option<Vec<Vec<u8>>> {
+        let mut reader = hound::WavReader::new(std::io::BufReader::new(file)).ok()?;
+        let spec = reader.spec();
+        if spec.sample_rate != 16000
+            || spec.channels != 1
+            || spec.bits_per_sample != 16
+            || spec.sample_format != hound::SampleFormat::Int
+        {
+            return None;
+        }
+        let per_window = spec.sample_rate as usize * window_secs as usize;
+        let expected = reader.len() as usize;
+        if expected == 0 {
+            return None;
+        }
+        let mut samples = reader.samples::<i16>();
+        let mut windows = Vec::new();
+        let mut count = 0;
+        while count < expected && windows.len() <= MAX_AUDIO_WINDOWS {
+            if budget.expired() {
+                return None;
+            }
+            let mut buffer = std::io::Cursor::new(Vec::new());
+            let mut writer = hound::WavWriter::new(&mut buffer, spec).ok()?;
+            for _ in 0..per_window.min(expected - count) {
+                writer.write_sample(samples.next()?.ok()?).ok()?;
+                count += 1;
+            }
+            writer.finalize().ok()?;
+            windows.push(buffer.into_inner());
+        }
+        (!budget.expired()).then_some(windows)
     }
 
     fn output_ext(bytes: &[u8]) -> &'static str {
@@ -688,6 +923,10 @@ pub mod ffmpeg {
                 SEQUENCE.fetch_add(1, Ordering::Relaxed)
             ));
             std::fs::create_dir(&dir)?;
+            let workspace = Self {
+                input: dir.join(format!("input.{ext}")),
+                dir: dir.clone(),
+            };
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -704,7 +943,7 @@ pub mod ffmpeg {
             let mut file = options.open(&input)?;
             file.write_all(segment)?;
             file.sync_all()?;
-            Ok(Self { dir, input })
+            Ok(workspace)
         }
     }
 
@@ -736,6 +975,127 @@ pub mod ffmpeg {
             }
         }
     }
+    #[cfg(test)]
+    mod decode_tests {
+        use super::*;
+        #[test]
+        #[ignore = "subprocess fixture, invoked by the cancellation test"]
+        fn waiting_child() {
+            if let Some(path) = std::env::var_os("BULWARK_TEST_CHILD_READY") {
+                std::fs::write(path, b"ready").unwrap();
+                std::thread::sleep(Duration::from_secs(60));
+            }
+        }
+
+        #[test]
+        fn cancellation_kills_child_and_cleans_workspace() {
+            let workspace = TempWorkspace::new(&[], "mp4").unwrap();
+            let dir = workspace.dir.clone();
+            let marker = workspace.dir.join("ready");
+            let budget = AnalysisBudget::new(5000);
+            let watcher_budget = budget.clone();
+            let watcher_marker = marker.clone();
+            let watcher = std::thread::spawn(move || {
+                while !watcher_marker.exists() && !watcher_budget.expired() {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                watcher_budget
+                    .cancelled
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            });
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "ffmpeg::decode_tests::waiting_child",
+                ])
+                .env("BULWARK_TEST_CHILD_READY", &marker)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            assert!(!FfmpegDemuxer::new().run_bounded(&mut command, &budget));
+            watcher.join().unwrap();
+            assert!(marker.exists(), "child must begin work before cancellation");
+            drop(workspace);
+            assert!(
+                !dir.exists(),
+                "cancelled work must release its temporary files"
+            );
+        }
+
+        #[test]
+        fn wav_errors_and_overflow_keep_incomplete_coverage() {
+            let workspace = TempWorkspace::new(&[], "mp4").unwrap();
+            let bad_frame = workspace.dir.join("frame-0001.jpg");
+            std::fs::create_dir(&bad_frame).unwrap();
+            assert!(read_frames(&workspace).is_none());
+            std::fs::remove_dir(&bad_frame).unwrap();
+            for index in 0..MAX_SAMPLED_FRAMES + 1 {
+                std::fs::write(workspace.dir.join(format!("frame-{index:04}.jpg")), [1]).unwrap();
+            }
+            assert_eq!(
+                read_frames(&workspace).unwrap().len(),
+                MAX_SAMPLED_FRAMES + 1
+            );
+            let path = workspace.dir.join("test.wav");
+            std::fs::write(&path, b"not a WAV").unwrap();
+            assert!(window_wav(
+                std::fs::File::open(&path).unwrap(),
+                1,
+                &AnalysisBudget::new(5000)
+            )
+            .is_none());
+            let spec = hound::WavSpec {
+                channels: 1,
+                sample_rate: 16000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+            for _ in 0..16000 * (MAX_AUDIO_WINDOWS + 2) {
+                writer.write_sample(0i16).unwrap();
+            }
+            writer.finalize().unwrap();
+            assert_eq!(
+                window_wav(
+                    std::fs::File::open(&path).unwrap(),
+                    1,
+                    &AnalysisBudget::new(5000)
+                )
+                .unwrap()
+                .len(),
+                MAX_AUDIO_WINDOWS + 1
+            );
+            let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+            for _ in 0..16000 {
+                writer.write_sample(0i16).unwrap();
+            }
+            writer.finalize().unwrap();
+            assert_eq!(
+                window_wav(
+                    std::fs::File::open(&path).unwrap(),
+                    1,
+                    &AnalysisBudget::new(5000)
+                )
+                .unwrap()
+                .len(),
+                1
+            );
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_len(64)
+                .unwrap();
+            assert!(window_wav(
+                std::fs::File::open(&path).unwrap(),
+                1,
+                &AnalysisBudget::new(5000)
+            )
+            .is_none());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -744,7 +1104,7 @@ mod tests {
 
     struct EmptyDecoded;
     impl Demuxer for EmptyDecoded {
-        fn sample(&self, _: &[u8], _: f32) -> DecodedSegment {
+        fn sample(&self, _: &[u8], _: f32, _: &AnalysisBudget) -> DecodedSegment {
             DecodedSegment {
                 decoded: true,
                 ..Default::default()
@@ -769,6 +1129,195 @@ mod tests {
             .unwrap();
         assert_eq!(verdict.category(), Category::Unspecified);
         assert_eq!(verdict.action(), Action::Block);
+    }
+
+    struct Samples {
+        frames: usize,
+        audio: bool,
+        decoded: bool,
+        remediation_delay: bool,
+    }
+    impl Demuxer for Samples {
+        fn sample(&self, _: &[u8], _: f32, _: &AnalysisBudget) -> DecodedSegment {
+            DecodedSegment {
+                frames: vec![vec![1]; self.frames],
+                audio_windows: if self.audio { vec![vec![1]] } else { vec![] },
+                decoded: self.decoded,
+                audio_window_secs: 10.0,
+            }
+        }
+        fn remediate(
+            &self,
+            _: &[u8],
+            _: &[(f32, f32)],
+            _: &[(f32, f32)],
+            _: &AnalysisBudget,
+        ) -> Option<Vec<u8>> {
+            if self.remediation_delay {
+                std::thread::sleep(Duration::from_millis(80));
+            }
+            Some(vec![1])
+        }
+    }
+    struct Score {
+        delay: bool,
+        unsafe_frame: bool,
+    }
+    impl Scorer for Score {
+        fn score(&self, _: &[u8]) -> f32 {
+            if self.delay {
+                std::thread::sleep(Duration::from_millis(80));
+            }
+            if self.unsafe_frame {
+                0.9
+            } else {
+                0.0
+            }
+        }
+        fn model_id(&self) -> &str {
+            "test-real-scorer"
+        }
+    }
+    struct SlowAudio;
+    impl Transcriber for SlowAudio {
+        fn transcribe(&self, _: &[u8]) -> Option<String> {
+            std::thread::sleep(Duration::from_millis(80));
+            Some("hello".into())
+        }
+        fn engine_id(&self) -> &str {
+            "test-real-transcriber"
+        }
+    }
+    struct WaitForCancellation {
+        started: Arc<AtomicBool>,
+        finished: Arc<AtomicBool>,
+    }
+    impl Demuxer for WaitForCancellation {
+        fn sample(&self, _: &[u8], _: f32, budget: &AnalysisBudget) -> DecodedSegment {
+            self.started.store(true, Ordering::SeqCst);
+            while !budget.expired() {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            self.finished.store(true, Ordering::SeqCst);
+            DecodedSegment::default()
+        }
+    }
+    fn request(deadline_ms: u32) -> AnalysisRequest {
+        AnalysisRequest {
+            request_id: "regression".into(),
+            media_kind: MediaKind::Video as i32,
+            deadline_ms,
+            media: Some(Media::InlineMedia(InlineMedia {
+                data: vec![1],
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+    #[tokio::test]
+    async fn incomplete_and_late_samples_never_allow_or_rewrite() {
+        for (
+            frames,
+            audio,
+            decoded,
+            slow_score,
+            unsafe_frame,
+            slow_remediation,
+            deadline,
+            expected,
+        ) in [
+            (1, false, true, false, false, false, 1000, Category::Safe),
+            (16, false, true, false, false, false, 1000, Category::Safe),
+            (
+                17,
+                false,
+                true,
+                false,
+                false,
+                false,
+                1000,
+                Category::Unspecified,
+            ),
+            (
+                1,
+                false,
+                false,
+                false,
+                false,
+                false,
+                1000,
+                Category::Unspecified,
+            ),
+            (
+                1,
+                false,
+                true,
+                true,
+                false,
+                false,
+                30,
+                Category::Unspecified,
+            ),
+            (
+                0,
+                true,
+                true,
+                false,
+                false,
+                false,
+                30,
+                Category::Unspecified,
+            ),
+            (1, false, true, false, true, true, 30, Category::Unspecified),
+        ] {
+            let analyzer = VideoAnalyzer::with_demuxer(
+                VideoConfig::default(),
+                Samples {
+                    frames,
+                    audio,
+                    decoded,
+                    remediation_delay: slow_remediation,
+                },
+            )
+            .with_vision_scorer(Box::new(Score {
+                delay: slow_score,
+                unsafe_frame,
+            }))
+            .with_audio_transcriber(Box::new(SlowAudio));
+            let verdict = analyzer.analyze(request(deadline)).await.unwrap();
+            assert_eq!(verdict.category(), expected);
+            if expected == Category::Unspecified {
+                assert_eq!(verdict.action(), Action::Block);
+                assert!(verdict.remediated_media.is_empty());
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let started = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
+        let analyzer = VideoAnalyzer::with_demuxer(
+            VideoConfig::default(),
+            WaitForCancellation {
+                started: started.clone(),
+                finished: finished.clone(),
+            },
+        );
+        let task = tokio::spawn(async move { analyzer.analyze(request(5000)).await });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !started.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        let _ = task.await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !finished.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("cancelled decode must stop and release its worker");
     }
 
     #[test]

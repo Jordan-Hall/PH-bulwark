@@ -11,13 +11,13 @@ RUN apt-get update \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --default-toolchain stable --profile minimal
 ENV PATH=/root/.cargo/bin:$PATH
-ARG FEATURES=""
+ARG FEATURES="onnx,whisper,ffmpeg"
 WORKDIR /src
 COPY . .
 RUN if [ -n "$FEATURES" ]; then \
-        cargo build --release -p bulwark-server --features "$FEATURES"; \
+        cargo build --release --locked -p bulwark-server --features "$FEATURES"; \
     else \
-        cargo build --release -p bulwark-server; \
+        cargo build --release --locked -p bulwark-server; \
     fi \
     && mkdir -p /out/lib \
     && cp target/release/bulwark-server target/release/bulwark_admin /out/ \

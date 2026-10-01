@@ -299,7 +299,10 @@ impl Policy {
         allowlist: &Allowlist,
         host: &str,
     ) -> PolicyDecision {
-        if verdict.category() != Category::CsamSuspected {
+        if !matches!(
+            verdict.category(),
+            Category::CsamSuspected | Category::Unspecified
+        ) {
             let host_allowed = !host.is_empty() && allowlist.is_host_allowed(&ctx.device, host);
             let hash_allowed = verdict
                 .evidence
@@ -725,6 +728,34 @@ mod tests {
         let d = p.evaluate(&verdict(Category::Grooming, 0.9), &ctx(AgeProfile::Teen));
         assert_eq!(d.action, Action::Block);
         assert_eq!(d.raise_alert, Some(AlertKind::Intervention));
+    }
+
+    #[test]
+    fn coverage_gap_cannot_use_prior_host_approval() {
+        let p = Policy::default();
+        let context = ctx(AgeProfile::Teen);
+        let mut allowlist = Allowlist::new();
+        let item = crate::allowlist::ReviewItem::new(
+            context.device.clone(),
+            "alert",
+            "approved.example",
+            vec![1],
+            Category::AdultImage,
+        );
+        allowlist.apply(
+            &item,
+            bulwark_proto::v1::ReviewDecision::Approve,
+            bulwark_proto::v1::ReviewScope::ThisHost,
+            1,
+        );
+        assert!(allowlist.is_host_allowed(&context.device, "approved.example"));
+        let decision = p.decide_with_allowlist(
+            &verdict(Category::Unspecified, 0.0),
+            &context,
+            &allowlist,
+            "approved.example",
+        );
+        assert_eq!(decision.action, Action::Block);
     }
 
     // ---- Trait projection -------------------------------------------------

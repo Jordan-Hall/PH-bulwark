@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex};
 
 use bulwark_proto::v1::review_server::Review;
 use bulwark_proto::v1::{
-    AlertEvent, DeviceFilter, Evidence, PushAck, PushTarget, ReviewAck, ReviewRequest,
-    SegmentChunk, SegmentRequest,
+    AlertEvent, Category, DeviceFilter, Evidence, PushAck, PushTarget, ReviewAck, ReviewDecision,
+    ReviewRequest, SegmentChunk, SegmentRequest,
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -329,6 +329,17 @@ impl Review for SecureReviewService {
         {
             return Err(Status::permission_denied(
                 "guardian is not assigned to the alert's original child",
+            ));
+        }
+
+        if review.decision() == ReviewDecision::Approve
+            && matches!(
+                Category::try_from(authoritative.category).unwrap_or(Category::Unspecified),
+                Category::Unspecified | Category::CsamSuspected
+            )
+        {
+            return Err(Status::failed_precondition(
+                "incomplete coverage and CSAM alerts cannot be approved",
             ));
         }
 

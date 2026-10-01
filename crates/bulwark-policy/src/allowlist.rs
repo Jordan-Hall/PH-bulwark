@@ -185,9 +185,12 @@ impl Allowlist {
     }
 
     fn apply_approve(&mut self, item: &ReviewItem, scope: ReviewScope) -> ApplyOutcome {
-        if item.category == Category::CsamSuspected {
+        if matches!(
+            item.category,
+            Category::CsamSuspected | Category::Unspecified
+        ) {
             return ApplyOutcome::Refused(
-                "CSAM_SUSPECTED items are never allowlistable".to_string(),
+                "CSAM and incomplete coverage are never allowlistable".to_string(),
             );
         }
         let entry = self.per_device.entry(item.device.0.clone()).or_default();
@@ -321,6 +324,19 @@ mod tests {
         assert!(!allowlist.is_host_allowed(&device(), "example.com"));
         assert!(!allowlist.is_hash_allowed(&device(), &[0xde, 0xad]));
         assert!(allowlist.audit().verify().is_ok());
+    }
+
+    #[test]
+    fn incomplete_coverage_cannot_be_approved() {
+        let mut allowlist = Allowlist::new();
+        let outcome = allowlist.apply(
+            &item("approved.example", vec![1], Category::Unspecified),
+            ReviewDecision::Approve,
+            ReviewScope::ThisHost,
+            1,
+        );
+        assert!(matches!(outcome, ApplyOutcome::Refused(_)));
+        assert!(!allowlist.is_host_allowed(&device(), "approved.example"));
     }
 
     #[test]

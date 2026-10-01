@@ -360,11 +360,11 @@ impl FlowHandler {
         mut parts: ResponseParts,
         full: Vec<u8>,
         host: String,
-        status: u16,
         content_type: Option<String>,
         media: Option<MediaClass>,
         html: bool,
     ) -> Response<Body> {
+        let status = parts.status.as_u16();
         let flow_id = self.next_id();
         let source = if matches!(media, Some(MediaClass::Video)) {
             FlowSource::VideoStream
@@ -581,7 +581,7 @@ impl HttpHandler for FlowHandler {
                     Response::from_parts(parts, Body::empty())
                 }
                 Ok(BoundedRead::Complete(full)) => {
-                    self.gate_buffered(parts, full, host, status, content_type, Some(class), false)
+                    self.gate_buffered(parts, full, host, content_type, Some(class), false)
                         .await
                 }
                 Ok(BoundedRead::Overflow { peek, .. }) => {
@@ -628,7 +628,7 @@ impl HttpHandler for FlowHandler {
                     Response::from_parts(parts, Body::empty())
                 }
                 Ok(BoundedRead::Complete(full)) => {
-                    self.gate_buffered(parts, full, host, status, content_type, None, true)
+                    self.gate_buffered(parts, full, host, content_type, None, true)
                         .await
                 }
                 Ok(BoundedRead::Overflow { .. }) => blocked_page_response(),
