@@ -1,4 +1,5 @@
 use super::{env_flag, RemoteVpnContext};
+use crate::AnalyzerRegistry;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
