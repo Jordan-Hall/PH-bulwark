@@ -36,6 +36,49 @@ jobs:
           context: .
           file: deploy/docker/Dockerfile
           push: false
+          load: true
+          build-args: FEATURES=onnx,whisper,ffmpeg
           tags: bulwark-server:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Smoke test production image
+        run: |
+          docker run --rm --entrypoint /bin/sh bulwark-server:ci -ec '
+            test -s "$BULWARK_NSFW_MODEL"
+            test -s "$BULWARK_WHISPER_MODEL"
+            "$BULWARK_FFMPEG_BINARY" -version
+            ffprobe -version
+          '
+          set +e
+          timeout 30 docker run --rm -e BULWARK_PRODUCTION=1 -e BULWARK_ACCOUNTS=1 bulwark-server:ci > startup.log 2>&1
+          status=$?
+          set -e
+          cat startup.log
+          test "$status" -ne 0
+          grep -E 'TLS|tls|certificate' startup.log
+          smoke_dir=$(mktemp -d)
+          mkdir "$smoke_dir/tls" "$smoke_dir/state"
+          chmod 755 "$smoke_dir/tls"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=localhost \
+            -addext subjectAltName=DNS:localhost -keyout "$smoke_dir/tls/key.pem" -out "$smoke_dir/tls/cert.pem"
+          chmod 644 "$smoke_dir/tls/key.pem"
+          sudo chown 10001:10001 "$smoke_dir/state"
+          docker run -d --name bulwark-smoke -p 127.0.0.1:18443:8443 \
+            -v "$smoke_dir/state:/var/lib/bulwark" \
+            -v "$smoke_dir/tls:/run/bulwark-tls:ro" \
+            -e BULWARK_PRODUCTION=1 -e BULWARK_ACCOUNTS=1 \
+            -e BULWARK_TLS_CERT=/run/bulwark-tls/cert.pem \
+            -e BULWARK_TLS_KEY=/run/bulwark-tls/key.pem bulwark-server:ci
+          trap 'docker logs bulwark-smoke; docker rm -f bulwark-smoke' EXIT
+          for attempt in $(seq 1 60); do
+            if timeout 2 openssl s_client -connect 127.0.0.1:18443 \
+                -CAfile "$smoke_dir/tls/cert.pem" -verify_return_error </dev/null > tls.log 2>&1; then
+              cat tls.log
+              exit 0
+            fi
+            test "$(docker inspect -f '{{.State.Running}}' bulwark-smoke)" = true
+            sleep 1
+          done
+          cat tls.log
+          exit 1

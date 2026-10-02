@@ -1,24 +1,8 @@
-//! The `Analyzer` implementation for text (interfaces.md §`Analyzer`).
-//!
-//! Pipeline for one `TextSpan`:
-//!   1. Resolve the language lexicon (BCP-47 hint → English fallback).
-//!   2. Load prior [`ThreadState`] for `thread_id` (cross-message memory).
-//!   3. Run the deterministic [`GroomingRuleEngine`] — the PRIMARY detector.
-//!   4. Optionally let the backstop [`TextClassifier`] *confirm* (sets
-//!      `classifier_backed`); it never changes the category/score/action.
-//!   5. Run adult-text detection (independent of grooming state).
-//!   6. Record the fired categories back into thread state.
-//!   7. Emit an explainable [`Verdict`] with a populated [`GroomingSignal`] and
-//!      a redacted excerpt (never raw message text).
-//!
-//! Thread state lives in an in-process map here for the local first-pass; the
-//! server wires the same `ThreadState` through `bulwark-store`
-//! (`thread_state`/`put_thread_state`) so memory survives restarts. State and
-//! evidence carry category names + redacted excerpts only — no message text, no
-//! telemetry.
+//! Deterministic text analysis with bounded, per-conversation state.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use futures_core::stream::BoxStream;
@@ -33,45 +17,47 @@ use crate::classifier::{NoClassifier, TextClassifier};
 use crate::engine::{GroomingRuleEngine, RuleOutcome};
 use crate::error::TextError;
 use crate::lexicon::Lexicon;
-use crate::redact::{full_excerpt, redacted_excerpt};
+use crate::redact::redacted_excerpt;
 use crate::state::ThreadState;
 use crate::traits::GroomingRules;
 use bulwark_core::Analyzer;
 
-/// Stable model id reported in `Evidence.model_id` for the deterministic engine.
 const RULE_ENGINE_ID: &str = "bulwark-grooming-rules";
-const RULE_ENGINE_VERSION: &str = "1";
+const RULE_ENGINE_VERSION: &str = "2";
+const DEFAULT_THREAD_TTL_MS: i64 = 24 * 60 * 60 * 1000;
+const DEFAULT_MAX_THREADS: usize = 4096;
 
-/// The text analyzer: deterministic rules FIRST, optional classifier SECOND.
-///
-/// Generic over the [`TextClassifier`] backstop so the `classifier` feature can
-/// swap in an `ort` model without touching this type; the default is
-/// [`NoClassifier`] (no model, hot path is pure rules).
+struct ThreadCell {
+    state: Mutex<ThreadState>,
+    last_seen_ms: AtomicI64,
+}
+
+impl ThreadCell {
+    fn new(state: ThreadState, ts_ms: i64) -> Self {
+        Self {
+            state: Mutex::new(state),
+            last_seen_ms: AtomicI64::new(ts_ms.max(0)),
+        }
+    }
+}
+
 pub struct TextAnalyzer<C: TextClassifier = NoClassifier> {
     engine: GroomingRuleEngine,
     lexicon: Lexicon,
     classifier: C,
-    /// Per-thread grooming memory, keyed by `TextSpan.thread_id`.
-    threads: Mutex<HashMap<String, ThreadState>>,
+    threads: Mutex<HashMap<String, Arc<ThreadCell>>>,
+    thread_ttl_ms: i64,
+    max_threads: usize,
 }
 
 impl TextAnalyzer<NoClassifier> {
-    /// Build the analyzer with the built-in lexicon and no classifier backstop
-    /// (the default, minimal-AI configuration).
     pub fn new() -> Result<Self, TextError> {
-        Ok(TextAnalyzer {
-            engine: GroomingRuleEngine::new(),
-            lexicon: Lexicon::load_builtin()?,
-            classifier: NoClassifier,
-            threads: Mutex::new(HashMap::new()),
-        })
+        Self::with_components(NoClassifier)
     }
 }
 
 #[cfg(feature = "classifier")]
 impl TextAnalyzer<crate::classifier::SklearnTfidfClassifier> {
-    /// Build with the bundled full-corpus sklearn grooming model as the
-    /// confirm-only backstop — the "use now" model until DistilBERT lands.
     pub fn with_builtin_grooming_model() -> Result<Self, TextError> {
         Self::with_classifier(crate::classifier::SklearnTfidfClassifier::load_builtin()?)
     }
@@ -79,9 +65,6 @@ impl TextAnalyzer<crate::classifier::SklearnTfidfClassifier> {
 
 #[cfg(feature = "classifier")]
 impl TextAnalyzer<crate::classifier::DistilbertGroomingClassifier> {
-    /// Build with the fine-tuned DistilBERT model (higher accuracy, windowed AUC
-    /// ~0.98) as the confirm-only backstop. `model_path` is grooming_detector_v2.onnx
-    /// (its `.onnx.data` sidecar must be alongside); `tokenizer_json` is tokenizer.json.
     pub fn with_distilbert_grooming_model(
         model_path: impl AsRef<std::path::Path>,
         tokenizer_json: impl AsRef<std::path::Path>,
@@ -95,66 +78,96 @@ impl TextAnalyzer<crate::classifier::DistilbertGroomingClassifier> {
 }
 
 impl<C: TextClassifier> TextAnalyzer<C> {
-    /// Build with a specific classifier backstop (used under the `classifier`
-    /// feature). The classifier only ever sets `classifier_backed`.
-    pub fn with_classifier(classifier: C) -> Result<Self, TextError> {
-        Ok(TextAnalyzer {
+    fn with_components(classifier: C) -> Result<Self, TextError> {
+        let thread_ttl_ms = std::env::var("BULWARK_TEXT_THREAD_TTL_MS")
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_THREAD_TTL_MS);
+        let max_threads = std::env::var("BULWARK_TEXT_MAX_THREADS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_MAX_THREADS);
+        Ok(Self {
             engine: GroomingRuleEngine::new(),
             lexicon: Lexicon::load_builtin()?,
             classifier,
             threads: Mutex::new(HashMap::new()),
+            thread_ttl_ms,
+            max_threads,
         })
     }
 
-    /// Languages the loaded lexicon covers (diagnostics).
+    pub fn with_classifier(classifier: C) -> Result<Self, TextError> {
+        Self::with_components(classifier)
+    }
+
     pub fn languages(&self) -> Vec<&str> {
         self.lexicon.languages()
     }
 
-    /// Snapshot of a thread's current state (testing / store hand-off).
     pub fn thread_snapshot(&self, thread_id: &str) -> Option<ThreadState> {
-        self.threads.lock().unwrap().get(thread_id).cloned()
+        let cell = self.threads.lock().ok()?.get(thread_id).cloned()?;
+        cell.state.lock().ok().map(|state| state.clone())
     }
 
-    /// Seed thread state (e.g. rehydrated from `bulwark-store`).
     pub fn load_thread_state(&self, state: ThreadState) {
-        self.threads
-            .lock()
-            .unwrap()
-            .insert(state.thread_id.clone(), state);
+        let now = now_ms();
+        if let Ok(mut threads) = self.threads.lock() {
+            self.prune_locked(&mut threads, now);
+            threads.insert(
+                state.thread_id.clone(),
+                Arc::new(ThreadCell::new(state, now)),
+            );
+        }
     }
 
-    /// Core synchronous analysis of a `TextSpan` → `Verdict`. This is the real
-    /// work; `analyze` just adapts it to the async trait. Pure CPU/in-memory.
-    pub fn analyze_span(&self, request_id: &str, span: &TextSpan, ts_ms: i64) -> Verdict {
-        let lex = self.lexicon.resolve(&span.lang);
+    fn thread_cell(&self, thread_id: &str, ts_ms: i64) -> Arc<ThreadCell> {
+        let timestamp = if ts_ms > 0 { ts_ms } else { now_ms() };
+        let mut threads = self.threads.lock().expect("text thread map mutex poisoned");
+        self.prune_locked(&mut threads, timestamp);
+        threads
+            .entry(thread_id.to_string())
+            .or_insert_with(|| {
+                Arc::new(ThreadCell::new(
+                    ThreadState::new(thread_id.to_string()),
+                    timestamp,
+                ))
+            })
+            .clone()
+    }
 
-        // --- read prior thread state (clone out; don't hold the lock long) ---
-        let prior = {
-            let map = self.threads.lock().unwrap();
-            map.get(&span.thread_id)
-                .cloned()
-                .unwrap_or_else(|| ThreadState::new(span.thread_id.clone()))
-        };
-
-        // --- 1. PRIMARY: deterministic grooming rules ---
-        let outcome: RuleOutcome = self.engine.evaluate(&span.text, lex, &prior, ts_ms);
-
-        // --- 2. adult-text detection (independent of grooming state) ---
-        let adult = lex.is_adult_text(&span.text);
-
-        // --- 3. record fired categories back into thread memory ---
-        // Only create/touch thread state when something actually fired, so a
-        // clean conversation leaves no trace (and no spurious memory growth).
-        if !outcome.fired.is_empty() {
-            let mut map = self.threads.lock().unwrap();
-            let st = map
-                .entry(span.thread_id.clone())
-                .or_insert_with(|| ThreadState::new(span.thread_id.clone()));
-            st.record(&outcome.fired, ts_ms);
+    fn prune_locked(&self, threads: &mut HashMap<String, Arc<ThreadCell>>, now: i64) {
+        let cutoff = now.saturating_sub(self.thread_ttl_ms);
+        threads.retain(|_, cell| cell.last_seen_ms.load(Ordering::Relaxed) >= cutoff);
+        while threads.len() >= self.max_threads {
+            let oldest = threads
+                .iter()
+                .min_by_key(|(_, cell)| cell.last_seen_ms.load(Ordering::Relaxed))
+                .map(|(key, _)| key.clone());
+            match oldest {
+                Some(key) => {
+                    threads.remove(&key);
+                }
+                None => break,
+            }
         }
+    }
 
-        // Privacy-safe trace: category counts + score only, never message text.
+    pub fn analyze_span(&self, request_id: &str, span: &TextSpan, ts_ms: i64) -> Verdict {
+        let timestamp = if ts_ms > 0 { ts_ms } else { now_ms() };
+        let lexicon = self.lexicon.resolve(&span.lang);
+        let cell = self.thread_cell(&span.thread_id, timestamp);
+        let mut state = cell.state.lock().expect("text thread mutex poisoned");
+        let outcome: RuleOutcome = self.engine.evaluate(&span.text, lexicon, &state, timestamp);
+        let adult = lexicon.is_adult_text(&span.text);
+        if !outcome.fired.is_empty() {
+            state.record(&outcome.fired, timestamp);
+        }
+        cell.last_seen_ms.store(timestamp, Ordering::Relaxed);
+        drop(state);
+
         tracing::trace!(
             thread_id = %span.thread_id,
             app = %span.app,
@@ -162,10 +175,9 @@ impl<C: TextClassifier> TextAnalyzer<C> {
             score = outcome.score,
             image_request = outcome.image_request,
             adult,
-            "bulwark-text rule evaluation",
+            "text rule evaluation"
         );
 
-        // --- 4. assemble the verdict ---
         if !outcome.is_silent() {
             self.grooming_verdict(request_id, span, outcome)
         } else if adult {
@@ -175,125 +187,77 @@ impl<C: TextClassifier> TextAnalyzer<C> {
         }
     }
 
-    /// Build a GROOMING / CSAM_SUSPECTED verdict from a rule outcome.
     fn grooming_verdict(&self, request_id: &str, span: &TextSpan, outcome: RuleOutcome) -> Verdict {
-        // Backstop confirmation only — never alters category/score/action.
         let classifier_backed = self.classifier.agrees_grooming(span);
-
-        let fired_names: Vec<String> = outcome
+        let fired_names = outcome
             .fired
             .iter()
-            .map(|r| r.as_str().to_string())
-            .collect();
-
-        // Image request → CSAM-suspected (report-never-archive path, PLAN §0c).
-        let category = if outcome.image_request {
-            Category::CsamSuspected
-        } else {
-            Category::Grooming
-        };
-
-        // GUARDIAN TRANSPARENCY: show the parent the ACTUAL matched text for a
-        // normal grooming hit so they can understand/approve. HARD LEGAL
-        // EXCEPTION: a CSAM-suspected (image-request) hit stays REDACTED — its
-        // text is never surfaced verbatim.
-        let excerpt = if category == Category::CsamSuspected {
-            redacted_excerpt(&span.text, &outcome.fired)
-        } else {
-            full_excerpt(&span.text, &outcome.fired)
-        };
-
+            .map(|rule| rule.as_str().to_string())
+            .collect::<Vec<_>>();
+        let excerpt = redacted_excerpt(&span.text, &outcome.fired);
         let action = action_for(outcome.severity);
-
         let mut rationale = outcome.rationale.clone();
+        if outcome.image_request {
+            rationale.push_str("; sexual-image solicitation risk");
+        }
         if classifier_backed {
             rationale.push_str("; backstop classifier agreed");
         } else {
-            rationale.push_str("; rule-only (classifier did not back)");
+            rationale.push_str("; deterministic-rule signal");
         }
-
-        let grooming = GroomingSignal {
-            fired_categories: fired_names,
-            score: outcome.score,
-            excerpt: excerpt.clone(),
-            classifier_backed,
-        };
 
         Verdict {
             request_id: request_id.to_string(),
-            category: category as i32,
+            category: Category::Grooming as i32,
             action: action as i32,
             severity: outcome.severity as i32,
             score: outcome.score,
             rationale,
             evidence: Some(Evidence {
-                sha256: Vec::new(),
-                perceptual_hash: Vec::new(),
-                safe_thumbnail: Vec::new(),
-                // Guardian-transparency: the REAL matched text for non-CSAM hits
-                // (so the parent can act); REDACTED only for CSAM-suspected.
-                text_snippet: excerpt,
+                text_snippet: excerpt.clone(),
                 model_id: RULE_ENGINE_ID.to_string(),
                 model_version: RULE_ENGINE_VERSION.to_string(),
+                ..Default::default()
             }),
-            grooming: Some(grooming),
-            worker_id: String::new(),
-            latency_ms: 0,
+            grooming: Some(GroomingSignal {
+                fired_categories: fired_names,
+                score: outcome.score,
+                excerpt,
+                classifier_backed,
+            }),
             ..Default::default()
         }
     }
 }
 
-/// Expose the deterministic rule layer (interfaces.md §`GroomingRules`) so the
-/// verdict is explainable independently of the full `Analyzer` pipeline. Uses
-/// the span's own thread id timestamp-less (now=0) when called directly; the
-/// full pipeline in `analyze_span` supplies the real timestamp for the
-/// rapid-escalation window.
 impl<C: TextClassifier> GroomingRules for TextAnalyzer<C> {
     fn evaluate(&self, span: &TextSpan, thread: &ThreadState) -> GroomingSignal {
-        let lex = self.lexicon.resolve(&span.lang);
-        let outcome = self.engine.evaluate(&span.text, lex, thread, 0);
+        let lexicon = self.lexicon.resolve(&span.lang);
+        let outcome = self.engine.evaluate(&span.text, lexicon, thread, now_ms());
         let classifier_backed = !outcome.is_silent() && self.classifier.agrees_grooming(span);
-        // Guardian transparency (real text) for non-CSAM; redact CSAM (image req).
-        let excerpt = if outcome.image_request {
-            redacted_excerpt(&span.text, &outcome.fired)
-        } else {
-            full_excerpt(&span.text, &outcome.fired)
-        };
         GroomingSignal {
             fired_categories: outcome
                 .fired
                 .iter()
-                .map(|r| r.as_str().to_string())
+                .map(|rule| rule.as_str().to_string())
                 .collect(),
             score: outcome.score,
-            excerpt,
+            excerpt: redacted_excerpt(&span.text, &outcome.fired),
             classifier_backed,
         }
     }
 }
 
-/// Map a severity band to the recommended `Action` (policy may override; this is
-/// the sensible default from the thresholds). bulwark-policy is the authority.
-fn action_for(sev: Severity) -> Action {
-    match sev {
-        // CSAM risk / image request — block and escalate immediately.
+fn action_for(severity: Severity) -> Action {
+    match severity {
         Severity::Critical => Action::Block,
-        // ≥0.7 — immediate alert + human review; warn the flow meanwhile.
         Severity::High => Action::Warn,
-        // ≥0.5 — flag + log.
-        Severity::Medium => Action::Log,
-        // ≥0.3 — log.
-        Severity::Low => Action::Log,
-        // <0.3 — pass.
+        Severity::Medium | Severity::Low => Action::Log,
         Severity::Info | Severity::Unspecified => Action::Allow,
     }
 }
 
-/// Verdict for explicit adult text with no grooming signal.
 fn adult_text_verdict(request_id: &str, span: &TextSpan) -> Verdict {
-    // Adult-text is non-CSAM → guardian sees the actual matched text (bounded).
-    let excerpt = full_excerpt(&span.text, &[]);
     Verdict {
         request_id: request_id.to_string(),
         category: Category::AdultText as i32,
@@ -302,21 +266,15 @@ fn adult_text_verdict(request_id: &str, span: &TextSpan) -> Verdict {
         score: 0.6,
         rationale: "adult-text lexicon matched explicit sexual content".to_string(),
         evidence: Some(Evidence {
-            sha256: Vec::new(),
-            perceptual_hash: Vec::new(),
-            safe_thumbnail: Vec::new(),
-            text_snippet: excerpt,
+            text_snippet: redacted_excerpt(&span.text, &[]),
             model_id: RULE_ENGINE_ID.to_string(),
             model_version: RULE_ENGINE_VERSION.to_string(),
+            ..Default::default()
         }),
-        grooming: None,
-        worker_id: String::new(),
-        latency_ms: 0,
         ..Default::default()
     }
 }
 
-/// The explicit SAFE negative verdict (so a verdict is always conclusive).
 fn safe_verdict(request_id: &str) -> Verdict {
     Verdict {
         request_id: request_id.to_string(),
@@ -325,15 +283,10 @@ fn safe_verdict(request_id: &str) -> Verdict {
         severity: Severity::Info as i32,
         score: 0.0,
         rationale: "no grooming or adult-text indicators fired".to_string(),
-        evidence: None,
-        grooming: None,
-        worker_id: String::new(),
-        latency_ms: 0,
         ..Default::default()
     }
 }
 
-/// Extract the `TextSpan` from a request, erroring if absent / wrong kind.
 fn require_text_span(req: &AnalysisRequest) -> Result<&TextSpan, TextError> {
     req.text_span.as_ref().ok_or(TextError::MissingTextSpan)
 }
@@ -341,106 +294,69 @@ fn require_text_span(req: &AnalysisRequest) -> Result<&TextSpan, TextError> {
 #[async_trait]
 impl<C: TextClassifier + 'static> Analyzer for TextAnalyzer<C> {
     fn handles(&self) -> &[MediaKind] {
-        &[MediaKind::Text]
+        const KINDS: [MediaKind; 1] = [MediaKind::Text];
+        &KINDS
     }
 
     async fn analyze(&self, req: AnalysisRequest) -> bulwark_core::Result<Verdict> {
-        // Boundary: surface bulwark_core::Result. TextError -> anyhow -> Error::Other.
-        let span = require_text_span(&req).map_err(|e| bulwark_core::Error::Other(e.into()))?;
-        // ts is unix epoch millis on the request; default to 0 if unset.
+        let span =
+            require_text_span(&req).map_err(|error| bulwark_core::Error::Other(error.into()))?;
         Ok(self.analyze_span(&req.request_id, span, req.ts))
     }
 }
 
 impl<C: TextClassifier> TextAnalyzer<C> {
-    /// Streaming helper for the local first-pass live path. Kept as an INHERENT
-    /// method — the canonical `bulwark_core::Analyzer` is non-streaming; the server
-    /// drives streaming by looping `analyze` over its gRPC request stream.
     pub async fn analyze_stream(
         &self,
         requests: BoxStream<'static, AnalysisRequest>,
     ) -> anyhow::Result<BoxStream<'static, anyhow::Result<Verdict>>> {
-        // The text analyzer is cheap and synchronous per message; we map the
-        // request stream straight to a verdict stream. Thread state is shared
-        // via the analyzer's internal map, so ordering within a thread is
-        // preserved as long as the producer feeds messages in order.
-        let mut verdicts: Vec<anyhow::Result<Verdict>> = Vec::new();
+        let mut output = Vec::new();
         let mut requests = requests;
         while let Some(req) = requests.next().await {
             match require_text_span(&req) {
-                Ok(span) => verdicts.push(Ok(self.analyze_span(&req.request_id, span, req.ts))),
-                Err(e) => verdicts.push(Err(e.into())),
+                Ok(span) => output.push(Ok(self.analyze_span(&req.request_id, span, req.ts))),
+                Err(error) => output.push(Err(error.into())),
             }
         }
-        Ok(futures_util::stream::iter(verdicts).boxed())
+        Ok(futures_util::stream::iter(output).boxed())
     }
+}
+
+fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::text_span;
 
     #[test]
-    fn benign_message_is_safe() {
-        let a = TextAnalyzer::new().unwrap();
-        let span = text_span("benign", "are you coming to football practice tonight?");
-        let v = a.analyze_span("r1", &span, 0);
-        assert_eq!(v.category, Category::Safe as i32);
-        assert_eq!(v.action, Action::Allow as i32);
-        assert!(v.grooming.is_none());
+    fn thread_memory_is_bounded() {
+        let analyzer = TextAnalyzer::new().unwrap();
+        for n in 0..(DEFAULT_MAX_THREADS + 8) {
+            let span = TextSpan {
+                text: "hello".into(),
+                thread_id: format!("t-{n}"),
+                ..Default::default()
+            };
+            let _ = analyzer.analyze_span("r", &span, now_ms());
+        }
+        assert!(analyzer.threads.lock().unwrap().len() <= DEFAULT_MAX_THREADS);
     }
 
     #[test]
-    fn image_request_is_csam_suspected_and_blocked() {
-        let a = TextAnalyzer::new().unwrap();
-        let span = text_span("t", "can you send me a pic of you");
-        let v = a.analyze_span("r1", &span, 0);
-        assert_eq!(v.category, Category::CsamSuspected as i32);
-        assert_eq!(v.severity, Severity::Critical as i32);
-        assert_eq!(v.action, Action::Block as i32);
-        let g = v.grooming.unwrap();
-        assert!(g.fired_categories.iter().any(|c| c == "image_request"));
-        assert!(g.excerpt.starts_with("[redacted"));
-        // classifier_backed is false without the feature.
-        assert!(!g.classifier_backed);
-    }
-
-    #[test]
-    fn non_csam_evidence_shows_real_guardian_text() {
-        // GUARDIAN TRANSPARENCY: a normal (non-CSAM) grooming hit surfaces the
-        // ACTUAL matched text so the parent can understand/approve it — NOT a
-        // [redacted] placeholder.
-        let a = TextAnalyzer::new().unwrap();
-        let raw = "our little secret, dont tell your parents";
-        let span = text_span("t", raw);
-        let v = a.analyze_span("r1", &span, 0);
-        assert_eq!(v.category, Category::Grooming as i32);
-        let ev = v.evidence.unwrap();
-        assert!(
-            !ev.text_snippet.starts_with("[redacted"),
-            "non-CSAM text must NOT be redacted: {}",
-            ev.text_snippet
-        );
-        // The real words appear (possibly with a fired-category tag prefix).
-        assert!(ev.text_snippet.contains("our little secret"));
-    }
-
-    #[test]
-    fn csam_suspected_text_stays_redacted() {
-        // HARD LEGAL EXCEPTION: an image-request (CSAM-suspected) hit keeps the
-        // redacted excerpt — its text is NEVER surfaced verbatim.
-        let a = TextAnalyzer::new().unwrap();
-        let raw = "can you send me a pic of you";
-        let span = text_span("t", raw);
-        let v = a.analyze_span("r1", &span, 0);
-        assert_eq!(v.category, Category::CsamSuspected as i32);
-        let ev = v.evidence.unwrap();
-        assert!(
-            ev.text_snippet.starts_with("[redacted"),
-            "CSAM stays redacted"
-        );
-        assert_ne!(ev.text_snippet, raw);
-        assert!(v.grooming.unwrap().excerpt.starts_with("[redacted"));
+    fn safe_is_explicit_only_after_successful_rules() {
+        let analyzer = TextAnalyzer::new().unwrap();
+        let span = TextSpan {
+            text: "hello there".into(),
+            thread_id: "d\u{1f}app\u{1f}thread".into(),
+            ..Default::default()
+        };
+        let verdict = analyzer.analyze_span("r", &span, now_ms());
+        assert_eq!(verdict.category(), Category::Safe);
     }
 }

@@ -11,11 +11,9 @@ use crate::media::{base64_encode, image_data_uri, load_segment_from_disk, sniff_
 use crate::servers::CHILD_REGIONS;
 use crate::state::{should_show_snippet, should_show_thumbnail, Alert};
 
-/// Per-child VPN control row: the guardian picks the filtering region/server,
-/// toggles filtering on/off, and sets the strictness band — applied to the child
-/// device via `ChildControl`. Drafts seed from the child's SAVED desired config
-/// (echoed by `GetChildStatus`), falling back to safe defaults when none exists
-/// yet; "Apply" pushes them and shows the resulting config version (or the error).
+/// Per-child VPN control row. Local VPN filters on the supervised device;
+/// Remote VPN authenticates that device to the selected Bulwark region and
+/// moves inspection/inference/enforcement there.
 #[component]
 pub fn ChildVpnRow(child: ProtoChild) -> Element {
     let child_id = child.child_id.clone();
@@ -23,26 +21,15 @@ pub fn ChildVpnRow(child: ProtoChild) -> Element {
     let mut region = use_signal(|| "uk".to_string());
     let mut enabled = use_signal(|| true);
     let mut profile = use_signal(|| FilteringProfile::Preteen as i32);
-    // 0 = FILTER_ON_DEVICE (default), 1 = FILTER_ON_SERVER (route through the
-    // region + filter server-side + anonymise the child's IP). The server-side
-    // data path is rolling out, so selecting Cloud is honest about staying
-    // on-device until it's live (see the hint below) — never a silent claim.
     let mut filter_location = use_signal(|| 0i32);
     let note = use_signal(|| Option::<String>::None);
     let busy = use_signal(|| false);
 
-    // Seed the drafts from the guardian's SAVED desired config (echoed by
-    // GetChildStatus), so Apply pushes what the guardian sees instead of
-    // silently reverting untouched fields to the defaults above. No config yet
-    // (NotFound) or a fetch error keeps today's defaults — unchanged behaviour.
     let seed_child_id = child.child_id.clone();
     use_effect(move || {
         let child_id = seed_child_id.clone();
         spawn(async move {
             if let Ok((_, _, _, Some(cfg))) = get_child_status(&child_id).await {
-                // Only seed values this row can actually represent: a region
-                // outside CHILD_REGIONS (e.g. "self") or an UNSPECIFIED/CUSTOM
-                // profile keeps the default rather than an un-renderable state.
                 if CHILD_REGIONS
                     .iter()
                     .any(|(id, _, _)| *id == cfg.server_region.as_str())
@@ -74,26 +61,31 @@ pub fn ChildVpnRow(child: ProtoChild) -> Element {
                 }
             }
             div { class: "vpn-field",
-                span { class: "vpn-label", "Where filtering runs" }
-                div { class: "vpn-seg", role: "group", "aria-label": "Where filtering runs",
+                span { class: "vpn-label", "VPN mode" }
+                div { class: "vpn-seg", role: "group", "aria-label": "VPN mode",
                     button {
                         class: if filter_location() == 0 { "vpn-seg-btn vpn-seg-on" } else { "vpn-seg-btn" },
                         "aria-pressed": filter_location() == 0,
                         onclick: move |_| filter_location.set(0),
-                        "On the device"
+                        "Local VPN"
                     }
                     button {
                         class: if filter_location() == 1 { "vpn-seg-btn vpn-seg-on" } else { "vpn-seg-btn" },
                         "aria-pressed": filter_location() == 1,
                         onclick: move |_| filter_location.set(1),
-                        "PH Bulwark Cloud"
+                        "Remote VPN"
                     }
                 }
             }
-            if filter_location() == 1 {
+            if filter_location() == 0 {
                 div { class: "vpn-hint",
                     span { dangerous_inner_html: "{svg(\"info\")}" }
-                    "Cloud filtering — routes through your region and hides your child's IP — is rolling out. Until it's live there, your child stays protected on-device."
+                    "Local VPN keeps filtering on the child's device. The device performs inspection and policy enforcement and traffic exits through its normal connection."
+                }
+            } else {
+                div { class: "vpn-hint",
+                    span { dangerous_inner_html: "{svg(\"shield-check\")}" }
+                    "Remote VPN authenticates this enrolled device to the selected Bulwark region with a short-lived device-bound lease. Traffic is encrypted to that region, filtering runs there, and the public exit IP is the region. If authentication or filtering health fails, the remote tunnel stops instead of silently falling back to an unfiltered path."
                 }
             }
             div { class: "vpn-controls",
@@ -142,30 +134,32 @@ pub fn ChildVpnRow(child: ProtoChild) -> Element {
                         busy.set(true);
                         note.set(None);
                         spawn(async move {
-                            match set_child_config(&child_id, &device_id, &region, &endpoint, enabled, profile, filter_location).await {
+                            match set_child_config(
+                                &child_id,
+                                &device_id,
+                                &region,
+                                &endpoint,
+                                enabled,
+                                profile,
+                                filter_location,
+                            ).await {
                                 Ok(v) => {
-                                    note.set(Some(format!("Sent · config v{v} — waiting for the child to confirm…")));
-                                    // Release the button BEFORE the confirm-poll so the
-                                    // guardian can adjust and re-apply during the wait
-                                    // (a fresh Apply just supersedes this version).
+                                    let mode = if filter_location == 1 { "Remote VPN" } else { "Local VPN" };
+                                    note.set(Some(format!("Sent {mode} · config v{v} — waiting for the child to confirm…")));
                                     busy.set(false);
-                                    // The child acks the applied version on its next
-                                    // config poll (every 60s while filtering runs, and
-                                    // on app foreground) — watch GetChildStatus for up
-                                    // to ~3 minutes, then call it pending.
                                     let mut confirmed = false;
                                     for _ in 0..36 {
                                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                                         if let Ok((_, applied, _, _)) = get_child_status(&child_id).await {
                                             if applied >= v {
-                                                note.set(Some(format!("Applied on the child's device ✓ v{v}")));
+                                                note.set(Some(format!("{mode} applied on the child's device ✓ v{v}")));
                                                 confirmed = true;
                                                 break;
                                             }
                                         }
                                     }
                                     if !confirmed {
-                                        note.set(Some(format!("v{v} pending — the child's device hasn't confirmed yet (offline or app closed)")));
+                                        note.set(Some(format!("v{v} pending — the child's device hasn't confirmed {mode} yet")));
                                     }
                                 }
                                 Err(e) => {
@@ -180,7 +174,7 @@ pub fn ChildVpnRow(child: ProtoChild) -> Element {
             }
             if let Some(n) = note() {
                 {
-                    let applied = n.contains("Applied");
+                    let applied = n.contains("applied");
                     let failed = n.starts_with("Failed");
                     let cls = if applied { "vpn-note" } else if failed { "vpn-note failed" } else { "vpn-note pending" };
                     let icon = if applied { "check" } else if failed { "alert" } else { "info" };
@@ -198,28 +192,15 @@ pub fn ChildVpnRow(child: ProtoChild) -> Element {
 
 #[component]
 pub fn AlertCard(alert: Alert, on_decide: EventHandler<bool>) -> Element {
-    // THE CSAM EXCEPTION. Suspected CSAM is illegal to view, so this UI shows
-    // NEITHER the image NOR the text snippet, regardless of what the event
-    // carried. Everything else (intervention blocks, grooming) shows the
-    // guardian the real flagged content for an informed decision.
     let is_csam = alert.category == Category::CsamSuspected;
-
-    // Build the inline image data URI only for non-CSAM items that actually
-    // carried preview bytes. `image_data_uri` sniffs the format and base64s it.
     let preview_uri: Option<String> = if should_show_thumbnail(&alert) {
         Some(image_data_uri(&alert.thumbnail))
     } else {
         None
     };
-
-    // The actual flagged text — shown in full to the guardian, except for CSAM.
     let show_snippet = should_show_snippet(&alert);
-
-    // Cohesive icon + tint per alert family: grooming/protection-status read as a
-    // gentle warning; content blocks read as a calm "kept safe"; CSAM is withheld.
     let is_grooming = alert.category == Category::Grooming;
     let (card_cls, eyebrow, ic_cls, ic_name) = if alert.urgent {
-        // Child SOS: unmissable red treatment — the child asked for help.
         (
             "alert-card alert-sos",
             "URGENT — SOS",
@@ -263,7 +244,6 @@ pub fn AlertCard(alert: Alert, on_decide: EventHandler<bool>) -> Element {
                 p { class: "detail", "{alert.detail}" }
 
                 if is_csam {
-                    // No image, no snippet — withheld notice only (never displayed/stored).
                     div { class: "csam",
                         span { dangerous_inner_html: "{svg(\"eye-off\")}" }
                         "Preview withheld — suspected illegal content is blocked and is never shown or stored."
@@ -297,13 +277,6 @@ pub fn AlertCard(alert: Alert, on_decide: EventHandler<bool>) -> Element {
     }
 }
 
-/// Plays a blocked video segment for guardian review. The `blob://<sha>` URI is
-/// resolved from the per-user segment store on disk (`%LOCALAPPDATA%/Bulwark/
-/// segments/<sha>.blob`, written by `bulwark-video::SegmentStore`) when the parent is
-/// co-located with the server; otherwise it falls back to pulling the clip from the
-/// cluster over `Review.FetchSegment`. Bytes are shown via a data URI in the desktop
-/// webview's `<video>`. The caller only mounts this for NON-CSAM alerts (CSAM is
-/// never stored/served, so it would not exist anyway — defence in depth).
 #[component]
 pub fn SegmentPlayer(uri: String) -> Element {
     let mut data_uri = use_signal(|| Option::<String>::None);
@@ -312,27 +285,23 @@ pub fn SegmentPlayer(uri: String) -> Element {
     use_effect(move || {
         let uri = uri.clone();
         spawn(async move {
-            // Local disk first (co-located parent); fall back to the cluster over
-            // Review.FetchSegment for a guardian on a DIFFERENT device than the server.
             let bytes = match load_segment_from_disk(&uri) {
-                Ok(Some(b)) => Some(b),
+                Ok(Some(bytes)) => Some(bytes),
                 Ok(None) => match fetch_segment_remote(&uri).await {
-                    Ok(b) => Some(b),
-                    Err(e) => {
-                        load_err.set(Some(format!("not on disk; cluster fetch failed: {e}")));
+                    Ok(bytes) => Some(bytes),
+                    Err(error) => {
+                        load_err.set(Some(format!("not on disk; cluster fetch failed: {error}")));
                         None
                     }
                 },
-                Err(e) => {
-                    load_err.set(Some(e));
+                Err(error) => {
+                    load_err.set(Some(error));
                     None
                 }
             };
-            if let Some(b) = bytes {
-                // Sniff the container — clips may be MP4/fMP4, DASH .m4s, HLS .ts, or
-                // WebM; a hard-coded MP4 MIME breaks playback when it's something else.
-                let mime = sniff_video_mime(&b);
-                data_uri.set(Some(format!("data:{};base64,{}", mime, base64_encode(&b))));
+            if let Some(bytes) = bytes {
+                let mime = sniff_video_mime(&bytes);
+                data_uri.set(Some(format!("data:{};base64,{}", mime, base64_encode(&bytes))));
             }
         });
     });
@@ -353,33 +322,36 @@ pub fn SegmentPlayer(uri: String) -> Element {
 
 #[component]
 pub fn CoverageMatrix() -> Element {
-    // HONEST static matrix (audit 2026-06-10): what is filtered TODAY, not the
-    // target architecture. Keep in sync with PLAN.md §0a.
     let rows = [
         (
             "Web (browsers, desktop)",
             "Filtered via proxy",
-            "Explicit proxy mode: HTTPS decrypted via the per-install CA while the proxy is connected",
+            "HTTPS is decrypted with the trusted Bulwark inspection CA while filtering is active",
         ),
         (
-            "Android (transparent VPN)",
-            "Being validated",
-            "Capture pump implemented; device validation pending; HTTPS coverage limited (Android 7+ ignores user CAs)",
+            "Android Local VPN",
+            "Managed-device coverage",
+            "Capture and filtering run locally; full HTTPS inspection requires the Bulwark CA in the managed system trust store",
+        ),
+        (
+            "Android Remote VPN",
+            "Authenticated tunnel",
+            "Device-bound WireGuard identity + rotating Remote VPN lease; traffic stops if authentication/filter readiness is lost",
         ),
         (
             "Video / live streams",
-            "Filtered via proxy",
-            "On the proxy path: buffered, sampled, block/blur/mute",
+            "Protected media gate",
+            "Buffered and sampled with bounded deadlines; block/blur/mute rather than forwarding unscored media",
         ),
         (
-            "WhatsApp / Signal / Messenger (E2E / pinned)",
-            "Android text check only",
-            "Network can't read E2E; on-device text check covers 6 messengers on Android — no OCR agent yet, NOT covered elsewhere",
+            "WhatsApp / Signal / pinned E2E apps",
+            "On-device rendered-content layer",
+            "Wire interception cannot decrypt E2E/certificate-pinned payloads; the Android accessibility/OCR layer is the complementary path",
         ),
         (
             "iPhone / iPad",
             "Content filter only",
-            "Apple forbids message/screen access to apps",
+            "Apple platform restrictions limit cross-app message/screen inspection",
         ),
     ];
     rsx! {
@@ -388,9 +360,9 @@ pub fn CoverageMatrix() -> Element {
             tbody {
                 for (app, status, how) in rows.iter() {
                     {
-                        // "Filtered via proxy" reads as full coverage; everything else
-                        // (being validated / text-only / content-filter-only) is partial.
-                        let partial = !status.starts_with("Filtered");
+                        let partial = !status.starts_with("Filtered")
+                            && !status.starts_with("Authenticated")
+                            && !status.starts_with("Protected");
                         let cls = if partial { "cov-status partial" } else { "cov-status" };
                         rsx! {
                             tr {

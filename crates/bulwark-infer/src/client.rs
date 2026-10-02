@@ -1,21 +1,16 @@
-//! The cluster-offload gRPC client (tonic, over **mTLS**).
+//! Authenticated cluster-offload gRPC client.
 //!
-//! This is the client's single door to the cluster's `Offload` and `Analysis`
-//! services (`docs/design/interfaces.md`, `crates/bulwark-proto/proto/bulwark.proto`).
-//! Every call goes over a mutually-authenticated TLS channel: the per-device
-//! client identity authenticates *us* to the cluster and the cluster CA root
-//! authenticates the cluster to us (architecture.md §5: mTLS on every link). We
-//! **fail closed** — if the mTLS material is missing we never dial in the clear.
-//!
-//! Surface:
-//! * [`ClientTlsIdentity`] — config-provided client cert/key + CA root.
-//! * [`OffloadClient::connect`] — build the mTLS channel + service stubs.
-//! * `negotiate_offload` / `refresh_offload` — the `Offload` service.
-//! * `analyze` / `analyze_batch` / `analyze_stream` — the `Analysis` service.
+//! Every device call is authenticated twice: mTLS proves transport identity and
+//! the pairing-minted device credential proves current enrollment. The enrollment
+//! token is carried only in gRPC metadata and is Debug-redacted.
+
+use std::time::Duration;
 
 use futures_core::stream::BoxStream;
 use futures_util::StreamExt;
+use tonic::metadata::MetadataValue;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
+use tonic::Request;
 
 use bulwark_proto::v1::analysis_client::AnalysisClient;
 use bulwark_proto::v1::offload_client::OffloadClient as ProtoOffloadClient;
@@ -26,26 +21,24 @@ use bulwark_proto::v1::{
 
 use crate::error::{InferError, Result};
 
-/// The mTLS material the client presents and trusts, sourced from config
-/// (`bulwark_core::ClusterConfig.tls_dir`). The private key never appears in
-/// `bulwark-proto` or on the wire beyond the TLS handshake (architecture.md §5).
+const DEVICE_ID_HEADER: &str = "x-bulwark-device-id";
+const DEVICE_TOKEN_HEADER: &str = "x-bulwark-device-token";
+
+/// PEM material for the mutually authenticated device→cluster TLS connection.
 #[derive(Clone)]
 pub struct ClientTlsIdentity {
-    /// PEM-encoded client certificate chain (the per-device cert; its subject is
-    /// the `device_id`).
+    /// PEM client certificate chain issued to the installation.
     pub client_cert_pem: Vec<u8>,
-    /// PEM-encoded client private key. Held in memory only; loaded from the OS
-    /// keystore / DPAPI / Keychain by the composition root, never logged.
+    /// PEM private key corresponding to `client_cert_pem`.
     pub client_key_pem: Vec<u8>,
-    /// PEM-encoded CA root used to verify the cluster's server certificate.
+    /// PEM CA certificate used to authenticate the cluster.
     pub ca_cert_pem: Vec<u8>,
-    /// Expected server name (SNI / cert subject) of the cluster gateway.
+    /// Expected TLS server name/SNI.
     pub server_domain: String,
 }
 
 impl std::fmt::Debug for ClientTlsIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Never print key/cert bytes.
         f.debug_struct("ClientTlsIdentity")
             .field("server_domain", &self.server_domain)
             .field("client_cert_pem", &"<redacted>")
@@ -56,8 +49,6 @@ impl std::fmt::Debug for ClientTlsIdentity {
 }
 
 impl ClientTlsIdentity {
-    /// Build the tonic [`ClientTlsConfig`] for a mutually-authenticated channel:
-    /// presents our client identity and pins the cluster CA root.
     fn to_tls_config(&self) -> ClientTlsConfig {
         ClientTlsConfig::new()
             .domain_name(self.server_domain.clone())
@@ -69,106 +60,235 @@ impl ClientTlsIdentity {
     }
 }
 
-/// gRPC client to the cluster's `Offload` + `Analysis` services over one shared
-/// mTLS channel.
+/// Pairing-minted enrollment credential attached to every device-facing RPC.
+#[derive(Clone)]
+pub struct DeviceAuth {
+    device_id: String,
+    device_token: String,
+}
+
+impl std::fmt::Debug for DeviceAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceAuth")
+            .field("device_id", &self.device_id)
+            .field("device_token", &"<redacted>")
+            .finish()
+    }
+}
+
+impl DeviceAuth {
+    /// Validate and construct an enrollment identity.
+    pub fn new(device_id: impl Into<String>, device_token: impl Into<String>) -> Result<Self> {
+        let device_id = device_id.into().trim().to_string();
+        let device_token = device_token.into().trim().to_string();
+        if device_id.is_empty() {
+            return Err(
+                InferError::Tls("device_id is required for authenticated offload".into()).into(),
+            );
+        }
+        if device_token.len() < 32 {
+            return Err(InferError::Tls(
+                "device token is missing or too short; pair this installation before offload"
+                    .into(),
+            )
+            .into());
+        }
+        MetadataValue::try_from(device_id.as_str()).map_err(|_| {
+            bulwark_core::Error::from(InferError::Tls(
+                "device_id contains characters invalid in gRPC metadata".into(),
+            ))
+        })?;
+        MetadataValue::try_from(device_token.as_str()).map_err(|_| {
+            bulwark_core::Error::from(InferError::Tls(
+                "device token contains characters invalid in gRPC metadata".into(),
+            ))
+        })?;
+        Ok(Self {
+            device_id,
+            device_token,
+        })
+    }
+
+    /// Load `BULWARK_DEVICE_ID` and `BULWARK_DEVICE_TOKEN`.
+    pub fn from_env() -> Result<Self> {
+        let device_id = std::env::var("BULWARK_DEVICE_ID").map_err(|_| {
+            InferError::Tls("BULWARK_DEVICE_ID is not set; device is not enrolled".into())
+        })?;
+        let device_token = std::env::var("BULWARK_DEVICE_TOKEN").map_err(|_| {
+            InferError::Tls("BULWARK_DEVICE_TOKEN is not set; device is not enrolled".into())
+        })?;
+        Self::new(device_id, device_token)
+    }
+
+    fn request<T>(&self, body: T) -> Result<Request<T>> {
+        let mut request = Request::new(body);
+        let device_id = MetadataValue::try_from(self.device_id.as_str())
+            .map_err(|_| InferError::Tls("invalid device id metadata".into()))?;
+        let device_token = MetadataValue::try_from(self.device_token.as_str())
+            .map_err(|_| InferError::Tls("invalid device token metadata".into()))?;
+        request.metadata_mut().insert(DEVICE_ID_HEADER, device_id);
+        request
+            .metadata_mut()
+            .insert(DEVICE_TOKEN_HEADER, device_token);
+        Ok(request)
+    }
+
+    /// Authenticated supervised-device identifier.
+    pub fn device_id(&self) -> &str {
+        &self.device_id
+    }
+}
+
+/// Shared mTLS gRPC client for Offload and Analysis services.
 #[derive(Clone, Debug)]
 pub struct OffloadClient {
     offload: ProtoOffloadClient<Channel>,
     analysis: AnalysisClient<Channel>,
+    auth: DeviceAuth,
 }
 
 impl OffloadClient {
-    /// Connect to the cluster gateway at `endpoint` (e.g. `https://host:8443`)
-    /// using the supplied mTLS [`ClientTlsIdentity`]. Fails closed if the TLS
-    /// material is rejected or the endpoint is unreachable.
+    /// Connect with mTLS and enrollment credentials loaded from the environment.
     pub async fn connect(endpoint: &str, tls: &ClientTlsIdentity) -> Result<Self> {
-        let channel = Endpoint::from_shared(endpoint.to_owned())
-            .map_err(|e| InferError::Transport(format!("bad endpoint {endpoint:?}: {e}")))?
-            .tls_config(tls.to_tls_config())
-            .map_err(|e| InferError::Tls(format!("mTLS config: {e}")))?
-            .connect()
-            .await
-            .map_err(|e| InferError::Transport(format!("connect {endpoint:?}: {e}")))?;
-
-        Ok(Self::from_channel(channel))
+        let auth = DeviceAuth::from_env()?;
+        Self::connect_authenticated(endpoint, tls, auth).await
     }
 
-    /// Build the service stubs over an already-established mTLS [`Channel`]
-    /// (e.g. one shared with `bulwark-alert`/`bulwark-cluster` by the client).
-    pub fn from_channel(channel: Channel) -> Self {
+    /// Connect with an explicit enrollment identity.
+    pub async fn connect_authenticated(
+        endpoint: &str,
+        tls: &ClientTlsIdentity,
+        auth: DeviceAuth,
+    ) -> Result<Self> {
+        let endpoint = Endpoint::from_shared(endpoint.to_owned())
+            .map_err(|error| InferError::Transport(format!("bad endpoint {endpoint:?}: {error}")))?
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(20))
+            .tcp_keepalive(Some(Duration::from_secs(30)))
+            .tcp_nodelay(true)
+            .tls_config(tls.to_tls_config())
+            .map_err(|error| InferError::Tls(format!("mTLS config: {error}")))?;
+        let channel = endpoint
+            .connect()
+            .await
+            .map_err(|error| InferError::Transport(format!("connect failed: {error}")))?;
+        Ok(Self::from_channel_authenticated(channel, auth))
+    }
+
+    /// Build service clients over an already authenticated shared channel.
+    pub fn from_channel_authenticated(channel: Channel, auth: DeviceAuth) -> Self {
         Self {
             offload: ProtoOffloadClient::new(channel.clone()),
             analysis: AnalysisClient::new(channel),
+            auth,
         }
     }
 
-    // ---- Offload service --------------------------------------------------
-
-    /// `Offload.NegotiateOffload(DeviceProfile) -> OffloadPolicy`.
-    pub async fn negotiate_offload(&self, profile: DeviceProfile) -> Result<OffloadPolicy> {
-        let resp = self
-            .offload
+    /// Negotiate the local-vs-cluster execution policy for this enrolled device.
+    pub async fn negotiate_offload(&self, mut profile: DeviceProfile) -> Result<OffloadPolicy> {
+        if profile.device_id.trim().is_empty() {
+            profile.device_id = self.auth.device_id().to_string();
+        } else if profile.device_id.trim() != self.auth.device_id() {
+            return Err(InferError::Rpc(
+                "device profile identity does not match enrolled credential".into(),
+            )
+            .into());
+        }
+        self.offload
             .clone()
-            .negotiate_offload(profile)
+            .negotiate_offload(self.auth.request(profile)?)
             .await
-            .map_err(|s| InferError::Rpc(format!("NegotiateOffload: {s}")))?;
-        Ok(resp.into_inner())
+            .map(|response| response.into_inner())
+            .map_err(|status| InferError::Rpc(format!("NegotiateOffload: {status}")).into())
     }
 
-    /// `Offload.RefreshOffload(RefreshOffloadRequest) -> OffloadPolicy`.
-    pub async fn refresh_offload(&self, req: RefreshOffloadRequest) -> Result<OffloadPolicy> {
-        let resp = self
-            .offload
+    /// Refresh a negotiated policy with current RTT/battery observations.
+    pub async fn refresh_offload(
+        &self,
+        mut request: RefreshOffloadRequest,
+    ) -> Result<OffloadPolicy> {
+        if request.device_id.trim().is_empty() {
+            request.device_id = self.auth.device_id().to_string();
+        } else if request.device_id.trim() != self.auth.device_id() {
+            return Err(InferError::Rpc(
+                "refresh identity does not match enrolled credential".into(),
+            )
+            .into());
+        }
+        self.offload
             .clone()
-            .refresh_offload(req)
+            .refresh_offload(self.auth.request(request)?)
             .await
-            .map_err(|s| InferError::Rpc(format!("RefreshOffload: {s}")))?;
-        Ok(resp.into_inner())
+            .map(|response| response.into_inner())
+            .map_err(|status| InferError::Rpc(format!("RefreshOffload: {status}")).into())
     }
 
-    // ---- Analysis service -------------------------------------------------
-
-    /// `Analysis.Analyze(AnalysisRequest) -> Verdict` (single unit).
-    pub async fn analyze(&self, req: AnalysisRequest) -> Result<Verdict> {
-        let resp = self
-            .analysis
+    /// Analyze one media/text unit after binding its body identity to enrollment.
+    pub async fn analyze(&self, mut request: AnalysisRequest) -> Result<Verdict> {
+        if request.device_id.trim().is_empty() {
+            request.device_id = self.auth.device_id().to_string();
+        } else if request.device_id.trim() != self.auth.device_id() {
+            return Err(InferError::Rpc(
+                "analysis identity does not match enrolled credential".into(),
+            )
+            .into());
+        }
+        self.analysis
             .clone()
-            .analyze(req)
+            .analyze(self.auth.request(request)?)
             .await
-            .map_err(|s| InferError::Rpc(format!("Analyze: {s}")))?;
-        Ok(resp.into_inner())
+            .map(|response| response.into_inner())
+            .map_err(|status| InferError::Rpc(format!("Analyze: {status}")).into())
     }
 
-    /// `Analysis.AnalyzeBatch(AnalysisBatch) -> VerdictBatch` (sampled frames).
-    pub async fn analyze_batch(&self, batch: AnalysisBatch) -> Result<VerdictBatch> {
-        let resp = self
-            .analysis
+    /// Analyze a batch; every item must belong to this enrolled device.
+    pub async fn analyze_batch(&self, mut batch: AnalysisBatch) -> Result<VerdictBatch> {
+        for request in &mut batch.requests {
+            if request.device_id.trim().is_empty() {
+                request.device_id = self.auth.device_id().to_string();
+            } else if request.device_id.trim() != self.auth.device_id() {
+                return Err(
+                    InferError::Rpc("batch contains a request for another device".into()).into(),
+                );
+            }
+        }
+        self.analysis
             .clone()
-            .analyze_batch(batch)
+            .analyze_batch(self.auth.request(batch)?)
             .await
-            .map_err(|s| InferError::Rpc(format!("AnalyzeBatch: {s}")))?;
-        Ok(resp.into_inner())
+            .map(|response| response.into_inner())
+            .map_err(|status| InferError::Rpc(format!("AnalyzeBatch: {status}")).into())
     }
 
-    /// `Analysis.AnalyzeStream(stream AnalysisRequest) -> stream Verdict` (bidi,
-    /// for live capture). Returns a boxed stream of verdicts.
+    /// Open a bidirectional live-analysis stream authenticated as this device.
     pub async fn analyze_stream(
         &self,
         requests: BoxStream<'static, AnalysisRequest>,
     ) -> Result<BoxStream<'static, Result<Verdict>>> {
-        let resp = self
+        let expected = self.auth.device_id().to_string();
+        let requests = requests.map(move |mut request| {
+            if request.device_id.trim().is_empty() {
+                request.device_id = expected.clone();
+            }
+            request
+        });
+        let response = self
             .analysis
             .clone()
-            .analyze_stream(requests)
+            .analyze_stream(self.auth.request(requests.boxed())?)
             .await
-            .map_err(|s| InferError::Rpc(format!("AnalyzeStream: {s}")))?;
+            .map_err(|status| InferError::Rpc(format!("AnalyzeStream: {status}")))?;
 
-        let stream = resp.into_inner().map(|item| {
-            item.map_err(|s| {
-                bulwark_core::Error::from(InferError::Rpc(format!("AnalyzeStream item: {s}")))
+        Ok(response
+            .into_inner()
+            .map(|item| {
+                item.map_err(|status| {
+                    bulwark_core::Error::from(InferError::Rpc(format!(
+                        "AnalyzeStream item: {status}"
+                    )))
+                })
             })
-        });
-        Ok(stream.boxed())
+            .boxed())
     }
 }
 
@@ -177,9 +297,6 @@ mod tests {
     use super::*;
 
     fn dummy_identity() -> ClientTlsIdentity {
-        // Distinctive material so the test can assert the *bytes* never leak —
-        // without colliding with the field NAMES (client_key_pem/client_cert_pem),
-        // which legitimately contain "key"/"cert".
         ClientTlsIdentity {
             client_cert_pem: b"PEM-CERT-MATERIAL-AAAA".to_vec(),
             client_key_pem: b"PEM-PRIVATE-MATERIAL-BBBB".to_vec(),
@@ -191,23 +308,28 @@ mod tests {
     #[test]
     fn tls_identity_debug_redacts_material() {
         let shown = format!("{:?}", dummy_identity());
-        // The non-secret server domain is shown; the byte fields are redacted.
         assert!(shown.contains("cluster.local"));
         assert!(shown.contains("<redacted>"));
-        // The actual cert/key/CA MATERIAL must NEVER appear in Debug output.
         assert!(!shown.contains("PEM-CERT-MATERIAL-AAAA"));
         assert!(!shown.contains("PEM-PRIVATE-MATERIAL-BBBB"));
         assert!(!shown.contains("PEM-CA-MATERIAL-CCCC"));
     }
 
+    #[test]
+    fn device_auth_debug_redacts_token() {
+        let auth = DeviceAuth::new("dev-1", "a".repeat(64)).unwrap();
+        let shown = format!("{auth:?}");
+        assert!(shown.contains("dev-1"));
+        assert!(shown.contains("<redacted>"));
+        assert!(!shown.contains(&"a".repeat(64)));
+    }
+
     #[tokio::test]
-    async fn connect_rejects_a_malformed_endpoint() {
-        // No network: a malformed scheme must fail at endpoint construction,
-        // proving we never dial without a well-formed mTLS endpoint.
-        let err = OffloadClient::connect("not a url", &dummy_identity())
+    async fn malformed_endpoint_is_rejected_before_dial() {
+        let auth = DeviceAuth::new("dev-1", "b".repeat(64)).unwrap();
+        let error = OffloadClient::connect_authenticated("not a url", &dummy_identity(), auth)
             .await
             .unwrap_err();
-        // Maps onto the shared error type.
-        assert!(matches!(err, bulwark_core::Error::Other(_)));
+        assert!(matches!(error, bulwark_core::Error::Other(_)));
     }
 }

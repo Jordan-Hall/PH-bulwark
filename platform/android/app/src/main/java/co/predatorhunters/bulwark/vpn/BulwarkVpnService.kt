@@ -7,6 +7,7 @@ import android.content.Intent
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import co.predatorhunters.bulwark.admin.CaTrust
 import co.predatorhunters.bulwark.admin.Enrollment
 import co.predatorhunters.bulwark.core.RustBridge
 import co.predatorhunters.bulwark.notify.AlertNotifier
@@ -14,19 +15,10 @@ import org.json.JSONObject
 import java.io.File
 
 /**
- * The Bulwark filtering VPN client.
- *
- * Establishes a local TUN via [VpnService.Builder] capturing all device traffic,
- * then hands the tunnel file descriptor to the Rust core ([RustBridge.startVpn])
- * which runs the real-time intercept → classify → policy → block/blur/mute +
- * guardian-email loop. Heavy media analysis offloads to the home cluster per
- * bulwark-infer's routing.
- *
- * HONEST COVERAGE (PLAN §0a): Android 7+ ignores user-installed CAs for most
- * apps, and end-to-end-encrypted / cert-pinned apps can't be read on the wire at
- * all. Those are handled on-device by
- * [BulwarkAccessibilityService][co.predatorhunters.bulwark.accessibility.BulwarkAccessibilityService],
- * not here.
+ * Bulwark VPN shell with two explicit modes:
+ * - Local VPN: inspection, analysis and enforcement run on this device.
+ * - Remote VPN: this device only captures/encrypts packets; the authenticated
+ *   Bulwark region performs inspection, analysis and enforcement.
  */
 class BulwarkVpnService : VpnService() {
 
@@ -34,126 +26,207 @@ class BulwarkVpnService : VpnService() {
     private var rustHandle: Long = 0L
     @Volatile private var polling = false
     @Volatile private var configPolling = false
+    @Volatile private var establishing = false
+    @Volatile private var reconfiguring = false
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         running = true
+        lastFailure = ""
         startForeground(NOTIF_ID, buildNotification())
-        if (tun == null) establish()
+
+        val replaceDataPath = intent?.action == ACTION_RECONFIGURE
+        if (replaceDataPath || tun == null) {
+            launchEstablish(replaceDataPath)
+        }
         return START_STICKY
+    }
+
+    @Synchronized
+    private fun launchEstablish(replaceDataPath: Boolean) {
+        if (establishing) return
+        establishing = true
+        reconfiguring = replaceDataPath
+        ready = false
+        Thread({
+            try {
+                if (replaceDataPath) {
+                    stopDataPath(clearConfigPoller = false)
+                }
+                establish()
+            } finally {
+                reconfiguring = false
+                establishing = false
+            }
+        }, if (replaceDataPath) "bulwark-vpn-reconfigure" else "bulwark-vpn-start")
+            .apply { isDaemon = true }
+            .start()
     }
 
     private fun establish() {
         RustBridge.ensureLoaded()
+        val mode = ChildConfigSync.desiredFilterLocation(this)
+        activeFilterLocation = mode
 
-        // Trust the TLS-inspection CA in the SYSTEM store BEFORE the proxy starts.
-        // The proxy TLS-inspects every HTTPS flow, presenting a leaf minted under the
-        // per-install inspection CA; unless that CA is system-trusted, every app rejects the
-        // leaf (fatal alert CertificateUnknown) and, since ~all traffic is HTTPS,
-        // the device loses connectivity entirely ("network not working"). Only a
-        // Device Owner can install into the system store (Android 7+ ignores user
-        // CAs), so on a NON-managed device we must NOT bring the tunnel up — that
-        // would brick the network with no benefit. The on-device accessibility/OCR
-        // path still covers visible content meanwhile. Same ca_dir the Rust proxy
-        // uses (filesDir/ca), so the installed root matches the minted leaves.
-        val caResult = co.predatorhunters.bulwark.admin.CaTrust.ensureInstalled(this)
-        Log.i(TAG, "inspection CA trust: $caResult")
-        // FAIL CLOSED: bring the tunnel up ONLY on a CONFIRMED system-store install
-        // (Device Owner). Every other result means the inspection CA is NOT trusted,
-        // so the TLS-inspecting proxy would present leaves apps reject (CertificateUnknown) and,
-        // since ~all traffic is HTTPS, the device loses connectivity ("network not
-        // working"):
-        //   NOT_MANAGED — not Device Owner (Android 7+ ignores user-store CAs)
-        //   NO_CA       — the CA could not be loaded/generated (engine/ca_dir issue)
-        //   ERROR       — installCaCert failed
-        // (Note: DevicePolicyManager.installCaCert on a Device Owner is the platform
-        // mechanism for system trust — non-pinned apps using the default trust config
-        // accept it; cert-pinned / custom-trust-anchor apps are the documented
-        // residual the on-device accessibility/OCR path covers, never the wire.)
-        val caTrusted = caResult == co.predatorhunters.bulwark.admin.CaTrust.Result.INSTALLED_SYSTEM ||
-            caResult == co.predatorhunters.bulwark.admin.CaTrust.Result.ALREADY_TRUSTED
-        if (!caTrusted) {
-            Log.e(
-                TAG,
-                "not bringing up the tunnel: inspection CA not system-trusted " +
-                    "($caResult; needs Device-Owner provisioning) — would break all HTTPS",
-            )
-            notifyProvisioningRequired()
-            running = false
-            stopSelf()
-            return
+        val startup = when (mode) {
+            ChildConfigSync.FILTER_ON_SERVER -> prepareRemoteMode() ?: return
+            ChildConfigSync.FILTER_ON_DEVICE -> prepareLocalMode() ?: return
+            else -> {
+                failStart("unknown VPN mode '$mode'")
+                return
+            }
         }
 
-        val pfd = Builder()
-            .setSession("PH Bulwark")
-            .setMtu(1500)
-            .addAddress("10.0.0.2", 32)
-            .addDnsServer("10.0.0.1")
-            .addRoute("0.0.0.0", 0)   // capture all IPv4
-            .addRoute("::", 0)        // and IPv6
-            // Exclude ourselves so our own cluster traffic isn't re-filtered/looped.
-            .addDisallowedApplication(packageName)
-            .establish()
+        val builder = Builder()
+            .setSession(
+                if (mode == ChildConfigSync.FILTER_ON_SERVER) {
+                    "PH Bulwark Remote VPN"
+                } else {
+                    "PH Bulwark Local VPN"
+                },
+            )
+            .setMtu(startup.mtu)
+            .addAddress(startup.address, 32)
+            .addDnsServer(startup.dnsServer)
+            .addRoute("0.0.0.0", 0)
+            .addRoute("::", 0)
 
+        runCatching { builder.addDisallowedApplication(packageName) }
+            .onFailure {
+                failStart("could not exclude Bulwark transport from its own VPN")
+                return
+            }
+
+        val pfd = builder.establish()
         if (pfd == null) {
-            Log.e(TAG, "establish() returned null — VPN consent not granted?")
-            stopSelf()
+            failStart("Android refused the VPN tunnel; VPN consent may be missing")
             return
         }
         tun = pfd
-        // Rust owns the read/write loop on the raw fd from here.
-        rustHandle = RustBridge.startVpn(this, pfd.fd, deviceConfigJson())
-        Log.i(TAG, "Bulwark VPN established (rustHandle=$rustHandle)")
+
+        rustHandle = runCatching {
+            val config = deviceConfigJson()
+            if (mode == ChildConfigSync.FILTER_ON_SERVER) {
+                RustBridge.startServerVpn(this, pfd.fd, config)
+            } else {
+                RustBridge.startVpn(this, pfd.fd, config)
+            }
+        }.onFailure {
+            Log.e(TAG, "Rust VPN data path failed to start", it)
+        }.getOrDefault(0L)
+
+        if (rustHandle == 0L || runCatching { RustBridge.isDataPathDown() }.getOrDefault(true)) {
+            failStart("${modeLabel(mode)} data path did not become ready")
+            return
+        }
+
+        ready = true
+        lastFailure = ""
+        startForeground(NOTIF_ID, buildNotification())
+        Log.i(TAG, "${modeLabel(mode)} ready (rustHandle=$rustHandle)")
         startAlertPoller()
         startConfigPoller()
     }
+
+    private fun prepareLocalMode(): StartupConfig? {
+        val caResult = CaTrust.ensureInstalled(this)
+        Log.i(TAG, "Local VPN inspection CA trust: $caResult")
+        if (!caResult.isTrusted()) {
+            notifyProvisioningRequired()
+            failStart("Local VPN inspection CA is not system-trusted ($caResult)")
+            return null
+        }
+        return StartupConfig(
+            address = "10.0.0.2",
+            dnsServer = "10.0.0.1",
+            mtu = 1500,
+        )
+    }
+
+    private fun prepareRemoteMode(): StartupConfig? {
+        val enrollment = Enrollment.record(this)
+        if (enrollment == null || enrollment.deviceToken.isBlank()) {
+            failStart("Remote VPN requires a paired device credential")
+            return null
+        }
+
+        val raw = runCatching {
+            RustBridge.prepareServerVpn(
+                enrollment.clusterEndpoint,
+                enrollment.deviceId,
+                RustBridge.clusterCaPath(this),
+                enrollment.deviceToken,
+                RustBridge.remoteVpnDir(this),
+            )
+        }.onFailure {
+            Log.e(TAG, "Remote VPN authentication/provisioning call failed", it)
+        }.getOrNull()
+        val result = raw?.let { runCatching { JSONObject(it) }.getOrNull() }
+        if (result == null || !result.optBoolean("ok", false)) {
+            failStart(
+                result?.optString("error", "Remote VPN authentication failed")
+                    ?: "Remote VPN authentication failed",
+            )
+            return null
+        }
+        if (!result.optBoolean("filter_active", false)) {
+            failStart("region did not confirm an active Remote VPN filter")
+            return null
+        }
+
+        val assignedAddress = result.optString("assigned_address", "").trim()
+        val inspectionCaPem = result.optString("inspection_ca_pem", "")
+        val sessionExpiresTs = result.optLong("session_expires_ts", 0L)
+        if (assignedAddress.isBlank() || inspectionCaPem.isBlank() || sessionExpiresTs <= 0L) {
+            failStart("region returned an incomplete authenticated Remote VPN grant")
+            return null
+        }
+
+        val caResult = CaTrust.ensurePemInstalled(this, inspectionCaPem, "Remote VPN inspection CA")
+        Log.i(TAG, "Remote VPN region CA trust: $caResult")
+        if (!caResult.isTrusted()) {
+            notifyProvisioningRequired()
+            failStart("Remote VPN inspection CA is not system-trusted ($caResult)")
+            return null
+        }
+
+        Log.i(TAG, "Remote VPN authenticated with rotating device-bound lease")
+        return StartupConfig(
+            address = assignedAddress,
+            dnsServer = "1.1.1.1",
+            mtu = 1420,
+        )
+    }
+
+    private fun CaTrust.Result.isTrusted(): Boolean =
+        this == CaTrust.Result.INSTALLED_SYSTEM || this == CaTrust.Result.ALREADY_TRUSTED
 
     private fun deviceConfigJson(): String {
         val enrollment = Enrollment.record(this)
         val json = JSONObject()
             .put("device_id", Enrollment.stableDeviceId(this))
-            // The guardian's strictness band last applied by ChildConfigSync —
-            // seeds the Rust policy global so a process restart comes back up
-            // under the right band ("" = none yet -> Rust keeps its baseline).
-            .put("profile", ChildConfigSync.appliedProfile(this))
-            // App-private dir where the Rust core persists the per-install
-            // inspection CA across sessions (key DER, 0600; wiped with the app
-            // on uninstall). Android Keystore/TEE wrapping is the follow-up tier.
+            .put("profile", ChildConfigSync.desiredProfile(this))
+            .put("filter_location", ChildConfigSync.desiredFilterLocation(this))
             .put("ca_dir", File(filesDir, "ca").absolutePath)
-            // Pinned CLUSTER CA (the region server's public ca.crt) for https
-            // relay/heartbeat/config RPCs — provisioned at pairing by the full
-            // setup code (pairing payload v2, `cluster_ca_pem_b64`). Absent
-            // file -> https relay stays off.
+            .put("remote_vpn_dir", RustBridge.remoteVpnDir(this))
             .put("cluster_ca", File(filesDir, "cluster_ca.pem").absolutePath)
         if (enrollment != null) {
             json.put("cluster_endpoint", enrollment.clusterEndpoint)
                 .put("child_id", enrollment.childId)
                 .put("family_id", enrollment.familyId)
-                // Per-device credential minted at pairing — the Rust relay
-                // sends it on heartbeats ("" = legacy token-less enrollment).
                 .put("device_token", enrollment.deviceToken)
         }
         return json.toString()
     }
 
-    /**
-     * Surface flagged alerts to the guardian. Polls the Rust core for the next
-     * alert and posts each as a notification (safe evidence + approve/deny) via
-     * [AlertNotifier]. This is the same-device path; remote delivery to a separate
-     * parent device is via self-hosted UnifiedPush (FOSS; no Google/Apple — see
-     * docs/design/parent-notifications.md).
-     */
     private fun startAlertPoller() {
         if (polling) return
         polling = true
         Thread({
             while (polling) {
-                // SAFETY GATE: if the Rust data path failed to start or died, the
-                // TUN is captive (nobody reads the fd) and ALL device traffic
-                // blackholes. Release it immediately rather than leave the device
-                // with no internet — a stopped filter is detected/alerted, a
-                // blackholed device is just broken.
-                if (runCatching { RustBridge.isDataPathDown() }.getOrDefault(false)) {
-                    Log.e(TAG, "data path down — tearing down the TUN to restore connectivity")
+                if (!reconfiguring && runCatching { RustBridge.isDataPathDown() }.getOrDefault(true)) {
+                    Log.e(TAG, "VPN data path/authentication down — releasing TUN")
+                    ready = false
+                    lastFailure = "VPN protection stopped or Remote VPN authentication expired"
                     stopSelf()
                     return@Thread
                 }
@@ -164,12 +237,6 @@ class BulwarkVpnService : VpnService() {
         }, "bulwark-alert-poller").apply { isDaemon = true }.start()
     }
 
-    /**
-     * Workflow B step 2 (parent-controlled VPN): while filtering runs,
-     * periodically reconcile against the guardian's desired config. A guardian
-     * "filtering off" stops this service; the version gate and the actual
-     * apply live in [ChildConfigSync].
-     */
     private fun startConfigPoller() {
         if (configPolling) return
         configPolling = true
@@ -181,38 +248,51 @@ class BulwarkVpnService : VpnService() {
         }, "bulwark-config-poller").apply { isDaemon = true }.start()
     }
 
-    override fun onDestroy() {
-        running = false
+    private fun stopDataPath(clearConfigPoller: Boolean) {
+        ready = false
         polling = false
-        configPolling = false
+        if (clearConfigPoller) configPolling = false
         if (rustHandle != 0L) {
-            RustBridge.stopVpn(rustHandle)
+            runCatching { RustBridge.stopVpn(rustHandle) }
             rustHandle = 0L
         }
         runCatching { tun?.close() }
         tun = null
+        activeFilterLocation = ""
+    }
+
+    private fun failStart(detail: String) {
+        lastFailure = detail.take(256)
+        Log.e(TAG, detail)
+        stopDataPath(clearConfigPoller = true)
+        running = false
+        stopSelf()
+    }
+
+    override fun onDestroy() {
+        running = false
+        reconfiguring = false
+        establishing = false
+        stopDataPath(clearConfigPoller = true)
         super.onDestroy()
     }
 
     private fun buildNotification(): Notification {
         val mgr = getSystemService(NotificationManager::class.java)
         mgr.createNotificationChannel(
-            NotificationChannel(CHANNEL, "PH Bulwark filtering", NotificationManager.IMPORTANCE_LOW)
+            NotificationChannel(CHANNEL, "PH Bulwark VPN", NotificationManager.IMPORTANCE_LOW),
         )
+        val mode = modeLabel(ChildConfigSync.desiredFilterLocation(this))
         return Notification.Builder(this, CHANNEL)
-            .setContentTitle("PH Bulwark is protecting this device")
-            .setContentText("Protective filtering is starting up. Text monitoring runs when enabled; full traffic filtering is being validated.")
+            .setContentTitle("PH Bulwark $mode is protecting this device")
+            .setContentText(
+                "Protection is reported as applied only after the requested VPN mode is authenticated and ready.",
+            )
             .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
             .setOngoing(true)
             .build()
     }
 
-    /**
-     * Guardian-facing status when web filtering can't start because the inspection
-     * CA isn't system-trusted (device not provisioned as Device Owner). A separate
-     * high-importance channel + notification id from the ongoing one, since the
-     * service stops right after (the ongoing foreground notice goes away).
-     */
     private fun notifyProvisioningRequired() {
         runCatching {
             val mgr = getSystemService(NotificationManager::class.java)
@@ -223,30 +303,47 @@ class BulwarkVpnService : VpnService() {
                     NotificationManager.IMPORTANCE_HIGH,
                 ),
             )
-            val n = Notification.Builder(this, STATUS_CHANNEL)
-                .setContentTitle("PH Bulwark — setup needed")
+            val notification = Notification.Builder(this, STATUS_CHANNEL)
+                .setContentTitle("PH Bulwark — managed-device setup needed")
                 .setContentText(
-                    "Web filtering needs this device set up as a managed (Device " +
-                        "Owner) device so secure sites can be filtered. Open PH " +
-                        "Bulwark to finish setup.",
+                    "HTTPS filtering needs this device provisioned as Device Owner so the selected Local or Remote VPN inspection CA can be trusted.",
                 )
                 .setSmallIcon(android.R.drawable.stat_sys_warning)
                 .setAutoCancel(true)
                 .build()
-            mgr.notify(STATUS_NOTIF_ID, n)
+            mgr.notify(STATUS_NOTIF_ID, notification)
         }
     }
 
+    private fun modeLabel(mode: String): String =
+        if (mode == ChildConfigSync.FILTER_ON_SERVER) "Remote VPN" else "Local VPN"
+
+    private data class StartupConfig(
+        val address: String,
+        val dnsServer: String,
+        val mtu: Int,
+    )
+
     companion object {
+        const val ACTION_RECONFIGURE = "co.predatorhunters.bulwark.vpn.RECONFIGURE"
+
         private const val TAG = "BulwarkVpn"
         private const val CHANNEL = "bulwark_vpn"
         private const val STATUS_CHANNEL = "bulwark_status"
         private const val NOTIF_ID = 1001
         private const val STATUS_NOTIF_ID = 1002
-        private const val CONFIG_POLL_MS = 60_000L
+        private const val CONFIG_POLL_MS = 10_000L
 
-        /** Live "the filtering service is up" flag for [ChildConfigSync]. */
         @Volatile var running = false
+            private set
+
+        @Volatile var ready = false
+            private set
+
+        @Volatile var activeFilterLocation: String = ""
+            private set
+
+        @Volatile var lastFailure: String = ""
             private set
     }
 }

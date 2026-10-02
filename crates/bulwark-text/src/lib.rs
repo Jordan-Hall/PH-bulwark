@@ -140,16 +140,17 @@ mod integration_tests {
         );
         assert!(v2.rationale.contains("secrecy × platform-switch"));
 
-        // Day 2, message 3 — image request. CSAM-risk: hard-escalates the whole
+        // Day 2, message 3 — image request. Solicitation risk escalates the whole
         // thread to CRITICAL with a BLOCK recommendation, regardless of the
-        // numeric score (which here maxes at 1.0 anyway).
+        // numeric score (which here maxes at 1.0 anyway). Text alone remains
+        // Grooming; it cannot establish that a prohibited image exists.
         let two_days = 2 * one_day;
         let v3 = a.analyze_span(
             "m3",
             &text_span(thread, "now send me a pic of you in your room"),
             two_days,
         );
-        assert_eq!(v3.category, Category::CsamSuspected as i32);
+        assert_eq!(v3.category, Category::Grooming as i32);
         assert_eq!(v3.severity, Severity::Critical as i32);
         assert_eq!(v3.action, Action::Block as i32);
         assert_eq!(v3.score, 1.0);
@@ -195,8 +196,11 @@ mod integration_tests {
             assert_eq!(v.action, Action::Allow as i32);
             assert!(v.grooming.is_none());
         }
-        // No thread state should have been recorded for a clean conversation.
-        assert!(a.thread_snapshot(thread).is_none());
+        // The bounded conversation cell contains no recorded risk signals.
+        let snapshot = a.thread_snapshot(thread).expect("conversation cell");
+        assert_eq!(snapshot.flagged_messages, 0);
+        assert_eq!(snapshot.distinct_within(7000, i64::MAX), 0);
+        assert!(!snapshot.image_request_seen());
     }
 
     /// "add me when youre on" (benign) must NOT trip platform_switching, which
@@ -258,7 +262,8 @@ mod integration_tests {
         let verdicts: Vec<_> = out.collect().await;
         assert_eq!(verdicts.len(), 3);
         let last = verdicts[2].as_ref().unwrap();
-        assert_eq!(last.category, Category::CsamSuspected as i32);
+        assert_eq!(last.category, Category::Grooming as i32);
         assert_eq!(last.severity, Severity::Critical as i32);
+        assert_eq!(last.action, Action::Block as i32);
     }
 }

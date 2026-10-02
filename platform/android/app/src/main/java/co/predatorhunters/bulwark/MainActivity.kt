@@ -15,8 +15,11 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Typography
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -24,6 +27,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import co.predatorhunters.bulwark.accessibility.BulwarkAccessibilityService
 import co.predatorhunters.bulwark.admin.CaTrust
@@ -36,11 +43,58 @@ import co.predatorhunters.bulwark.vpn.ChildConfigSync
 private val Colors = lightColorScheme(
     primary = Navy,
     onPrimary = Color.White,
+    primaryContainer = Color(0xFFE5F1F7),
+    onPrimaryContainer = NavyDeep,
     secondary = Sky,
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFFE8F5FB),
+    onSecondaryContainer = NavyDeep,
     background = Mist,
     onBackground = Ink,
     surface = Color.White,
     onSurface = Ink,
+    surfaceVariant = Color(0xFFF1F5F7),
+    onSurfaceVariant = Slate,
+    outline = Color(0xFFDCE4E8),
+    error = Danger,
+)
+
+private val AppTypography = Typography(
+    headlineLarge = TextStyle(
+        fontSize = 30.sp,
+        lineHeight = 36.sp,
+        fontWeight = FontWeight.ExtraBold,
+        letterSpacing = (-0.6).sp,
+    ),
+    headlineSmall = TextStyle(
+        fontSize = 24.sp,
+        lineHeight = 30.sp,
+        fontWeight = FontWeight.Bold,
+        letterSpacing = (-0.35).sp,
+    ),
+    titleMedium = TextStyle(
+        fontSize = 16.sp,
+        lineHeight = 22.sp,
+        fontWeight = FontWeight.SemiBold,
+    ),
+    bodyMedium = TextStyle(
+        fontSize = 14.sp,
+        lineHeight = 20.sp,
+        fontWeight = FontWeight.Normal,
+    ),
+    labelLarge = TextStyle(
+        fontSize = 14.sp,
+        lineHeight = 19.sp,
+        fontWeight = FontWeight.SemiBold,
+    ),
+)
+
+private val AppShapes = Shapes(
+    extraSmall = RoundedCornerShape(10.dp),
+    small = RoundedCornerShape(14.dp),
+    medium = RoundedCornerShape(18.dp),
+    large = RoundedCornerShape(24.dp),
+    extraLarge = RoundedCornerShape(30.dp),
 )
 
 private const val PREFS = "ph_bulwark"
@@ -51,10 +105,9 @@ private const val KEY_VPN_CONSENTED = "vpn_consented"
 
 /**
  * Hosts the guided onboarding journey ([OnboardingJourney]) and, once setup is
- * complete (or the guardian has finished onboarding), a calm read-only
- * [StatusDashboard]. The journey vs. dashboard decision is derived from saved
- * "onboarding seen" state combined with the LIVE permission/enrollment status,
- * so a half-finished setup always resumes at the first incomplete step.
+ * complete, a calm read-only protection dashboard. The journey vs. dashboard
+ * decision is derived from saved onboarding state combined with LIVE protection
+ * state, so a half-finished setup always resumes at the first incomplete step.
  */
 class MainActivity : ComponentActivity() {
 
@@ -66,12 +119,6 @@ class MainActivity : ComponentActivity() {
     private var caInstalled by mutableStateOf(false)
     private var paired by mutableStateOf(false)
     private var enrollment by mutableStateOf<EnrollmentRecord?>(null)
-
-    /**
-     * Honest status: the guardian may have asked for server-side ("cloud")
-     * filtering, but that data path is still staged — we keep filtering
-     * on-device and only surface the request. Sourced from [ChildConfigSync].
-     */
     private var cloudFilteringRequested by mutableStateOf(false)
 
     /** "Force the journey" — set when the guardian taps "Review setup" on the dashboard. */
@@ -89,20 +136,13 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         refreshLocalState()
-        // Workflow B step 2: apply any newer guardian config while we are in
-        // the foreground — covers "protection turned back ON from the parent
-        // app" when the VPN service (and its poller) is not running.
+        // Apply any newer guardian config while foregrounded. This also covers a
+        // guardian turning protection back on while the VPN service is stopped.
         Thread({
             runCatching { ChildConfigSync.fetchAndReconcile(applicationContext) }
         }, "bulwark-config-sync").apply { isDaemon = true }.start()
     }
 
-    /**
-     * Provisioning finishes in [admin.BulwarkDeviceAdminReceiver], which launches
-     * us with [EXTRA_FROM_PROVISIONING]. Re-read the live state (now Device Owner +
-     * CA installed) and drop any forced re-journey so the dashboard reflects the
-     * freshly-managed device immediately.
-     */
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -116,7 +156,11 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         refreshLocalState()
         setContent {
-            MaterialTheme(colorScheme = Colors) {
+            MaterialTheme(
+                colorScheme = Colors,
+                typography = AppTypography,
+                shapes = AppShapes,
+            ) {
                 Surface(Modifier.fillMaxSize(), color = Mist) {
                     Root()
                 }
@@ -145,7 +189,7 @@ class MainActivity : ComponentActivity() {
             label = "root",
         ) { dashboard ->
             if (dashboard) {
-                StatusDashboard(
+                PremiumStatusDashboard(
                     state = state,
                     enrollment = enrollment,
                     deviceId = Enrollment.stableDeviceId(this@MainActivity),
@@ -192,26 +236,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Grant actions — real system intents; no fabricated bridge calls.
-    // -----------------------------------------------------------------------
-
     private fun openAccessibilitySettings() {
         startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
     }
 
-    /** Open the in-app PH Bulwark Browser (guarded web view that pre-checks a
-     *  page's full rendered content before the child reads it). */
     private fun openSafeBrowser() {
         startActivity(Intent(this, co.predatorhunters.bulwark.browser.BrowserActivity::class.java))
     }
 
-    /**
-     * VpnService consent: [VpnService.prepare] returns an Intent if the user must
-     * consent, or null if consent was already given. On null we can start the
-     * service straight away; otherwise we launch the system consent dialog and
-     * start on RESULT_OK (handled by [vpnConsentLauncher]).
-     */
     private fun requestVpnConsent() {
         val intent = VpnService.prepare(this)
         if (intent != null) {
@@ -235,22 +267,10 @@ class MainActivity : ComponentActivity() {
         vpnConsented = true
     }
 
-    /**
-     * Anti-removal is OPTIONAL/advanced. The codebase exposes Device Owner
-     * enforcement ([Lockdown.enforce]) but no in-app "become device owner" flow
-     * (that happens via managed provisioning / `dpm` on the parent-managed path).
-     * We therefore present this as parent-managed and, as a best-effort advanced
-     * action, send the guardian to the standard "add device admin" screen for the
-     * REAL, manifest-declared admin receiver. If admin is already active and we
-     * are Device Owner, we apply the anti-removal policy set.
-     */
     private fun requestAntiRemoval() {
         if (Lockdown.isDeviceOwner(this)) {
             Lockdown.enforce(this)
-            // Managed device: install the per-install inspection CA into the
-            // system trust store so inspected HTTPS validates instead of showing
-            // "connection not private". No-op if already trusted.
-            runCatching { co.predatorhunters.bulwark.admin.CaTrust.ensureInstalled(this) }
+            runCatching { CaTrust.ensureInstalled(this) }
             refreshLocalState()
             return
         }
@@ -266,31 +286,16 @@ class MainActivity : ComponentActivity() {
         runCatching { startActivity(intent) }
     }
 
-    /**
-     * Whether the platform will let THIS app launch managed (Device Owner)
-     * provisioning right now — true only on a fresh / no-accounts device. We never
-     * show a "make this managed" button when the platform would reject it; the
-     * existing-device path is an operator command surfaced as text instead.
-     * `ACTION_PROVISION_MANAGED_DEVICE` is deprecated (API 30+) but remains the
-     * only in-app entry to Device-Owner provisioning.
-     */
     @Suppress("DEPRECATION")
     private fun canProvisionManaged(): Boolean {
         if (Lockdown.isDeviceOwner(this)) return false
         return runCatching {
-            val dpm = Lockdown.dpm(this)
-            dpm.isProvisioningAllowed(
+            Lockdown.dpm(this).isProvisioningAllowed(
                 android.app.admin.DevicePolicyManager.ACTION_PROVISION_MANAGED_DEVICE,
             )
         }.getOrDefault(false)
     }
 
-    /**
-     * Launch the platform's managed-device provisioning flow (Device Owner). Only
-     * reachable when [canProvisionManaged] is true. The platform shows its own
-     * consent screen; on completion [admin.BulwarkDeviceAdminReceiver] finalizes
-     * lockdown + CA trust. Best-effort: a no-op (logged) if the platform declines.
-     */
     @Suppress("DEPRECATION")
     private fun launchManagedProvisioning() {
         val intent = Intent(android.app.admin.DevicePolicyManager.ACTION_PROVISION_MANAGED_DEVICE)
@@ -301,22 +306,13 @@ class MainActivity : ComponentActivity() {
         runCatching { startActivity(intent) }
     }
 
-    // -----------------------------------------------------------------------
-    // Live state
-    // -----------------------------------------------------------------------
-
     private fun refreshLocalState() {
         accessibilityOn = isAccessibilityEnabled()
-        // Consent is sticky once granted; VpnService.prepare == null also means
-        // consent is currently in place (e.g. always-on configured by the parent).
         vpnConsented = prefs().getBoolean(KEY_VPN_CONSENTED, false) ||
             VpnService.prepare(this) == null
-        // Honest live state: BulwarkVpnService flips `running` in
-        // onStartCommand/onDestroy — consent alone must never show "running".
         vpnRunning = BulwarkVpnService.running
         isDeviceOwner = Lockdown.isDeviceOwner(this)
         antiRemovalOn = isDeviceOwner || Lockdown.isActiveAdmin(this)
-        // Read-only: short-circuits to false off-Device-Owner, so this is cheap.
         caInstalled = CaTrust.isInstalled(this)
         paired = Enrollment.isEnrolled(this)
         enrollment = Enrollment.record(this)

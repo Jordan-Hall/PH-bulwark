@@ -32,6 +32,10 @@ fn find_ffmpeg() -> Option<OsString> {
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
+    assert!(
+        ok || std::env::var_os("CI").is_none(),
+        "CI must provide a runnable FFmpeg binary"
+    );
     ok.then_some(candidate)
 }
 
@@ -79,45 +83,24 @@ fn decodes_real_frames_from_synthetic_clip() {
     let tmp = std::env::temp_dir();
     let fixture = make_fixture(&ffmpeg, &tmp, "path");
 
-    // Decode + sample the real clip at 5 fps. 2s of video → ~10 sampled frames
-    // (the source is 10 fps, so 5 fps sampling is a real stride, not 1:1).
-    let sample_fps = 5.0_f32;
-    let demux = FfmpegDemuxer::with_binary(PathBuf::from(&ffmpeg));
-    let frames = demux
-        .decode_path_frames(&fixture.to_string_lossy(), sample_fps, false)
-        .expect("ffmpeg should spawn and decode (binary was just verified to run)");
-
-    // Clean up the fixture early; assertions below don't need it anymore.
+    let bytes = std::fs::read(&fixture).expect("read fixture");
     let _ = std::fs::remove_file(&fixture);
-
-    eprintln!(
-        "decoded {} sampled frames at {} fps (first={}x{}, last_ts={:.2}s)",
-        frames.len(),
-        sample_fps,
-        frames.first().map(|f| f.width).unwrap_or(0),
-        frames.first().map(|f| f.height).unwrap_or(0),
-        frames.last().map(|f| f.timestamp).unwrap_or(0.0),
+    let demux = FfmpegDemuxer::with_binary(PathBuf::from(&ffmpeg));
+    let decoded = bulwark_video::Demuxer::sample(
+        &demux,
+        &bytes,
+        2.0,
+        &bulwark_video::AnalysisBudget::new(5000),
     );
-
-    // (1) Sane number of frames: duration(2s) * sample_fps(5) = ~10, allow slack
-    // for fps-filter edge frames (first/last) across ffmpeg versions.
-    assert!(!frames.is_empty(), "expected real decoded frames, got zero");
     assert!(
-        frames.len() >= 8 && frames.len() <= 13,
-        "expected ~10 frames (2s * 5fps), got {}",
-        frames.len()
+        decoded.decoded,
+        "silent video must have verified audio absence"
     );
-
-    // (2) Expected dimensions: the source was 320x240 and we did not rescale.
-    for (i, f) in frames.iter().enumerate() {
-        assert_eq!(f.width, 320, "frame {i} width");
-        assert_eq!(f.height, 240, "frame {i} height");
-        // rgb24 ⇒ exactly w*h*3 bytes of pixel data per frame.
-        assert_eq!(
-            f.data.len(),
-            (320 * 240 * 3) as usize,
-            "frame {i} rgb24 byte length"
-        );
+    assert_eq!(decoded.frames.len(), 4);
+    assert!(decoded.audio_windows.is_empty());
+    for frame in decoded.frames {
+        let image = image::load_from_memory(&frame).expect("valid JPEG sample");
+        assert_eq!((image.width(), image.height()), (320, 240));
     }
 }
 
@@ -139,7 +122,7 @@ fn demuxer_trait_samples_in_memory_segment() {
     let _ = std::fs::remove_file(&fixture);
 
     let demux = FfmpegDemuxer::with_binary(PathBuf::from(&ffmpeg));
-    let decoded = demux.sample(&bytes, 5.0);
+    let decoded = demux.sample(&bytes, 2.0, &bulwark_video::AnalysisBudget::new(5000));
 
     eprintln!(
         "in-memory segment: decoded={}, frames={}",
@@ -151,4 +134,87 @@ fn demuxer_trait_samples_in_memory_segment() {
         !decoded.frames.is_empty(),
         "expected sampled frames from in-memory segment"
     );
+}
+
+struct SafeScorer;
+impl bulwark_vision::Scorer for SafeScorer {
+    fn score(&self, _: &[u8]) -> f32 {
+        0.0
+    }
+    fn model_id(&self) -> &str {
+        "fixture-scorer"
+    }
+}
+struct SafeTranscriber;
+impl bulwark_audio::Transcriber for SafeTranscriber {
+    fn transcribe(&self, wav: &[u8]) -> Option<String> {
+        assert!(wav.starts_with(b"RIFF"));
+        Some("hello".into())
+    }
+    fn engine_id(&self) -> &str {
+        "fixture-transcriber"
+    }
+}
+#[tokio::test]
+async fn real_audio_and_frame_overflow_have_distinct_coverage() {
+    use bulwark_core::Analyzer;
+    use bulwark_proto::v1::{analysis_request::Media, AnalysisRequest, Category, InlineMedia};
+    let Some(ffmpeg) = find_ffmpeg() else {
+        return;
+    };
+    for (tag, duration, audio, expected) in [
+        ("av", 2, true, Category::Safe),
+        ("overflow", 18, false, Category::Unspecified),
+    ] {
+        let path =
+            std::env::temp_dir().join(format!("bulwark-fixture-{}-{tag}.mp4", std::process::id()));
+        let mut command = Command::new(&ffmpeg);
+        command
+            .args(["-y", "-f", "lavfi", "-i"])
+            .arg(format!("color=c=black:s=64x64:r=1:d={duration}"));
+        if audio {
+            command.args([
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=2",
+                "-shortest",
+                "-c:a",
+                "aac",
+            ]);
+        }
+        let status = command
+            .args(["-pix_fmt", "yuv420p"])
+            .arg(&path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let demux = FfmpegDemuxer::with_binary(PathBuf::from(&ffmpeg));
+        let analyzer = bulwark_video::VideoAnalyzer::with_demuxer(
+            bulwark_video::VideoConfig::default(),
+            demux,
+        )
+        .with_vision_scorer(Box::new(SafeScorer))
+        .with_audio_transcriber(Box::new(SafeTranscriber));
+        let verdict = analyzer
+            .analyze(AnalysisRequest {
+                request_id: tag.into(),
+                deadline_ms: 5000,
+                media: Some(Media::InlineMedia(InlineMedia {
+                    data: bytes,
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(verdict.category(), expected, "{tag}: {}", verdict.rationale);
+        if !audio {
+            assert_eq!(verdict.action(), bulwark_proto::v1::Action::Block);
+        }
+    }
 }

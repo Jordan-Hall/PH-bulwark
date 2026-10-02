@@ -5,7 +5,10 @@ import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Matrix
+import android.graphics.Paint
+import android.graphics.Rect
 import android.util.Log
 import java.io.File
 import java.nio.FloatBuffer
@@ -84,6 +87,17 @@ class NsfwGate private constructor(
         private val SHAPE = longArrayOf(1, 3, INPUT_SIZE.toLong(), INPUT_SIZE.toLong())
         private val ORT: OrtEnvironment get() = OrtEnvironment.getEnvironment()
 
+        private class Scratch {
+            val scaled = Bitmap.createBitmap(INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(scaled)
+            val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
+            val destination = Rect(0, 0, INPUT_SIZE, INPUT_SIZE)
+            val pixels = IntArray(INPUT_SIZE * INPUT_SIZE)
+            val input = FloatArray(3 * INPUT_SIZE * INPUT_SIZE)
+        }
+
+        private val scratch = ThreadLocal.withInitial { Scratch() }
+
         @Volatile
         private var cached: NsfwGate? = null
 
@@ -121,11 +135,11 @@ class NsfwGate private constructor(
                 if (android.os.Process.is64Bit()) booleanArrayOf(true, false) else booleanArrayOf(false)
             for (useNnapi in providers) {
                 val gate = runCatching { build(model, useNnapi) }.getOrNull() ?: continue
-                val warm = runCatching {
-                    gate.score(Bitmap.createBitmap(INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ARGB_8888))
-                }
+                val warmBitmap = Bitmap.createBitmap(INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ARGB_8888)
+                val warm = runCatching { gate.score(warmBitmap) }
+                warmBitmap.recycle()
                 if (warm.isSuccess) {
-                    Log.i(TAG, "NSFW gate ready (engine=${gate.engine})") // content-free
+                    Log.i(TAG, "NSFW gate ready (engine=${gate.engine})")
                     return gate
                 }
                 runCatching { gate.session.close() }
@@ -135,8 +149,17 @@ class NsfwGate private constructor(
         }
 
         private fun build(model: File, nnapi: Boolean): NsfwGate {
-            val opts = OrtSession.SessionOptions()
-            if (nnapi) opts.addNnapi()
+            val opts = OrtSession.SessionOptions().apply {
+                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+                setMemoryPatternOptimization(true)
+                if (nnapi) {
+                    addNnapi()
+                } else {
+                    val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+                    setIntraOpNumThreads((cores / 2).coerceIn(1, 4))
+                    setInterOpNumThreads(1)
+                }
+            }
             val session = ORT.createSession(model.absolutePath, opts)
             return NsfwGate(session, session.inputNames.first(), if (nnapi) "nnapi" else "cpu")
         }
@@ -167,19 +190,25 @@ class NsfwGate private constructor(
 
         /** Mirrors preprocess.rs::to_nchw with Normalization::half(). */
         private fun preprocess(bitmap: Bitmap): FloatArray {
-            val scaled = Bitmap.createScaledBitmap(bitmap, INPUT_SIZE, INPUT_SIZE, true)
-            val px = IntArray(INPUT_SIZE * INPUT_SIZE)
-            scaled.getPixels(px, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
-            if (scaled !== bitmap) scaled.recycle()
+            val work = scratch.get()
+            work.canvas.drawBitmap(bitmap, null, work.destination, work.paint)
+            work.scaled.getPixels(
+                work.pixels,
+                0,
+                INPUT_SIZE,
+                0,
+                0,
+                INPUT_SIZE,
+                INPUT_SIZE,
+            )
             val plane = INPUT_SIZE * INPUT_SIZE
-            val data = FloatArray(3 * plane)
             for (i in 0 until plane) {
-                val c = px[i]
-                data[i] = ((c shr 16 and 0xFF) / 255f - MEAN) / STD          // R
-                data[plane + i] = ((c shr 8 and 0xFF) / 255f - MEAN) / STD   // G
-                data[2 * plane + i] = ((c and 0xFF) / 255f - MEAN) / STD     // B
+                val c = work.pixels[i]
+                work.input[i] = ((c shr 16 and 0xFF) / 255f - MEAN) / STD
+                work.input[plane + i] = ((c shr 8 and 0xFF) / 255f - MEAN) / STD
+                work.input[2 * plane + i] = ((c and 0xFF) / 255f - MEAN) / STD
             }
-            return data
+            return work.input
         }
 
         private fun extractLogits(raw: Any?): FloatArray = when (raw) {

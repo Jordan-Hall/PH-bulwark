@@ -1,99 +1,100 @@
-//! Server-side TRANSPARENT redirect front-end (Linux only).
+//! Server-side transparent REDIRECT front-end (Linux only).
 //!
-//! On a PH Bulwark Cloud region, child traffic arrives over WireGuard (`wg0`) and
-//! an `iptables ... -j REDIRECT --to-ports <p>` rule (deploy/wireguard/
-//! wg-filter.sh) bends every TCP/80 + TCP/443 flow to a LOCAL port. Unlike the
-//! on-device pump (which reconstructs flows from L3 packets with smoltcp), here
-//! the Linux kernel has already done the L3/L4 work: we `accept()` a normal TCP
-//! socket whose *original* (pre-DNAT) destination is recoverable via
-//! `getsockopt(SO_ORIGINAL_DST)`. We then reuse the SAME CONNECT bridge the
-//! on-device pump uses ([`super::netstack::connect_via_proxy`] +
-//! [`super::netstack::splice`]) to hand the flow to the in-process hudsucker
-//! TLS-inspecting proxy — so ONE engine filters both modes.
+//! WireGuard traffic arriving on `wg0` is redirected by `wg-filter.sh` to this
+//! listener. The kernel preserves the original destination (`SO_ORIGINAL_DST`).
+//! We synthesize an HTTP CONNECT to a local Bulwark TLS-inspecting proxy and
+//! splice bytes in both directions. No direct-to-destination fallback exists.
 //!
-//! hudsucker is an explicit/CONNECT proxy; it does NOT itself speak transparent
-//! mode or read `SO_ORIGINAL_DST`. This module is the thin shim that adapts a
-//! REDIRECT'd socket into the CONNECT the proxy already understands; the proxy is
-//! unchanged.
-//!
-//! ## FFI ISOLATION
-//! The only `unsafe` here is the `getsockopt(SO_ORIGINAL_DST)` recovery,
-//! localized + `// SAFETY:`-documented, matching the policy used by `vpn`
-//! (elevation probe), `tun::windows`, and `ca::dpapi`.
+//! Remote VPN additionally needs tenant attribution. `run_transparent_listener_routed`
+//! therefore lets the region choose a local proxy slot from the authenticated
+//! WireGuard peer source address. A missing mapping or unavailable proxy drops
+//! the flow fail-closed instead of leaking it through the region NAT path.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
 use crate::{NetError, Result};
 
-/// `SOL_IP`-level option returning the ORIGINAL destination of a connection that
-/// netfilter DNAT/REDIRECT'd (`linux/netfilter_ipv4.h` `SO_ORIGINAL_DST`). Defined
-/// explicitly rather than relying on a libc re-export so the value is auditable.
 const SO_ORIGINAL_DST: libc::c_int = 80;
 
-/// Run the transparent redirect front-end until `shutdown` fires.
-///
-/// `bind` is where the `iptables REDIRECT --to-ports` rule lands flows (e.g.
-/// `0.0.0.0:8081` — NOT loopback: REDIRECT rewrites the dst to the wg0 local
-/// address, so a loopback-only bind would never receive it). `proxy` is the
-/// in-process hudsucker CONNECT proxy (`127.0.0.1:8080`). Each accepted flow is
-/// bridged to the proxy by SYNTHESISING `CONNECT <orig-ip>:<orig-port>` — exactly
-/// like the on-device pump — so every flow is TLS-inspected + content-filtered.
+/// Run the transparent listener against one fixed local inspection proxy.
 pub async fn run_transparent_listener(
     bind: SocketAddr,
     proxy: SocketAddr,
     shutdown: CancellationToken,
 ) -> Result<()> {
+    run_transparent_listener_routed(bind, move |_| Some(proxy), shutdown).await
+}
+
+/// Run the region transparent listener and choose the local inspection proxy per
+/// accepted WireGuard peer.
+///
+/// `proxy_for_peer` receives the source socket of the REDIRECTed connection. On
+/// the Remote VPN path its IP is the peer's authenticated tunnel address
+/// (`10.8.0.x`). Returning `None` means the source is not an active/authorized
+/// peer and the connection is dropped before any upstream dial.
+pub async fn run_transparent_listener_routed<F>(
+    bind: SocketAddr,
+    proxy_for_peer: F,
+    shutdown: CancellationToken,
+) -> Result<()>
+where
+    F: Fn(SocketAddr) -> Option<SocketAddr> + Send + Sync + 'static,
+{
     let listener = TcpListener::bind(bind)
         .await
-        .map_err(|e| NetError::proxy(format!("transparent listener bind {bind}: {e}")))?;
-    tracing::info!(%bind, %proxy, "transparent redirect front-end up (server filter mode)");
+        .map_err(|error| NetError::proxy(format!("transparent listener bind {bind}: {error}")))?;
+    let proxy_for_peer = Arc::new(proxy_for_peer);
+    tracing::info!(%bind, "transparent redirect front-end up (Remote VPN filter mode)");
+
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => break,
             accepted = listener.accept() => {
                 let (client, peer) = match accepted {
                     Ok(pair) => pair,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "transparent accept failed");
+                    Err(error) => {
+                        tracing::warn!(%error, "transparent accept failed");
                         continue;
                     }
                 };
-                let orig = match original_dst(&client) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        // No recoverable original destination → we cannot know
-                        // where this flow was headed, so we must NOT guess: drop
-                        // it (fail-closed; never forward an unattributable flow).
-                        tracing::warn!(%peer, error = %e, "no SO_ORIGINAL_DST; dropping flow");
+
+                let Some(proxy) = proxy_for_peer(peer) else {
+                    tracing::warn!(peer_ip = %peer.ip(), "unattributed/unauthorized Remote VPN peer; dropping flow");
+                    continue;
+                };
+
+                let original = match original_dst(&client) {
+                    Ok(destination) => destination,
+                    Err(error) => {
+                        tracing::warn!(%peer, %error, "no SO_ORIGINAL_DST; dropping flow");
                         continue;
                     }
                 };
-                let authority = format!("{}:{}", orig.ip(), orig.port());
-                tokio::spawn(bridge_one(client, proxy, authority));
+                let authority = format!("{}:{}", original.ip(), original.port());
+                tokio::spawn(bridge_one(client, proxy, authority, peer));
             }
         }
     }
+
     tracing::info!("transparent redirect front-end stopped");
     Ok(())
 }
 
-/// Recover the pre-REDIRECT destination of `client` via `getsockopt(SO_ORIGINAL_DST)`.
-/// IPv4 only: the WG subnet (deploy/wireguard) is IPv4-only so v6 is never routed
-/// here (a v6 socket would need `IP6T_SO_ORIGINAL_DST` + `sockaddr_in6`).
+/// Recover the pre-REDIRECT destination of a connection.
 fn original_dst(client: &TcpStream) -> Result<SocketAddr> {
     use std::os::fd::AsRawFd;
+
     let fd = client.as_raw_fd();
-    // SAFETY: `sockaddr_in` is plain-old-data; an all-zero value is a valid
-    // (unspecified) sockaddr that `getsockopt` overwrites in full below.
+    // SAFETY: `sockaddr_in` is POD and is fully overwritten by getsockopt on
+    // success. The socket remains alive for the synchronous call.
     let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
     let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
-    // SAFETY: `getsockopt` writes at most `len` bytes into `addr` (a live,
-    // correctly-sized `sockaddr_in` stack local) and updates `len` in place. `fd`
-    // is owned by `client` and stays open for the whole synchronous call; no
-    // pointer escapes it. A non-zero return is converted to an error below.
+    // SAFETY: `addr` is correctly sized/aligned, `len` describes that buffer,
+    // and no pointer escapes the call.
     let rc = unsafe {
         libc::getsockopt(
             fd,
@@ -109,22 +110,23 @@ fn original_dst(client: &TcpStream) -> Result<SocketAddr> {
             std::io::Error::last_os_error()
         )));
     }
+
     let ip = std::net::Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr));
     let port = u16::from_be(addr.sin_port);
     Ok(SocketAddr::from((ip, port)))
 }
 
-/// Bridge ONE REDIRECT'd flow to the CONNECT proxy: open `CONNECT authority` to
-/// the proxy, then splice the client socket and the proxy tunnel both ways. Reuses
-/// the EXACT functions the on-device pump uses, so the server path inherits the
-/// same (device-validated) CONNECT-by-IP behaviour.
-async fn bridge_one(mut client: TcpStream, proxy: SocketAddr, authority: String) {
+async fn bridge_one(mut client: TcpStream, proxy: SocketAddr, authority: String, peer: SocketAddr) {
     match super::netstack::connect_via_proxy(proxy, &authority).await {
-        Ok(mut up) => {
-            if let Err(e) = super::netstack::splice(&mut client, &mut up).await {
-                tracing::debug!(%authority, error = %e, "transparent splice ended");
+        Ok(mut upstream) => {
+            if let Err(error) = super::netstack::splice(&mut client, &mut upstream).await {
+                tracing::debug!(%authority, peer_ip = %peer.ip(), %error, "transparent splice ended");
             }
         }
-        Err(e) => tracing::debug!(%authority, error = %e, "transparent CONNECT failed"),
+        Err(error) => {
+            // No direct fallback. If the per-peer inspection proxy is absent or
+            // unhealthy, this connection dies here.
+            tracing::warn!(%authority, peer_ip = %peer.ip(), %proxy, %error, "Remote VPN inspection proxy unavailable; flow dropped");
+        }
     }
 }
